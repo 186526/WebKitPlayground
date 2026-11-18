@@ -34,6 +34,20 @@ jobs:
       - name: Measure disk before clone
         run: df -h /
 
+      - name: Free runner disk
+        run: |
+          set -euo pipefail
+          # Xcode ships simulator runtimes and device support packs that an iOS device build never touches.
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/iPhoneSimulator.platform || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/WatchOS.platform || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/WatchSimulator.platform || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/AppleTVOS.platform || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/AppleTVSimulator.platform || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/XROS.platform || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/XRSimulator.platform || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator || true
+          df -h /
+
       - name: Install ccache
         run: |
           set -euo pipefail
@@ -45,7 +59,7 @@ jobs:
           echo "CCACHE_BASEDIR=$(/usr/bin/realpath -m /Users/runner/work)" >> "$GITHUB_ENV"
           echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
           echo "CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime,time_macros" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=6G" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
 
       - name: Configure ccache
         run: |
@@ -54,7 +68,7 @@ jobs:
           ccache --set-config=hash_dir=false
           ccache --set-config=compiler_check=content
           ccache --set-config=sloppiness=include_file_mtime,include_file_ctime,time_macros
-          ccache --set-config=max_size=6G
+          ccache --set-config=max_size=3G
           ccache -p | grep -E 'cache_dir|base_dir|hash_dir|compiler_check|sloppiness|max_size'
 
       - name: Restore ccache
@@ -116,11 +130,12 @@ jobs:
           ccache -s || true
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
-            ARCHS='arm64 arm64e' \
+            ARCHS='arm64e' \
             ONLY_ACTIVE_ARCH=NO \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_CFLAGS='$(inherited) -Wno-error' \
-            OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error'
+            OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error' \
+            DEBUG_INFORMATION_FORMAT=dwarf
           echo "ccache statistics after build:"
           ccache -s
 
@@ -137,6 +152,15 @@ jobs:
           df -h /
           du -sh WebKit/WebKitBuild 2>/dev/null || true
           ls -la WebKit/WebKitBuild/Release-iphoneos 2>/dev/null | head -40 || echo "no Release-iphoneos"
+
+      - name: Prune build intermediates
+        if: always()
+        run: |
+          set -euo pipefail
+          # Object files live in WebKitBuild; the packaging step only needs Release-iphoneos products.
+          du -sh WebKit/WebKitBuild/*.build 2>/dev/null | sort -h | tail -10 || true
+          rm -rf WebKit/WebKitBuild/*.build 2>/dev/null || true
+          df -h /
 
       - name: Install packaging tools
         if: success()
