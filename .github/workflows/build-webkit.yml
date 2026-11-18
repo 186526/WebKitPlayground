@@ -39,6 +39,20 @@ jobs:
           set -euo pipefail
           command -v ccache || brew install ccache
           ccache --version | head -1
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=6G" >> "$GITHUB_ENV"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          # Exact per-run key so every run saves its own cache; restores from the newest prefix match.
+          key: ccache-${{ inputs.webkit_ref }}-${{ inputs.xcode }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.webkit_ref }}-${{ inputs.xcode }}-
+            ccache-${{ inputs.webkit_ref }}-
 
       - name: Fetch WebKit source
         run: |
@@ -88,6 +102,13 @@ jobs:
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_CFLAGS='$(inherited) -Wno-error' \
             OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error'
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ inputs.webkit_ref }}-${{ inputs.xcode }}-${{ github.run_id }}
 
       - name: Inspect build output
         if: always()
