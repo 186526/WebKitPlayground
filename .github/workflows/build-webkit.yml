@@ -88,3 +88,29 @@ jobs:
           df -h /
           du -sh WebKit/WebKitBuild 2>/dev/null || true
           ls -la WebKit/WebKitBuild/Release-iphoneos 2>/dev/null | head -40 || echo "no Release-iphoneos"
+
+      - name: Install packaging tools
+        if: success()
+        run: |
+          set -euo pipefail
+          brew install ldid dpkg || true
+          command -v ldid && command -v dpkg-deb
+
+      - name: Package rootless deb
+        if: success()
+        run: |
+          set -euo pipefail
+          zsh scripts/package-webkit-device-deb.sh \
+            --product "$PWD/WebKit/WebKitBuild/Release-iphoneos" \
+            --rootless \
+            --output "$PWD/packages/webkit-rootless.deb"
+          ls -lh packages/
+
+      - name: Upload deb
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webkit-rootless-deb
+          path: packages/*.deb
+          if-no-files-found: warn
+          retention-days: 7
