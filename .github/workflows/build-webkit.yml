@@ -127,11 +127,22 @@ jobs:
         run: |
           set -uo pipefail
           cd WebKit
-          # The runner has 3 cores and 7 GB; Xcode's default parallelism oversubscribes both.
-          defaults write com.apple.dt.Xcode IDEBuildOperationMaxNumberOfConcurrentCompileTasks 4
-          defaults write com.apple.dt.Xcode IDEBuildOperationMaxNumberOfConcurrentCompileTasksForPlayground 4
+          # build-webkit drives xcodebuild directly, so IDE defaults do not reach it; Xcode's own
+          # scheduling already spreads work across ~3 cores natively.
           echo "ccache statistics before build:"
           ccache -s || true
+          # Independent sampler: survives whatever kills the build shell.
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics"
+          sampler="$GITHUB_WORKSPACE/diagnostics/samples.log"
+          ( while true; do
+              printf '%s ' "$(date -u +%FT%TZ)"
+              sysctl -n vm.swapusage 2>/dev/null | tr '\n' ' '
+              printf 'procs=%s ' "$(ps -Ao rss -r 2>/dev/null | awk 'NR>1{s+=$1} END{print s+0}')"
+              printf 'top=%s\n' "$(ps -Ao rss,comm -r 2>/dev/null | sed -n 2p | tr ' ' '_')"
+              sleep 15
+            done ) > "$sampler" 2>&1 &
+          sampler_pid=$!
+          echo "sampler pid ${sampler_pid}"
           status=0
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
@@ -140,20 +151,20 @@ jobs:
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_CFLAGS='$(inherited) -Wno-error' \
             OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error' \
-            DEBUG_INFORMATION_FORMAT=dwarf || status=$?
+            DEBUG_INFORMATION_FORMAT=dwarf > "$GITHUB_WORKSPACE/diagnostics/build.log" 2>&1 || status=$?
           echo "build-webkit exited with status ${status}"
+          kill "$sampler_pid" 2>/dev/null || true
           echo "ccache statistics after build:"
           ccache -s || true
           if [ "$status" -ne 0 ]; then
-            echo "=== mailbox and memory diagnostics"
+            echo "=== last 60 lines of build output"
+            tail -60 "$GITHUB_WORKSPACE/diagnostics/build.log" || true
+            echo "=== memory"
             sysctl -n hw.memsize vm.swapusage 2>/dev/null || true
             vm_stat 2>/dev/null | head -12 || true
             ps -Ao rss,comm -r 2>/dev/null | head -15 || true
-            echo "=== newest build artefacts"
-            find WebKitBuild -type f -newermt '-90 minutes' -exec ls -lt {} + 2>/dev/null | head -20 || true
-            echo "=== .dia and log tail"
-            ls -lt WebKitBuild/Release-iphoneos/*.dia 2>/dev/null | head -3 || true
-            ls -lt ~/Library/Logs/DiagnosticReports 2>/dev/null | head -10 || true
+            echo "=== sampler tail"
+            tail -20 "$sampler" || true
           fi
           exit "$status"
 
