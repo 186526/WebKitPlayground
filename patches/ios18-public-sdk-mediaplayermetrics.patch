@@ -1,0 +1,22 @@
+diff --git a/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateMediaSourceAVFObjC.mm b/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateMediaSourceAVFObjC.mm
+--- a/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateMediaSourceAVFObjC.mm
++++ b/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateMediaSourceAVFObjC.mm
+@@ -935,6 +935,10 @@ std::optional<VideoPlaybackQualityMetrics> MediaPlayerPrivateMediaSourceAVFObjC:
+     if (!metrics)
+         return std::nullopt;
+ 
++#if PLATFORM(IOS_FAMILY)
++    UNUSED_PARAM(metrics);
++    return std::nullopt;
++#else
+     uint32_t displayCompositedFrames = 0;
+ ALLOW_NEW_API_WITHOUT_GUARDS_BEGIN
+     if ([metrics respondsToSelector:@selector(numberOfDisplayCompositedVideoFrames)])
+@@ -948,6 +952,7 @@ ALLOW_NEW_API_WITHOUT_GUARDS_END
+         [metrics totalFrameDelay],
+         displayCompositedFrames,
+     };
++#endif
+ }
+ 
+ #pragma mark -
