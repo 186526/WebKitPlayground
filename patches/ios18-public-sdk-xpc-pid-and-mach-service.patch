@@ -1,0 +1,36 @@
+diff --git a/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm b/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm
+--- a/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm
++++ b/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm
+@@ -612,7 +612,11 @@ pid_t Connection::remoteProcessID() const
+     if (!m_xpcConnection)
+         return 0;
+ 
++#if PLATFORM(MAC)
+     return xpc_connection_get_pid(m_xpcConnection.get());
++#else
++    return 0;
++#endif
+ }
+ 
+ std::optional<Connection::ConnectionIdentifierPair> Connection::createConnectionIdentifierPair()
+diff --git a/Source/WebKit/Platform/IPC/cocoa/DaemonConnectionCocoa.mm b/Source/WebKit/Platform/IPC/cocoa/DaemonConnectionCocoa.mm
+--- a/Source/WebKit/Platform/IPC/cocoa/DaemonConnectionCocoa.mm
++++ b/Source/WebKit/Platform/IPC/cocoa/DaemonConnectionCocoa.mm
+@@ -64,6 +64,7 @@ void ConnectionToMachService<Traits>::initializeConnectionIfNeeded() const
+ {
+     if (m_connection)
+         return;
++#if PLATFORM(MAC)
+     m_connection = adoptOSObject(xpc_connection_create_mach_service(m_machServiceName.data(), dispatch_get_main_queue(), 0));
+     xpc_connection_set_event_handler(m_connection.get(), [weakThis = WeakPtr { *this }](xpc_object_t event) {
+         if (!weakThis)
+@@ -83,6 +84,9 @@ void ConnectionToMachService<Traits>::initializeConnectionIfNeeded() const
+         weakThis->connectionReceivedEvent(event);
+     });
+     xpc_connection_activate(m_connection.get());
++#else
++    ASSERT_NOT_REACHED();
++#endif
+ 
+     newConnectionWasInitialized();
+ }
