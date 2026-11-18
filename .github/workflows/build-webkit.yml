@@ -1,0 +1,90 @@
+name: Build WebKit (iOS device)
+
+on:
+  workflow_dispatch:
+    inputs:
+      webkit_ref:
+        description: 'WebKit tag or branch to build'
+        required: true
+        default: 'releases/Apple/Safari-18.3.1-iOS-18.3.2'
+      apply_patch:
+        description: 'Apply the worktree patch (only known-good for 16.1-16.5 tags)'
+        required: true
+        default: 'false'
+      xcode:
+        description: 'Xcode app bundle name'
+        required: true
+        default: 'Xcode_16.4'
+
+jobs:
+  build:
+    name: Fetch, patch, build
+    runs-on: macos-15
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "/Applications/${{ inputs.xcode }}.app"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Measure disk before clone
+        run: df -h /
+
+      - name: Install ccache
+        run: |
+          set -euo pipefail
+          command -v ccache || brew install ccache
+          ccache --version | head -1
+
+      - name: Fetch WebKit source
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout \
+            --branch '${{ inputs.webkit_ref }}' \
+            https://github.com/WebKit/WebKit.git WebKit
+          cd WebKit
+          git checkout HEAD -- .
+          git log -1 --format='%H %ad %s'
+          grep -E '^(MAJOR|MINOR|TINY)_VERSION' Configurations/Version.xcconfig || \
+            grep -E '^(MAJOR|MINOR|TINY)_VERSION' Source/WebKit/Configurations/Version.xcconfig || true
+          df -h /
+
+      - name: Copy ABI shims
+        run: |
+          set -euo pipefail
+          cp -R scripts WebKit/
+
+      - name: Apply worktree patch
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          for p in patches/*.patch; do
+            echo "== $p"
+            git -C WebKit apply --check -v "$p" && git -C WebKit apply -v "$p"
+          done
+
+      - name: Configure embedded development
+        run: sudo WebKit/Tools/Scripts/configure-xcode-for-embedded-development || true
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cd WebKit
+          Tools/Scripts/build-webkit --ios-device --release --use-ccache \
+            WK_USE_CCACHE=YES \
+            ARCHS='arm64 arm64e' \
+            ONLY_ACTIVE_ARCH=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            OTHER_CFLAGS='$(inherited) -Wno-error' \
+            OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error'
+
+      - name: Inspect build output
+        if: always()
+        run: |
+          df -h /
+          du -sh WebKit/WebKitBuild 2>/dev/null || true
+          ls -la WebKit/WebKitBuild/Release-iphoneos 2>/dev/null | head -40 || echo "no Release-iphoneos"
