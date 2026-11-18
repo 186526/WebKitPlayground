@@ -1,22 +1,39 @@
 diff --git a/Source/WebCore/platform/graphics/cocoa/VideoMediaSampleRenderer.mm b/Source/WebCore/platform/graphics/cocoa/VideoMediaSampleRenderer.mm
-index 28dc3b41b8..ad654028ab 100644
 --- a/Source/WebCore/platform/graphics/cocoa/VideoMediaSampleRenderer.mm
 +++ b/Source/WebCore/platform/graphics/cocoa/VideoMediaSampleRenderer.mm
-@@ -481,7 +481,7 @@ void VideoMediaSampleRenderer::enqueueSample(const MediaSample& sample, std::opt
- 
-     if (!useDecompressionSessionForProtectedFallback() && !m_decompressionSessionBlocked && sample.isProtected()) {
-         m_decompressionSessionBlocked = true;
--#if !PLATFORM(WATCHOS)
-+#if PLATFORM(MAC)
-         auto numberOfDroppedVideoFrames = [renderer videoPerformanceMetrics].numberOfDroppedVideoFrames;
-         if (m_droppedVideoFrames >= numberOfDroppedVideoFrames)
-             m_droppedVideoFramesOffset = m_droppedVideoFrames - numberOfDroppedVideoFrames;
-@@ -1224,7 +1224,7 @@ std::optional<VideoPlaybackQualityMetrics> VideoMediaSampleRenderer::videoPlayba
-             m_presentedVideoFrames.load()
-         };
-     }
+@@ -460,7 +460,7 @@ unsigned VideoMediaSampleRenderer::totalVideoFrames() const
+ {
+     if (m_decompressionSession)
+         return m_decompressionSession->totalVideoFrames();
 -#if PLATFORM(WATCHOS)
 +#if PLATFORM(WATCHOS) || PLATFORM(IOS_FAMILY)
-     return std::nullopt;
+     return 0;
  #else
-     RetainPtr renderer = this->renderer();
+     return [renderer() videoPerformanceMetrics].totalNumberOfVideoFrames;
+@@ -471,7 +471,7 @@ unsigned VideoMediaSampleRenderer::droppedVideoFrames() const
+ {
+     if (m_decompressionSession)
+         return m_decompressionSession->droppedVideoFrames();
+-#if PLATFORM(WATCHOS)
++#if PLATFORM(WATCHOS) || PLATFORM(IOS_FAMILY)
+     return 0;
+ #else
+     return [renderer() videoPerformanceMetrics].numberOfDroppedVideoFrames;
+@@ -482,7 +482,7 @@ unsigned VideoMediaSampleRenderer::corruptedVideoFrames() const
+ {
+     if (m_decompressionSession)
+         return m_decompressionSession->corruptedVideoFrames();
+-#if PLATFORM(WATCHOS)
++#if PLATFORM(WATCHOS) || PLATFORM(IOS_FAMILY)
+     return 0;
+ #else
+     return [renderer() videoPerformanceMetrics].numberOfCorruptedVideoFrames;
+@@ -493,7 +493,7 @@ MediaTime VideoMediaSampleRenderer::totalFrameDelay() const
+ {
+     if (m_decompressionSession)
+         return m_decompressionSession->totalFrameDelay();
+-#if PLATFORM(WATCHOS)
++#if PLATFORM(WATCHOS) || PLATFORM(IOS_FAMILY)
+     return MediaTime::invalidTime();
+ #else
+     return MediaTime::createWithDouble([renderer() videoPerformanceMetrics].totalFrameDelay);
