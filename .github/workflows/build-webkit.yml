@@ -43,14 +43,14 @@ jobs:
       - name: Fetch WebKit source
         run: |
           set -euo pipefail
-          git clone --filter=blob:none --no-checkout \
+          time git clone --depth 1 --single-branch \
             --branch '${{ inputs.webkit_ref }}' \
             https://github.com/WebKit/WebKit.git WebKit
           cd WebKit
-          git checkout HEAD -- .
           git log -1 --format='%H %ad %s'
           grep -E '^(MAJOR|MINOR|TINY)_VERSION' Configurations/Version.xcconfig || \
             grep -E '^(MAJOR|MINOR|TINY)_VERSION' Source/WebKit/Configurations/Version.xcconfig || true
+          du -sh .git
           df -h /
 
       - name: Copy ABI shims
