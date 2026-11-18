@@ -55,8 +55,8 @@ jobs:
           ccache --version | head -1
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
-          # Key derivation only: see "Configure ccache" below.
-          echo "CCACHE_BASEDIR=$(/usr/bin/realpath -m /Users/runner/work)" >> "$GITHUB_ENV"
+          # base_dir strips the per-run checkout prefix from the hashed file paths.
+          echo "CCACHE_BASEDIR=/Users/runner/work" >> "$GITHUB_ENV"
           echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
           echo "CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime,time_macros" >> "$GITHUB_ENV"
           echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
@@ -69,6 +69,7 @@ jobs:
           ccache --set-config=compiler_check=content
           ccache --set-config=sloppiness=include_file_mtime,include_file_ctime,time_macros
           ccache --set-config=max_size=3G
+          ccache --set-config=base_dir=/Users/runner/work
           ccache -p | grep -E 'cache_dir|base_dir|hash_dir|compiler_check|sloppiness|max_size'
 
       - name: Restore ccache
@@ -124,10 +125,14 @@ jobs:
 
       - name: Build
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd WebKit
+          # The runner has 3 cores and 7 GB; Xcode's default parallelism oversubscribes both.
+          defaults write com.apple.dt.Xcode IDEBuildOperationMaxNumberOfConcurrentCompileTasks 4
+          defaults write com.apple.dt.Xcode IDEBuildOperationMaxNumberOfConcurrentCompileTasksForPlayground 4
           echo "ccache statistics before build:"
           ccache -s || true
+          status=0
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
             ARCHS='arm64e' \
@@ -135,9 +140,22 @@ jobs:
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_CFLAGS='$(inherited) -Wno-error' \
             OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error' \
-            DEBUG_INFORMATION_FORMAT=dwarf
+            DEBUG_INFORMATION_FORMAT=dwarf || status=$?
+          echo "build-webkit exited with status ${status}"
           echo "ccache statistics after build:"
-          ccache -s
+          ccache -s || true
+          if [ "$status" -ne 0 ]; then
+            echo "=== mailbox and memory diagnostics"
+            sysctl -n hw.memsize vm.swapusage 2>/dev/null || true
+            vm_stat 2>/dev/null | head -12 || true
+            ps -Ao rss,comm -r 2>/dev/null | head -15 || true
+            echo "=== newest build artefacts"
+            find WebKitBuild -type f -newermt '-90 minutes' -exec ls -lt {} + 2>/dev/null | head -20 || true
+            echo "=== .dia and log tail"
+            ls -lt WebKitBuild/Release-iphoneos/*.dia 2>/dev/null | head -3 || true
+            ls -lt ~/Library/Logs/DiagnosticReports 2>/dev/null | head -10 || true
+          fi
+          exit "$status"
 
       - name: Save ccache
         if: always()
@@ -157,7 +175,9 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          # Object files live in WebKitBuild; the packaging step only needs Release-iphoneos products.
+          # Crash reports explain a silent kill; upload them out of the VM before it goes away.
+          mkdir -p diagnostics
+          cp -R ~/Library/Logs/DiagnosticReports diagnostics/ 2>/dev/null || true
           du -sh WebKit/WebKitBuild/*.build 2>/dev/null | sort -h | tail -10 || true
           rm -rf WebKit/WebKitBuild/*.build 2>/dev/null || true
           df -h /
@@ -186,4 +206,13 @@ jobs:
           name: webkit-rootless-deb
           path: packages/*.deb
           if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: diagnostics/
+          if-no-files-found: ignore
           retention-days: 7
