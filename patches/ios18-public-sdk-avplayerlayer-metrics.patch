@@ -1,0 +1,28 @@
+diff --git a/Source/WebCore/platform/graphics/avfoundation/objc/LocalSampleBufferDisplayLayer.mm b/Source/WebCore/platform/graphics/avfoundation/objc/LocalSampleBufferDisplayLayer.mm
+--- a/Source/WebCore/platform/graphics/avfoundation/objc/LocalSampleBufferDisplayLayer.mm
++++ b/Source/WebCore/platform/graphics/avfoundation/objc/LocalSampleBufferDisplayLayer.mm
+@@ -409,8 +409,12 @@ ALLOW_DEPRECATED_DECLARATIONS_END
+ #if !RELEASE_LOG_DISABLED
+     constexpr size_t frameCountPerLog = 1800; // log every minute at 30 fps
+     if (!(m_frameRateMonitor.frameCount() % frameCountPerLog)) {
++#if PLATFORM(IOS_FAMILY)
++        RELEASE_LOG(WebRTC, "LocalSampleBufferDisplayLayer (%{public}s) metrics unsupported, pending=%lu", m_logIdentifier.utf8().data(), m_pendingVideoFrameQueue.size());
++#else
+         if (auto* metrics = [m_sampleBufferDisplayLayer videoPerformanceMetrics])
+             RELEASE_LOG(WebRTC, "LocalSampleBufferDisplayLayer (%{public}s) metrics, total=%lu, dropped=%lu, corrupted=%lu, display-composited=%lu, non-display-composited=%lu (pending=%lu)", m_logIdentifier.utf8().data(), metrics.totalNumberOfVideoFrames, metrics.numberOfDroppedVideoFrames, metrics.numberOfCorruptedVideoFrames, metrics.numberOfDisplayCompositedVideoFrames, metrics.numberOfNonDisplayCompositedVideoFrames, m_pendingVideoFrameQueue.size());
++#endif
+     }
+     m_frameRateMonitor.update();
+ #endif
+diff --git a/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateAVFoundationObjC.mm b/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateAVFoundationObjC.mm
+--- a/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateAVFoundationObjC.mm
++++ b/Source/WebCore/platform/graphics/avfoundation/objc/MediaPlayerPrivateAVFoundationObjC.mm
+@@ -3901,7 +3901,7 @@ std::optional<VideoPlaybackQualityMetrics> MediaPlayerPrivateAVFoundationObjC::v
+     if (!videoLayer)
+         return std::nullopt;
+ 
+-#if PLATFORM(WATCHOS)
++#if PLATFORM(WATCHOS) || PLATFORM(IOS_FAMILY)
+     return std::nullopt;
+ #else
+ ALLOW_NEW_API_WITHOUT_GUARDS_BEGIN
