@@ -40,12 +40,26 @@ jobs:
           command -v ccache || brew install ccache
           ccache --version | head -1
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          # Key derivation only: see "Configure ccache" below.
+          echo "CCACHE_BASEDIR=$(/usr/bin/realpath -m /Users/runner/work)" >> "$GITHUB_ENV"
+          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
+          echo "CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime,time_macros" >> "$GITHUB_ENV"
           echo "CCACHE_MAXSIZE=6G" >> "$GITHUB_ENV"
 
+      - name: Configure ccache
+        run: |
+          set -euo pipefail
+          # A native ccache binary reads neither CCACHE_NOHASHDIR nor CCACHE_SLOPPINESS.
+          ccache --set-config=hash_dir=false
+          ccache --set-config=compiler_check=content
+          ccache --set-config=sloppiness=include_file_mtime,include_file_ctime,time_macros
+          ccache --set-config=max_size=6G
+          ccache -p | grep -E 'cache_dir|base_dir|hash_dir|compiler_check|sloppiness|max_size'
+
       - name: Restore ccache
-        uses: actions/cache@v4
+        id: ccache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
           # Exact per-run key so every run saves its own cache; restores from the newest prefix match.
@@ -95,6 +109,8 @@ jobs:
         run: |
           set -euo pipefail
           cd WebKit
+          echo "ccache statistics before build:"
+          ccache -s || true
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
             ARCHS='arm64 arm64e' \
@@ -102,13 +118,15 @@ jobs:
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_CFLAGS='$(inherited) -Wno-error' \
             OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error'
+          echo "ccache statistics after build:"
+          ccache -s
 
       - name: Save ccache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ inputs.webkit_ref }}-${{ inputs.xcode }}-${{ github.run_id }}
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
 
       - name: Inspect build output
         if: always()
