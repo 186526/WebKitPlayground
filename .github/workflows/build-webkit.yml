@@ -60,11 +60,18 @@ jobs:
 
       - name: Apply worktree patch
         if: inputs.apply_patch == 'true'
+        env:
+          WEBKIT_REF: ${{ inputs.webkit_ref }}
         run: |
           set -euo pipefail
           for p in patches/*.patch; do
             echo "== $p"
-            git -C WebKit apply --check -v "$p" && git -C WebKit apply -v "$p"
+            # 16.x worktree patches do not apply past 16.5; the iOS public-SDK patch is version independent.
+            if ! git -C WebKit apply --check -v "$p"; then
+              echo "SKIP (does not apply to ${WEBKIT_REF}): $p"
+              continue
+            fi
+            git -C WebKit apply -v "$p"
           done
 
       - name: Configure embedded development

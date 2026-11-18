@@ -1,0 +1,22 @@
+diff --git a/Source/JavaScriptCore/inspector/remote/cocoa/RemoteInspectorCocoa.mm b/Source/JavaScriptCore/inspector/remote/cocoa/RemoteInspectorCocoa.mm
+--- a/Source/JavaScriptCore/inspector/remote/cocoa/RemoteInspectorCocoa.mm
++++ b/Source/JavaScriptCore/inspector/remote/cocoa/RemoteInspectorCocoa.mm
+@@ -326,6 +326,7 @@ void RemoteInspector::setupXPCConnectionIfNeeded()
+         return;
+     }
+ 
++#if PLATFORM(MAC)
+     auto connection = adoptOSObject(xpc_connection_create_mach_service(WIRXPCMachPortName, m_xpcQueue, 0));
+     if (!connection) {
+         WTFLogAlways("RemoteInspector failed to create XPC connection.");
+@@ -344,6 +345,9 @@ void RemoteInspector::setupXPCConnectionIfNeeded()
+         for (auto targetID : m_pausedAutomaticInspectionCandidates)
+             sendAutomaticInspectionCandidateMessage(targetID);
+     } else
+         pushListingsSoon();
++#else
++    WTFLogAlways("RemoteInspector relay unavailable: xpc_connection_create_mach_service is not available on this platform.");
++#endif
+ }
+ 
+ void RemoteInspector::connectToWebInspector()
