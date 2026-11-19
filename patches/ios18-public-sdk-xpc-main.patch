@@ -1,0 +1,16 @@
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+@@ -271,8 +271,12 @@ int XPCServiceMain(int, const char**)
+     setenv("__APPLEEVENTSSERVICENAME", "", 1);
+ #endif
+ 
++#if PLATFORM(MAC) || PLATFORM(MACCATALYST)
+     xpc_main(XPCServiceEventHandler);
+     return 0;
++#else
++    return 0;
++#endif
+ }
+ 
+ } // namespace WebKit
