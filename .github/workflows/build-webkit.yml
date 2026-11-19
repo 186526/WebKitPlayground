@@ -136,19 +136,27 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
-          probe="$RUNNER_TEMP/actool-probe"
-          rm -rf "$probe"
-          mkdir -p "$probe/Test.imageset"
-          printf '{"images":[{"idiom":"universal","filename":"x.pdf"}],"info":{"version":1,"author":"xcode"}}' > "$probe/Test.imageset/Contents.json"
-          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 10 10]>>endobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > "$probe/Test.imageset/x.pdf"
           actool=/Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool
-          mkdir -p "$RUNNER_TEMP/actool-out-a" "$RUNNER_TEMP/actool-out-b"
-          echo "== A: no bundle identifier (same shape as CompileAssetCatalogVariant)"
-          "$actool" "$probe" --compile "$RUNNER_TEMP/actool-out-a" --output-format human-readable-text --notices --warnings --target-device iphone --minimum-deployment-target 18.5 --platform iphoneos --output-partial-info-plist "$RUNNER_TEMP/actool-a.plist"
-          echo "actool A exit: $?"
-          echo "== B: with bundle identifier (same shape as GenerateAssetSymbols)"
-          "$actool" "$probe" --compile "$RUNNER_TEMP/actool-out-b" --output-format human-readable-text --notices --warnings --target-device iphone --minimum-deployment-target 18.5 --platform iphoneos --bundle-identifier com.apple.WebKit --output-partial-info-plist "$RUNNER_TEMP/actool-b.plist"
-          echo "actool B exit: $?"
+          src="$PWD/WebKit/Source/WebKit"
+          out="$RUNNER_TEMP/actool-real"
+          rm -rf "$out"
+          mkdir -p "$out"
+          echo "== real asset catalogs, thinned arguments copied from the failing command"
+          "$actool" \
+            "$src/HTTPSBrowsingWarning.xcassets" \
+            "$src/Resources/ios/iOS.xcassets" \
+            "$src/Resources/SafeBrowsing.xcassets" \
+            --compile "$out" \
+            --output-format human-readable-text --notices --warnings \
+            --export-dependency-info "$RUNNER_TEMP/actool-real.deps" \
+            --output-partial-info-plist "$RUNNER_TEMP/actool-real.plist" \
+            --enable-on-demand-resources NO \
+            --development-region en \
+            --target-device iphone \
+            --minimum-deployment-target 18.5 \
+            --platform iphoneos
+          echo "actool real exit: $?"
+          ls -la "$out" || true
 
       - name: Build
         run: |
