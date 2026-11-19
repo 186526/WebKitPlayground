@@ -1,0 +1,22 @@
+diff --git a/Source/WebKit/webpushd/webpushtool/WebPushToolConnection.mm b/Source/WebKit/webpushd/webpushtool/WebPushToolConnection.mm
+--- a/Source/WebKit/webpushd/webpushtool/WebPushToolConnection.mm
++++ b/Source/WebKit/webpushd/webpushtool/WebPushToolConnection.mm
+@@ -76,7 +76,7 @@ Connection::Connection(PreferTestService preferTestService, String bundleIdentif
+ 
+ void Connection::connectToService(WaitForServiceToExist waitForServiceToExist)
+ {
+-
++#if PLATFORM(MAC)
+     m_connection = adoptNS(xpc_connection_create_mach_service(m_serviceName, dispatch_get_main_queue(), 0));
+ 
+     xpc_connection_set_event_handler(m_connection.get(), [](xpc_object_t event) {
+@@ -103,6 +103,9 @@ void Connection::connectToService(WaitForServiceToExist waitForServiceToExist)
+     xpc_connection_activate(m_connection.get());
+ 
+     sendAuditToken();
++#else
++    UNUSED_PARAM(waitForServiceToExist);
++#endif
+ }
+ 
+ void Connection::sendPushMessage(PushMessageForTesting&& message, CompletionHandler<void(String)>&& completionHandler)
