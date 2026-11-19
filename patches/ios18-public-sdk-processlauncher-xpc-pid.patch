@@ -1,0 +1,15 @@
+diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
+--- a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
++++ b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
+@@ -521,7 +521,11 @@ void ProcessLauncher::finishLaunchingProcess(ASCIILiteral name)
+             }
+ 
+             // The process has finished launching, grab the pid from the connection.
++#if PLATFORM(MAC)
+             pid_t processIdentifier = xpc_connection_get_pid(m_xpcConnection.get());
++#else
++            pid_t processIdentifier = 0;
++#endif
+ 
+             didFinishLaunchingProcess(processIdentifier, IPC::Connection::Identifier(listeningPort, m_xpcConnection));
+             m_xpcConnection = nullptr;
