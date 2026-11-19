@@ -141,14 +141,15 @@ jobs:
           out="$RUNNER_TEMP/actool-real"
           rm -rf "$out"
           mkdir -p "$out"
-          echo "== real asset catalogs, thinned arguments copied from the failing command"
+          echo "== help excerpt for export options"
+          "$actool" --help 2>&1 | grep -iE "export|depend|thin|symbol" | head -20 || true
+          echo "== without the xcodebuild-only flags"
           "$actool" \
             "$src/HTTPSBrowsingWarning.xcassets" \
             "$src/Resources/ios/iOS.xcassets" \
             "$src/Resources/SafeBrowsing.xcassets" \
             --compile "$out" \
             --output-format human-readable-text --notices --warnings \
-            --export-dependency-info "$RUNNER_TEMP/actool-real.deps" \
             --output-partial-info-plist "$RUNNER_TEMP/actool-real.plist" \
             --enable-on-demand-resources NO \
             --development-region en \
@@ -156,7 +157,7 @@ jobs:
             --minimum-deployment-target 18.5 \
             --platform iphoneos
           echo "actool real exit: $?"
-          ls -la "$out" || true
+          ls "$out" | head
 
       - name: Build
         run: |
