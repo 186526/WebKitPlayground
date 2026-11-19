@@ -160,6 +160,7 @@ jobs:
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_CFLAGS='$(inherited) -Wno-error' \
             OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error' \
+            COMPRESS_PNG_FILES=NO \
             DEBUG_INFORMATION_FORMAT=dwarf > "$GITHUB_WORKSPACE/diagnostics/build.log" 2>&1 || status=$?
           echo "build-webkit exited with status ${status}"
           kill "$sampler_pid" 2>/dev/null || true
@@ -174,6 +175,8 @@ jobs:
             ps -Ao rss,comm -r 2>/dev/null | head -15 || true
             echo "=== sampler tail"
             tail -20 "$sampler" || true
+            echo "=== actool probe"
+            /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1 || true
           fi
           exit "$status"
 
