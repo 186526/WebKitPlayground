@@ -37,8 +37,10 @@ jobs:
       - name: Free runner disk
         run: |
           set -euo pipefail
-          # Xcode ships simulator runtimes and device support packs that an iOS device build never touches.
-          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/iPhoneSimulator.platform || true
+          # actool reaches into iPhoneSimulator.platform for its CARCompiler overlay tool, so that
+          # platform must stay. Dropping it makes ibtoold abort inside
+          # +[IBICSimulatorToolCARCompiler catalogToolForPlatformWithIdentifier:...] and takes
+          # CompileAssetCatalogVariant down with it.
           sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/WatchOS.platform || true
           sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/WatchSimulator.platform || true
           sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/AppleTVOS.platform || true
