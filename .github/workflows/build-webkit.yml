@@ -132,32 +132,6 @@ jobs:
       - name: Configure embedded development
         run: sudo WebKit/Tools/Scripts/configure-xcode-for-embedded-development || true
 
-      - name: Wrap actool to capture its output
-        run: |
-          set -euo pipefail
-          actool=/Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool
-          sudo mv "$actool" "$actool.real"
-          cat > "$RUNNER_TEMP/actool-wrapper.sh" <<'WRAPPER'
-          #!/bin/bash
-          log=/Users/runner/actool-invocation.log
-          {
-            echo "=== actool invoked"
-            printf 'arg: %s\n' "$@"
-          } >> "$log"
-          out=$("$(dirname "$0")/actool.real" "$@" 2>&1)
-          status=$?
-          {
-            echo "--- exit: $status"
-            echo "$out"
-          } >> "$log"
-          echo "$out"
-          exit $status
-          WRAPPER
-          sed -i '' 's/^          //' "$RUNNER_TEMP/actool-wrapper.sh"
-          sudo cp "$RUNNER_TEMP/actool-wrapper.sh" "$actool"
-          sudo chmod +x "$actool"
-          "$actool" --version --output-format xml1 > /dev/null && echo "wrapper works"
-
       - name: Probe actool
         continue-on-error: true
         run: |
@@ -242,8 +216,6 @@ jobs:
       - name: Inspect build output
         if: always()
         run: |
-          mkdir -p diagnostics
-          cp /Users/runner/actool-invocation.log diagnostics/ 2>/dev/null || true
           df -h /
           du -sh WebKit/WebKitBuild 2>/dev/null || true
           ls -la WebKit/WebKitBuild/Release-iphoneos 2>/dev/null | head -40 || echo "no Release-iphoneos"
