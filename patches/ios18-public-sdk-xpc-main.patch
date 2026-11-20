@@ -1,7 +1,47 @@
+diff --git a/Source/WebKit/Configurations/BaseXPCService.xcconfig b/Source/WebKit/Configurations/BaseXPCService.xcconfig
+--- a/Source/WebKit/Configurations/BaseXPCService.xcconfig
++++ b/Source/WebKit/Configurations/BaseXPCService.xcconfig
+@@ -59,7 +59,10 @@ WK_NO_STATIC_INITIALIZERS_Release_NO_ = $(WK_ERROR_WHEN_LINKING_WITH_STATIC_INIT
+ WK_NO_STATIC_INITIALIZERS_Production__ = $(WK_ERROR_WHEN_LINKING_WITH_STATIC_INITIALIZERS);
+ WK_NO_STATIC_INITIALIZERS_Production_NO_ = $(WK_ERROR_WHEN_LINKING_WITH_STATIC_INITIALIZERS);
+ 
+-OTHER_LDFLAGS = $(inherited) $(OTHER_LDFLAGS_STAGED_FRAMEWORK_PATH) $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS) $(WK_NO_STATIC_INITIALIZERS);
++OTHER_LDFLAGS = $(inherited) $(OTHER_LDFLAGS_STAGED_FRAMEWORK_PATH) $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS) $(WK_ROOTLESS_FRAMEWORKS_LDFLAGS_$(WK_ROOTLESS_FRAMEWORKS)) $(WK_NO_STATIC_INITIALIZERS);
++
++WK_ROOTLESS_FRAMEWORKS_LDFLAGS = $(WK_ROOTLESS_FRAMEWORKS_LDFLAGS_$(WK_ROOTLESS_FRAMEWORKS));
++WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=/var/jb/usr/lib;
+ 
+ WK_RELOCATABLE_FRAMEWORKS_LDFLAGS = $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS_$(WK_RELOCATABLE_FRAMEWORKS));
+ WK_RELOCATABLE_FRAMEWORKS_LDFLAGS_ = $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS_NO);
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
-@@ -271,8 +271,12 @@ int XPCServiceMain(int, const char**)
+@@ -135,9 +135,9 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+                 if (event == XPC_ERROR_CONNECTION_INVALID || event == XPC_ERROR_TERMINATION_IMMINENT) {
+                     RELEASE_LOG_FAULT(IPC, "Exiting: Received XPC event type: %{public}s", event == XPC_ERROR_CONNECTION_INVALID ? "XPC_ERROR_CONNECTION_INVALID" : "XPC_ERROR_TERMINATION_IMMINENT");
+                     // FIXME: Handle this case more gracefully.
+-                    [[NSRunLoop mainRunLoop] performBlock:^{
+-                        exitProcess(EXIT_FAILURE);
+-                    }];
++                    // Exit directly: performBlock: needs the main run loop, which the non-macOS
++                    // entry point below does not run.
++                    exitProcess(EXIT_FAILURE);
+                 }
+             }
+             return;
+@@ -205,10 +205,7 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+             InitializerFunction initializerFunctionPtr = reinterpret_cast<InitializerFunction>(CFBundleGetFunctionPointerForName(webKitBundle, entryPointFunctionName));
+             if (!initializerFunctionPtr) {
+                 RELEASE_LOG_FAULT(IPC, "Exiting: Unable to find entry point in WebKit.framework with name: %s", [(__bridge NSString *)entryPointFunctionName UTF8String]);
+-                [[NSRunLoop mainRunLoop] performBlock:^{
+-                    exitProcess(EXIT_FAILURE);
+-                }];
+-                return;
++                exitProcess(EXIT_FAILURE);
+             }
+ 
+             auto reply = adoptOSObject(xpc_dictionary_create_reply(event));
+@@ -271,8 +268,32 @@ int XPCServiceMain(int, const char**)
      setenv("__APPLEEVENTSSERVICENAME", "", 1);
  #endif
  
@@ -9,7 +49,27 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
      xpc_main(XPCServiceEventHandler);
      return 0;
 +#else
-+    return 0;
++    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does:
++    // connect to the endpoint launchd put in the environment, and hand the first inbound message to
++    // XPCServiceEventHandler as the peer connection it expects. That handler installs the peer's
++    // event handler and resumes it, and launchd has not resumed it yet, so it is resumed once.
++    xpc_connection_t taskConnection = xpc_connection_create(nullptr, nullptr);
++    xpc_connection_set_event_handler(taskConnection, ^(xpc_object_t event) {
++        if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) {
++            // ConnectionInvalid or TerminationImminent: launchd is the only way in, so exit.
++            exitProcess(EXIT_FAILURE);
++        }
++        xpc_connection_t peer = xpc_dictionary_get_remote_connection(event);
++        if (!peer) {
++            RELEASE_LOG_FAULT(IPC, "Exiting: bootstrap message has no remote connection");
++            exitProcess(EXIT_FAILURE);
++        }
++        XPCServiceEventHandler(peer);
++    });
++    xpc_connection_resume(taskConnection);
++    // The bootstrap message initialises through WorkQueue::main().dispatchSync, which needs the
++    // main queue to be driven, so drain it instead of running the main run loop.
++    dispatch_main();
 +#endif
  }
  
