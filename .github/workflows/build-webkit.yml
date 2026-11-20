@@ -231,6 +231,7 @@ jobs:
       - name: Inspect build output
         if: always()
         run: |
+          set -uo pipefail
           df -h /
           du -sh WebKit/WebKitBuild 2>/dev/null || true
           ls -la WebKit/WebKitBuild/Release-iphoneos 2>/dev/null | head -40 || echo "no Release-iphoneos"
@@ -242,8 +243,9 @@ jobs:
               found=1
             fi
           done < <(find WebKit/WebKitBuild/Release-iphoneos -name '*.LinkFileList' 2>/dev/null)
-          [ "$found" = 0 ] && echo "no LinkFileList mentions dyld_env"
-          true
+          if [ "$found" = 0 ]; then
+            echo "no LinkFileList mentions dyld_env"
+          fi
           echo "=== XPC services carrying an LC_DYLD_ENVIRONMENT load command"
           for b in WebKit/WebKitBuild/Release-iphoneos/*.xpc/* WebKit/WebKitBuild/Release-iphoneos/WebKit.framework/XPCServices/*.xpc/*; do
             [ -f "$b" ] || continue
@@ -252,6 +254,7 @@ jobs:
               otool -l "$b" 2>/dev/null | grep -A3 'cmd LC_DYLD_ENVIRONMENT' | sed 's/^/    /'
             fi
           done
+          echo "=== end of inspection"
 
       - name: Prune build intermediates
         if: always()
