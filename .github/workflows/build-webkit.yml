@@ -196,7 +196,8 @@ jobs:
             OTHER_CFLAGS='$(inherited) -Wno-error' \
             OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error' \
             COMPRESS_PNG_FILES=NO \
-            DEBUG_INFORMATION_FORMAT=dwarf > "$GITHUB_WORKSPACE/diagnostics/build.log" 2>&1 || status=$?
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            WK_ROOTLESS_FRAMEWORKS=YES > "$GITHUB_WORKSPACE/diagnostics/build.log" 2>&1 || status=$?
           echo "build-webkit exited with status ${status}"
           kill "$sampler_pid" 2>/dev/null || true
           echo "ccache statistics after build:"
@@ -233,6 +234,15 @@ jobs:
           df -h /
           du -sh WebKit/WebKitBuild 2>/dev/null || true
           ls -la WebKit/WebKitBuild/Release-iphoneos 2>/dev/null | head -40 || echo "no Release-iphoneos"
+          echo "=== files whose link command carries -dyld_env"
+          grep -rlE 'Ld .*dyld_env' WebKit/WebKitBuild/Release-iphoneos --include='*.LinkFileList' --include='*.build' 2>/dev/null | head -10 || true
+          echo "=== XPC services carrying an LC_DYLD_ENV load command"
+          for b in WebKit/WebKitBuild/Release-iphoneos/*.xpc/* WebKit/WebKitBuild/Release-iphoneos/WebKit.framework/XPCServices/*.xpc/*; do
+            [ -f "$b" ] || continue
+            if otool -l "$b" 2>/dev/null | grep -A3 LC_DYLD_ENV | grep -q DYLD_ENVIRONMENT; then
+              echo "DYLD_ENV FOUND: $b"
+            fi
+          done
 
       - name: Prune build intermediates
         if: always()
