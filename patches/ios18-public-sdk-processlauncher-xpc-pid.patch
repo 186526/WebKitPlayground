@@ -1,3 +1,22 @@
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+@@ -35,6 +35,7 @@
+ #import <pal/spi/cf/CFUtilitiesSPI.h>
+ #import <pal/spi/cocoa/LaunchServicesSPI.h>
+ #import <sys/sysctl.h>
++#import <unistd.h>
+ #import <wtf/BlockPtr.h>
+ #import <wtf/Language.h>
+ #import <wtf/OSObjectPtr.h>
+@@ -213,6 +214,7 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+ 
+             auto reply = adoptOSObject(xpc_dictionary_create_reply(event));
+             xpc_dictionary_set_string(reply.get(), "message-name", "process-finished-launching");
++            xpc_dictionary_set_int64(reply.get(), "pid", getpid());
+             xpc_connection_send_message(xpc_dictionary_get_remote_connection(event), reply.get());
+ 
+             int fd = xpc_dictionary_dup_fd(event, "stdout");
 diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
 --- a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
 +++ b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
@@ -8,10 +27,10 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +#if PLATFORM(MAC)
              pid_t processIdentifier = xpc_connection_get_pid(m_xpcConnection.get());
 +#else
-+            // iOS 公开 SDK 不声明 xpc_connection_get_pid，这里拿不到子进程的 pid，只能填 0。
-+            // 后果：ProcessLauncher::processID() 返回 0，ProcessAssertion 走 m_pid <= 0 的失效路径，
++            // iOS 公开 SDK 不声明 xpc_connection_get_pid，改为读取子进程在回复里回传的 pid；读不到时为 0。
++            // 后果：读不到 pid 时 ProcessLauncher::processID() 返回 0，ProcessAssertion 走 m_pid <= 0 的失效路径，
 +            // UI 进程不会为子进程持有 RunningBoard 断言，iOS 17.4 及以上的 ExtensionKit 能力路径不受影响。
-+            pid_t processIdentifier = 0;
++            pid_t processIdentifier = xpc_dictionary_get_int64(reply, "pid");
 +#endif
  
              didFinishLaunchingProcess(processIdentifier, IPC::Connection::Identifier(listeningPort, m_xpcConnection));
