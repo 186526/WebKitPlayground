@@ -234,13 +234,22 @@ jobs:
           df -h /
           du -sh WebKit/WebKitBuild 2>/dev/null || true
           ls -la WebKit/WebKitBuild/Release-iphoneos 2>/dev/null | head -40 || echo "no Release-iphoneos"
-          echo "=== files whose link command carries -dyld_env"
-          grep -rlE 'Ld .*dyld_env' WebKit/WebKitBuild/Release-iphoneos --include='*.LinkFileList' --include='*.build' 2>/dev/null | head -10 || true
-          echo "=== XPC services carrying an LC_DYLD_ENV load command"
+          echo "=== link commands carrying -dyld_env"
+          found=0
+          while IFS= read -r f; do
+            if grep -q 'dyld_env' "$f"; then
+              echo "LINKFLAG: $f"
+              found=1
+            fi
+          done < <(find WebKit/WebKitBuild/Release-iphoneos -name '*.LinkFileList' 2>/dev/null)
+          [ "$found" = 0 ] && echo "no LinkFileList mentions dyld_env"
+          true
+          echo "=== XPC services carrying an LC_DYLD_ENVIRONMENT load command"
           for b in WebKit/WebKitBuild/Release-iphoneos/*.xpc/* WebKit/WebKitBuild/Release-iphoneos/WebKit.framework/XPCServices/*.xpc/*; do
             [ -f "$b" ] || continue
-            if otool -l "$b" 2>/dev/null | grep -A3 LC_DYLD_ENV | grep -q DYLD_ENVIRONMENT; then
+            if otool -l "$b" 2>/dev/null | grep -q 'cmd LC_DYLD_ENVIRONMENT'; then
               echo "DYLD_ENV FOUND: $b"
+              otool -l "$b" 2>/dev/null | grep -A3 'cmd LC_DYLD_ENVIRONMENT' | sed 's/^/    /'
             fi
           done
 
