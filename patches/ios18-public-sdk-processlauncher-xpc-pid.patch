@@ -1,14 +1,17 @@
 diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
 --- a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
 +++ b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
-@@ -521,7 +521,11 @@ void ProcessLauncher::finishLaunchingProcess(ASCIILiteral name)
+@@ -521,7 +521,14 @@ void ProcessLauncher::finishLaunchingProcess(ASCIILiteral name)
              }
  
              // The process has finished launching, grab the pid from the connection.
 +#if PLATFORM(MAC)
              pid_t processIdentifier = xpc_connection_get_pid(m_xpcConnection.get());
 +#else
-+            pid_t processIdentifier = getpid();
++            // iOS 公开 SDK 不声明 xpc_connection_get_pid，这里拿不到子进程的 pid，只能填 0。
++            // 后果：ProcessLauncher::processID() 返回 0，ProcessAssertion 走 m_pid <= 0 的失效路径，
++            // UI 进程不会为子进程持有 RunningBoard 断言，iOS 17.4 及以上的 ExtensionKit 能力路径不受影响。
++            pid_t processIdentifier = 0;
 +#endif
  
              didFinishLaunchingProcess(processIdentifier, IPC::Connection::Identifier(listeningPort, m_xpcConnection));
