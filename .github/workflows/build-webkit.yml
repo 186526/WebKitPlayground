@@ -61,7 +61,9 @@ jobs:
           echo "CCACHE_BASEDIR=/Users/runner/work" >> "$GITHUB_ENV"
           echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
           echo "CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime,time_macros" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
+          # GitHub keeps at most 10 GiB of caches per repository, so 6 GiB leaves room
+          # for one previous generation while staying under the quota.
+          echo "CCACHE_MAXSIZE=6G" >> "$GITHUB_ENV"
 
       - name: Configure ccache
         run: |
@@ -70,9 +72,13 @@ jobs:
           ccache --set-config=hash_dir=false
           ccache --set-config=compiler_check=content
           ccache --set-config=sloppiness=include_file_mtime,include_file_ctime,time_macros
-          ccache --set-config=max_size=3G
+          ccache --set-config=max_size=6G
           ccache --set-config=base_dir=/Users/runner/work
-          ccache -p | grep -E 'cache_dir|base_dir|hash_dir|compiler_check|sloppiness|max_size'
+          # ccache stores each entry with zstd; level 6 keeps most of level 19's saving
+          # without spending build time on maximum compression.
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache -p | grep -E 'cache_dir|base_dir|hash_dir|compiler_check|sloppiness|max_size|compression'
 
       - name: Restore ccache
         id: ccache
@@ -208,6 +214,11 @@ jobs:
             /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1 || true
           fi
           exit "$status"
+
+      - name: Report ccache compression
+        if: always()
+        run: |
+          ccache --show-compression || true
 
       - name: Save ccache
         if: always()
