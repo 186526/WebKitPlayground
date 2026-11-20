@@ -1,0 +1,44 @@
+diff --git a/Source/WebKit/Shared/Daemon/DaemonUtilities.mm b/Source/WebKit/Shared/Daemon/DaemonUtilities.mm
+--- a/Source/WebKit/Shared/Daemon/DaemonUtilities.mm
++++ b/Source/WebKit/Shared/Daemon/DaemonUtilities.mm
+@@ -36,6 +36,7 @@ namespace WebKit {
+ 
+ void startListeningForMachServiceConnections(const char* serviceName, ASCIILiteral entitlement, void(*connectionAdded)(xpc_connection_t), void(*connectionRemoved)(xpc_connection_t), void(*eventHandler)(xpc_object_t))
+ {
++#if PLATFORM(MAC)
+     static NeverDestroyed<RetainPtr<xpc_connection_t>> listener = xpc_connection_create_mach_service(serviceName, dispatch_get_main_queue(), XPC_CONNECTION_MACH_SERVICE_LISTENER);
+     xpc_connection_set_event_handler(listener.get().get(), ^(xpc_object_t peer) {
+         if (xpc_get_type(peer) != XPC_TYPE_CONNECTION)
+@@ -75,6 +76,13 @@ void startListeningForMachServiceConnections(const char* serviceName, ASCIILiter
+         connectionAdded(peer);
+     });
+     xpc_connection_activate(listener.get().get());
++#else
++    UNUSED_PARAM(serviceName);
++    UNUSED_PARAM(entitlement);
++    UNUSED_PARAM(connectionAdded);
++    UNUSED_PARAM(connectionRemoved);
++    UNUSED_PARAM(eventHandler);
++#endif // PLATFORM(MAC)
+ }
+ 
+ RetainPtr<xpc_object_t> vectorToXPCData(Vector<uint8_t>&& vector)
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm
+@@ -75,6 +75,7 @@ static void connectionEventHandler(xpc_object_t request)
+ 
+ static void registerScheduledActivityHandler()
+ {
++#if PLATFORM(MAC)
+     NSLog(@"Registering XPC activity");
+ 
+ ALLOW_DEPRECATED_DECLARATIONS_BEGIN
+@@ -104,6 +105,7 @@ ALLOW_DEPRECATED_DECLARATIONS_END
+             PCM::doDailyActivityInManager();
+         });
+     });
++#endif // PLATFORM(MAC)
+ }
+ 
+ static void enterSandbox()
