@@ -8,7 +8,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +#if PLATFORM(MAC)
              pid_t processIdentifier = xpc_connection_get_pid(m_xpcConnection.get());
 +#else
-+            pid_t processIdentifier = 0;
++            pid_t processIdentifier = getpid();
 +#endif
  
              didFinishLaunchingProcess(processIdentifier, IPC::Connection::Identifier(listeningPort, m_xpcConnection));
