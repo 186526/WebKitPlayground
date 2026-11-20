@@ -1,0 +1,58 @@
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm
+@@ -125,6 +125,7 @@ static void connectionRemoved(xpc_connection_t connection)
+ 
+ int PCMDaemonMain(int argc, const char** argv)
+ {
++#if PLATFORM(MAC)
+     if (argc < 5 || strcmp(argv[1], "--machServiceName") || strcmp(argv[3], "--storageLocation")) {
+         NSLog(@"Usage: %s --machServiceName <name> --storageLocation <location> [--startActivity]", argv[0]);
+         return -1;
+@@ -149,6 +150,11 @@ int PCMDaemonMain(int argc, const char** argv)
+     }
+     CFRunLoopRun();
+     return 0;
++#else
++    UNUSED_PARAM(argc);
++    UNUSED_PARAM(argv);
++    return 0;
++#endif
+ }
+ 
+ } // namespace WebKit
+diff --git a/Source/WebKit/webpushd/PushClientConnection.mm b/Source/WebKit/webpushd/PushClientConnection.mm
+--- a/Source/WebKit/webpushd/PushClientConnection.mm
++++ b/Source/WebKit/webpushd/PushClientConnection.mm
+@@ -147,7 +147,7 @@ RefPtr<PushClientConnection> PushClientConnection::create(xpc_connection_t conne
+     if (bool peerHasPushInjectEntitlement = WTF::hasEntitlement(peerAuditToken, "com.apple.private.webkit.webpush.inject"_s))
+         return adoptRef(new PushClientConnection(connection, WTFMove(configuration.bundleIdentifierOverride), peerHasPushInjectEntitlement, WTFMove(configuration.pushPartitionString), WTFMove(configuration.dataStoreIdentifier)));
+ 
+-#if USE(EXTENSIONKIT)
++#if PLATFORM(MAC) && USE(EXTENSIONKIT)
+     pid_t pid = xpc_connection_get_pid(connection);
+     NSError *error = nil;
+     RBSProcessHandle *handle = [RBSProcessHandle handleForIdentifier:[RBSProcessIdentifier identifierWithPid:pid] error:&error];
+diff --git a/Source/WebKit/webpushd/WebPushDaemonMain.mm b/Source/WebKit/webpushd/WebPushDaemonMain.mm
+--- a/Source/WebKit/webpushd/WebPushDaemonMain.mm
++++ b/Source/WebKit/webpushd/WebPushDaemonMain.mm
+@@ -117,6 +117,7 @@ static void applySandbox()
+ 
+ int WebPushDaemonMain(int argc, char** argv)
+ {
++#if PLATFORM(MAC)
+     @autoreleasepool {
+         WTF::initializeMainThread();
+ 
+@@ -195,6 +196,11 @@ int WebPushDaemonMain(int argc, char** argv)
+     }
+     CFRunLoopRun();
+     return 0;
++#else
++    UNUSED_PARAM(argc);
++    UNUSED_PARAM(argv);
++    return 0;
++#endif
+ }
+ 
+ } // namespace WebKit
