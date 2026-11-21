@@ -19,8 +19,15 @@
 # --deb mode; --build-dir mode keeps its original behaviour and counts every
 # BrowserEngineKit load command as a failure.
 #
+# Every architecture slice of a universal image is gated, and a slice that
+# cannot be read, or that the fat header declares but llvm-objdump does not
+# return, fails the run instead of being skipped.
+#
 # One-line usage:
 #   scripts/check-ios-deployment-gates.sh --deb /tmp/artdl/webkit-rootless.deb
+#
+# Regression tests (synthetic Mach-O, no build or device needed):
+#   zsh scripts/test-check-ios-deployment-gates.sh
 #
 set -euo pipefail
 
@@ -169,55 +176,99 @@ read_platform_and_minos() {
     '
 }
 
-# Prints "<slice> <platform> <minos>" once per architecture slice, where
-# <slice> is the llvm-objdump architecture name for a universal image and "-"
-# for a thin one. Prints "<slice> none none" when a slice carries no
-# LC_BUILD_VERSION and no LC_VERSION_MIN_IPHONEOS. Every slice is listed so a
-# universal image cannot pass on the minos of its first slice alone.
-read_slice_versions() {
+is_fat_image() {
     local binary="$1"
     local magic
     magic="$(od -An -tx1 -N4 "${binary}" 2>/dev/null | tr -d ' \n')"
-    local fat=0
     case "${magic}" in
-        cafebabe|cafebabf|bebafeca|bfbafeca) fat=1 ;;
+        cafebabe|cafebabf|bebafeca|bfbafeca) return 0 ;;
     esac
+    return 1
+}
+
+# Prints the number of architecture slices in the fat header of $1, or 0 when
+# $1 is not a universal image.
+read_fat_slice_count() {
+    local binary="$1"
+    local magic order hex b1 b2 b3 b4
+    magic="$(od -An -tx1 -N4 "${binary}" 2>/dev/null | tr -d ' \n')"
+    case "${magic}" in
+        cafebabe|cafebabf) order="big" ;;
+        bebafeca|bfbafeca) order="little" ;;
+        *) printf '0\n'; return 0 ;;
+    esac
+    hex="$(od -An -tx1 -j4 -N4 "${binary}" 2>/dev/null | tr -d ' \n')"
+    if [[ "${order}" == "big" ]]; then
+        printf '%d\n' "$(( 16#${hex} ))"
+    else
+        b1="${hex[1,2]}"; b2="${hex[3,2]}"; b3="${hex[5,2]}"; b4="${hex[7,2]}"
+        printf '%d\n' "$(( 16#${b4}${b3}${b2}${b1} ))"
+    fi
+}
+
+# Prints "<slice> <platform> <minos>" once per architecture slice, where
+# <slice> is the llvm-objdump architecture name when it prints one, "slice-N"
+# for an unnamed slice of a universal image, and "-" for a thin one. Prints
+# "<slice> none none" when a slice carries no LC_BUILD_VERSION and no
+# LC_VERSION_MIN_IPHONEOS, so an unreadable slice fails closed instead of
+# inheriting the previous slice's minos.
+#
+# The slice boundary is the "Mach header" line, not the "(architecture ...)"
+# banner: llvm-objdump omits that banner for cputypes it cannot name, and a
+# parser keyed on the banner would silently drop those slices. Everything is
+# reset at each boundary, so no slice can leak state into the next.
+read_slice_versions() {
+    local binary="$1"
+    local fat=0
+    if is_fat_image "${binary}"; then
+        fat=1
+    fi
     # Only a universal image needs --arch all; a thin image reads the same
     # either way, so its check does not depend on that flag being supported.
     typeset -a objdump_args=(--macho --private-headers)
     if [[ "${fat}" == "1" ]]; then
         objdump_args=(--macho --arch all --private-headers)
     fi
-    "${OBJDUMP}" "${objdump_args[@]}" "${binary}" 2>/dev/null | awk -v fat="${fat}" '
-        function flush() {
-            if (arch == "") return
-            if (minos != "") print arch, platform, minos
-            else print arch, "none", "none"
+    { "${OBJDUMP}" "${objdump_args[@]}" "${binary}" 2>/dev/null || true; } | awk -v fat="${fat}" '
+        function reset_slice() {
             platform = ""; minos = ""; in_build = 0; in_legacy = 0
         }
-        BEGIN { arch = (fat == 1) ? "" : "-" }
+        function flush_slice() {
+            if (!in_slice) return
+            name = (slice_name != "") ? slice_name : ((fat == 1) ? "slice-" slice_index : "-")
+            if (minos != "") print name, platform, minos
+            else print name, "none", "none"
+            in_slice = 0
+            reset_slice()
+        }
+        BEGIN {
+            in_slice = 0
+            slice_index = 0
+            slice_name = ""
+            banner = ""
+            reset_slice()
+        }
         / \(architecture / {
-            flush()
-            arch = $0
-            sub(/.*\(architecture /, "", arch)
-            sub(/\).*/, "", arch)
+            banner = $0
+            sub(/.*\(architecture /, "", banner)
+            sub(/\).*/, "", banner)
             next
         }
-        END { flush() }
+        /^Mach header[[:space:]]*$/ {
+            flush_slice()
+            in_slice = 1
+            slice_index++
+            slice_name = banner
+            banner = ""
+            next
+        }
         /^[[:space:]]*cmd LC_BUILD_VERSION[[:space:]]*$/ { in_build = 1; in_legacy = 0; next }
         /^[[:space:]]*cmd LC_VERSION_MIN_IPHONEOS[[:space:]]*$/ { in_legacy = 1; in_build = 0; next }
         /^[[:space:]]*cmd / { in_build = 0; in_legacy = 0; next }
         in_build && /^[[:space:]]*platform[[:space:]]/ { platform = $2; next }
-        in_build && /^[[:space:]]*minos[[:space:]]/ {
-            if (platform != "" && minos == "") minos = $2
-            in_build = 0
-            next
-        }
-        in_legacy && /^[[:space:]]*version[[:space:]]/ {
-            if (minos == "") { platform = "ios"; minos = $2 }
-            in_legacy = 0
-            next
-        }
+        in_build && /^[[:space:]]*minos[[:space:]]/ { minos = $2; in_build = 0; next }
+        in_legacy && /^[[:space:]]*version[[:space:]]/ { platform = "ios"; minos = $2; in_legacy = 0; next }
+        END { flush_slice() }
     '
 }
 
@@ -240,9 +291,12 @@ version_gt() {
 }
 
 # Prints "<kind> <path>" for every dylib load command naming the framework.
+# A malformed image makes llvm-objdump exit non-zero; under `set -o pipefail`
+# that would abort the whole run before the table is printed, so the exit
+# status is swallowed here and the caller's slice check reports the image.
 list_framework_links() {
     local binary="$1"
-    "${OBJDUMP}" --macho --private-headers "${binary}" 2>/dev/null | awk -v needle="${FORBIDDEN_FRAMEWORK}" '
+    { "${OBJDUMP}" --macho --private-headers "${binary}" 2>/dev/null || true; } | awk -v needle="${FORBIDDEN_FRAMEWORK}" '
         /^[[:space:]]*cmd LC_LOAD_DYLIB[[:space:]]*$/ { kind = "strong"; next }
         /^[[:space:]]*cmd LC_LOAD_WEAK_DYLIB[[:space:]]*$/ { kind = "weak"; next }
         /^[[:space:]]*cmd LC_REEXPORT_DYLIB[[:space:]]*$/ { kind = "re-export"; next }
@@ -364,8 +418,8 @@ check_deb() {
     local prefix_len=$(( ${#unpack_dir} + 1 ))
     typeset -a row_path=() row_minos=() row_bek=() row_result=() row_level=()
     local image rel slice_rows platform minos links line kind link_path
-    local weak_links=0
-    local level result image_weak image_fatal bek_cell link_kinds arch
+    local weak_linked_images=0
+    local level result image_weak image_fatal bek_cell link_kinds arch declared_slices
 
     for image in "${images[@]}"; do
         rel="${image:${prefix_len}}"
@@ -382,6 +436,15 @@ check_deb() {
         if [[ "${#slice_lines}" -eq 0 ]]; then
             slice_lines=("- none none")
         fi
+        # llvm-objdump can skip a slice it cannot parse. When the fat header
+        # declares more slices than were read, fail closed instead of gating
+        # only the slices that came back.
+        declared_slices="$(read_fat_slice_count "${image}")"
+        if [[ "${declared_slices}" -gt 0 && "${#slice_lines}" -ne "${declared_slices}" ]]; then
+            level="fail"
+            result="FAIL"
+            DEB_FAILURES+=("${rel}: the fat header declares ${declared_slices} slice(s) but only ${#slice_lines} could be read, so the rest are ungated")
+        fi
 
         typeset -a slice_minos=()
         for line in "${slice_lines[@]}"; do
@@ -397,12 +460,18 @@ check_deb() {
             if [[ "${minos}" == "none" ]]; then
                 level="fail"
                 result="FAIL"
-                DEB_FAILURES+=("${rel}: no LC_BUILD_VERSION or LC_VERSION_MIN_IPHONEOS, so the minos is unknown")
+                if [[ "${arch}" == "-" ]]; then
+                    DEB_FAILURES+=("${rel}: no LC_BUILD_VERSION or LC_VERSION_MIN_IPHONEOS, so the minos is unknown")
+                else
+                    DEB_FAILURES+=("${rel}: ${arch} has no LC_BUILD_VERSION or LC_VERSION_MIN_IPHONEOS, so its minos is unknown")
+                fi
             elif version_gt "${minos}" "${MAX_MINOS}"; then
                 level="fail"
                 result="FAIL"
                 if [[ "${arch}" == "-" ]]; then
                     DEB_FAILURES+=("${rel}: minos ${platform} ${minos} is newer than ${MAX_MINOS}")
+                elif [[ "${arch}" == slice-* ]]; then
+                    DEB_FAILURES+=("${rel}: ${arch} reports minos ${platform} ${minos}, newer than ${MAX_MINOS}")
                 else
                     DEB_FAILURES+=("${rel}: minos ${platform} ${minos} is newer than ${MAX_MINOS} in the ${arch} slice")
                 fi
@@ -441,7 +510,7 @@ check_deb() {
             result="weak ok"
         fi
         if [[ "${image_weak}" == "1" ]]; then
-            weak_links=$(( weak_links + 1 ))
+            weak_linked_images=$(( weak_linked_images + 1 ))
         fi
 
         row_path+=("${rel}")
@@ -507,12 +576,12 @@ check_deb() {
         for detail in "${DEB_FAILURES[@]}"; do
             printf "  %s%s%s\n" "${C_RED}" "${detail}" "${C_RESET}"
         done
-        printf "\n%sResult: FAILED (%d image(s) checked, %d failed check(s), %d weak link(s) reported)%s\n" \
-            "${C_BOLD}${C_RED}" "${#images}" "${#DEB_FAILURES}" "${weak_links}" "${C_RESET}"
+        printf "\n%sResult: FAILED (%d image(s) checked, %d failed check(s), %d image(s) with a weak link)%s\n" \
+            "${C_BOLD}${C_RED}" "${#images}" "${#DEB_FAILURES}" "${weak_linked_images}" "${C_RESET}"
         exit 1
     fi
-    printf "\n%sResult: PASS (%d image(s) checked, %d weak link(s) reported)%s\n" \
-        "${C_BOLD}${C_GREEN}" "${#images}" "${weak_links}" "${C_RESET}"
+    printf "\n%sResult: PASS (%d image(s) checked, %d image(s) with a weak link)%s\n" \
+        "${C_BOLD}${C_GREEN}" "${#images}" "${weak_linked_images}" "${C_RESET}"
     exit 0
 }
 
