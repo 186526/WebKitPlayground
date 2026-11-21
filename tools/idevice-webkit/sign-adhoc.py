@@ -9,7 +9,8 @@
 # it loading, with every byte of code unchanged. The file is kept because
 # tests/signature_test.py uses it as a Mach-O writer and the disassembly work
 # compared against it. The reason it is not enough is written up in
-# docs/safari-injection-plan.md, in the signature section.
+# docs/safari-injection-plan.md, under 安装与卸载, in the paragraph that starts
+# with 签名由 ldid -S 写出.
 #
 # The signature is a SuperBlob holding one CodeDirectory, hashed with SHA-256
 # over 4 KiB pages, flagged ad-hoc. ldid's own output holds two blobs (the
