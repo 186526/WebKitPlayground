@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Packs the two built slices into one .deb for a rootless jailbreak.
+# Packs the built dylib into one .deb for a rootless jailbreak.
 #
 # The package writes real files below /var/jb:
 #
-#   TweakInject/WebSafeWebKitFilter.dylib                   fat, ad-hoc signed
+#   TweakInject/WebSafeWebKitFilter.dylib                   arm64, ad-hoc signed
 #   TweakInject/WebSafeWebKitFilter.plist                   ellekit filter
 #   TweakInject/com.websafe.idevice.host.*.plist            host manifests
 #
@@ -15,9 +15,13 @@
 # dylib when the answer is not zero, so the two names have to be the same and
 # both read "WebSafeWebKitFilter".
 #
-# Each slice is signed ad-hoc by sign-adhoc.py before it is lipoed, so the fat
-# file carries one signature per architecture. A slice that cannot be signed
-# stops the build: an unsigned dylib does not load on a device.
+# The dylib is one arm64 slice with the cpusubtype ld64.lld writes, 0x00000000.
+# dyld on the device runs no initializer of an image carrying the ARM64E
+# subtype, so the slice has to stay at 0 and cannot be joined with an arm64e
+# slice: two slices of subtype 0 are the same architecture to lipo. It is
+# signed ad-hoc by sign-adhoc.py before it is copied into the stage; a slice
+# that cannot be signed stops the build, because an unsigned dylib does not
+# load on a device.
 #
 # The scripts change nothing beyond the files dpkg owns:
 #
@@ -32,27 +36,20 @@
 #
 # Usage:
 #
-#   ARCH=arm64  ./build.sh
-#   ARCH=arm64e ./build.sh
-#   ./package-deb.sh [--output PATH] [--arch-dir DIR]
+#   ./build.sh
+#   ./package-deb.sh [--output PATH] [--slice-dir DIR]
 #
-# Without --arch-dir the two slices are read from build/<arch>/WebSafeWebKit.dylib.
+# Without --slice-dir the slice is read from build/arm64/WebSafeWebKit.dylib.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 staging_parent="${STAGING_PARENT:-${TMPDIR:-/tmp}}"
-lipo="${LIPO:-lipo}"
 dpkg_deb="${DPKG_DEB:-dpkg-deb}"
 python="${PYTHON:-python3}"
 
-if ! command -v "$lipo" >/dev/null; then
-  # macOS names the tool lipo, Linux llvm-lipo
-  lipo=llvm-lipo
-fi
-
 payload_name="WebSafeWebKitFilter"
 package_id="com.websafe.idevice"
-package_version="1.0.7-20261122"
+package_version="1.0.8-20261122"
 tweak_dir="var/jb/usr/lib/TweakInject"
 manifest_prefix="com.websafe.idevice.host."
 
@@ -74,47 +71,35 @@ afad50b29108cdebdb3bd5b5912849dd  var/jb/usr/lib/websafewebkit/com.websafe.idevi
 7a235d24524c9f997ec27e35383ae212  var/jb/var/mobile/WebSafeWebKit/disabled-ellekit-filter.plist'
 
 output="$here/build/${package_id}_${package_version}_iphoneos-arm64.deb"
-slice_root="$here/build"
+slice_dir="$here/build/arm64"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --output) output="$2"; shift 2 ;;
-    --arch-dir) slice_root="$2"; shift 2 ;;
-    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
+    --slice-dir) slice_dir="$2"; shift 2 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-for tool in "$lipo" "$dpkg_deb" "$python"; do
+for tool in "$dpkg_deb" "$python"; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
 
-slice_of() {
-  local arch="$1"
-  local slice="$slice_root/$arch/WebSafeWebKit.dylib"
-  [ -f "$slice" ] || { echo "missing slice: $slice" >&2; exit 1; }
-  printf '%s\n' "$slice"
-}
+slice="$slice_dir/WebSafeWebKit.dylib"
+[ -f "$slice" ] || { echo "missing slice: $slice" >&2; exit 1; }
 
 work="$(mktemp -d "$staging_parent/idevice-webkit-deb.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 stage="$work/stage"
 mkdir -p "$stage/DEBIAN" "$stage/$tweak_dir"
 
-# 1. One signed copy of each slice.
-signed_slices=()
-for arch in arm64 arm64e; do
-  mkdir -p "$work/$arch"
-  cp "$(slice_of "$arch")" "$work/$arch/$payload_name.dylib"
-  "$python" "$here/sign-adhoc.py" "$work/$arch/$payload_name.dylib" "$payload_name" || {
-    echo "cannot sign the $arch slice of $payload_name" >&2
-    exit 1
-  }
-  signed_slices+=("$work/$arch/$payload_name.dylib")
-done
-
-# 2. Fat dylib
-"$lipo" -create "${signed_slices[@]}" -output "$stage/$tweak_dir/$payload_name.dylib"
+# 1. One signed copy of the slice.
+cp "$slice" "$stage/$tweak_dir/$payload_name.dylib"
+"$python" "$here/sign-adhoc.py" "$stage/$tweak_dir/$payload_name.dylib" "$payload_name" || {
+  echo "cannot sign the slice of $payload_name" >&2
+  exit 1
+}
 
 # 3. Files from the repository, one copy each
 cp "$here/$payload_name.plist" "$work/filter.plist"
@@ -169,7 +154,7 @@ Installed-Size: $install_size
 Section: Tweaks
 Priority: optional
 Description: Loads a self-built WebKit into the listed apps through ellekit.
- Installs one ad-hoc signed fat dylib and its ellekit filter as real files in
+ Installs one ad-hoc signed arm64 dylib and its ellekit filter as real files in
  TweakInject, with no symlinks. The filter is a binary property list named
  after the dylib.
 CONTROL

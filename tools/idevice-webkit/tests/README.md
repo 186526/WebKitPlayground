@@ -9,13 +9,13 @@ and the `NSDictionary.objectForKey:` / `NSString.stringWithUTF8String:` /
 `NSString.UTF8String` accessors), the Darwin file writer, and the two `dlsym`
 wrappers of `src/dyld_lookup.c`. No `_dyld_*` image table function is replaced,
 because the dylib refers to none: the dyld of the device does not export them,
-and a reference to one keeps the whole image from binding. The writer is replaced because the dylib
-writes with the Darwin `open` flags `0x601`, which a Linux kernel reads as
-`O_WRONLY | O_TRUNC | O_APPEND`; without `O_CREAT` the call fails with
-`ENOENT`. It checks the host decisions of the constructor, not the device
-behaviour: `dlopen` of the `/var/jb` framework, the real `TweakInject` plist
-parsing and the pointer authenticated load on an arm64e process are only
-observable on the device. The run also checks that the three device host paths
+and a reference to one keeps the whole image from binding. The writer is
+replaced because the dylib writes with the Darwin `open` flags `0x601`, which a
+Linux kernel reads as `O_WRONLY | O_TRUNC | O_APPEND`; without `O_CREAT` the
+call fails with `ENOENT`. It checks the host decisions of the constructor, not
+the device behaviour: `dlopen` of the `/var/jb` framework, the real
+`TweakInject` plist parsing and the load of the arm64 slice in an arm64e
+process are only observable on the device. The run also checks that the three device host paths
 (`/Applications`, a container under `/var/containers/Bundle/Application/` and
 the same container below `/private/preboot/.../procursus/Applications/`) reach
 the same manifest, that a tool below `/private/preboot/` is not taken for a
@@ -153,13 +153,16 @@ has to exit non-zero with a message naming the field. A broken signer stops the
 run before the C cases, because a dylib dyld will not load makes every host
 decision below moot.
 
-Right after the signature checks, `run.sh` reads `llvm-nm -u` of both slices of
-`build/arm64/WebSafeWebKit.dylib` and `build/arm64e/WebSafeWebKit.dylib` and
-fails on any symbol with the `__dyld_` prefix, which is what a reference to the
-device's unexported image table functions looks like; a slice that is not on
-disk is skipped, so the check covers whatever the last build left. A passing run
-prints `the arm64 slice refers to no dyld symbol the device does not export
-pass` and the same line for `arm64e`. `build.sh` carries the same check on the
+Right after the signature checks, `run.sh` reads the slice the package is built
+from, `build/arm64/WebSafeWebKit.dylib`, and checks two things about it. The
+Mach header's cpusubtype has to be 0, the value ld64.lld writes: an image
+carrying the ARM64E subtype 0x80000002 is loaded on the device and runs no
+initializer, and a working image with those four bytes set is killed with
+signal 9. It also reads `llvm-nm -u` and fails on any symbol with the `__dyld_`
+prefix, which is what a reference to the device's unexported image table
+functions looks like. A passing run prints `the arm64 slice carries cpusubtype
+0, the one the device runs pass` and `the arm64 slice refers to no dyld symbol
+the device does not export pass`. `build.sh` carries the same two checks on the
 slice it just linked, so a build cannot produce one.
 
 `dyld_lookup_test.c` covers the one thing `test_main.c` cannot see. That file
