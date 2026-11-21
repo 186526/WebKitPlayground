@@ -117,6 +117,21 @@ jobs:
           set -euo pipefail
           pwd
           ls -d patches scripts WebKit
+          # patches/ios18-public-sdk-libpas-ulock-flags.patch guards PAS_USE_ULOCK_FLAGS_API,
+          # which does not exist before tag Safari-18.2, so on an older ref the patch cannot
+          # apply and a skip there is correct rather than stale.
+          ref_needs_ulock_flags_api=0
+          ref_name="${WEBKIT_REF##*/}"
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2; minor = $3 }
+              END {
+                  if (major == "" || minor == "") exit 1
+                  exit !((major + 0) > 18 || ((major + 0) == 18 && (minor + 0) >= 2))
+              }' <<< "${ref_name}"; then
+            ref_needs_ulock_flags_api=1
+          fi
+          echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -125,6 +140,12 @@ jobs:
             # means the patch is stale and the build would fail 90 minutes later.
             if ! git -C WebKit apply --check -v "$PWD/$p"; then
               case "$(basename "$p")" in
+                ios18-public-sdk-libpas-ulock-flags.patch)
+                  if [ "$ref_needs_ulock_flags_api" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
                 ios18-public-sdk-*)
                   echo "REQUIRED PATCH DOES NOT APPLY: $p"
                   exit 1
@@ -188,13 +209,30 @@ jobs:
           sampler_pid=$!
           echo "sampler pid ${sampler_pid}"
           status=0
+          # The device deb must load on iOS 16.1, so every shipped binary has to be built
+          # for 16.1 against the 18.5 SDK. Without IPHONEOS_DEPLOYMENT_TARGET the SDK's own
+          # minimum leaks into LC_BUILD_VERSION, and dyld then refuses the framework with
+          # "built for iOS 18.5 which is newer than running OS".
+          #
+          # Source/WebKit/Configurations/WebKit.xcconfig:227-244 is where the 18.5-SDK build
+          # decides to link BrowserEngineKit strongly and WritingTools weakly; blanking both
+          # keys removes those -framework flags. Blanking the flags alone is not enough:
+          # Source/WTF/wtf/PlatformUse.h:411-417 turns the two USE macros on from
+          # __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400 and __has_include(<BrowserEngineKit/...>),
+          # both of which still hold under an 18.5 SDK, so the -D...=0 defines close the
+          # gate. Source/WTF/wtf/PlatformHave.h:1717-1724 wraps
+          # HAVE_BROWSER_ENGINE_SUPPORTING_API in !defined(), so the command-line define wins
+          # over the 170400 SDK check there as well.
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
             ARCHS='arm64e' \
+            IPHONEOS_DEPLOYMENT_TARGET='16.1' \
             ONLY_ACTIVE_ARCH=NO \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
-            OTHER_CFLAGS='$(inherited) -Wno-error' \
-            OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error' \
+            OTHER_CFLAGS='$(inherited) -Wno-error -DUSE_BROWSERENGINEKIT=0 -DUSE_EXTENSIONKIT=0 -DHAVE_BROWSER_ENGINE_SUPPORTING_API=0' \
+            OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error -DUSE_BROWSERENGINEKIT=0 -DUSE_EXTENSIONKIT=0 -DHAVE_BROWSER_ENGINE_SUPPORTING_API=0' \
+            WK_BROWSERENGINEKIT_LDFLAGS= \
+            WK_WRITING_TOOLS_LDFLAGS_iphoneos= \
             COMPRESS_PNG_FILES=NO \
             DEBUG_INFORMATION_FORMAT=dwarf \
             WK_ROOTLESS_FRAMEWORKS=YES > "$GITHUB_WORKSPACE/diagnostics/build.log" 2>&1 || status=$?
@@ -215,6 +253,17 @@ jobs:
             /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1 || true
           fi
           exit "$status"
+
+      - name: Assert iOS 16.1 deployment gates
+        if: success()
+        run: |
+          set -euo pipefail
+          # Fails the job when a shipped binary asks for a newer minos than 16.1 or still
+          # carries a BrowserEngineKit load command, so a gate regression cannot turn into
+          # another deb that dyld refuses to load on the device.
+          zsh scripts/check-ios-deployment-gates.sh \
+            --build-dir "$PWD/WebKit/WebKitBuild/Release-iphoneos" \
+            --max-minos 16.1
 
       - name: Report ccache compression
         if: always()
