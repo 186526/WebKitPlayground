@@ -1,7 +1,12 @@
 diff --git a/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h b/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h
 --- a/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h
 +++ b/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h
-@@ -96,7 +96,15 @@ WTF_EXTERN_C_END
+@@ -92,11 +92,21 @@
+ 
+ #else
+ 
++#import <IOSurface/IOSurfaceRef.h>
+ #import <IOSurface/IOSurfaceTypes.h>
  
  WTF_EXTERN_C_BEGIN
  
@@ -9,12 +14,13 @@ diff --git a/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h b/Source/WTF/wtf/spi/cocoa/
 +#if (HAVE(IOSURFACE_SET_OWNERSHIP) || HAVE(IOSURFACE_SET_OWNERSHIP_IDENTITY)) \
 +    && !HAVE(BROWSER_ENGINE_SUPPORTING_API) \
 +    && !((PLATFORM(IOS) || PLATFORM(MACCATALYST)) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400)
-+/* The iOS 17.4-and-later SDK declares this enum in IOSurfaceRef.h, which CoreVideo includes
-+   ahead of every use of the tags below. HAVE_BROWSER_ENGINE_SUPPORTING_API answers whether
-+   the SDK has the browser-engine API, and a build that forces it to 0 to reach the SPI
-+   fallbacks elsewhere says nothing about this enum, so the SDK boundary PlatformHave.h:1716-1723
-+   uses for the macro decides here too. Mac has already taken the branch above, so only the
-+   iOS and Mac Catalyst terms are needed. */
++/* An iOS 17.4-and-later SDK declares this enum in IOSurfaceRef.h, which the import above brings
++   in, so the typedef below would define the enum a second time. An older SDK's IOSurfaceRef.h
++   has no such enum, so the typedef is then the only definition. HAVE_BROWSER_ENGINE_SUPPORTING_API
++   answers whether the SDK has the browser-engine API and says nothing about this enum, so the
++   boundary PlatformHave.h:1717-1724 uses for that macro decides here as well. On Mac the last
++   term is trivially true, because __IPHONE_OS_VERSION_MAX_ALLOWED is undefined there and
++   evaluates to 0, so only the iOS and Mac Catalyst terms select anything. */
  typedef CF_ENUM(int, IOSurfaceMemoryLedgerTags)
  {
      kIOSurfaceMemoryLedgerTagDefault     = 0x00000001,
