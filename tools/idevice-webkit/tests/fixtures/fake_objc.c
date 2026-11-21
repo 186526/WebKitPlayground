@@ -434,21 +434,36 @@ static void *message_with_object(void *receiver, const char *selector, void *arg
   return 0;
 }
 
-static void *message_with_text(void *receiver, const char *selector, const char *text) {
+/* +bundleWithPath: and +dictionaryWithContentsOfFile: declare an NSString *
+   argument, so their argument is looked up in the object tables and a C string
+   answers nil. That is the shape the device ran into: a path handed over as
+   bytes makes Foundation read the first eight of them as an isa. Only
+   stringWithUTF8String: takes bytes. */
+
+static void *message_with_path(void *receiver, const char *selector, void *text) {
   (void)receiver;
+  const char *argument = text_of(text);
+  if (argument == 0) {
+    return 0;
+  }
   if (text_equal(selector, "bundleWithPath:")) {
     /* The bundle is the table slot, and bundleIdentifier reads its identifier
        from it; handing back the identifier here would leave the next message
        with no receiver to find. */
-    return (void *)bundle_for_path(text);
+    return (void *)bundle_for_path(argument);
   }
   if (text_equal(selector, "dictionaryWithContentsOfFile:")) {
-    if (filter_file[0] != 0 && text_equal(text, filter_file)) {
+    if (filter_file[0] != 0 && text_equal(argument, filter_file)) {
       filter_present = true;
       return filter_dictionary_slot;
     }
-    return plist_for_path(text);
+    return plist_for_path(argument);
   }
+  return 0;
+}
+
+static void *message_with_text(void *receiver, const char *selector, const char *text) {
+  (void)receiver;
   if (text_equal(selector, "stringWithUTF8String:")) {
     return string_for(text);
   }
@@ -465,13 +480,19 @@ void *fake_objc_msg_send(void *receiver, void *selector, ...) {
   if (name == 0) {
     return 0;
   }
-  if (text_equal(name, "bundleWithPath:") || text_equal(name, "dictionaryWithContentsOfFile:") ||
-      text_equal(name, "stringWithUTF8String:")) {
+  if (text_equal(name, "stringWithUTF8String:")) {
     va_list arguments;
     va_start(arguments, selector);
     const char *text = va_arg(arguments, const char *);
     va_end(arguments);
     return message_with_text(receiver, name, text);
+  }
+  if (text_equal(name, "bundleWithPath:") || text_equal(name, "dictionaryWithContentsOfFile:")) {
+    va_list arguments;
+    va_start(arguments, selector);
+    void *text = va_arg(arguments, void *);
+    va_end(arguments);
+    return message_with_path(receiver, name, text);
   }
   if (text_equal(name, "objectForKey:")) {
     va_list arguments;

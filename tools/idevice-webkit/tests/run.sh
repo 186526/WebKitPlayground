@@ -30,32 +30,35 @@ rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready \
 # leading underscore too few or too many is the failure, and both are refused
 # here.
 #
-# Three properties of the slice decide whether the device runs the
-# constructor, and it needs all three. They were measured on the device with
-# /var/jb/usr/bin/true and Safari:
+# Two properties of the slice decide whether the device runs the constructor,
+# and it needs both. They were measured on the device with /var/jb/usr/bin/true
+# and Safari:
 #
-#   subtype    fixups                 constructor
-#   0x0        LC_DYLD_INFO_ONLY      does not run
-#   0x80000002 LC_DYLD_INFO_ONLY      image loads, constructor does not run
-#   0x0        LC_DYLD_CHAINED_FIXUPS runs
-#   0x80000002 LC_DYLD_CHAINED_FIXUPS runs, and an abort() in it takes Safari
-#                                     down with the crash report naming abort()
+#   fixups                 constructor
+#   LC_DYLD_INFO_ONLY      does not run
+#   LC_DYLD_CHAINED_FIXUPS runs, and an abort() in it takes Safari down with
+#                          the crash report naming abort()
 #
-# So the subtype has to be 0x80000002, the link has to produce chained fixups
-# with the constructor in __init_offsets, and the signature has to be written
-# after both, because it covers the header page. 1.0.9 held the subtype at 0
-# and read the first two rows as the device rejecting ARM64E; it does not, it
-# was acting on a signature that stopped matching once the byte changed.
+# So the link has to produce chained fixups with the constructor in
+# __init_offsets, and the signature has to be written after that, because it
+# covers the header page.
+#
+# A third value used to be required here, cpusubtype 0x80000002, and 1.0.11
+# crashed on the device because of it: dyld then fixes up every pointer as
+# arm64e, which signs the function addresses dlsym answers, and this arm64 code
+# branches to them with a plain br. The control experiment changed that header
+# word alone, back to 0x0, and the crash stopped while the constructor still
+# ran. The check below therefore holds the value down at 0x0.
 slice="$here/../build/arm64/WebSafeWebKit.dylib"
 [ -f "$slice" ] || { echo "missing slice: $slice" >&2; exit 1; }
 
 subtype_bytes="$(od -An -t x1 -j 8 -N 4 "$slice" | tr -d ' \n')"
-if [ "$subtype_bytes" != "02000080" ]; then
-  echo "the arm64 slice does not carry cpusubtype 0x80000002:" >&2
-  echo "read 0x${subtype_bytes}, the header has 02 00 00 80 when the device runs" >&2
+if [ "$subtype_bytes" != "00000000" ]; then
+  echo "the arm64 slice does not carry cpusubtype 0x0:" >&2
+  echo "read 0x${subtype_bytes}, the header has 00 00 00 00 when the device runs it" >&2
   exit 1
 fi
-echo "the arm64 slice carries cpusubtype 0x80000002, the one the device runs pass"
+echo "the arm64 slice keeps cpusubtype 0x0, so no pointer is signed pass"
 
 slice_headers="$(llvm-objdump --macho --private-headers "$slice")"
 if ! printf '%s\n' "$slice_headers" | grep -q 'LC_DYLD_CHAINED_FIXUPS'; then

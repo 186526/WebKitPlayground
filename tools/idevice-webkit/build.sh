@@ -11,34 +11,37 @@
 # The output name here is a local build name. package-deb.sh signs this file
 # and installs it under the name WebSafeWebKitFilter.dylib.
 #
-# The image has to carry three things the device checks together, and 1.0.9
-# proved that a build missing any one of them is loaded without its
-# initializer ever running:
+# The image has to carry two things the device checks together, and 1.0.9
+# proved that a build missing either one is loaded without its initializer ever
+# running:
 #
-#   cpusubtype      0x80000002 (ARM64E), not the 0x0 ld64.lld writes
 #   fixup format    LC_DYLD_CHAINED_FIXUPS, with the constructor in
 #                   __init_offsets rather than __mod_init_func
-#   signature       written by ldid, after the two above are in place
+#   signature       written by ldid, after the link
 #
 # The device experiments behind this, all with /var/jb/usr/bin/true and Safari:
 #
-#   subtype    fixups                 constructor
-#   0x0        LC_DYLD_INFO_ONLY      does not run
-#   0x80000002 LC_DYLD_INFO_ONLY      image loads, constructor does not run
-#   0x0        LC_DYLD_CHAINED_FIXUPS runs
-#   0x80000002 LC_DYLD_CHAINED_FIXUPS runs, and an abort() inside it takes
-#                                     Safari down, with the crash report naming
-#                                     abort() called
+#   fixups                 constructor
+#   LC_DYLD_INFO_ONLY      does not run
+#   LC_DYLD_CHAINED_FIXUPS runs, and an abort() inside it takes Safari down,
+#                          with the crash report naming abort() called
 #
-# An earlier reading of the first two rows said the device rejects the ARM64E
-# subtype. It does not: those images carried LC_DYLD_INFO_ONLY, and once the
-# header byte was changed the signature no longer matched the page it covers,
-# which is what the device acted on. The same subtype with chained fixups and a
-# signature written after the change runs.
+# A third condition used to be here: the header's cpusubtype rewritten to
+# 0x80000002 (ARM64E). 1.0.11 shipped that way, and the device crashed as soon
+# as the constructor sent its first message. What the rewrite does is make dyld
+# treat this arm64 image as arm64e, so every pointer it fixes up, including the
+# function addresses dlsym answers, comes back with a pointer-authentication
+# signature in the upper bits. The code is compiled for arm64, so it reaches
+# those addresses with a plain `br` rather than an `autib`-checked branch and
+# faults on the signed value. Changing only that header word back to 0x0, with
+# the same bytes otherwise and a fresh signature, stopped the crash and the
+# constructor's own report line appeared in the stack, which is the experiment
+# that settles it. The comparison table's earlier reading, that the device
+# wants 0x80000002, came from images that also carried LC_DYLD_INFO_ONLY.
 #
-# ld64.lld refuses -fixup_chains on an arm64e target ("only supported on x86_64
-# and arm64 targets"), so the link is done as arm64 with -fixup_chains and the
-# subtype is written into the header afterwards, before signing.
+# So cpusubtype is left at the value ld64.lld writes for an arm64 target, 0x0.
+# The link is still done as arm64, because ld64.lld refuses -fixup_chains on an
+# arm64e target ("only supported on x86_64 and arm64 targets").
 #
 # CLANG may hold a command with spaces, such as "xcrun -sdk iphoneos clang".
 set -euo pipefail
@@ -72,14 +75,13 @@ link_flags=(
   -install_name "${install_name}"
 )
 
-# The link is arm64 so that ld64.lld accepts -fixup_chains, and the subtype is
-# written into the header afterwards. Offsets are from the start of the image,
-# which is also the start of the slice: the package carries one slice.
+# Offsets are from the start of the image, which is also the start of the
+# slice, because the package carries one slice.
 mach_header_subtype_offset=8
 
 if [ "$arch" != "arm64" ]; then
   echo "only the arm64 slice is built: ld64.lld accepts -fixup_chains on arm64" >&2
-  echo "and x86_64 alone, and the subtype is written into the header afterwards" >&2
+  echo "and x86_64 alone, and the image is compiled for arm64" >&2
   exit 1
 fi
 
@@ -100,18 +102,16 @@ done
 
 "$linker" "${link_flags[@]}" -o "$output_dir/WebSafeWebKit.dylib" "${objects[@]}"
 
-# The subtype is written before the signature, which package-deb.sh writes: the
-# signature covers the header page, so setting this byte afterwards would leave
-# a signature that does not match and the device acts on the mismatch rather
-# than loading the image.
-printf '\x02\x00\x00\x80' |
-  dd of="$output_dir/WebSafeWebKit.dylib" bs=1 seek="$mach_header_subtype_offset" \
-     conv=notrunc status=none
-
+# cpusubtype stays what ld64.lld writes for this arm64 target, 0x0. Rewriting it
+# to 0x80000002 makes dyld fix up every pointer as arm64e, which signs the
+# function addresses dlsym answers; the code branches to them with a plain `br`.
+# The check below holds the value at 0x0 so that the rewrite cannot come back.
 subtype_bytes="$(od -An -t x1 -j "$mach_header_subtype_offset" -N 4 "$output_dir/WebSafeWebKit.dylib" | tr -d ' \n')"
-if [ "$subtype_bytes" != "02000080" ]; then
-  echo "the dylib does not carry cpusubtype 0x80000002:" >&2
-  echo "read 0x$subtype_bytes, expected 0x02000080" >&2
+if [ "$subtype_bytes" != "00000000" ]; then
+  echo "the dylib does not carry cpusubtype 0x0:" >&2
+  echo "read 0x$subtype_bytes, expected 0x00000000" >&2
+  echo "a signed subtype makes dyld sign the pointers dlsym answers, which a" >&2
+  echo "plain br faults on; see the note at the top of this file" >&2
   exit 1
 fi
 

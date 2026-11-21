@@ -27,14 +27,16 @@ void *objc_selector(const char *name);
 
 void *objc_send_object(void *receiver, void *selector);
 
-/* [receiver selector:text] with the argument as a C string, the form
-   stringWithUTF8String: and bundleWithPath: and dictionaryWithContentsOfFile:
-   take. */
+/* [receiver selector:text] with the argument as a C string. Only
+   stringWithUTF8String: takes its text this way; every other Foundation method
+   that names a path takes an NSString object and needs
+   objc_send_object_object, which is the mistake the device found: a C string
+   there is read as an object and its first bytes as an isa. */
 
 void *objc_send_object_text(void *receiver, void *selector, const char *text);
 
 /* [receiver selector:object] with the argument already an object, the form
-   objectForKey: takes. */
+   objectForKey: and bundleWithPath: and dictionaryWithContentsOfFile: take. */
 
 void *objc_send_object_object(void *receiver, void *selector, void *argument);
 

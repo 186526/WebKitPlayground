@@ -89,11 +89,15 @@ static void *test_objc_msgSend(void *receiver, void *operation, ...) {
     va_end(arguments);
     return NULL;
   }
-  if (strcmp((const char *)operation, "bundleWithPath:") == 0 ||
-      strcmp((const char *)operation, "dictionaryWithContentsOfFile:") == 0 ||
-      strcmp((const char *)operation, "stringWithUTF8String:") == 0) {
+  if (strcmp((const char *)operation, "stringWithUTF8String:") == 0) {
     last_argument_count = 1;
     last_text_argument = va_arg(arguments, const char *);
+  } else if (strcmp((const char *)operation, "bundleWithPath:") == 0 ||
+             strcmp((const char *)operation, "dictionaryWithContentsOfFile:") == 0) {
+    /* These two declare an NSString * argument. Reading it as a const char *
+       here is what let a C string pass for an object on the device. */
+    last_argument_count = 1;
+    last_object_argument = va_arg(arguments, void *);
   } else if (strcmp((const char *)operation, "objectForKey:") == 0) {
     last_argument_count = 1;
     last_object_argument = va_arg(arguments, void *);
@@ -194,10 +198,28 @@ int main(void) {
         last_selector != NULL && strcmp(last_selector, "bundleIdentifier") == 0);
 
   reset();
-  objc_send_object_text((void *)&class_object, objc_selector("bundleWithPath:"), "/Applications/X.app");
+  objc_send_object_text((void *)&class_object, objc_selector("stringWithUTF8String:"),
+                        "/Applications/X.app");
   check("a text argument reaches the message as the string given",
         last_argument_count == 1 && last_text_argument != NULL &&
             strcmp(last_text_argument, "/Applications/X.app") == 0);
+
+  /* The two path methods take an NSString object, not the bytes of one. The
+     device crashed on exactly this mistake, so it gets a check of its own:
+     the argument is read back as the object handed over. */
+
+  reset();
+  objc_send_object_object((void *)&class_object, objc_selector("bundleWithPath:"),
+                          (void *)0x2000);
+  check("a path method is handed an object, not a C string",
+        last_argument_count == 1 && last_object_argument == (void *)0x2000 &&
+            last_text_argument == NULL);
+  reset();
+  objc_send_object_object((void *)&class_object, objc_selector("dictionaryWithContentsOfFile:"),
+                          (void *)0x2000);
+  check("  the manifest reader is handed an object too",
+        last_argument_count == 1 && last_object_argument == (void *)0x2000 &&
+            last_text_argument == NULL);
 
   reset();
   objc_send_object_object((void *)&class_object, objc_selector("objectForKey:"), (void *)0x3000);

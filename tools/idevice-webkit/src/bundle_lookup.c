@@ -40,12 +40,23 @@ static bool copy_text_of(void *object, char *out, usize capacity) {
   return text_length(out) > 0;
 }
 
+/* A Foundation class answers a path only as an NSString. Both
+   +bundleWithPath: and +dictionaryWithContentsOfFile: declare an NSString *
+   argument, so the bytes are turned into an object first: handing the C string
+   over makes the runtime read the path's first bytes as an isa, which the
+   device stops on with a SIGTRAP. */
+
+static void *string_at_path(const char *text) {
+  void *stringClass = class_object("NSString");
+  return objc_send_object_text(stringClass, selector("stringWithUTF8String:"), text);
+}
+
 /* NSBundle.bundleWithPath: reads the Info.plist of a directory. A directory
    without one is not a bundle and answers nil. */
 
 static void *bundle_at_path(const char *path) {
   void *bundleClass = class_object("NSBundle");
-  return objc_send_object_text(bundleClass, selector("bundleWithPath:"), path);
+  return objc_send_object_object(bundleClass, selector("bundleWithPath:"), string_at_path(path));
 }
 
 static void *bundle_identifier_object(void *bundle) {
@@ -63,7 +74,8 @@ bool bundle_path_identifier(const char *bundlePath, char *out, usize capacity) {
 
 void *dictionary_for_file(const char *path) {
   void *dictionaryClass = class_object("NSDictionary");
-  return objc_send_object_text(dictionaryClass, selector("dictionaryWithContentsOfFile:"), path);
+  return objc_send_object_object(dictionaryClass, selector("dictionaryWithContentsOfFile:"),
+                                 string_at_path(path));
 }
 
 void *object_for_key(void *dictionary, const char *key) {

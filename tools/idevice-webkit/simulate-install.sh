@@ -64,7 +64,7 @@ fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 package="com.websafe.idevice"
-version="1.0.11-20261122"
+version="1.0.12-20261122"
 deb="$here/build/${package}_${version}_iphoneos-arm64.deb"
 payload_name="WebSafeWebKitFilter"
 tweak_path="var/jb/usr/lib/TweakInject"

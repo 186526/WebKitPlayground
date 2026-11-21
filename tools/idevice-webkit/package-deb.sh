@@ -15,12 +15,15 @@
 # dylib when the answer is not zero, so the two names have to be the same and
 # both read "WebSafeWebKitFilter".
 #
-# The dylib is one arm64 slice carrying cpusubtype 0x80000002 and
-# LC_DYLD_CHAINED_FIXUPS, and it is signed by ldid after both are in place.
-# build.sh sets the subtype and the link produces the chained fixups; the
-# signature has to come last because it covers the header page. A slice that
-# cannot be signed stops the packaging, because an unsigned dylib does not load
-# on a device.
+# The dylib is one arm64 slice carrying cpusubtype 0x0 and
+# LC_DYLD_CHAINED_FIXUPS, and it is signed by ldid after the link.
+# The subtype is the value ld64.lld writes for an arm64 target; rewriting it to
+# 0x80000002 once made the device sign every fixed-up pointer, including the
+# function addresses dlsym answers, and 1.0.11 crashed on the first message
+# because this code branches to them with a plain br. The link produces the
+# chained fixups; the signature has to come last because it covers the header
+# page. A slice that cannot be signed stops the packaging, because an unsigned
+# dylib does not load on a device.
 #
 # ldid is taken from LDID, then from PATH, then from /tmp/ldid-src/ldid, which
 # is a development path and not a published dependency; the error below prints
@@ -57,7 +60,7 @@ python="${PYTHON:-python3}"
 
 payload_name="WebSafeWebKitFilter"
 package_id="com.websafe.idevice"
-package_version="1.0.11-20261122"
+package_version="1.0.12-20261122"
 tweak_dir="var/jb/usr/lib/TweakInject"
 manifest_prefix="com.websafe.idevice.host."
 

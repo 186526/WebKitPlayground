@@ -168,17 +168,21 @@ decision below moot.
 
 Right after the signature checks, `run.sh` reads the slice the package is built
 from, `build/arm64/WebSafeWebKit.dylib`, and checks three things about it. The
-Mach header's cpusubtype has to be 0, the value ld64.lld writes: an image
-carrying the ARM64E subtype 0x80000002 is loaded on the device and runs no
-initializer, and a working image with those four bytes set is killed with
-signal 9. It reads `llvm-nm -u` and fails on a symbol with the `___dyld_`
+Mach header's cpusubtype has to be 0, the value ld64.lld writes. It was once
+rewritten to the ARM64E subtype 0x80000002, and 1.0.11 crashed on the device
+because of it: with that value dyld signs every pointer it fixes up, including
+the function addresses dlsym answers, and this image branches to them with a
+plain `br`. The control experiment changed that header word alone, back to
+0x0, and the crash stopped while the constructor's own frame stayed in the
+stack.
+It reads `llvm-nm -u` and fails on a symbol with the `___dyld_`
 prefix, three underscores: the device's own names are `_dyld_*`, so their
 linker-level names are `__dyld_*` with two, and 1.0.7 to 1.0.8 rejected those
 legitimate names with a `^__dyld_` pattern, which is the spelling mistake 1.0.9
-corrected. A passing run prints `the arm64 slice carries cpusubtype 0, the one
-the device runs pass` and `the arm64 slice refers to no misspelt dyld symbol
-pass`. `build.sh` carries the same two checks on the slice it just linked, so a
-build cannot produce one.
+corrected. A passing run prints `the arm64 slice keeps cpusubtype 0x0, so no
+pointer is signed pass` and `the arm64 slice refers to no dyld symbol name the
+device does not export pass`. `build.sh` carries the same two checks on the
+slice it just linked, so a build cannot produce one.
 
 The third check reads the disassembly of `_write_file` out of the same slice
 and fails if the function assigns `w2` before its call to `open`. Darwin's
