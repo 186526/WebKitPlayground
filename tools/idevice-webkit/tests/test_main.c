@@ -581,8 +581,11 @@ int main(void) {
              found_in(report, "\t<key>matchVia</key>\n\t<string>bundles</string>") &&
              found_in(report, "\t<integer>7</integer>"));
 
-  /* A filter that has no Filter key is the older flat shape, and it still
-     reads: the lists are the file dictionary's own keys there. */
+  /* A filter with no Filter key at all is the older flat shape: the file
+     dictionary answers nil for "Filter" and carries the two lists as its own
+     keys, so the reader's fallback is the only path that reaches them. The
+     fixture answers nil for "Filter" in flat mode, which is what makes this
+     case red for a reader whose filter_lists() dropped the fallback. */
 
   prepare(safari, installed_self, 1);
   fake_filters_reset(idevice_webkit_filter_path);

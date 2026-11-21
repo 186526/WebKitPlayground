@@ -75,8 +75,11 @@ by path, with the device's shape: its one top-level key is `Filter`, and the
 `Classes` and `Bundles` arrays live in that subdictionary. Asking the file
 dictionary for `Classes` answers nil, which is what every report of 1.0.13 and
 earlier said on the device. `fake_filters_flat()` switches a case to the older
-flat shape, where the two arrays are the file dictionary's own keys; only the
-case that pins the compatibility branch calls it. `objc_getClass` answers
+flat shape, where the file dictionary has no `Filter` key and the two arrays are
+its own keys; only the case that pins the compatibility branch calls it. That
+case is what holds the fallback in `filter_lists()`: a flat file answers nil for
+`Filter`, so the reader has to fall back to the file dictionary itself, and
+dropping that fallback turns the case red. `objc_getClass` answers
 from a class table and `CFBundleGetBundleWithIdentifier` from a bundle table
 (`fake_bundle_register`, `fake_objc.c:179`), and the two tables are separate
 because a system app such as MobileSafari is in a filter and not in the

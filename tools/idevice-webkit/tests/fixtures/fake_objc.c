@@ -290,11 +290,13 @@ static void *filter_value_for_key(void *dictionary, const char *key) {
     return 0;
   }
   if (dictionary == (void *)filter_dictionary_slot) {
-    /* The file dictionary. Its one key is Filter, and only a flat filter has
-       the two lists as its own keys: a real one answers nil for Classes and
-       Bundles, which is the defect this fixture reproduces. */
+    /* The file dictionary. A filter of the device's shape has one key, Filter,
+       and answers nil for Classes and Bundles: that is the defect this fixture
+       reproduces. A flat filter has no Filter key at all and answers the two
+       lists itself, so a flat file sends the reader down its fallback rather
+       than into a subdictionary that is not there. */
     if (text_equal(key, "Filter")) {
-      return filter_present ? filter_subdictionary_slot : 0;
+      return filter_present && !filter_flat ? filter_subdictionary_slot : 0;
     }
     if (!filter_flat) {
       return 0;

@@ -7,8 +7,7 @@ manifests, and the tests (`tests/`).
 
 Two device measurements, both taken on iPad14,4 / iPadOS 16.1, decide what this
 directory does. They are written here because they are not inferable from the
-sources. The same conclusions are recorded, with the surrounding history, in
-`docs/safari-injection-plan.md` at the repository root.
+sources.
 
 ## The filter's lists sit in the top-level Filter dictionary
 
