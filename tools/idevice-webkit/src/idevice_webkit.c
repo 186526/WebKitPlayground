@@ -28,6 +28,8 @@ typedef struct host_images {
 char idevice_webkit_report_path[256];
 char idevice_webkit_marker_path[256];
 char idevice_webkit_filter_path[256];
+char idevice_webkit_others_path[256];
+
 static char manifest_name[path_capacity];
 static char manifest_path[path_capacity];
 static char guest_path[path_capacity];
@@ -201,16 +203,25 @@ static void bundle_directory(const char *hostPath, char *out, usize capacity) {
   out[length] = 0;
 }
 
+/* Which file the next write goes to. The entry report is written before the
+   process has said what it is, so it goes to the report of the others: a
+   process that turns out to be one of the four hosts leaves nothing behind
+   until it names itself, and every other process in the system, of which
+   there are many once the filter names UIApplication, never touches the main
+   report. */
+
+static bool write_others = true;
+
 static bool write_report(void) {
-  return dylib_report_write(idevice_webkit_report_path);
+  return dylib_report_write(write_others ? idevice_webkit_others_path : idevice_webkit_report_path);
 }
 
-/* The placeholder decides whether the dylib writes a report, not whether it
-   loads WebKit, so it is always read: a process outside the host set leaves
-   behind only its own placeholder report. The stage is the one the
-   constructor had already reached, so a process the filter did not match
-   reports the entry stage while a UIApplication process reports the filter
-   stage even though it named no host. */
+/* A process outside the host set leaves behind only the entry report, in the
+   file of the others, with whichever branch of the filter was given and the
+   stage the constructor had reached: a process the filter did not match
+   reports the entry stage, while a UIApplication process reports the filter
+   stage even though it named no host. The main report is not written here,
+   so the record of the last host stays readable. */
 
 static void write_placeholder(const char *bundleIdentifier) {
   dylib_report_begin(bundleIdentifier);
@@ -339,13 +350,15 @@ static const char *self_image_path(void) {
   return imageCount == 0 ? NULL : _dyld_get_image_name(imageCount - 1);
 }
 
-/* The report path is the default until a test points it at a directory it
-   owns, so both the entry report and the later ones reach the same file. */
+/* The three paths are the defaults until a test points the report at a
+   directory it owns. */
 
 static void default_report_paths(void) {
   if (idevice_webkit_report_path[0] == 0) {
     join(idevice_webkit_report_path, sizeof(idevice_webkit_report_path), report_directory,
          report_file_name);
+    join(idevice_webkit_others_path, sizeof(idevice_webkit_others_path), report_directory,
+         others_file_name);
     join(idevice_webkit_marker_path, sizeof(idevice_webkit_marker_path), report_directory,
          marker_file_name);
   }
@@ -372,26 +385,31 @@ static void report_stage(void) {
   usleep(stage_pause_microseconds);
 }
 
-/* The first write happens before the dylib judges its own path, so a process
-   that loaded the dylib at all leaves a report behind: the question «was the
-   constructor called» and the question «was it the installed copy» then have
-   different answers on disk. When the entry report cannot be written, nothing
-   later would be readable either, and the dylib stops instead of overwriting
-   a report the installed copy already wrote.
+/* The first write happens before the dylib knows which process it is in, so
+   it goes to the report of the others: the question «was the constructor
+   called» is answered for every process, and the answer for the four hosts
+   is not disturbed by the processes that are not hosts. Only a process that
+   names itself as one of the hosts writes the main report, and that write
+   carries the whole record, so the main report always holds the record of the
+   last host that reached the host stage.
 
-   The write after it names how the filter matched, because ellekit loads the
-   dylib into every process the filter hits and the WebKit subprocesses of a
-   host carry no UIApplication and no identifier this dylib can read. A
-   subprocess therefore stops at the filter stage with matchVia at none, while
-   the main application goes on through the stages above and names its match.
-   The filter is read again from disk, as an ordinary dictionary, because
-   ellekit keeps the matching inside libinjector. */
+   The write after the entry report names how the filter matched, because
+   ellekit loads the dylib into every process the filter hits and the WebKit
+   subprocesses of a host carry no UIApplication and no identifier this dylib
+   can read. A subprocess therefore stops at the filter stage with matchVia at
+   none, while the main application goes on through the stages above and names
+   its match. The filter is read again from disk, as an ordinary dictionary,
+   because ellekit keeps the matching inside libinjector.
+
+   A process that loaded the dylib from anywhere but TweakInject stops after
+   the entry report, because its own report path is not the installed one. */
 
 void idevice_webkit_start(void) {
   if (stage_current() != 0) {
     return;
   }
   char filterPath[path_capacity];
+  write_others = true;
   default_report_paths();
   filter_file_path(filterPath, sizeof(filterPath));
   dylib_report_begin("");
@@ -416,6 +434,7 @@ void idevice_webkit_start(void) {
   if (!host_is_target(&images)) {
     return;
   }
+  write_others = false;
   stage_reach(stage_bundle_resolved);
   dylib_report_begin(images.identifier);
   dylib_report_set_self(selfPath, true, NULL);

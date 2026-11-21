@@ -87,13 +87,23 @@ static int found_in(const char *text, const char *fragment) {
   return 0;
 }
 
+/* Each read has its own buffer, because a case reads the report, the file of
+   the others and the marker in one expression, and one static buffer would
+   hand the second read over the first one's text. */
+
+static char report_text[maximum_report_size];
+static char others_text[maximum_report_size];
+static char marker_text[maximum_report_size];
+
 static char *read_report(const char *path) {
-  static char text[maximum_report_size];
+  char *text = path == idevice_webkit_marker_path  ? marker_text
+               : path == idevice_webkit_others_path ? others_text
+                                                    : report_text;
   FILE *file = fopen(path, "r");
   if (file == NULL) {
     return NULL;
   }
-  usize length = fread(text, 1, sizeof(text) - 1, file);
+  usize length = fread(text, 1, maximum_report_size - 1, file);
   text[length] = 0;
   fclose(file);
   return text;
@@ -111,7 +121,7 @@ static char *read_report(const char *path) {
    in place of the executable inside it. */
 
 
-static void prepare(const char *host, const char *self, int withWebKit) {
+static void prepare_keeping_reports(const char *host, const char *self, int withWebKit) {
   fake_reset(host, "/private/var/mobile/Library/Preferences/com.apple.prefs.plist",
              withWebKit ? "/var/jb/Library/Frameworks/WebKit.framework/WebKit" : 0, self);
 
@@ -121,7 +131,16 @@ static void prepare(const char *host, const char *self, int withWebKit) {
   fake_filter_add_class("UIApplication");
   fake_class_register("UIApplication");
   stage_reset();
+}
+
+/* A case starts a fresh process, so the files of the previous run are
+   cleared. A case that reads the main report after a second process starts
+   uses prepare_keeping_reports, because the main report is what it checks. */
+
+static void prepare(const char *host, const char *self, int withWebKit) {
+  prepare_keeping_reports(host, self, withWebKit);
   remove(idevice_webkit_report_path);
+  remove(idevice_webkit_others_path);
   remove(idevice_webkit_marker_path);
 }
 
@@ -135,23 +154,26 @@ static void add_manifest(const char *path, const char *identifier) {
   fake_plist_add(path, identifier);
 }
 
-/* A process outside the host set leaves a placeholder report behind: an
-   empty bundle identifier, no handle and no marker, and whichever branch of
-   the filter was given; a subprocess the filter does not name stops at the
-   entry stage, while a UIApplication process goes on to name its match. A
-   placeholder keeps the class match, because the filter of such a process
-   named UIApplication and the report must say so. */
+/* A process outside the host set leaves a placeholder report behind, in the
+   file of the others: an empty bundle identifier, no handle and no marker,
+   and whichever branch of the filter was given; a subprocess the filter does
+   not name stops at the entry stage, while a UIApplication process goes on to
+   name its match. A placeholder keeps the class match, because the filter of
+   such a process named UIApplication and the report must say so. The main
+   report is not written by such a process, so it still holds what it held
+   before. */
 
 static void expect_placeholder(const char *name, int stage, const char *via) {
-  char *report = read_report(idevice_webkit_report_path);
+  char *report = read_report(idevice_webkit_others_path);
   char stageText[32];
   char matchText[80];
   snprintf(stageText, sizeof(stageText), "<integer>%d</integer>", stage);
   snprintf(matchText, sizeof(matchText), "<key>matchVia</key>\n\t<string>%s</string>", via);
   expect(name, report != NULL && found_in(report, stageText) &&
-                   found_in(report, "<key>bundleId</key>\n\t<string></string>") &&
-                   found_in(report, "<key>handleOk</key>\n\t<false/>") &&
+                   found_in(report, "\t<key>bundleId</key>\n\t<string></string>") &&
+                   found_in(report, "\t<key>handleOk</key>\n\t<false/>") &&
                    found_in(report, matchText) &&
+                   read_report(idevice_webkit_report_path) == NULL &&
                    read_report(idevice_webkit_marker_path) == NULL);
 }
 
@@ -162,12 +184,12 @@ static void expect_placeholder(const char *name, int stage, const char *via) {
 #define preboot_self "/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus/usr/lib/TweakInject/WebSafeWebKitFilter.dylib"
 #define test_self "/tmp/WebSafeWebKitTest/WebSafeWebKitFilter.dylib"
 
-/* Everything the report says about the copy that was called: a nil image path
-   leaves both strings empty, while a path outside TweakInject is written as
-   dyld gave it beside the reason the check failed. */
+/* Everything the others report says about the copy that was called: a nil
+   image path leaves both strings empty, while a path outside TweakInject is
+   written as dyld gave it beside the reason the check failed. */
 
 static void expect_self(const char *name, const char *imagePath, const char *reason) {
-  char *report = read_report(idevice_webkit_report_path);
+  char *report = read_report(idevice_webkit_others_path);
   char expectations[1024];
   snprintf(expectations, sizeof(expectations),
            "\t<key>selfImage</key>\n\t<string>%s</string>\n"
@@ -179,13 +201,15 @@ static void expect_self(const char *name, const char *imagePath, const char *rea
 /* A copy that dyld reports outside TweakInject is called, finds no installed
    directory to write under, and leaves its own path and the failed check as
    the report. The stage stays below the host work: no identifier, no handle,
-   no marker. */
+   no marker, and nothing in the main report, because such a copy cannot know
+   whether it runs inside one of the hosts. */
 
 static void expect_not_installed(const char *name, const char *imagePath, const char *reason) {
-  char *report = read_report(idevice_webkit_report_path);
-  expect(name, report != NULL && found_in(report, "<integer>3</integer>") &&
-                   found_in(report, "<key>bundleId</key>\n\t<string></string>") &&
-                   found_in(report, "<key>handleOk</key>\n\t<false/>") &&
+  char *report = read_report(idevice_webkit_others_path);
+  expect(name, report != NULL && found_in(report, "\t<integer>3</integer>") &&
+                   found_in(report, "\t<key>bundleId</key>\n\t<string></string>") &&
+                   found_in(report, "\t<key>handleOk</key>\n\t<false/>") &&
+                   read_report(idevice_webkit_report_path) == NULL &&
                    read_report(idevice_webkit_marker_path) == NULL);
   expect_self("  report names the self image and the failed check", imagePath, reason);
 }
@@ -211,14 +235,21 @@ static void case_host(const char *name, const char *host, const char *manifest,
   fake_bundle_register(identifier);
   idevice_webkit_start();
   char *report = read_report(idevice_webkit_report_path);
+  char expectations[1024];
+  snprintf(expectations, sizeof(expectations),
+           "\t<key>selfImage</key>\n\t<string>%s</string>\n"
+           "\t<key>selfError</key>\n\t<string></string>",
+           self);
   expect(name, report != NULL);
   if (report != NULL) {
-    expect("  report reaches the holding stage", found_in(report, "<integer>7</integer>"));
+    expect("  report reaches the holding stage", found_in(report, "\t<integer>7</integer>"));
     expect("  report records the bundle identifier", found_in(report, identifier));
     expect("  the class branch is read first, so matchVia is classes",
-           found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
-    expect("  marker is written next to the report", read_report(idevice_webkit_marker_path) != NULL);
-    expect_self("  report names the installed copy with no failed check", self, "");
+           found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>"));
+    expect("  report names the installed copy with no failed check",
+           found_in(report, expectations));
+    expect("  marker is written next to the report",
+           read_report(idevice_webkit_marker_path) != NULL);
   }
 }
 
@@ -233,6 +264,8 @@ int main(void) {
            "%s/com.websafe.idevice.plist", work_directory);
   snprintf(idevice_webkit_filter_path, sizeof(idevice_webkit_filter_path),
            "%s/WebSafeWebKitFilter.plist", work_directory);
+  snprintf(idevice_webkit_others_path, sizeof(idevice_webkit_others_path),
+           "%s/com.websafe.idevice.others.plist", work_directory);
   snprintf(idevice_webkit_marker_path, sizeof(idevice_webkit_marker_path),
            "%s/com.websafe.idevice.ready", work_directory);
   char command[300];
@@ -321,8 +354,8 @@ int main(void) {
   expect("Safari is matched through Classes though Bundles cannot resolve it",
          report != NULL &&
              !found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
-             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>") &&
-             found_in(report, "<integer>7</integer>"));
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>") &&
+             found_in(report, "\t<integer>7</integer>"));
 
   prepare(safari, installed_self, 1);
   fake_filters_reset(idevice_webkit_filter_path);
@@ -336,7 +369,7 @@ int main(void) {
   expect("a filter without Classes is matched through Bundles",
          report != NULL &&
              found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
-             found_in(report, "<integer>7</integer>"));
+             found_in(report, "\t<integer>7</integer>"));
 
   prepare(wechat, installed_self, 1);
   fake_filters_reset(idevice_webkit_filter_path);
@@ -350,7 +383,7 @@ int main(void) {
   expect("an identifier in the registry is matched through Bundles",
          report != NULL &&
              found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
-             found_in(report, "<integer>7</integer>"));
+             found_in(report, "\t<integer>7</integer>"));
 
   prepare(wechat, installed_self, 1);
   fake_filters_reset(idevice_webkit_filter_path);
@@ -365,8 +398,8 @@ int main(void) {
   report = read_report(idevice_webkit_report_path);
   expect("an identifier the registry does not name falls back to Classes",
          report != NULL &&
-             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>") &&
-             found_in(report, "<integer>7</integer>"));
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>") &&
+             found_in(report, "\t<integer>7</integer>"));
 
   prepare(safari, installed_self, 1);
   fake_filters_reset(idevice_webkit_filter_path);
@@ -387,7 +420,7 @@ int main(void) {
   expect("a system app outside the registry is not matched through Bundles",
          report != NULL &&
              found_in(report, "<key>matchVia</key>\n\t<string>none</string>") &&
-             found_in(report, "<integer>7</integer>"));
+             found_in(report, "\t<integer>7</integer>"));
 
   /* The four hosts below lose their manifest one at a time. The report is
      still written, and it says how the process was matched, because the match
@@ -396,36 +429,36 @@ int main(void) {
   prepare(safari, installed_self, 1);
   add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
   idevice_webkit_start();
-  report = read_report(idevice_webkit_report_path);
+  report = read_report(idevice_webkit_others_path);
   expect("Safari without its manifest still reports the class match",
-         report != NULL && found_in(report, "<integer>2</integer>") &&
-             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
+         report != NULL && found_in(report, "\t<integer>2</integer>") &&
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>"));
 
   prepare(wechat, installed_self, 1);
   add_bundle("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
              "com.tencent.xin");
   idevice_webkit_start();
-  report = read_report(idevice_webkit_report_path);
+  report = read_report(idevice_webkit_others_path);
   expect("WeChat without its manifest still reports the class match",
-         report != NULL && found_in(report, "<integer>2</integer>") &&
-             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
+         report != NULL && found_in(report, "\t<integer>2</integer>") &&
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>"));
 
   prepare(chrome, installed_self, 1);
   add_bundle("/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app",
              "com.google.chrome.ios");
   idevice_webkit_start();
-  report = read_report(idevice_webkit_report_path);
+  report = read_report(idevice_webkit_others_path);
   expect("Chrome without its manifest still reports the class match",
-         report != NULL && found_in(report, "<integer>2</integer>") &&
-             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
+         report != NULL && found_in(report, "\t<integer>2</integer>") &&
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>"));
 
   prepare("/Applications/SafariViewService.app/SafariViewService", installed_self, 1);
   add_bundle("/Applications/SafariViewService.app", "com.apple.SafariViewService");
   idevice_webkit_start();
-  report = read_report(idevice_webkit_report_path);
+  report = read_report(idevice_webkit_others_path);
   expect("SafariViewService without its manifest still reports the class match",
-         report != NULL && found_in(report, "<integer>2</integer>") &&
-             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
+         report != NULL && found_in(report, "\t<integer>2</integer>") &&
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>"));
 
   /* NSBundle.bundleWithPath: answers for the .app directory, not for the
      executable inside it, so an executable registered with an identifier is
@@ -478,7 +511,7 @@ int main(void) {
   idevice_webkit_start();
   report = read_report(idevice_webkit_report_path);
   expect("the host is image 0, not the last image",
-         report != NULL && found_in(report, "<integer>7</integer>"));
+         report != NULL && found_in(report, "\t<integer>7</integer>"));
 
   /* The same Chrome process and manifest, with the dylib called from a test
      directory: the entry report is the only file written, and its stage 2
@@ -509,8 +542,8 @@ int main(void) {
   expect("report still written when WebKit was not loaded yet", report != NULL);
   if (report != NULL) {
     expect("  missing WebKit leaves imagePath empty",
-           found_in(report, "<key>imagePath</key>\n\t<string></string>"));
-    expect("  handleOk is false", found_in(report, "<key>handleOk</key>\n\t<false/>"));
+           found_in(report, "\t<key>imagePath</key>\n\t<string></string>"));
+    expect("  handleOk is false", found_in(report, "\t<key>handleOk</key>\n\t<false/>"));
   }
 
   /* A fresh process of the same host starts with the stage at zero; the entry
@@ -524,19 +557,45 @@ int main(void) {
             "com.google.chrome.ios");
   idevice_webkit_start();
   {
-    char *kept = read_report(idevice_webkit_report_path);
+    char kept[sizeof(report_text)];
     char before[maximum_report_size];
-    snprintf(before, sizeof(before), "%s", kept == NULL ? "" : kept);
+    snprintf(kept, sizeof(kept), "%s", read_report(idevice_webkit_report_path));
+    snprintf(before, sizeof(before), "%s", kept);
     stage_reset();
     fake_refuse_writes(1);
     idevice_webkit_start();
     fake_refuse_writes(0);
     char *after = read_report(idevice_webkit_report_path);
+    char kept_text[maximum_report_size];
+    snprintf(kept_text, sizeof(kept_text), "%s", after == NULL ? "" : after);
     expect("a refused entry report stops the constructor",
-           after != NULL && strcmp(before, after) == 0 &&
-               found_in(after, "<string>com.google.chrome.ios</string>") &&
+           strcmp(kept_text, before) == 0 &&
+               found_in(kept_text, "<string>com.google.chrome.ios</string>") &&
                read_report(idevice_webkit_marker_path) != NULL);
     stage_reset();
+  }
+
+  /* The filter names UIApplication, so every app on the device is loaded
+     with this dylib. An app that is not one of the four hosts writes the file
+     of the others and leaves the main report alone, so the record of the last
+     host stays readable while unrelated apps start and stop. Maps has no
+     manifest here, which is how every app outside the four looks. */
+
+  {
+    char kept[sizeof(report_text)];
+    snprintf(kept, sizeof(kept), "%s", read_report(idevice_webkit_report_path));
+    prepare_keeping_reports("/Applications/Maps.app/Maps", installed_self, 1);
+    add_bundle("/Applications/Maps.app", "com.apple.Maps");
+    idevice_webkit_start();
+    char *after = read_report(idevice_webkit_report_path);
+    char *others = read_report(idevice_webkit_others_path);
+    expect("an unrelated app does not overwrite the host report",
+           kept[0] != 0 && after != NULL && strcmp(kept, after) == 0 &&
+               found_in(after, "<string>com.google.chrome.ios</string>") &&
+               found_in(after, "\t<integer>7</integer>"));
+    expect("  the unrelated app leaves its own report",
+           others != NULL && found_in(others, "\t<integer>2</integer>") &&
+               found_in(others, "\t<key>matchVia</key>\n\t<string>classes</string>"));
   }
 
   printf("\nfailures: %d\n", failures);

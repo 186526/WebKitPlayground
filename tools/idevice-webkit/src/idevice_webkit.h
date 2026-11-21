@@ -12,15 +12,18 @@
 #define manifest_suffix ".plist"
 #define filter_file_name "WebSafeWebKitFilter.plist"
 #define report_file_name "com.websafe.idevice.plist"
+#define others_file_name "com.websafe.idevice.others.plist"
 #define marker_file_name "com.websafe.idevice.ready"
 #define framework_path "/var/jb/Library/Frameworks/WebKit.framework/WebKit"
 #define stage_pause_microseconds 5000u
 #define path_capacity 2048
 #define version_capacity 128
 
-/* The two paths are writable so a test can point them at a directory it owns;
-   the device build leaves them at their default. */
+/* The paths are writable so a test can point them at a directory it owns; the
+   device build leaves them at their default. The other report belongs to the
+   processes that are not one of the four hosts. */
 extern char idevice_webkit_report_path[256];
+extern char idevice_webkit_others_path[256];
 extern char idevice_webkit_marker_path[256];
 extern char idevice_webkit_filter_path[256];
 

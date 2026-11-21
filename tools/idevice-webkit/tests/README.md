@@ -58,6 +58,16 @@ more cases start Safari, WeChat, Chrome and SafariViewService without their
 manifest and read `matchVia` from the placeholder report, because the filter is
 read before the manifest is.
 
+The report is split in two, because the filter names `UIApplication` and so
+every app on the device loads the dylib. The entry report and the placeholder
+of a process that is not one of the four hosts go to
+`com.websafe.idevice.others.plist`; only a process that names itself as one of
+the hosts writes `com.websafe.idevice.plist`. The last case checks that
+directly: a host writes its record, an unrelated app starts, and the main
+report stays byte for byte what it was while the file of the others carries
+the `stage` 2 record of the unrelated app. Removing the split makes that case
+and the five placeholder cases fail.
+
 Run from `tools/idevice-webkit`:
 
 ```sh
