@@ -17,6 +17,13 @@ rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready \
 # every host decision below moot, so a broken signer stops the run first.
 "$python" "$here/signature_test.py"
 
+# The two handles this file hands to dlsym decide whether a lookup reaches the
+# process's own symbols or dies on an invalid handle, so they get their own
+# binary: test_main.c stubs the lookups whole and could not see either value.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" \
+  "$here/dyld_lookup_test.c" -o "$work/dyld_lookup_test"
+"$work/dyld_lookup_test"
+
 clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" -I"$here/fixtures" \
   "$here/test_main.c" -o "$work/test_main"
 clang -std=c11 -g -fsanitize=address,undefined -I"$here/../src" -I"$here" -I"$here/fixtures" \

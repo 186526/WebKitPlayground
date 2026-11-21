@@ -108,6 +108,18 @@ non-zero with a message naming the slot type. A broken signer stops the run
 before the C cases, because a dylib dyld will not load makes every host
 decision below moot.
 
+`dyld_lookup_test.c` covers the one thing `test_main.c` cannot see. That file
+stubs `symbol_find` and `symbol_find_global` whole, so a wrong handle inside
+`src/dyld_lookup.c` would pass every host case. This binary therefore compiles
+`src/dyld_lookup.c` itself, renaming `dlsym`, `dlopen` and `dlerror` to
+recorders before the include, and asserts the handle `symbol_find_global`
+passes: Darwin's `RTLD_DEFAULT`, which `dlfcn.h` defines as `((void *)-2)`.
+dyld compares the handle against that constant and treats anything else as a
+handle `dlopen` returned, so zero reaches the loader-from-handle path and comes
+back NULL with `invalid handle`. It also checks that `symbol_find(NULL, …)`
+answers nothing without calling `dlsym`, that a real handle is passed through
+unchanged, and that `library_find` asks for `RTLD_NOLOAD`.
+
 The script builds the test twice: once plainly and once with AddressSanitizer
 and UndefinedBehaviorSanitizer. The second run only counts when its log holds
 neither a sanitizer error nor a UBSan report. Everything is written under
