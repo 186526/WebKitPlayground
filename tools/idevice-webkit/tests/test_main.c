@@ -84,6 +84,12 @@ static char *read_report(const char *path) {
 
 #define manifest_path_for(host) "/var/jb/usr/lib/TweakInject/com.websafe.idevice.host." host ".plist"
 
+/* Each case registers the host app bundle and the manifest with the same
+   bundle identifier, which is what the device has once the manifest is in
+   place. The bundle identifier of a host is read from its .app directory, the
+   way NSBundle.bundleWithPath: reads it, so every case registers the directory
+   in place of the executable inside it. */
+
 static void prepare(const char *host, const char *self, int withWebKit) {
   fake_reset(host, "/private/var/mobile/Library/Preferences/com.apple.prefs.plist",
              withWebKit ? "/var/jb/Library/Frameworks/WebKit.framework/WebKit" : 0, self);
@@ -99,19 +105,34 @@ static void add_bundle(const char *path, const char *identifier) {
   fake_bundle_add(path, identifier);
 }
 
-/* Each case registers the manifest and the executable with the same bundle
-   identifier, which is what the device has once the manifest is in place. */
+/* The manifest is a plist file, not a bundle directory, so it is registered
+   in the plist table. */
+static void add_manifest(const char *path, const char *identifier) {
+  fake_plist_add(path, identifier);
+}
+
+/* A process outside the host set leaves a placeholder report behind: stage 1,
+   an empty bundle identifier and no handle. The marker holds the decision of
+   the dylib, so a placeholder is no marker. */
+
+static void expect_placeholder(const char *name) {
+  char *report = read_report(idevice_webkit_report_path);
+  expect(name, report != NULL && found_in(report, "<integer>1</integer>") &&
+                   found_in(report, "<key>bundleId</key>\n\t<string></string>") &&
+                   found_in(report, "<key>handleOk</key>\n\t<false/>") &&
+                   read_report(idevice_webkit_marker_path) == NULL);
+}
 
 static void list_host(const char *host, const char *manifest, const char *identifier) {
   add_bundle(host, identifier);
-  add_bundle(manifest, identifier);
+  add_manifest(manifest, identifier);
 }
 
 static void case_host(const char *name, const char *host, const char *manifest,
-                      const char *identifier) {
+                      const char *bundle, const char *identifier) {
   prepare(host, self_path, 1);
 
-  list_host(host, manifest, identifier);
+  list_host(bundle, manifest, identifier);
   idevice_webkit_start();
   char *report = read_report(idevice_webkit_report_path);
   expect(name, report != NULL);
@@ -151,18 +172,23 @@ int main(void) {
       "/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus/Applications/WeChat.app/WeChat";
 
   case_host("safari at /Applications is a host", safari,
-            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"), "com.apple.mobilesafari");
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "/Applications/MobileSafari.app", "com.apple.mobilesafari");
   case_host("chrome container is a host", chrome,
             manifest_path_for("-var-containers-Bundle-Application-25D51062-B818-4434-94C6-1D163B9C6C06-stable.app-Chrome"),
+            "/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app",
             "com.google.chrome.ios");
   case_host("wechat container is a host", wechat,
             manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
             "com.tencent.xin");
   case_host("wechat container is a host on the plain name", wechat,
             manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
             "com.tencent.xin");
   case_host("wechat below the bootstrap is a host", wechat_in_bootstrap,
-            manifest_path_for("-Applications-WeChat.app-WeChat"), "com.tencent.xin");
+            manifest_path_for("-Applications-WeChat.app-WeChat"), "/Applications/WeChat.app",
+            "com.tencent.xin");
 
   char *report = read_report(idevice_webkit_report_path);
   if (report != NULL) {
@@ -173,20 +199,29 @@ int main(void) {
   }
 
   prepare(safari, self_path, 1);
-  add_bundle(safari, "com.apple.mobilesafari");
+  add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
   idevice_webkit_start();
-  expect("host without a manifest writes no report",
-         read_report(idevice_webkit_report_path) == NULL);
+  expect_placeholder("host without a manifest leaves a placeholder");
 
   prepare(safari, self_path, 1);
-  add_bundle(safari, "com.apple.mobilesafari");
-  add_bundle(manifest_path_for("-Applications-MobileSafari.app-MobileSafari"), "com.tencent.xin");
+  add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
+  add_manifest(manifest_path_for("-Applications-MobileSafari.app-MobileSafari"), "com.tencent.xin");
   idevice_webkit_start();
-  expect("manifest naming another bundle writes no report",
-         read_report(idevice_webkit_report_path) == NULL);
+  expect_placeholder("manifest naming another bundle leaves a placeholder");
+
+  /* NSBundle.bundleWithPath: answers for the .app directory, not for the
+     executable inside it, so an executable registered with an identifier is
+     still not a bundle and the host cannot be named. */
+
+  prepare(safari, self_path, 1);
+  list_host(safari, manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  expect_placeholder("an executable path is not a bundle");
 
   prepare(safari, "/tmp/WebSafeWebKit.dylib", 1);
-  list_host(safari, manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
             "com.apple.mobilesafari");
   idevice_webkit_start();
   expect("dylib loaded from a test path writes no report",
@@ -196,7 +231,7 @@ int main(void) {
      below puts a second framework after it and keeps the host first. */
 
   prepare(chrome, "/tmp/WebSafeWebKit.dylib", 1);
-  list_host(chrome,
+  list_host("/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app",
             manifest_path_for("-var-containers-Bundle-Application-25D51062-B818-4434-94C6-1D163B9C6C06-stable.app-Chrome"),
             "com.google.chrome.ios");
   idevice_webkit_start();
@@ -204,7 +239,7 @@ int main(void) {
          read_report(idevice_webkit_report_path) == NULL);
 
   prepare(wechat, "/var/jb/usr/lib/TweakInject/WebSafeWebKit.dylib", 1);
-  list_host(wechat,
+  list_host("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
             manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
             "com.tencent.xin");
   idevice_webkit_start();
@@ -217,14 +252,13 @@ int main(void) {
 
   prepare("/private/preboot/UUID/dopamine-ML13U0/procursus/usr/bin/tool", self_path, 1);
   add_bundle("/private/preboot/UUID/dopamine-ML13U0/procursus/usr/bin/tool", "com.tencent.xin");
-  add_bundle(manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+  add_manifest(manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
              "com.tencent.xin");
   idevice_webkit_start();
-  expect("a process that is not an app writes no report",
-         read_report(idevice_webkit_report_path) == NULL);
+  expect_placeholder("a process that is not an app leaves a placeholder");
 
   prepare(chrome, self_path, 0);
-  list_host(chrome,
+  list_host("/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app",
             manifest_path_for("-var-containers-Bundle-Application-25D51062-B818-4434-94C6-1D163B9C6C06-stable.app-Chrome"),
             "com.google.chrome.ios");
   idevice_webkit_start();

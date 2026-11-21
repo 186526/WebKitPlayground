@@ -10,5 +10,6 @@
 
 void fake_bundles_reset(void);
 void fake_bundle_add(const char *path, const char *identifier);
+void fake_plist_add(const char *path, const char *identifier);
 
 #endif

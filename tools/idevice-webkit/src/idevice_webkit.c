@@ -15,9 +15,9 @@ extern const void *_dyld_get_image_header(u32 imageIndex);
 extern void usleep(u32 microseconds);
 
 typedef struct host_images {
-  char image_path[path_capacity];
   char host_path[path_capacity];
   char host_name[path_capacity];
+  char bundle_path[path_capacity];
   char identifier[bundle_identifier_capacity];
   bool web_kit_seen;
   const void *web_kit_header;
@@ -169,37 +169,77 @@ static void collect_images(host_images *images) {
   }
   const char *hostPath = imageCount == 0 ? NULL : _dyld_get_image_name(0);
   if (hostPath != NULL) {
-    text_copy(images->image_path, hostPath, sizeof(images->image_path));
     host_path_from(hostPath, images->host_path, sizeof(images->host_path));
   }
+}
+
+/* The code that runs is not the bundle. NSBundle.bundleWithPath: reads the
+   Info.plist of a directory, so the identifier of a host is read from its
+   .app directory and not from the executable inside it. The checks before
+   this point already proved that the directory before the last component
+   ends in .app, so the bundle directory is the part before the last slash. */
+
+static void bundle_directory(const char *hostPath, char *out, usize capacity) {
+  usize length = 0;
+  while (hostPath[length] != 0) {
+    length++;
+  }
+  while (length > 0 && hostPath[length - 1] != '/') {
+    length--;
+  }
+  while (length > 1 && hostPath[length - 1] == '/') {
+    length--;
+  }
+  if (length >= capacity) {
+    length = capacity - 1;
+  }
+  for (usize index = 0; index < length; index++) {
+    out[index] = hostPath[index];
+  }
+  out[length] = 0;
+}
+
+/* The placeholder decides whether the dylib writes a report, not whether it
+   loads WebKit, so it is always read: a process outside the host set leaves
+   behind only its own placeholder report. */
+
+static void write_report(void) {
+  dylib_report_write(idevice_webkit_report_path);
+}
+
+static void write_placeholder(const char *bundleIdentifier) {
+  dylib_report_begin(bundleIdentifier);
+  stage_reach(stage_entered);
+  write_report();
 }
 
 /* Each host has its own manifest, and the manifest has to name the bundle
    identifier that this process really runs as. The manifest name comes from
    the mapped path, so a container has one name in every namespace, while the
-   identifier is read from the path dyld reported, because that is the path
-   the bundle lookup reaches. Matching the two proves both that the manifest
-   belongs to this host and that the host is listed. */
+   identifier is read from the bundle directory of the mapped path. Matching
+   the two proves both that the manifest belongs to this host and that the
+   host is listed. The bundle directory is taken after the mapping, so both
+   the container form and the bootstrap form of the same app reach the same
+   directory below /Applications. */
 
 static bool host_is_target(host_images *images) {
-  if (!is_host_path(images->host_path)) {
+  host_file_name(images->host_path, images->host_name, sizeof(images->host_name));
+  bundle_directory(images->host_path, images->bundle_path, sizeof(images->bundle_path));
+  if (!is_host_path(images->host_path) ||
+      !bundle_path_identifier(images->bundle_path, images->identifier,
+                              sizeof(images->identifier))) {
+    write_placeholder("");
     return false;
   }
-  host_file_name(images->host_path, images->host_name, sizeof(images->host_name));
   join(manifest_name, sizeof(manifest_name), host_manifest_prefix, images->host_name);
   join(manifest_path, sizeof(manifest_path), tweak_directory, manifest_name);
   join(manifest_path, sizeof(manifest_path), manifest_path, manifest_suffix);
-  if (!bundle_path_identifier(manifest_path, images->identifier, sizeof(images->identifier))) {
+  if (!plist_file_identifier(manifest_path, guest_path, sizeof(guest_path)) ||
+      !text_equal(guest_path, images->identifier)) {
+    write_placeholder("");
     return false;
   }
-  if (!bundle_path_identifier(images->image_path, guest_path, sizeof(guest_path))) {
-    return false;
-  }
-  return text_equal(guest_path, images->identifier);
-}
-
-static void write_report(void) {
-  dylib_report_write(idevice_webkit_report_path);
+  return true;
 }
 
 static void attempt_load(host_images *images) {
@@ -251,10 +291,10 @@ void idevice_webkit_start(void) {
   }
   host_images images;
   collect_images(&images);
-  stage_reach(stage_bundle_resolved);
   if (!host_is_target(&images)) {
     return;
   }
+  stage_reach(stage_bundle_resolved);
   dylib_report_begin(images.identifier);
   report_stage();
   stage_reach(stage_attempted);

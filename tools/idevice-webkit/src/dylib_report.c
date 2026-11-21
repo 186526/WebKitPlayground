@@ -91,6 +91,7 @@ void dylib_report_begin(const char *bundleIdentifier) {
   text_set(&record, 0, sizeof(record));
   text_copy(record.bundle_identifier, bundleIdentifier, sizeof(record.bundle_identifier));
   text_copy(record.dlopen_status, "false", sizeof(record.dlopen_status));
+  text_copy(record.stage, "0", sizeof(record.stage));
   if (gettimeofday(&now, NULL) == 0) {
     render_number(record.timestamp, sizeof(record.timestamp), now.seconds);
   } else {
