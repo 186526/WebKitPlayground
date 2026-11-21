@@ -29,6 +29,10 @@ void fake_reset(const char *first, const char *preferences, const char *loaded,
   if (loaded != 0) {
     image_paths[image_count_value++] = loaded;
   }
+  if (self == 0) {
+    image_paths[image_count_value++] = 0;
+    return;
+  }
   text_copy(self_text, self, fake_path_text);
   image_paths[image_count_value++] = self_text;
 }

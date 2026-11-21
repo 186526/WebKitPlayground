@@ -11,7 +11,15 @@
 void dylib_report_begin(const char *bundleIdentifier);
 void dylib_report_set_dlopen(const char *path, void *handle, const char *error);
 void dylib_report_set_image(const char *imagePath, const char *version);
+
+/* The path dyld gave for this dylib and the answer of installed_copy_reason,
+   which is empty only when the dylib is the installed copy. */
+
+void dylib_report_set_self(const char *imagePath, bool installedCopy, const char *reason);
 void dylib_report_set_stage(u32 stage);
-void dylib_report_write(const char *path);
+
+/* Writes the report and answers whether the file was written. */
+
+bool dylib_report_write(const char *path);
 
 #endif

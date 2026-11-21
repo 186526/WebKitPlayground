@@ -199,13 +199,13 @@ static void bundle_directory(const char *hostPath, char *out, usize capacity) {
   out[length] = 0;
 }
 
+static bool write_report(void) {
+  return dylib_report_write(idevice_webkit_report_path);
+}
+
 /* The placeholder decides whether the dylib writes a report, not whether it
    loads WebKit, so it is always read: a process outside the host set leaves
    behind only its own placeholder report. */
-
-static void write_report(void) {
-  dylib_report_write(idevice_webkit_report_path);
-}
 
 static void write_placeholder(const char *bundleIdentifier) {
   dylib_report_begin(bundleIdentifier);
@@ -253,17 +253,97 @@ static void attempt_load(host_images *images) {
   }
 }
 
-/* The report and the marker are only written by the installed copy, so a copy
-   loaded from a test directory cannot rewrite the result of the installed
-   one. */
+/* The path is a directory when its last component is the whole of it:
+   /var/jb/usr/lib/TweakInject qualifies, /var/jb/usr/lib/TweakInjectX does
+   not. Both forms of the directory end the same way, so one check reads
+   /var/jb/usr/lib/TweakInject and its /private/preboot form alike. */
 
-static bool loaded_as_installed_copy(void) {
-  u32 imageCount = _dyld_image_count();
-  const char *selfPath = imageCount == 0 ? NULL : _dyld_get_image_name(imageCount - 1);
-  if (selfPath == NULL) {
+static bool ends_with_directory(const char *directory, const char *suffix) {
+  usize directoryLength = text_length(directory);
+  usize suffixLength = text_length(suffix);
+  if (directoryLength < suffixLength) {
     return false;
   }
-  return text_equal(selfPath, self_path);
+  return text_equal(directory + directoryLength - suffixLength, suffix);
+}
+
+/* The installed copy is the dylib in the TweakInject directory of the
+   jailbreak root. That directory is reached through /var/jb on the device and
+   through /private/preboot/<uuid>/<name>/procursus on the root filesystem,
+   and dyld reports whichever form it resolved, so the check is not a compare
+   against one literal path. A dylib built into a test directory has another
+   directory and answers a reason instead. */
+
+static bool installed_directory_path(const char *imagePath) {
+  if (ends_with_directory(imagePath, installed_directory_tail)) {
+    return true;
+  }
+  if (text_begins_with(imagePath, installed_directory)) {
+    return ends_with_directory(imagePath, installed_directory_tail);
+  }
+  return false;
+}
+
+/* A path ending in a slash names a directory itself, and dyld never reports
+   one, so the trailing slashes are dropped before the directory is taken. A
+   path left with no directory at all then answers a reason. */
+
+static void parent_directory(const char *path, char *out, usize capacity) {
+  usize length = text_length(path);
+  while (length > 0 && path[length - 1] == '/') {
+    length--;
+  }
+  if (length >= capacity) {
+    length = capacity - 1;
+  }
+  for (usize index = 0; index < length; index++) {
+    out[index] = path[index];
+  }
+  out[length] = 0;
+  if (length > 0) {
+    bundle_directory(out, out, capacity);
+  }
+}
+
+/* The report and the marker are only written by the installed copy under its
+   own directory, so a copy loaded from a test directory cannot rewrite the
+   result of the installed one. An answer other than NULL names the check the
+   path failed, and each of them is written into the entry report. */
+
+static const char *installed_copy_reason(const char *selfPath) {
+  if (selfPath == NULL || selfPath[0] == 0) {
+    return "no self image path";
+  }
+  char directory[path_capacity];
+  parent_directory(selfPath, directory, sizeof(directory));
+  if (directory[0] == 0) {
+    return "self image path has no directory";
+  }
+  if (!installed_directory_path(directory)) {
+    return "self image is not in the TweakInject directory";
+  }
+  return NULL;
+}
+
+/* The last image is this dylib on the device, but the reason above judges the
+   path and not its position, so a copy that dyld reports elsewhere in the
+   table is still recognised by the directory it sits in. */
+
+static const char *self_image_path(void) {
+  u32 imageCount = _dyld_image_count();
+  return imageCount == 0 ? NULL : _dyld_get_image_name(imageCount - 1);
+}
+
+/* The report path is the default until a test points it at a directory it
+   owns, so both the entry report and the later ones reach the same file. */
+
+static void default_report_paths(void) {
+  if (idevice_webkit_report_path[0] == 0) {
+    join(idevice_webkit_report_path, sizeof(idevice_webkit_report_path), report_directory,
+         report_file_name);
+    join(idevice_webkit_marker_path, sizeof(idevice_webkit_marker_path), report_directory,
+         marker_file_name);
+  }
 }
 
 /* The pause after each write lets a second launch write a later stage over
@@ -275,19 +355,31 @@ static void report_stage(void) {
   usleep(stage_pause_microseconds);
 }
 
+/* The first write happens before the dylib judges its own path, so a process
+   that loaded the dylib at all leaves a report behind: the question «was the
+   constructor called» and the question «was it the installed copy» then have
+   different answers on disk. When the entry report cannot be written, nothing
+   later would be readable either, and the dylib stops instead of overwriting
+   a report the installed copy already wrote. */
+
 void idevice_webkit_start(void) {
   if (stage_current() != 0) {
     return;
   }
+  default_report_paths();
+  dylib_report_begin("");
   stage_reach(stage_entered);
-  if (!loaded_as_installed_copy()) {
+  if (!write_report()) {
     return;
   }
-  if (idevice_webkit_report_path[0] == 0) {
-    join(idevice_webkit_report_path, sizeof(idevice_webkit_report_path), report_directory,
-         report_file_name);
-    join(idevice_webkit_marker_path, sizeof(idevice_webkit_marker_path), report_directory,
-         marker_file_name);
+  usleep(stage_pause_microseconds);
+  const char *selfPath = self_image_path();
+  const char *reason = installed_copy_reason(selfPath);
+  dylib_report_set_self(selfPath, reason == NULL, reason);
+  if (reason != NULL) {
+    stage_reach(stage_not_installed_copy);
+    write_report();
+    return;
   }
   host_images images;
   collect_images(&images);
@@ -296,6 +388,7 @@ void idevice_webkit_start(void) {
   }
   stage_reach(stage_bundle_resolved);
   dylib_report_begin(images.identifier);
+  dylib_report_set_self(selfPath, true, NULL);
   report_stage();
   stage_reach(stage_attempted);
   attempt_load(&images);

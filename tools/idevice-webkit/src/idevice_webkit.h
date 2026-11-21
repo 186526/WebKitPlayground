@@ -4,6 +4,8 @@
 #include "textkit.h"
 
 #define tweak_directory "/var/jb/usr/lib/TweakInject/"
+#define installed_directory "/private/preboot/"
+#define installed_directory_tail "/usr/lib/TweakInject"
 #define report_directory "/var/jb/var/mobile/Library/Preferences/"
 #define guest_prefix "/private/preboot/"
 #define host_manifest_prefix "com.websafe.idevice.host."
@@ -11,7 +13,6 @@
 #define report_file_name "com.websafe.idevice.plist"
 #define marker_file_name "com.websafe.idevice.ready"
 #define framework_path "/var/jb/Library/Frameworks/WebKit.framework/WebKit"
-#define self_path "/var/jb/usr/lib/TweakInject/WebSafeWebKitFilter.dylib"
 #define stage_pause_microseconds 5000u
 #define path_capacity 2048
 #define version_capacity 128

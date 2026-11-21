@@ -13,6 +13,8 @@ typedef struct report_record {
   char dlopen_error[plist_value_capacity];
   char image_path[plist_value_capacity];
   char image_version[plist_value_capacity];
+  char self_image[plist_value_capacity];
+  char self_error[plist_value_capacity];
   char timestamp[24];
   char stage[16];
 } report_record;
@@ -111,11 +113,16 @@ void dylib_report_set_image(const char *imagePath, const char *version) {
   text_copy(record.image_version, version == NULL ? "" : version, sizeof(record.image_version));
 }
 
+void dylib_report_set_self(const char *imagePath, bool installedCopy, const char *reason) {
+  text_copy(record.self_image, imagePath == NULL ? "" : imagePath, sizeof(record.self_image));
+  text_copy(record.self_error, installedCopy ? "" : reason, sizeof(record.self_error));
+}
+
 void dylib_report_set_stage(u32 stage) {
   render_number(record.stage, sizeof(record.stage), (i64)stage);
 }
 
-void dylib_report_write(const char *path) {
+bool dylib_report_write(const char *path) {
   char document[document_capacity];
   usize position = 0;
   document[0] = 0;
@@ -132,9 +139,11 @@ void dylib_report_write(const char *path) {
   append_text(document, &position, "error", record.dlopen_error);
   append_text(document, &position, "imagePath", record.image_path);
   append_text(document, &position, "imageVersion", record.image_version);
+  append_text(document, &position, "selfImage", record.self_image);
+  append_text(document, &position, "selfError", record.self_error);
   append_text(document, &position, "timestamp", record.timestamp);
   append(document, &position, "\t<key>stage</key>\n\t<integer>");
   append(document, &position, record.stage);
   append(document, &position, "</integer>\n</dict>\n</plist>\n");
-  write_file(path, document, text_length(document));
+  return write_file(path, document, text_length(document));
 }
