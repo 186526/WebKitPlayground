@@ -10,7 +10,12 @@
    write bit: the app process rewrites the report at every stage, and a refused
    second write stops the run at stage 1. The report holds a host path and a
    bundle identifier and nothing secret, so 0644 keeps the owner able to rewrite
-   it and every diagnostic process able to read it. */
+   it and every diagnostic process able to read it.
+
+   This value has to reach open through the ellipsis of the declaration below,
+   where -Wall cannot type-check it: there is no other reason it would fail.
+   tests/file_writer_test.c is what checks it, and `build.sh` and `tests/run.sh`
+   both fail on a `write_file` that assigns w2 before its call. */
 #define file_mode 0644
 
 /* open is variadic in Darwin's headers. A fixed three-parameter declaration is

@@ -105,5 +105,18 @@ if printf '%s\n' "$undefined" | grep -q '^___dyld_'; then
   exit 1
 fi
 
+# The report writer has to pass its mode the variadic way. Darwin's open reads
+# the mode from the stack; a fixed three-parameter declaration makes the
+# compiler put it in w2 instead, and the device then creates the report with a
+# mode nobody asked for, 0504 among them. A write_file that assigns w2 before
+# its call to open is that declaration come back.
+write_file_body="$(llvm-objdump -d --no-show-raw-insn "$output_dir/WebSafeWebKit.dylib" 2>/dev/null |
+  sed -n '/<_write_file>:/,/^$/p')"
+if printf '%s\n' "$write_file_body" | grep -q 'mov[[:space:]]*w2,'; then
+  echo "the report writer passes the file mode in a register, which the device drops:" >&2
+  printf '%s\n' "$write_file_body" | grep 'mov[[:space:]]*w2,' >&2
+  exit 1
+fi
+
 echo "arch: $arch"
 echo "built: $output_dir/WebSafeWebKit.dylib"
