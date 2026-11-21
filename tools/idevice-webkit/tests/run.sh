@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Compiles the same sources the dylib is built from together with the test
+# fixtures that replace the dyld image table, the Info.plist lookup and the
+# Darwin file writer, so the host decisions can be checked without a device.
+# The plain build checks the expectations; the sanitizer build repeats the run
+# under ASan and UBSan, and its log is searched because ASan normally exits 1
+# on its own while UBSan only prints.
+set -eu
+here="$(cd "$(dirname "$0")" && pwd)"
+work="${TMPDIR:-/tmp}/idevice-webkit-test"
+mkdir -p "$work"
+rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready "$work"/asan.log
+
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" -I"$here/fixtures" \
+  "$here/test_main.c" -o "$work/test_main"
+clang -std=c11 -g -fsanitize=address,undefined -I"$here/../src" -I"$here" -I"$here/fixtures" \
+  "$here/test_main.c" -o "$work/test_asan"
+
+"$work/test_main"
+
+status=0
+"$work/test_asan" >>"$work/asan.log" 2>&1 || status=$?
+if [ "$status" -ne 0 ] ||
+   grep -q -e "ERROR: AddressSanitizer" -e "runtime error" "$work/asan.log"; then
+  echo "sanitizer run failed, log in $work/asan.log"
+  cat "$work/asan.log"
+  exit 1
+fi
+echo "sanitizer build: no report, exit 0"
