@@ -1,12 +1,11 @@
 # idevice-webkit tests
 
 `test_main.c` compiles the same `src/` files the dylib is built from and
-replaces four sets of calls with test versions: the process calls
+replaces five sets of calls with test versions: the process calls
 (`_NSGetExecutablePath`, the `dlopen` handle of the framework and the address of
-one class it defines, together with `dladdr`), the Foundation lookups
-(`NSBundle.bundleWithPath:`, `NSDictionary.dictionaryWithContentsOfFile:`
-and the `NSDictionary.objectForKey:` / `NSString.stringWithUTF8String:` /
-`NSString.UTF8String` accessors), the Darwin file writer, the image reader
+one class it defines, together with `dladdr`), the Objective-C messages the dylib
+sends (`fake_objc.c` answers class names, selectors and the Foundation objects
+those messages reach), the Darwin file writer, the image reader
 (`macho_version_text`), and the two `dlsym` wrappers of `src/dyld_lookup.c`.
 No `_dyld_*` image table function is replaced, because the dylib refers to
 none: 1.0.6 and earlier referred to three of them, the device exports them, and
@@ -63,24 +62,40 @@ image's place` and `a loaded framework does not hide a test copy either`; in
 `a later image does not hide a test copy either`, and the fixture appended an
 image to the table through `fake_load_after_self`.
 
-`fixtures/fake_bundle.c` answers the way Foundation does rather than by string
-equality: a bundle is a `.app` directory, so registering the executable inside
-one, or the manifest plist itself, answers nothing. Every case registers the
-`.app` directory in place of the executable, which is why removing the
-derivation in `bundle_directory()` makes the suite fail. The manifest is
-registered in a separate plist table that answers only `.plist` paths.
+`fixtures/fake_objc.c` answers the way Foundation does rather than by string
+equality, and it keeps the two path lookups in separate tables. `NSBundle` gets
+a `.app` directory table, so registering the executable inside one answers
+nothing; `NSDictionary` gets a plist table that answers only `.plist` paths.
+Every case registers the `.app` directory in place of the executable, which is
+why removing the derivation in `bundle_directory()` makes the suite fail.
 
-`fixtures/fake_filter.c` stands in for the ellekit filter and for the two
+`fixtures/fake_objc.c` also stands in for the ellekit filter and for the two
 registries its branches ask. The filter is one `NSDictionary` the dylib reads
 by path, with a `Classes` array and a `Bundles` array; `objc_getClass` answers
-from a class table and `CFBundleGetBundleWithIdentifier` from a bundle table,
-and the two tables are separate because a system app such as MobileSafari is in
-a filter and not in the LaunchServices registry. `fake_bundle_register` can
-register the lowercased form of an identifier on its own, which is how a case
-tells the second lookup of the bundle branch from the first. Every object the
-dylib receives is a slot of a string table, and the fixture types `NSString.UTF8String`
-and `NSArray.count` exactly as the dylib declares them, because a call through
-a pointer of another type is what UBSan reports.
+from a class table and `CFBundleGetBundleWithIdentifier` from a bundle table
+(`fake_bundle_register`, `fake_objc.c:179`), and the two tables are separate
+because a system app such as MobileSafari is in a filter and not in the
+LaunchServices registry. `fake_bundle_register` can register the lowercased form
+of an identifier on its own, which is how a case tells the second lookup of the
+bundle branch from the first. Every object the dylib receives is a slot of a
+string table, and the fixture types `NSString.UTF8String` and `NSArray.count`
+exactly as the dylib declares them, because a call through a pointer of another
+type is what UBSan reports.
+
+The two path methods are the exception that gives the suite its grip on the
+1.0.12 crash. `bundleWithPath:` and `dictionaryWithContentsOfFile:` declare an
+`NSString *` argument, so `fake_objc_msg_send` reads a `void *` for them and
+`message_with_path` looks the argument up in the object tables; a C string
+answers nil there, the way Foundation reads its first eight bytes as an `isa`
+on the device. Three cases in `test_main.c` hold that from the product entry:
+`a bundle directory answers its identifier at the entry` and
+`a manifest file answers its identifier the same way` call
+`bundle_path_identifier()` and `plist_file_identifier()`, so the bytes handed
+over are the ones `string_at_path()` built rather than an argument a case
+chose, and `a C string at the path method answers no bundle` holds the fixture
+to the rule. Returning the path unchanged from `string_at_path()` turns the
+first two red; making the fixture accept bytes at those selectors turns the
+third red.
 
 The `matchVia` cases hand the constructor one combination of the two branches
 at a time: Safari matched through `Classes` while its identifier does not
@@ -167,24 +182,26 @@ run before the C cases, because a dylib dyld will not load makes every host
 decision below moot.
 
 Right after the signature checks, `run.sh` reads the slice the package is built
-from, `build/arm64/WebSafeWebKit.dylib`, and checks three things about it. The
+from, `build/arm64/WebSafeWebKit.dylib`, and checks five things about it. The
 Mach header's cpusubtype has to be 0, the value ld64.lld writes. It was once
 rewritten to the ARM64E subtype 0x80000002, and 1.0.11 crashed on the device
 because of it: with that value dyld signs every pointer it fixes up, including
 the function addresses dlsym answers, and this image branches to them with a
 plain `br`. The control experiment changed that header word alone, back to
 0x0, and the crash stopped while the constructor's own frame stayed in the
-stack.
-It reads `llvm-nm -u` and fails on a symbol with the `___dyld_`
+stack. The header has to carry `LC_DYLD_CHAINED_FIXUPS` and no
+`LC_DYLD_INFO_ONLY`, and `__init_offsets` has to be registered, because those
+two are what made the device execute the constructor at all in 1.0.10. It then
+reads `llvm-nm -u` and fails on a symbol with the `___dyld_`
 prefix, three underscores: the device's own names are `_dyld_*`, so their
 linker-level names are `__dyld_*` with two, and 1.0.7 to 1.0.8 rejected those
 legitimate names with a `^__dyld_` pattern, which is the spelling mistake 1.0.9
 corrected. A passing run prints `the arm64 slice keeps cpusubtype 0x0, so no
 pointer is signed pass` and `the arm64 slice refers to no dyld symbol name the
-device does not export pass`. `build.sh` carries the same two checks on the
-slice it just linked, so a build cannot produce one.
+device does not export pass`. `build.sh` runs the same checks on the slice it
+just linked, so a build cannot produce one that fails them.
 
-The third check reads the disassembly of `_write_file` out of the same slice
+The last check reads the disassembly of `_write_file` out of the same slice
 and fails if the function assigns `w2` before its call to `open`. Darwin's
 `open` is variadic: the mode travels on the stack, and a fixed three-parameter
 declaration makes the compiler put it in `w2` instead, where the device's `open`
@@ -216,6 +233,17 @@ empty string. Each of those is a defect 1.0.9 fixed: the 32-bit `LC_SEGMENT`
 number, a 56-byte section record, a 24-byte string record, a virtual address
 used as a pointer, and a search that looked in `__DATA` alone.
 
+
+`objc_runtime_test.c` compiles `src/objc_runtime.c` against a recorder rather
+than the object fixture: `dlsym` answers NULL for every method name, the three
+runtime entry points answer stub addresses, and the two path selectors record
+the argument they were handed. `a path method is handed an object, not a C
+string` and `the manifest reader is handed an object too` read that record and
+require the argument to be the object a case passed, with no text argument
+beside it. They hold the wrappers in `src/objc_runtime.c` to passing the
+argument through unchanged; they do not reach `src/bundle_lookup.c`, so a lookup
+that goes back to handing the path over as bytes leaves both green. The cases in
+`test_main.c` named above are the ones that fail then.
 
 `dyld_lookup_test.c` covers the one thing `test_main.c` cannot see. That file
 stubs `symbol_find` and `symbol_find_global` whole, so a wrong handle inside

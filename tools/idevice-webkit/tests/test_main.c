@@ -636,6 +636,34 @@ int main(void) {
   idevice_webkit_start();
   expect_placeholder("an executable path is not a bundle", 2, "classes");
 
+  /* The two path methods declare an NSString argument, so the lookup has to
+     build one; a C string there is read as an isa by Foundation and the device
+     stops on it. These cases read that lookup at its entry, so the bytes
+     handed to the message are the ones the lookup itself builds, not an
+     argument a case chooses. The third case holds the fixture to the same
+     rule: an object it holds is answered and a C string is not, which is what
+     makes the two above them fail when the lookup goes back to handing bytes
+     over. */
+
+  prepare(safari, installed_self, 1);
+  add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
+  add_manifest(manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+               "com.apple.mobilesafari");
+  {
+    char identifier[plist_value_capacity];
+    expect("a bundle directory answers its identifier at the entry",
+           bundle_path_identifier("/Applications/MobileSafari.app", identifier,
+                                  sizeof(identifier)) &&
+               strcmp(identifier, "com.apple.mobilesafari") == 0);
+    expect("  a manifest file answers its identifier the same way",
+           plist_file_identifier(manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+                                 identifier, sizeof(identifier)) &&
+               strcmp(identifier, "com.apple.mobilesafari") == 0);
+    expect("  a C string at the path method answers no bundle",
+           objc_send_object_text(objc_class("NSBundle"), objc_selector("bundleWithPath:"),
+                                 "/Applications/MobileSafari.app") == NULL);
+  }
+
   /* The file of the others is the only one a process that is not a host leaves
      behind, so it has to say which check stopped that process. A host that
      passed both checks writes that file before the copy check and leaves both
