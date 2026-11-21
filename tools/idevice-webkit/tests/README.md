@@ -1,8 +1,11 @@
 # idevice-webkit tests
 
 `test_main.c` compiles the same `src/` files the dylib is built from and
-replaces the three dyld image table functions, the two Foundation lookups and
-the file writer with test versions. The writer is replaced because the dylib
+replaces three sets of calls with test versions: the three dyld image table
+functions (`_dyld_image_count`, `_dyld_get_image_name`, `_dyld_get_image_header`),
+the Foundation lookups (`NSBundle.bundleWithPath:`, `NSDictionary.dictionaryWithContentsOfFile:`
+and the `NSDictionary.objectForKey:` / `NSString.stringWithUTF8String:` /
+`NSString.UTF8String` accessors), and the Darwin file writer. The writer is replaced because the dylib
 writes with the Darwin `open` flags `0x601`, which a Linux kernel reads as
 `O_WRONLY | O_TRUNC | O_APPEND`; without `O_CREAT` the call fails with
 `ENOENT`. It checks the host decisions of the constructor, not the device

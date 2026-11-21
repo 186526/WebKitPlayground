@@ -7,7 +7,16 @@
 #
 #   ARCH=arm64  ./build.sh     one slice for the arm64 hosts
 #   ARCH=arm64e ./build.sh     one slice for the arm64e hosts
-#   lipo -create build/arm64/... build/arm64e/... -output WebSafeWebKit.dylib
+#   lipo -create build/arm64/... build/arm64e/... -output build/WebSafeWebKit.dylib
+#
+# The installable artifact is the lipo output. A slice on its own only loads in
+# a process of its own architecture.
+#
+# clang writes the arm64e CPU subtype ARM64E (0x80000002) into its objects, but
+# ld64.lld stamps every output as ARM64 ALL (0x00000000). Two slices with that
+# subtype are indistinguishable to lipo, which refuses to put them in one file,
+# and a device has no way to tell the arm64e slice from the arm64 one. The
+# header subtype is therefore restored to ARM64E in the arm64e output.
 #
 # CLANG may hold a command with spaces, such as "xcrun -sdk iphoneos clang".
 set -euo pipefail
@@ -40,6 +49,9 @@ link_flags=(
   -install_name "${install_name}"
 )
 
+arm64e_subtype=0x80000002
+mach_header_subtype_offset=8
+
 mkdir -p "$output_dir/obj"
 
 command -v "${clang_command[0]}" >/dev/null || {
@@ -56,6 +68,15 @@ for source in "$here"/src/*.c; do
 done
 
 "$linker" "${link_flags[@]}" -o "$output_dir/WebSafeWebKit.dylib" "${objects[@]}"
+
+if [ "$arch" = "arm64e" ]; then
+  subtype="$(od -An -t u4 -j "$mach_header_subtype_offset" -N 4 "$output_dir/WebSafeWebKit.dylib" | tr -d ' ')"
+  if [ "$subtype" != "0" ]; then
+    echo "unexpected arm64e cpusubtype: $subtype" >&2
+    exit 1
+  fi
+  printf "\002\000\000\200" | dd of="$output_dir/WebSafeWebKit.dylib" bs=1 seek="$mach_header_subtype_offset" conv=notrunc status=none
+fi
 
 echo "arch: $arch"
 echo "built: $output_dir/WebSafeWebKit.dylib"

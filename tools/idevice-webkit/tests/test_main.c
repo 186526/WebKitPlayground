@@ -168,6 +168,8 @@ int main(void) {
       "/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app/Chrome";
   const char *wechat =
       "/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app/WeChat";
+  const char *wechat_private_container =
+      "/private/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app/WeChat";
   const char *wechat_in_bootstrap =
       "/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus/Applications/WeChat.app/WeChat";
 
@@ -182,7 +184,11 @@ int main(void) {
             manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
             "/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
             "com.tencent.xin");
-  case_host("wechat container is a host on the plain name", wechat,
+  /* The container is also reached through its /private/var path, which the
+     mapping strips down to /var, so the manifest name is the one the
+     /var/containers form above already uses. */
+
+  case_host("wechat container below /private/var is a host", wechat_private_container,
             manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
             "/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
             "com.tencent.xin");
