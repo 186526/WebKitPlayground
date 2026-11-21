@@ -10,6 +10,7 @@
 #define guest_prefix "/private/preboot/"
 #define host_manifest_prefix "com.websafe.idevice.host."
 #define manifest_suffix ".plist"
+#define filter_file_name "WebSafeWebKitFilter.plist"
 #define report_file_name "com.websafe.idevice.plist"
 #define marker_file_name "com.websafe.idevice.ready"
 #define framework_path "/var/jb/Library/Frameworks/WebKit.framework/WebKit"
@@ -21,6 +22,7 @@
    the device build leaves them at their default. */
 extern char idevice_webkit_report_path[256];
 extern char idevice_webkit_marker_path[256];
+extern char idevice_webkit_filter_path[256];
 
 void idevice_webkit_start(void);
 

@@ -16,4 +16,10 @@ bool bundle_path_identifier(const char *bundlePath, char *out, usize capacity);
 
 bool plist_file_identifier(const char *plistPath, char *out, usize capacity);
 
+/* Resolves a Foundation selector of the form "ClassName.selector" in the
+   loaded Foundation image. The ellekit filter is read back through the same
+   lookup, so its answers come from the same Foundation the host runs. */
+
+void *foundation_symbol(const char *name);
+
 #endif

@@ -4,6 +4,7 @@
 #include "dylib_report.h"
 #include "dyld_lookup.h"
 #include "file_writer.h"
+#include "filter_match.h"
 #include "macho_image.h"
 #include "stage_clock.h"
 #include "textkit.h"
@@ -26,6 +27,7 @@ typedef struct host_images {
 
 char idevice_webkit_report_path[256];
 char idevice_webkit_marker_path[256];
+char idevice_webkit_filter_path[256];
 static char manifest_name[path_capacity];
 static char manifest_path[path_capacity];
 static char guest_path[path_capacity];
@@ -205,11 +207,14 @@ static bool write_report(void) {
 
 /* The placeholder decides whether the dylib writes a report, not whether it
    loads WebKit, so it is always read: a process outside the host set leaves
-   behind only its own placeholder report. */
+   behind only its own placeholder report. The stage is the one the
+   constructor had already reached, so a process the filter did not match
+   reports the entry stage while a UIApplication process reports the filter
+   stage even though it named no host. */
 
 static void write_placeholder(const char *bundleIdentifier) {
   dylib_report_begin(bundleIdentifier);
-  stage_reach(stage_entered);
+  stage_reach(stage_current());
   write_report();
 }
 
@@ -346,6 +351,18 @@ static void default_report_paths(void) {
   }
 }
 
+/* The filter and the dylib sit in the same directory, and libinjector finds
+   the filter by that neighbourhood. The path below is the one a test points
+   at a file it owns, and the default when it is empty. */
+
+static void filter_file_path(char *out, usize capacity) {
+  if (idevice_webkit_filter_path[0] != 0) {
+    text_copy(out, idevice_webkit_filter_path, capacity);
+    return;
+  }
+  join(out, capacity, tweak_directory, filter_file_name);
+}
+
 /* The pause after each write lets a second launch write a later stage over
    the report of the first one; without it the file keeps the stage of the
    first write, because the following writes happen after the last read. */
@@ -360,19 +377,32 @@ static void report_stage(void) {
    constructor called» and the question «was it the installed copy» then have
    different answers on disk. When the entry report cannot be written, nothing
    later would be readable either, and the dylib stops instead of overwriting
-   a report the installed copy already wrote. */
+   a report the installed copy already wrote.
+
+   The write after it names how the filter matched, because ellekit loads the
+   dylib into every process the filter hits and the WebKit subprocesses of a
+   host carry no UIApplication and no identifier this dylib can read. A
+   subprocess therefore stops at the filter stage with matchVia at none, while
+   the main application goes on through the stages above and names its match.
+   The filter is read again from disk, as an ordinary dictionary, because
+   ellekit keeps the matching inside libinjector. */
 
 void idevice_webkit_start(void) {
   if (stage_current() != 0) {
     return;
   }
+  char filterPath[path_capacity];
   default_report_paths();
+  filter_file_path(filterPath, sizeof(filterPath));
   dylib_report_begin("");
   stage_reach(stage_entered);
   if (!write_report()) {
     return;
   }
   usleep(stage_pause_microseconds);
+  filter_match_report(filterPath);
+  stage_reach(stage_filter_read);
+  report_stage();
   const char *selfPath = self_image_path();
   const char *reason = installed_copy_reason(selfPath);
   dylib_report_set_self(selfPath, reason == NULL, reason);

@@ -1,5 +1,6 @@
 #include "fake_bundle.h"
 #include "fake_dyld.h"
+#include "fake_filter.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,12 +16,15 @@
 #include "../src/dylib_report.c"
 #include "../src/macho_image.c"
 #include "fixtures/fake_bundle.c"
+#include "fixtures/fake_filter.c"
 #include "fixtures/fake_dyld.c"
+#include "../src/filter_match.c"
 #include "../src/idevice_webkit.c"
 
 #define maximum_report_size 4096
 #define work_directory_name "/idevice-webkit-test"
 static char work_directory[256];
+
 
 void *library_load(const char *path) {
   (void)path;
@@ -28,6 +32,22 @@ void *library_load(const char *path) {
 }
 char *library_last_error(void) {
   return "test: no framework";
+}
+/* The constructor reaches the Objective-C runtime and Foundation through the
+   two lookups dyld_lookup.c and bundle_lookup.c make. The class lookup takes
+   no library and answers by the name it is given, so a case registers the
+   class names the process has; the other lookup reads the filter table. */
+
+void *symbol_find(void *library, const char *name) {
+  (void)library;
+  if (strcmp(name, "objc_getClass") == 0) {
+    return (void *)fake_class_named;
+  }
+  return NULL;
+}
+
+void *foundation_symbol(const char *name) {
+  return fake_foundation_symbol(name);
 }
 
 static int failures = 0;
@@ -90,15 +110,19 @@ static char *read_report(const char *path) {
    way NSBundle.bundleWithPath: reads it, so every case registers the directory
    in place of the executable inside it. */
 
+
 static void prepare(const char *host, const char *self, int withWebKit) {
   fake_reset(host, "/private/var/mobile/Library/Preferences/com.apple.prefs.plist",
              withWebKit ? "/var/jb/Library/Frameworks/WebKit.framework/WebKit" : 0, self);
 
   fake_bundles_reset();
+  fake_filters_reset(idevice_webkit_filter_path);
+
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
   stage_reset();
   remove(idevice_webkit_report_path);
   remove(idevice_webkit_marker_path);
-
 }
 
 static void add_bundle(const char *path, const char *identifier) {
@@ -111,15 +135,23 @@ static void add_manifest(const char *path, const char *identifier) {
   fake_plist_add(path, identifier);
 }
 
-/* A process outside the host set leaves a placeholder report behind: stage 1,
-   an empty bundle identifier and no handle. The marker holds the decision of
-   the dylib, so a placeholder is no marker. */
+/* A process outside the host set leaves a placeholder report behind: an
+   empty bundle identifier, no handle and no marker, and whichever branch of
+   the filter was given; a subprocess the filter does not name stops at the
+   entry stage, while a UIApplication process goes on to name its match. A
+   placeholder keeps the class match, because the filter of such a process
+   named UIApplication and the report must say so. */
 
-static void expect_placeholder(const char *name) {
+static void expect_placeholder(const char *name, int stage, const char *via) {
   char *report = read_report(idevice_webkit_report_path);
-  expect(name, report != NULL && found_in(report, "<integer>1</integer>") &&
+  char stageText[32];
+  char matchText[80];
+  snprintf(stageText, sizeof(stageText), "<integer>%d</integer>", stage);
+  snprintf(matchText, sizeof(matchText), "<key>matchVia</key>\n\t<string>%s</string>", via);
+  expect(name, report != NULL && found_in(report, stageText) &&
                    found_in(report, "<key>bundleId</key>\n\t<string></string>") &&
                    found_in(report, "<key>handleOk</key>\n\t<false/>") &&
+                   found_in(report, matchText) &&
                    read_report(idevice_webkit_marker_path) == NULL);
 }
 
@@ -151,7 +183,7 @@ static void expect_self(const char *name, const char *imagePath, const char *rea
 
 static void expect_not_installed(const char *name, const char *imagePath, const char *reason) {
   char *report = read_report(idevice_webkit_report_path);
-  expect(name, report != NULL && found_in(report, "<integer>2</integer>") &&
+  expect(name, report != NULL && found_in(report, "<integer>3</integer>") &&
                    found_in(report, "<key>bundleId</key>\n\t<string></string>") &&
                    found_in(report, "<key>handleOk</key>\n\t<false/>") &&
                    read_report(idevice_webkit_marker_path) == NULL);
@@ -165,19 +197,26 @@ static void list_host(const char *host, const char *manifest, const char *identi
 
 /* A listed host leaves the holding stage behind, the last stage the
    constructor reaches, and names the copy that was called with no failed
-   check beside it. */
+   check beside it. The class branch is read first, as libinjector reads it,
+   so a UIApplication process that is also listed in Bundles reports classes. */
 
 static void case_host(const char *name, const char *host, const char *manifest,
                       const char *bundle, const char *identifier, const char *self) {
   prepare(host, self, 1);
 
   list_host(bundle, manifest, identifier);
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
+  fake_filter_add_bundle(identifier);
+  fake_bundle_register(identifier);
   idevice_webkit_start();
   char *report = read_report(idevice_webkit_report_path);
   expect(name, report != NULL);
   if (report != NULL) {
-    expect("  report reaches the holding stage", found_in(report, "<integer>6</integer>"));
+    expect("  report reaches the holding stage", found_in(report, "<integer>7</integer>"));
     expect("  report records the bundle identifier", found_in(report, identifier));
+    expect("  the class branch is read first, so matchVia is classes",
+           found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
     expect("  marker is written next to the report", read_report(idevice_webkit_marker_path) != NULL);
     expect_self("  report names the installed copy with no failed check", self, "");
   }
@@ -192,15 +231,18 @@ int main(void) {
   }
   snprintf(idevice_webkit_report_path, sizeof(idevice_webkit_report_path),
            "%s/com.websafe.idevice.plist", work_directory);
+  snprintf(idevice_webkit_filter_path, sizeof(idevice_webkit_filter_path),
+           "%s/WebSafeWebKitFilter.plist", work_directory);
   snprintf(idevice_webkit_marker_path, sizeof(idevice_webkit_marker_path),
            "%s/com.websafe.idevice.ready", work_directory);
   char command[300];
   snprintf(command, sizeof(command), "mkdir -p %s", work_directory);
   system(command);
-  printf("stages: entered=%u not-installed=%u bundle=%u attempted=%u written=%u holding=%u\n",
-         (unsigned)stage_entered, (unsigned)stage_not_installed_copy,
-         (unsigned)stage_bundle_resolved, (unsigned)stage_attempted,
-         (unsigned)stage_report_written, (unsigned)stage_holding);
+  printf("stages: entered=%u filter=%u not-installed=%u bundle=%u attempted=%u written=%u holding=%u\n",
+         (unsigned)stage_entered, (unsigned)stage_filter_read,
+         (unsigned)stage_not_installed_copy, (unsigned)stage_bundle_resolved,
+         (unsigned)stage_attempted, (unsigned)stage_report_written,
+         (unsigned)stage_holding);
 
   /* The three host paths below were read from the device. */
 
@@ -253,13 +295,137 @@ int main(void) {
   prepare(safari, installed_self, 1);
   add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
   idevice_webkit_start();
-  expect_placeholder("host without a manifest leaves a placeholder");
+  expect_placeholder("host without a manifest leaves a placeholder", 2, "classes");
 
   prepare(safari, preboot_self, 1);
   add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
   add_manifest(manifest_path_for("-Applications-MobileSafari.app-MobileSafari"), "com.tencent.xin");
   idevice_webkit_start();
-  expect_placeholder("manifest naming another bundle leaves a placeholder");
+  expect_placeholder("manifest naming another bundle leaves a placeholder", 2, "classes");
+
+  /* The filter names a class and a bundle list, and every case below hands
+     the constructor one combination of the two. The class of the template is
+     the one a main application has; a WebKit subprocess has none of it and is
+     not in the bundle list either, so it stops at the entry report. */
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
+  fake_filter_add_bundle("com.apple.mobilesafari");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("Safari is matched through Classes though Bundles cannot resolve it",
+         report != NULL &&
+             !found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
+             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>") &&
+             found_in(report, "<integer>7</integer>"));
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_bundle("com.apple.mobilesafari");
+  fake_bundle_register("com.apple.mobilesafari");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a filter without Classes is matched through Bundles",
+         report != NULL &&
+             found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
+             found_in(report, "<integer>7</integer>"));
+
+  prepare(wechat, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_bundle("com.tencent.xin");
+  fake_bundle_register("com.tencent.xin");
+  list_host("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("an identifier in the registry is matched through Bundles",
+         report != NULL &&
+             found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
+             found_in(report, "<integer>7</integer>"));
+
+  prepare(wechat, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
+  fake_filter_add_bundle("com.tencent.xin");
+  fake_bundle_register("another.application");
+  list_host("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("an identifier the registry does not name falls back to Classes",
+         report != NULL &&
+             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>") &&
+             found_in(report, "<integer>7</integer>"));
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_class("AWebContentProcessClass");
+  fake_filter_add_bundle("com.apple.WebKit.WebContent");
+  idevice_webkit_start();
+  expect_placeholder("a WebKit subprocess stops after the filter with matchVia none", 2, "none");
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_bundle("com.apple.mobilesafari");
+  fake_bundle_register("com.tencent.xin");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a system app outside the registry is not matched through Bundles",
+         report != NULL &&
+             found_in(report, "<key>matchVia</key>\n\t<string>none</string>") &&
+             found_in(report, "<integer>7</integer>"));
+
+  /* The four hosts below lose their manifest one at a time. The report is
+     still written, and it says how the process was matched, because the match
+     was decided before the manifest was read. */
+
+  prepare(safari, installed_self, 1);
+  add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("Safari without its manifest still reports the class match",
+         report != NULL && found_in(report, "<integer>2</integer>") &&
+             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
+
+  prepare(wechat, installed_self, 1);
+  add_bundle("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
+             "com.tencent.xin");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("WeChat without its manifest still reports the class match",
+         report != NULL && found_in(report, "<integer>2</integer>") &&
+             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
+
+  prepare(chrome, installed_self, 1);
+  add_bundle("/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app",
+             "com.google.chrome.ios");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("Chrome without its manifest still reports the class match",
+         report != NULL && found_in(report, "<integer>2</integer>") &&
+             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
+
+  prepare("/Applications/SafariViewService.app/SafariViewService", installed_self, 1);
+  add_bundle("/Applications/SafariViewService.app", "com.apple.SafariViewService");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("SafariViewService without its manifest still reports the class match",
+         report != NULL && found_in(report, "<integer>2</integer>") &&
+             found_in(report, "<key>matchVia</key>\n\t<string>classes</string>"));
 
   /* NSBundle.bundleWithPath: answers for the .app directory, not for the
      executable inside it, so an executable registered with an identifier is
@@ -269,7 +435,7 @@ int main(void) {
   list_host(safari, manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
             "com.apple.mobilesafari");
   idevice_webkit_start();
-  expect_placeholder("an executable path is not a bundle");
+  expect_placeholder("an executable path is not a bundle", 2, "classes");
 
   prepare(safari, test_self, 1);
   list_host("/Applications/MobileSafari.app",
@@ -312,7 +478,7 @@ int main(void) {
   idevice_webkit_start();
   report = read_report(idevice_webkit_report_path);
   expect("the host is image 0, not the last image",
-         report != NULL && found_in(report, "<integer>6</integer>"));
+         report != NULL && found_in(report, "<integer>7</integer>"));
 
   /* The same Chrome process and manifest, with the dylib called from a test
      directory: the entry report is the only file written, and its stage 2
@@ -332,7 +498,7 @@ int main(void) {
   add_manifest(manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
              "com.tencent.xin");
   idevice_webkit_start();
-  expect_placeholder("a process that is not an app leaves a placeholder");
+  expect_placeholder("a process that is not an app leaves a placeholder", 2, "classes");
 
   prepare(chrome, installed_self, 0);
   list_host("/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app",

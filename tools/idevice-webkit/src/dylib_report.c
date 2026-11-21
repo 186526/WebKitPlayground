@@ -15,6 +15,7 @@ typedef struct report_record {
   char image_version[plist_value_capacity];
   char self_image[plist_value_capacity];
   char self_error[plist_value_capacity];
+  char match_via[16];
   char timestamp[24];
   char stage[16];
 } report_record;
@@ -88,9 +89,18 @@ static void append_text(char *document, usize *position, const char *key, const 
   append(document, position, "</string>\n");
 }
 
+/* The match belongs to the process, not to one write of the report, so a
+   begin() that runs after the filter was read keeps the answer it holds. The
+   entry report runs begin() first, when the field is empty, and that is the
+   one report that says match_none. */
+
 void dylib_report_begin(const char *bundleIdentifier) {
   clock_value now = {0, 0};
+  char match[sizeof(record.match_via)];
+  bool matched = record.match_via[0] != 0;
+  text_copy(match, record.match_via, sizeof(match));
   text_set(&record, 0, sizeof(record));
+  text_copy(record.match_via, matched ? match : match_none, sizeof(record.match_via));
   text_copy(record.bundle_identifier, bundleIdentifier, sizeof(record.bundle_identifier));
   text_copy(record.dlopen_status, "false", sizeof(record.dlopen_status));
   text_copy(record.stage, "0", sizeof(record.stage));
@@ -118,6 +128,10 @@ void dylib_report_set_self(const char *imagePath, bool installedCopy, const char
   text_copy(record.self_error, installedCopy ? "" : reason, sizeof(record.self_error));
 }
 
+void dylib_report_set_match(const char *via) {
+  text_copy(record.match_via, via, sizeof(record.match_via));
+}
+
 void dylib_report_set_stage(u32 stage) {
   render_number(record.stage, sizeof(record.stage), (i64)stage);
 }
@@ -141,6 +155,7 @@ bool dylib_report_write(const char *path) {
   append_text(document, &position, "imageVersion", record.image_version);
   append_text(document, &position, "selfImage", record.self_image);
   append_text(document, &position, "selfError", record.self_error);
+  append_text(document, &position, "matchVia", record.match_via);
   append_text(document, &position, "timestamp", record.timestamp);
   append(document, &position, "\t<key>stage</key>\n\t<integer>");
   append(document, &position, record.stage);

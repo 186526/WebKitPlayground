@@ -11,7 +11,7 @@ static void *foundation_image(void) {
   return library_find("/System/Library/Frameworks/Foundation.framework/Foundation");
 }
 
-static void *foundation_symbol(const char *name) {
+void *foundation_symbol(const char *name) {
   void *foundation = foundation_image();
   return foundation == NULL ? NULL : symbol_find(foundation, name);
 }
