@@ -13,7 +13,7 @@
 bool write_file(const char *path, const char *bytes, usize length) {
   FILE *file = fopen(path, "wb");
   if (file == NULL) {
-    printf("write failed: %s\n", path);
+    perror(path);
     return false;
   }
   usize written = length == 0 ? 0 : fwrite(bytes, 1, length, file);

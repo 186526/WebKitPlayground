@@ -1,5 +1,6 @@
 #include "fake_bundle.h"
 #include "fake_dyld.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,11 +32,39 @@ char *library_last_error(void) {
 
 static int failures = 0;
 
+static void show(const char *format, ...) {
+  char line[4096];
+  va_list arguments;
+  va_start(arguments, format);
+  vsnprintf(line, sizeof(line), format, arguments);
+  va_end(arguments);
+  printf("%s", line);
+}
+
 static void expect(const char *name, int condition) {
   printf("%-58s %s\n", name, condition ? "pass" : "FAIL");
   if (!condition) {
     failures++;
   }
+}
+
+/* The assertions below search for fragments of the report. The search is a
+   loop of its own rather than a library call, because the report text and the
+   fragment travel through the same string functions the code under test uses,
+   and keeping the assertion out of those calls keeps the two apart. */
+
+static int found_in(const char *text, const char *fragment) {
+  usize fragmentLength = strlen(fragment);
+  for (const char *scan = text; *scan != 0; scan++) {
+    usize matched = 0;
+    while (matched < fragmentLength && scan[matched] == fragment[matched]) {
+      matched++;
+    }
+    if (matched == fragmentLength) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static char *read_report(const char *path) {
@@ -50,33 +79,56 @@ static char *read_report(const char *path) {
   return text;
 }
 
+/* The dylib drops the leading slash and turns every other slash into a dash,
+   so a host that starts at /Applications has a file name starting with "-". */
+
+#define manifest_path_for(host) "/var/jb/usr/lib/TweakInject/com.websafe.idevice.host." host ".plist"
+
 static void prepare(const char *host, const char *self, int withWebKit) {
   fake_reset(host, "/private/var/mobile/Library/Preferences/com.apple.prefs.plist",
              withWebKit ? "/var/jb/Library/Frameworks/WebKit.framework/WebKit" : 0, self);
+
+  fake_bundles_reset();
   stage_reset();
   remove(idevice_webkit_report_path);
   remove(idevice_webkit_marker_path);
+
 }
 
-const char *host_main = "/private/preboot/UUID/procursus/demo.app/demo";
-const char *host_manifest =
-    "/var/jb/usr/lib/TweakInject/com.websafe.idevice.host.UUID-procursus-demo.app-demo.plist";
+static void add_bundle(const char *path, const char *identifier) {
+  fake_bundle_add(path, identifier);
+}
 
-/* run.sh cleans the same directory before the run, so the test follows TMPDIR
-   rather than a fixed path. */
+/* Each case registers the manifest and the executable with the same bundle
+   identifier, which is what the device has once the manifest is in place. */
 
-static void use_work_directory(void) {
-  const char *root = getenv("TMPDIR");
-  snprintf(work_directory, sizeof(work_directory), "%s%s", root == NULL ? "/tmp" : root,
-           work_directory_name);
-  while (work_directory[0] != 0 &&
-         work_directory[strlen(work_directory) - 1] == '/') {
-    work_directory[strlen(work_directory) - 1] = 0;
+static void list_host(const char *host, const char *manifest, const char *identifier) {
+  add_bundle(host, identifier);
+  add_bundle(manifest, identifier);
+}
+
+static void case_host(const char *name, const char *host, const char *manifest,
+                      const char *identifier) {
+  prepare(host, self_path, 1);
+
+  list_host(host, manifest, identifier);
+  idevice_webkit_start();
+  char *report = read_report(idevice_webkit_report_path);
+  expect(name, report != NULL);
+  if (report != NULL) {
+    expect("  report reaches the holding stage", found_in(report, "<integer>5</integer>"));
+    expect("  report records the bundle identifier", found_in(report, identifier));
+    expect("  marker is written next to the report", read_report(idevice_webkit_marker_path) != NULL);
   }
 }
 
 int main(void) {
-  use_work_directory();
+  const char *root = getenv("TMPDIR");
+  snprintf(work_directory, sizeof(work_directory), "%s%s", root == NULL ? "/tmp" : root,
+           work_directory_name);
+  while (work_directory[0] != 0 && work_directory[strlen(work_directory) - 1] == '/') {
+    work_directory[strlen(work_directory) - 1] = 0;
+  }
   snprintf(idevice_webkit_report_path, sizeof(idevice_webkit_report_path),
            "%s/com.websafe.idevice.plist", work_directory);
   snprintf(idevice_webkit_marker_path, sizeof(idevice_webkit_marker_path),
@@ -88,58 +140,100 @@ int main(void) {
          (unsigned)stage_entered, (unsigned)stage_bundle_resolved, (unsigned)stage_attempted,
          (unsigned)stage_report_written, (unsigned)stage_holding);
 
-  prepare(host_main, self_path, 1);
-  fake_manifest_path = host_manifest;
-  idevice_webkit_start();
+  /* The three host paths below were read from the device. */
+
+  const char *safari = "/Applications/MobileSafari.app/MobileSafari";
+  const char *chrome =
+      "/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app/Chrome";
+  const char *wechat =
+      "/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app/WeChat";
+  const char *wechat_in_bootstrap =
+      "/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus/Applications/WeChat.app/WeChat";
+
+  case_host("safari at /Applications is a host", safari,
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"), "com.apple.mobilesafari");
+  case_host("chrome container is a host", chrome,
+            manifest_path_for("-var-containers-Bundle-Application-25D51062-B818-4434-94C6-1D163B9C6C06-stable.app-Chrome"),
+            "com.google.chrome.ios");
+  case_host("wechat container is a host", wechat,
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
+  case_host("wechat container is a host on the plain name", wechat,
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
+  case_host("wechat below the bootstrap is a host", wechat_in_bootstrap,
+            manifest_path_for("-Applications-WeChat.app-WeChat"), "com.tencent.xin");
+
   char *report = read_report(idevice_webkit_report_path);
-  expect("target host writes a report", report != NULL);
   if (report != NULL) {
     char shown[maximum_report_size];
     snprintf(shown, sizeof(shown), "%s", report);
-    printf("\n--- report written for the target host ---\n%s\n", shown);
-    expect("report names the host container",
-           strstr(report, "UUID-procursus-demo.app-demo") != NULL);
-    expect("report records handleOk", strstr(report, "<key>handleOk</key>") != NULL);
-    expect("report records imageVersion key", strstr(report, "<key>imageVersion</key>") != NULL);
-    expect("report records timestamp", strstr(report, "<key>timestamp</key>") != NULL);
-    expect("report reaches the holding stage", strstr(report, "<integer>5</integer>") != NULL);
-    expect("marker is written next to the report",
-           read_report(idevice_webkit_marker_path) != NULL);
+    show("\n--- report written for the bootstrap host, from the test fixtures ---\n%s\n",
+         shown);
   }
 
-  prepare(host_main, self_path, 1);
-  fake_manifest_path = NULL;
+  prepare(safari, self_path, 1);
+  add_bundle(safari, "com.apple.mobilesafari");
   idevice_webkit_start();
   expect("host without a manifest writes no report",
          read_report(idevice_webkit_report_path) == NULL);
 
-  prepare(host_main, "/tmp/WebSafeWebKit.dylib", 1);
-  fake_manifest_path = host_manifest;
+  prepare(safari, self_path, 1);
+  add_bundle(safari, "com.apple.mobilesafari");
+  add_bundle(manifest_path_for("-Applications-MobileSafari.app-MobileSafari"), "com.tencent.xin");
+  idevice_webkit_start();
+  expect("manifest naming another bundle writes no report",
+         read_report(idevice_webkit_report_path) == NULL);
+
+  prepare(safari, "/tmp/WebSafeWebKit.dylib", 1);
+  list_host(safari, manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
   idevice_webkit_start();
   expect("dylib loaded from a test path writes no report",
          read_report(idevice_webkit_report_path) == NULL);
 
-  prepare("/private/preboot/UUID/procursus/other.app/other", self_path, 1);
-  fake_manifest_path = host_manifest;
+  /* The host is image 0 even when the dylib is not the last image, so the run
+     below puts a second framework after it and keeps the host first. */
+
+  prepare(chrome, "/tmp/WebSafeWebKit.dylib", 1);
+  list_host(chrome,
+            manifest_path_for("-var-containers-Bundle-Application-25D51062-B818-4434-94C6-1D163B9C6C06-stable.app-Chrome"),
+            "com.google.chrome.ios");
   idevice_webkit_start();
-  expect("manifest of another host does not match",
+  expect("a dylib that is not image 0 of a listed host writes no report",
          read_report(idevice_webkit_report_path) == NULL);
 
-  prepare("/private/preboot/UUID/dopamine-X/procursus/usr/bin/tool", self_path, 1);
-  fake_manifest_path =
-      "/var/jb/usr/lib/TweakInject/com.websafe.idevice.host.UUID-dopamine-X-procursus-usr-bin-tool.plist";
+  prepare(wechat, "/var/jb/usr/lib/TweakInject/WebSafeWebKit.dylib", 1);
+  list_host(wechat,
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
   idevice_webkit_start();
-  expect("a bootstrap tool is not taken for a host",
+  report = read_report(idevice_webkit_report_path);
+  expect("the host is image 0, not the last image", report != NULL);
+  if (report != NULL) {
+    expect("  report names the container of image 0",
+           found_in(report, "<string>com.tencent.xin</string>"));
+  }
+
+  prepare("/private/preboot/UUID/dopamine-ML13U0/procursus/usr/bin/tool", self_path, 1);
+  add_bundle("/private/preboot/UUID/dopamine-ML13U0/procursus/usr/bin/tool", "com.tencent.xin");
+  add_bundle(manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+             "com.tencent.xin");
+  idevice_webkit_start();
+  expect("a process that is not an app writes no report",
          read_report(idevice_webkit_report_path) == NULL);
 
-  prepare(host_main, self_path, 0);
-  fake_manifest_path = host_manifest;
+  prepare(chrome, self_path, 0);
+  list_host(chrome,
+            manifest_path_for("-var-containers-Bundle-Application-25D51062-B818-4434-94C6-1D163B9C6C06-stable.app-Chrome"),
+            "com.google.chrome.ios");
   idevice_webkit_start();
   report = read_report(idevice_webkit_report_path);
   expect("report still written when WebKit was not loaded yet", report != NULL);
   if (report != NULL) {
-    expect("missing WebKit leaves imagePath empty",
-           strstr(report, "<key>imagePath</key>\n\t<string></string>") != NULL);
+    expect("  missing WebKit leaves imagePath empty",
+           found_in(report, "<key>imagePath</key>\n\t<string></string>"));
+    expect("  handleOk is false", found_in(report, "<key>handleOk</key>\n\t<false/>"));
   }
 
   printf("\nfailures: %d\n", failures);

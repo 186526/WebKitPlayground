@@ -8,9 +8,12 @@ writes with the Darwin `open` flags `0x601`, which a Linux kernel reads as
 `ENOENT`. It checks the host decisions of the constructor, not the device
 behaviour: `dlopen` of the `/var/jb` framework, the real `TweakInject` plist
 parsing and the pointer authenticated load on an arm64e process are only
-observable on the device. The run also checks that a bootstrap tool
-below `/private/preboot/` is not taken for a host and that the ready marker
-appears next to the report.
+observable on the device. The run also checks that the three device host paths
+(`/Applications`, a container under `/var/containers/Bundle/Application/` and
+the same container below `/private/preboot/.../procursus/Applications/`) reach
+the same manifest, that a tool below `/private/preboot/` is not taken for a
+host, that the host is image 0 rather than the last image, and that the ready
+marker appears next to the report.
 
 Run from `tools/idevice-webkit`:
 

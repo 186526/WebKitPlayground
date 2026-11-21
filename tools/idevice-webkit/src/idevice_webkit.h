@@ -6,6 +6,7 @@
 #define tweak_directory "/var/jb/usr/lib/TweakInject/"
 #define report_directory "/var/jb/var/mobile/Library/Preferences/"
 #define guest_prefix "/private/preboot/"
+#define host_manifest_prefix "com.websafe.idevice.host."
 #define manifest_suffix ".plist"
 #define report_file_name "com.websafe.idevice.plist"
 #define marker_file_name "com.websafe.idevice.ready"
