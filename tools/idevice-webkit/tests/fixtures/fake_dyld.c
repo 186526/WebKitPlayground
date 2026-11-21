@@ -19,6 +19,29 @@ static u32 image_count_value = 0;
 
 static char first_text[fake_path_text];
 static char self_text[fake_path_text];
+static char later_text[fake_path_text];
+
+/* dladdr answers for the image this binary is in. The test picks the answer,
+   including none at all, because the path of the test binary is not what the
+   cases are about. */
+
+static const char *dladdr_answer = 0;
+
+static void fake_dladdr_answers(const char *path) {
+  dladdr_answer = path;
+}
+
+int dladdr(const void *address, dl_info *info) {
+  (void)address;
+  if (dladdr_answer == 0 || info == 0) {
+    return 0;
+  }
+  info->dli_fname = dladdr_answer;
+  info->dli_fbase = (void *)0;
+  info->dli_sname = 0;
+  info->dli_saddr = (void *)0;
+  return 1;
+}
 
 void fake_reset(const char *first, const char *preferences, const char *loaded,
                 const char *self) {
@@ -31,10 +54,23 @@ void fake_reset(const char *first, const char *preferences, const char *loaded,
   }
   if (self == 0) {
     image_paths[image_count_value++] = 0;
+    fake_dladdr_answers(0);
     return;
   }
   text_copy(self_text, self, fake_path_text);
   image_paths[image_count_value++] = self_text;
+  fake_dladdr_answers(self_text);
+}
+
+/* Adds an image after this dylib, the way the Swift runtime libraries arrive
+   after ellekit finishes loading us. The last slot then holds a neighbour, so
+   a lookup that reads it sees the wrong image. */
+
+void fake_load_after_self(const char *path) {
+  if (path != 0 && image_count_value < maximum_images) {
+    text_copy(later_text, path, fake_path_text);
+    image_paths[image_count_value++] = later_text;
+  }
 }
 
 u32 _dyld_image_count(void) {

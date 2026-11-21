@@ -16,8 +16,17 @@
 # whole image, without a message, when the entry names another slot. The magic
 # appears only inside the blob itself, at the offset the entry points to.
 #
+# The CodeDirectory also carries an executable segment record: execSegBase is
+# where the code starts inside __TEXT, execSegLimit is how far it runs, and
+# execSegFlags says how that range may be entered. dyld and the kernel hand
+# this record to the memory system, and a limit of 0 leaves __TEXT outside it,
+# so the very first instruction of the constructor dies with SIGBUS at __TEXT
+# (KERN_PROTECTION_FAILURE) although the image loaded fine. It is 0 unless the
+# signer says otherwise, which is what 1.0.0 through 1.0.5 shipped.
+#
 # The script exits non-zero when the input has no room for the load command, no
-# __LINKEDIT, an existing signature, or is not a thin little-endian dylib.
+# __LINKEDIT or __TEXT, an existing signature, or is not a thin little-endian
+# dylib.
 import hashlib
 import struct
 import sys
@@ -48,6 +57,11 @@ SEGMENT_VMADDR_FIELD = 24
 SEGMENT_VMSIZE_FIELD = 32
 SEGMENT_FILEOFF_FIELD = 40
 SEGMENT_FILESIZE_FIELD = 48
+
+# Byte offsets of the executable segment record inside the CodeDirectory
+# header. execSegBase sits at 64, execSegLimit at 72, execSegFlags at 80.
+CD_EXEC_SEG_BASE_OFFSET = 64
+CD_EXEC_SEG_LIMIT_OFFSET = 72
 
 
 def fail(message):
@@ -88,13 +102,31 @@ def first_section_offset(data, commands):
     return min(offsets)
 
 
-def check_signature(data, dataoff, superblob_length, code_directory_length, code_slots):
-    """Reads the signature back and refuses to write a file dyld would skip.
+def text_segment_size(data, commands, path):
+    """Returns vmsize of __TEXT, the range the executable segment record covers.
+
+    The record's base stays 0, so the limit has to be the whole segment: the
+    kernel maps the code pages inside this range and refuses to execute a
+    constructor that falls outside it."""
+    for command_offset, command, _ in commands:
+        if command == LC_SEGMENT_64 and segment_name(data, command_offset) == "__TEXT":
+            return struct.unpack_from("<Q", data, command_offset + SEGMENT_VMSIZE_FIELD)[0]
+    fail(f"{path} has no __TEXT segment")
+    return 0
+
+
+def check_signature(data, dataoff, superblob_length, code_directory_length, code_slots,
+                    text_size):
+    """Reads the signature back and refuses to write a file the device rejects.
 
     dyld finds the CodeDirectory by slot type 0 in the SuperBlob index. An
     entry that names another slot, which is what writing the blob magic here
     produces, makes dyld drop the whole image without printing anything.
-    """
+
+    The executable segment record has to cover __TEXT. A limit of 0, which is
+    what the field holds when nobody writes it, leaves the code pages outside
+    the range the kernel will execute from, and the constructor dies with
+    SIGBUS on its first instruction although dyld loaded the image."""
     magic, length, count = struct.unpack_from(">III", data, dataoff)
     if magic != CSMAGIC_EMBEDDED_SIGNATURE:
         fail(f"internal error: SuperBlob magic is {magic:#010x}")
@@ -117,6 +149,15 @@ def check_signature(data, dataoff, superblob_length, code_directory_length, code
     if stored_slots != code_slots:
         fail(f"internal error: CodeDirectory lists {stored_slots} slots, "
              f"expected {code_slots}")
+    exec_seg_base = struct.unpack_from(">Q", data, blob + CD_EXEC_SEG_BASE_OFFSET)[0]
+    exec_seg_limit = struct.unpack_from(">Q", data, blob + CD_EXEC_SEG_LIMIT_OFFSET)[0]
+    if exec_seg_base != 0:
+        fail(f"internal error: execSegBase is {exec_seg_base:#x}, expected 0")
+    if exec_seg_limit == 0:
+        fail("internal error: execSegLimit is 0, so __TEXT would not be executable")
+    if exec_seg_limit != text_size:
+        fail(f"internal error: execSegLimit is {exec_seg_limit:#x}, "
+             f"expected the __TEXT size {text_size:#x}")
 
 
 def main():
@@ -149,6 +190,7 @@ def main():
     command_area = MACH_HEADER_SIZE + sizeofcmds
     if command_area + 16 > first_section_offset(data, commands):
         fail(f"{path} has no room for LC_CODE_SIGNATURE in its load commands")
+    text_size = text_segment_size(data, commands, path)
 
     # Layout: the file keeps its bytes, is padded to the signature alignment,
     # and the signature follows. Everything before dataoff is hashed, so the
@@ -194,9 +236,9 @@ def main():
         0,  # teamOffset
         0,  # spare3
         0,  # codeLimit64
-        0,  # execSegBase
-        0,  # execSegLimit
-        0,  # execSegFlags
+        0,  # execSegBase: the code starts at the front of __TEXT
+        text_size,  # execSegLimit: the whole of __TEXT is executable
+        0,  # execSegFlags: not the main binary
     )
     if len(header) != CD_HEADER_SIZE:
         fail(f"internal error: CodeDirectory header is {len(header)} bytes")
@@ -211,7 +253,7 @@ def main():
     if len(data) != dataoff + superblob_length:
         fail(f"internal error: file is {len(data)} bytes, expected {dataoff + superblob_length}")
 
-    check_signature(data, dataoff, superblob_length, code_directory_length, code_slots)
+    check_signature(data, dataoff, superblob_length, code_directory_length, code_slots, text_size)
 
     with open(path, "wb") as target:
         target.write(data)

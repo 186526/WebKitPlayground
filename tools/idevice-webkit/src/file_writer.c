@@ -5,7 +5,7 @@
 #define write_only 0x0001
 #define create_mode 0x0200
 #define truncate_mode 0x0400
-#define file_mode 0644
+#define file_mode 0600
 
 extern int open(const char *path, int flags, int mode);
 extern int close(int descriptor);

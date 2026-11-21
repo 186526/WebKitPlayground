@@ -2,7 +2,8 @@
 
 `test_main.c` compiles the same `src/` files the dylib is built from and
 replaces four sets of calls with test versions: the three dyld image table
-functions (`_dyld_image_count`, `_dyld_get_image_name`, `_dyld_get_image_header`),
+functions (`_dyld_image_count`, `_dyld_get_image_name`, `_dyld_get_image_header`)
+together with `dladdr`,
 the Foundation lookups (`NSBundle.bundleWithPath:`, `NSDictionary.dictionaryWithContentsOfFile:`
 and the `NSDictionary.objectForKey:` / `NSString.stringWithUTF8String:` /
 `NSString.UTF8String` accessors), the Darwin file writer, and the two `dlsym`
@@ -29,6 +30,17 @@ dyld gave in `selfImage` and the failed check in `selfError`. A refused write
 is the last case: `fixtures/host_file_writer.c` can be told to fail, and the
 report an earlier run left then has to stay as it was, because the constructor
 stops at its entry write instead of running on without a report.
+
+The path the constructor reports as its own comes from `dladdr`, not from the
+last slot of the image table, because dyld keeps loading images after this one
+and the Swift runtime libraries take that slot on the device. `fake_dyld.c`
+answers `dladdr` for the address of the constructor with the path `fake_reset`
+recorded, and `fake_load_after_self` appends one more image so that the last
+slot belongs to a neighbour. Two cases use it: an installed copy behind such a
+later image still reaches the holding stage with its own path and no failed
+check, and a test copy behind one still reports
+`self image is not in the TweakInject directory`. Reading the last image again
+turns the first of them red.
 
 `fixtures/fake_bundle.c` answers the way Foundation does rather than by string
 equality: a bundle is a `.app` directory, so registering the executable inside
@@ -89,6 +101,15 @@ report stays byte for byte what it was while the file of the others carries
 the `stage` 2 record of the unrelated app. Removing the split makes that case
 and the five placeholder cases fail.
 
+Every write replaces the report whole, so the file only ever shows the last
+stage of a run. `host_file_writer.c` therefore also keeps a log of the writes
+with their path and the stage each one carried, and `fake_write_log_*` reads
+it. Three cases use it to pin the order on the host path: the first write to
+the main report has to carry stage 4, so a `dylib_report_begin()` that runs
+after `stage_reach(stage_bundle_resolved)` and resets the stage to 0 fails it;
+stage 5 has to reach the disk on its own, because it is the write that carries
+`handleOk` and `error`; and that write has to come after stage 4.
+
 Run from `tools/idevice-webkit`:
 
 ```sh
@@ -102,10 +123,15 @@ then parses the result with its own reader rather than with the signer's code.
 It checks that `LC_CODE_SIGNATURE` is there, that the SuperBlob magic, length
 and blob count match, that the index entry names slot 0, that the offset lands
 on a `0xfade0c02` CodeDirectory of the stated length, and that the index entry
-does not carry the blob magic itself. It then imports the signer as a module
-and hands `check_signature` the shape 1.0.0–1.0.4 wrote; the guard has to exit
-non-zero with a message naming the slot type. A broken signer stops the run
-before the C cases, because a dylib dyld will not load makes every host
+does not carry the blob magic itself. It then reads the executable segment
+record at offsets 64 and 72 of that CodeDirectory and requires `execSegBase` to
+be 0 and `execSegLimit` to equal the `__TEXT` vmsize it built, because a limit
+of 0 leaves the segment outside the range the kernel executes from and the
+constructor dies with SIGBUS on its first instruction. Three more checks import
+the signer as a module and hand `check_signature` shapes it has to reject: the
+1.0.0–1.0.4 slot type, a 0 `execSegLimit`, and a limit short of `__TEXT`; each
+has to exit non-zero with a message naming the field. A broken signer stops the
+run before the C cases, because a dylib dyld will not load makes every host
 decision below moot.
 
 `dyld_lookup_test.c` covers the one thing `test_main.c` cannot see. That file

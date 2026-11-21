@@ -341,13 +341,33 @@ static const char *installed_copy_reason(const char *selfPath) {
   return NULL;
 }
 
-/* The last image is this dylib on the device, but the reason above judges the
-   path and not its position, so a copy that dyld reports elsewhere in the
-   table is still recognised by the directory it sits in. */
+/* The path of this image. dyld does not keep it at a fixed place in the table:
+   the images loaded after this one, such as the Swift runtime libraries, take
+   the last slot, so asking for the last image answers a neighbour. dladdr
+   resolves the address of this function to the image that contains it, which is
+   this one whatever else has loaded since. */
+
+/* Darwin declares this in <dlfcn.h>, which the test build leaves out in favour
+   of its own stubs; the guard keeps one definition per translation unit. */
+
+#ifndef IDEVICE_WEBKIT_DL_INFO
+#define IDEVICE_WEBKIT_DL_INFO
+typedef struct dl_info {
+  const char *dli_fname;
+  void *dli_fbase;
+  const char *dli_sname;
+  void *dli_saddr;
+} dl_info;
+#endif
+
+extern int dladdr(const void *address, dl_info *info);
 
 static const char *self_image_path(void) {
-  u32 imageCount = _dyld_image_count();
-  return imageCount == 0 ? NULL : _dyld_get_image_name(imageCount - 1);
+  dl_info info;
+  if (dladdr((const void *)&self_image_path, &info) == 0 || info.dli_fname == NULL) {
+    return NULL;
+  }
+  return info.dli_fname;
 }
 
 /* The three paths are the defaults until a test points the report at a
@@ -435,12 +455,13 @@ void idevice_webkit_start(void) {
     return;
   }
   write_others = false;
-  stage_reach(stage_bundle_resolved);
   dylib_report_begin(images.identifier);
   dylib_report_set_self(selfPath, true, NULL);
+  stage_reach(stage_bundle_resolved);
   report_stage();
   stage_reach(stage_attempted);
   attempt_load(&images);
+  report_stage();
   stage_reach(stage_report_written);
   report_stage();
   write_file(idevice_webkit_marker_path, "ready\n", 6);

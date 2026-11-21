@@ -332,6 +332,38 @@ int main(void) {
          shown);
   }
 
+  /* The host writes the report five times, and only the last write survives in
+     the file, so the order is read from the log the writer fixture keeps. The
+     first write to the main report is the one that begins it, and it has to
+     carry stage 4: a begin() that runs after stage_reach(4) resets the stage to
+     0 and leaves the first record unreadable by the table that has no 0 row.
+     Stage 5 has to reach the disk on its own, because it is the write that
+     carries handleOk and error. */
+
+  prepare(safari, installed_self, 1);
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  fake_write_log_reset();
+  idevice_webkit_start();
+  {
+    int firstMain = -1;
+    int stage5 = -1;
+    for (int index = 0; index < fake_write_log_length(); index++) {
+      if (fake_write_log_path(index) == idevice_webkit_report_path && firstMain < 0) {
+        firstMain = index;
+      }
+      if (fake_write_log_path(index) == idevice_webkit_report_path &&
+          strcmp(fake_write_log_stage(index), "5") == 0) {
+        stage5 = index;
+      }
+    }
+    expect("the first write to the main report carries stage 4",
+           firstMain >= 0 && strcmp(fake_write_log_stage(firstMain), "4") == 0);
+    expect("stage 5 reaches the main report", stage5 >= 0);
+    expect("  stage 5 comes after stage 4", stage5 > firstMain);
+  }
+
   prepare(safari, installed_self, 1);
   add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
   idevice_webkit_start();
@@ -569,6 +601,38 @@ int main(void) {
   report = read_report(idevice_webkit_report_path);
   expect("the host is image 0, not the last image",
          report != NULL && found_in(report, "\t<integer>7</integer>"));
+
+  /* dyld loads other images after this one, and the Swift runtime libraries
+     take the last slot. Reading that slot answered libswift_RegexParser on the
+     device, so the copy check judged a neighbour and the constructor stopped at
+     stage 3. dladdr resolves the address of the constructor, which stays this
+     image whatever loads afterwards. */
+
+  prepare(safari, installed_self, 1);
+  fake_load_after_self("/usr/lib/swift/libswift_RegexParser.dylib");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a later image does not take the self image's place", report != NULL);
+  if (report != NULL) {
+    expect("  the report still reaches the holding stage",
+           found_in(report, "\t<integer>7</integer>"));
+    expect("  the self image is still the installed copy",
+           found_in(report, "\t<key>selfImage</key>\n\t<string>" installed_self "</string>"));
+    expect("  no failed copy check is recorded",
+           found_in(report, "\t<key>selfError</key>\n\t<string></string>"));
+  }
+
+  prepare(safari, test_self, 1);
+  fake_load_after_self("/usr/lib/swift/libswift_RegexParser.dylib");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  expect_not_installed("a later image does not hide a test copy either", test_self,
+                       "self image is not in the TweakInject directory");
 
   /* The same Chrome process and manifest, with the dylib called from a test
      directory: the entry report is the only file written, and its stage 2

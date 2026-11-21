@@ -9,6 +9,11 @@
 # and 1.0.0 through 1.0.4 shipped exactly that. The assertions below read the
 # written file with a parser of their own, so a regression in the writer is not
 # hidden by the writer's own check.
+#
+# The CodeDirectory also carries an executable segment record. The kernel maps
+# the code pages inside the range execSegBase/execSegLimit describe, and a limit
+# of 0 leaves __TEXT out of it, so the constructor dies with SIGBUS on its first
+# instruction. 1.0.0 through 1.0.5 shipped a limit of 0.
 import importlib.util
 import os
 import struct
@@ -27,6 +32,9 @@ CSMAGIC_EMBEDDED_SIGNATURE = 0xFADE0CC0
 CSMAGIC_CODEDIRECTORY = 0xFADE0C02
 CSSLOT_CODEDIRECTORY = 0
 SUPERBLOB_HEADER_SIZE = 12
+CD_EXEC_SEG_BASE_OFFSET = 64
+CD_EXEC_SEG_LIMIT_OFFSET = 72
+TEXT_VM_SIZE = 0x4000
 
 failures = []
 
@@ -60,7 +68,7 @@ def build_dylib(path):
     text_offset = 0x200
     linkedit_offset = 0x400
     commands = [
-        segment("__TEXT", 0, 0x4000, 0, 0x200, [("__text", text_offset)]),
+        segment("__TEXT", 0, TEXT_VM_SIZE, 0, 0x200, [("__text", text_offset)]),
         segment("__LINKEDIT", 0, 0x4000, linkedit_offset, 0x10, []),
     ]
     sizeofcmds = sum(len(command) for command in commands)
@@ -122,24 +130,63 @@ def main():
         check("the index entry does not carry the blob magic",
               slot_type != CSMAGIC_CODEDIRECTORY)
 
-        # The guard inside the signer has to reject the file 1.0.0-1.0.4 wrote.
+        # The executable segment record has to cover __TEXT, or the kernel
+        # refuses to execute the constructor there. 1.0.0-1.0.5 wrote 0 here.
+        directory = dataoff + entry_offset
+        exec_seg_base = struct.unpack_from(">Q", blob, directory + CD_EXEC_SEG_BASE_OFFSET)[0]
+        exec_seg_limit = struct.unpack_from(">Q", blob, directory + CD_EXEC_SEG_LIMIT_OFFSET)[0]
+        check("the CodeDirectory marks all of __TEXT executable",
+              exec_seg_base == 0 and exec_seg_limit == TEXT_VM_SIZE,
+              "base %#x, limit %#x" % (exec_seg_base, exec_seg_limit))
+
+        # The guard inside the signer has to reject the file 1.0.0-1.0.5 wrote.
         spec = importlib.util.spec_from_file_location("sign_adhoc", SCRIPT)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
         good = bytearray(blob)
         module.check_signature(good, dataoff, length, length - entry_offset,
-                               struct.unpack_from(">I", good, dataoff + entry_offset + 28)[0])
+                               struct.unpack_from(">I", good, dataoff + entry_offset + 28)[0],
+                               TEXT_VM_SIZE)
 
         broken = bytearray(blob)
         struct.pack_into(">I", broken, dataoff + SUPERBLOB_HEADER_SIZE, CSMAGIC_CODEDIRECTORY)
         try:
-            module.check_signature(broken, dataoff, length, length - entry_offset, 1)
+            module.check_signature(broken, dataoff, length, length - entry_offset, 1,
+                                   TEXT_VM_SIZE)
         except SystemExit as error:
             check("the guard rejects the 1.0.0-1.0.4 slot type",
                   "slot type" in str(error), str(error))
         else:
             check("the guard rejects the 1.0.0-1.0.4 slot type", False, "it accepted the file")
+
+        empty_record = bytearray(blob)
+        struct.pack_into(">Q", empty_record, directory + CD_EXEC_SEG_LIMIT_OFFSET, 0)
+        try:
+            module.check_signature(empty_record, dataoff, length, length - entry_offset,
+                                   struct.unpack_from(">I", empty_record,
+                                                      dataoff + entry_offset + 28)[0],
+                                   TEXT_VM_SIZE)
+        except SystemExit as error:
+            check("the guard rejects a 0 execSegLimit",
+                  "execSegLimit" in str(error), str(error))
+        else:
+            check("the guard rejects a 0 execSegLimit", False, "it accepted the file")
+
+        short_record = bytearray(blob)
+        struct.pack_into(">Q", short_record, directory + CD_EXEC_SEG_LIMIT_OFFSET,
+                         TEXT_VM_SIZE // 2)
+        try:
+            module.check_signature(short_record, dataoff, length, length - entry_offset,
+                                   struct.unpack_from(">I", short_record,
+                                                      dataoff + entry_offset + 28)[0],
+                                   TEXT_VM_SIZE)
+        except SystemExit as error:
+            check("the guard rejects an execSegLimit short of __TEXT",
+                  "execSegLimit" in str(error), str(error))
+        else:
+            check("the guard rejects an execSegLimit short of __TEXT", False,
+                  "it accepted the file")
 
     return report()
 
