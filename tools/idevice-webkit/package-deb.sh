@@ -60,7 +60,6 @@ manifest_prefix="com.websafe.idevice.host."
 # the filter and the host manifests, two symlinks into it from TweakInject, and
 # a copy of the filter under var/mobile.
 old_directory="var/jb/usr/lib/websafewebkit"
-old_tweak_links=("$tweak_dir/WebSafeWebKit.dylib" "$tweak_dir/WebSafeWebKit.plist")
 retired_directory="var/jb/var/mobile/WebSafeWebKit"
 retired_filter="$retired_directory/disabled-ellekit-filter.plist"
 
@@ -81,7 +80,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --output) output="$2"; shift 2 ;;
     --arch-dir) slice_root="$2"; shift 2 ;;
-    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
