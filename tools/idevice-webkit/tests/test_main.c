@@ -1,6 +1,5 @@
-#include "fake_bundle.h"
 #include "fake_dyld.h"
-#include "fake_filter.h"
+#include "fake_objc.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,8 +14,9 @@
 #include "../src/stage_clock.c"
 #include "../src/dylib_report.c"
 #include "../src/macho_image.c"
-#include "fixtures/fake_bundle.c"
-#include "fixtures/fake_filter.c"
+#include "../src/objc_runtime.c"
+#include "../src/bundle_lookup.c"
+#include "fixtures/fake_objc.c"
 #include "fixtures/fake_dyld.c"
 #include "../src/filter_match.c"
 #include "../src/idevice_webkit.c"
@@ -50,17 +50,21 @@ void *library_find(const char *path) {
   return fake_framework_handle();
 }
 
-/* The constructor reaches the Objective-C runtime and Foundation through the
-   three lookups dyld_lookup.c and bundle_lookup.c make. symbol_find keeps the
-   meaning it has on the device: an absent library answers nothing. The class
-   lookup goes through the global table instead and answers by the name it is
-   given, so a case registers the class names the process has; the Foundation
-   lookup reads the filter table. */
+/* The constructor reaches the Objective-C runtime and CoreFoundation through
+   the process's own symbol table, so both go through symbol_find_global here
+   with the device's meaning: a name that is not a C symbol answers nothing.
+   objc_getClass, sel_registerName and objc_msgSend reach the fixture's object
+   tables, which is what makes a case fail when a method name is looked up as
+   though it were a C symbol. */
 
 void *symbol_find(void *library, const char *name) {
   if (library == 0) {
     return 0;
   }
+  /* The framework handle is the one object whose exports are C symbols:
+     OBJC_CLASS_$_WKWebView is what dlopen's image exports, and it is the
+     address dladdr turns into the image base. A name that is not one of those
+     exports still answers nothing, as it does on the device. */
   if (strncmp(name, "OBJC_CLASS_$_", 13) == 0) {
     return (void *)fake_framework_symbol(name);
   }
@@ -69,13 +73,15 @@ void *symbol_find(void *library, const char *name) {
 
 void *symbol_find_global(const char *name) {
   if (strcmp(name, "objc_getClass") == 0) {
-    return (void *)fake_class_named;
+    return (void *)fake_objc_class_named;
   }
-  return NULL;
-}
-
-void *foundation_symbol(const char *name) {
-  return fake_foundation_symbol(name);
+  if (strcmp(name, "sel_registerName") == 0) {
+    return (void *)fake_objc_selector_named;
+  }
+  if (strcmp(name, "objc_msgSend") == 0) {
+    return (void *)fake_objc_msg_send;
+  }
+  return fake_cf_symbol(name);
 }
 
 static int failures = 0;
@@ -203,7 +209,7 @@ static char *read_report(const char *path) {
 static void prepare_keeping_reports(const char *host, const char *self, int withWebKit) {
   fake_reset(host, withWebKit ? framework_path : 0, self);
 
-  fake_bundles_reset();
+  fake_objc_reset();
   fake_filters_reset(idevice_webkit_filter_path);
 
   fake_filter_add_class("UIApplication");
@@ -574,7 +580,7 @@ int main(void) {
              found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
              found_in(report, "\t<integer>7</integer>"));
   void *(*allocator_default)(void) =
-      (void *(*)(void))fake_foundation_symbol("CFAllocatorGetDefault");
+      (void *(*)(void))fake_cf_symbol("CFAllocatorGetDefault");
   expect("the lowercase copy is made with the default allocator",
          allocator_default != NULL &&
              fake_filter_last_copy_allocator() == allocator_default() &&

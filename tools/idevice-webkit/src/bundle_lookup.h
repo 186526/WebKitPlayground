@@ -16,10 +16,12 @@ bool bundle_path_identifier(const char *bundlePath, char *out, usize capacity);
 
 bool plist_file_identifier(const char *plistPath, char *out, usize capacity);
 
-/* Resolves a Foundation selector of the form "ClassName.selector" in the
-   loaded Foundation image. The ellekit filter is read back through the same
-   lookup, so its answers come from the same Foundation the host runs. */
+/* The two steps of the manifest lookup, shared with the filter reader: a plist
+   file as an NSDictionary, and a key of it as an object. Both answer NULL when
+   Foundation is not reachable, and object_for_key answers NULL for a key the
+   dictionary does not hold. */
 
-void *foundation_symbol(const char *name);
+void *dictionary_for_file(const char *path);
+void *object_for_key(void *dictionary, const char *key);
 
 #endif

@@ -57,7 +57,7 @@ python="${PYTHON:-python3}"
 
 payload_name="WebSafeWebKitFilter"
 package_id="com.websafe.idevice"
-package_version="1.0.10-20261122"
+package_version="1.0.11-20261122"
 tweak_dir="var/jb/usr/lib/TweakInject"
 manifest_prefix="com.websafe.idevice.host."
 

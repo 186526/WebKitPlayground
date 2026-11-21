@@ -99,6 +99,15 @@ if printf '%s\n' "$write_file_body" | grep -q 'mov[[:space:]]*w2,'; then
 fi
 echo "the report writer passes the file mode the variadic way pass"
 
+# The runtime lookup is the one that failed on the device: every Foundation
+# accessor used to be resolved by dlsym with its method name, and a method name
+# is not a C symbol, so each answered NULL and no process was ever identified
+# as a host. This binary records dlsym the way the device answers it and holds
+# the method-name lookup and the typed msgSend wrappers apart from each other.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" \
+  "$here/objc_runtime_test.c" "$here/../src/textkit.c" -o "$work/objc_runtime_test"
+"$work/objc_runtime_test"
+
 # The two handles this file hands to dlsym decide whether a lookup reaches the
 # process's own symbols or dies on an invalid handle, so they get their own
 # binary: test_main.c stubs the lookups whole and could not see either value.
@@ -126,8 +135,12 @@ clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
 
 clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" -I"$here/fixtures" \
   "$here/test_main.c" -o "$work/test_main"
-clang -std=c11 -g -fsanitize=address,undefined -I"$here/../src" -I"$here" -I"$here/fixtures" \
-  "$here/test_main.c" -o "$work/test_asan"
+# -fno-sanitize=function: objc_msgSend is one address called through a pointer
+# of each method's own type, which the function sanitizer reports as a type
+# mismatch by design. Every other sanitizer check stays on, and the address,
+# bounds and alignment checks that matter for the message arguments are those.
+clang -std=c11 -g -fsanitize=address,undefined -fno-sanitize=function \
+  -I"$here/../src" -I"$here" -I"$here/fixtures" "$here/test_main.c" -o "$work/test_asan"
 
 "$work/test_main"
 
