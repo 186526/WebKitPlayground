@@ -10,9 +10,22 @@
 #include "textkit.h"
 #include "types.h"
 
-extern u32 _dyld_image_count(void);
-extern const char *_dyld_get_image_name(u32 imageIndex);
-extern const void *_dyld_get_image_header(u32 imageIndex);
+/* Darwin declares this in <dlfcn.h>, which the test build leaves out in favour
+   of its own stubs; the guard keeps one definition per translation unit. */
+
+#ifndef IDEVICE_WEBKIT_DL_INFO
+#define IDEVICE_WEBKIT_DL_INFO
+typedef struct dl_info {
+  const char *dli_fname;
+  void *dli_fbase;
+  const char *dli_sname;
+  void *dli_saddr;
+} dl_info;
+#endif
+
+extern int dladdr(const void *address, dl_info *info);
+
+extern int _NSGetExecutablePath(char *buffer, u32 *size);
 extern void usleep(u32 microseconds);
 
 typedef struct host_images {
@@ -154,26 +167,51 @@ static bool is_host_path(const char *hostPath) {
   return true;
 }
 
-/* The framework copy under /var/jb is reported by its dyld path, while its
-   install name stays the /System path it was built against. */
+/* The framework copy under /var/jb is never found in the image table: the
+   three __dyld_* functions that would walk it are not exported by the dyld of
+   the device, and a reference to one of them keeps the whole image from being
+   bound, so the constructor never runs. The two images this code needs are
+   reached another way. The host is the main executable, which
+   _NSGetExecutablePath names, the same call libinjector makes before it loads
+   a tweak. The framework is loaded under its literal path, so a handle for it
+   answers whether the image is there, and one class it defines turns that
+   handle into the base address of the image for the version text. */
+
+static void host_path_of_this_process(char *out, usize capacity) {
+  u32 size = (u32)capacity;
+  if (_NSGetExecutablePath(out, &size) != 0) {
+    out[0] = 0;
+  }
+}
+
+/* dladdr takes any address inside an image, so the address of a class the
+   framework defines gives the base of that image. The class is asked for by
+   its Objective-C symbol name, which is what a dlsym on the hook of the image
+   answers. A process that has not loaded the framework has no handle, and a
+   handle whose image defines no such class leaves the answer empty. */
+
+static const void *web_kit_header(void *frameworkHandle) {
+  const void *address =
+      frameworkHandle == NULL ? NULL : symbol_find(frameworkHandle, "OBJC_CLASS_$_WKWebView");
+  dl_info info;
+  if (address == NULL || dladdr(address, &info) == 0) {
+    return NULL;
+  }
+  return info.dli_fbase;
+}
 
 static void collect_images(host_images *images) {
   text_set(images, 0, sizeof(*images));
-  u32 imageCount = _dyld_image_count();
-  for (u32 index = 0; index < imageCount; index++) {
-    if (images->web_kit_seen) {
-      break;
-    }
-    const char *imagePath = _dyld_get_image_name(index);
-    if (imagePath != NULL && text_equal(imagePath, framework_path)) {
-      images->web_kit_seen = true;
-      images->web_kit_header = _dyld_get_image_header(index);
-      text_copy(images->web_kit_path, imagePath, sizeof(images->web_kit_path));
-    }
+  char executable[path_capacity];
+  host_path_of_this_process(executable, sizeof(executable));
+  if (executable[0] != 0) {
+    host_path_from(executable, images->host_path, sizeof(images->host_path));
   }
-  const char *hostPath = imageCount == 0 ? NULL : _dyld_get_image_name(0);
-  if (hostPath != NULL) {
-    host_path_from(hostPath, images->host_path, sizeof(images->host_path));
+  void *framework = library_find(framework_path);
+  images->web_kit_header = web_kit_header(framework);
+  if (images->web_kit_header != NULL) {
+    images->web_kit_seen = true;
+    text_copy(images->web_kit_path, framework_path, sizeof(images->web_kit_path));
   }
 }
 
@@ -348,21 +386,6 @@ static const char *installed_copy_reason(const char *selfPath) {
    the last slot, so asking for the last image answers a neighbour. dladdr
    resolves the address of this function to the image that contains it, which is
    this one whatever else has loaded since. */
-
-/* Darwin declares this in <dlfcn.h>, which the test build leaves out in favour
-   of its own stubs; the guard keeps one definition per translation unit. */
-
-#ifndef IDEVICE_WEBKIT_DL_INFO
-#define IDEVICE_WEBKIT_DL_INFO
-typedef struct dl_info {
-  const char *dli_fname;
-  void *dli_fbase;
-  const char *dli_sname;
-  void *dli_saddr;
-} dl_info;
-#endif
-
-extern int dladdr(const void *address, dl_info *info);
 
 static const char *self_image_path(void) {
   dl_info info;

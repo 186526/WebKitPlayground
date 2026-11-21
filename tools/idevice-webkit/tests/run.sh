@@ -17,6 +17,22 @@ rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready \
 # every host decision below moot, so a broken signer stops the run first.
 "$python" "$here/signature_test.py"
 
+# The dyld of the device exports no __dyld_* function, and one reference to one
+# of them keeps the image from binding: dyld loads it, runs no initializer, and
+# says nothing unless DYLD_PRINT_ERRORS is set. The build refuses such a
+# reference, and this run refuses it on both slices as well, so a product that
+# was built elsewhere is caught here too.
+for arch in arm64 arm64e; do
+  slice="$here/../build/$arch/WebSafeWebKit.dylib"
+  [ -f "$slice" ] || continue
+  if llvm-nm -u "$slice" | grep -q '^__dyld_'; then
+    echo "the $arch slice refers to a dyld symbol the device does not export:" >&2
+    llvm-nm -u "$slice" | grep '^__dyld_' >&2
+    exit 1
+  fi
+  echo "the $arch slice refers to no dyld symbol the device does not export pass"
+done
+
 # The two handles this file hands to dlsym decide whether a lookup reaches the
 # process's own symbols or dies on an invalid handle, so they get their own
 # binary: test_main.c stubs the lookups whole and could not see either value.

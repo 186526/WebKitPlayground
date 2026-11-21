@@ -33,6 +33,17 @@ void *library_load(const char *path) {
 char *library_last_error(void) {
   return "test: no framework";
 }
+/* The constructor asks three things of the process: where the executable is
+   (_NSGetExecutablePath), whether the framework is loaded (a dlopen handle for
+   its literal path) and what address a class it defines has (dladdr). The
+   fixture answers all three; these two wrappers route the lookups to it so no
+   part of the code under test is replaced. */
+
+void *library_find(const char *path) {
+  (void)path;
+  return fake_framework_handle();
+}
+
 /* The constructor reaches the Objective-C runtime and Foundation through the
    three lookups dyld_lookup.c and bundle_lookup.c make. symbol_find keeps the
    meaning it has on the device: an absent library answers nothing. The class
@@ -41,9 +52,13 @@ char *library_last_error(void) {
    lookup reads the filter table. */
 
 void *symbol_find(void *library, const char *name) {
-  (void)library;
-  (void)name;
-  return NULL;
+  if (library == 0) {
+    return 0;
+  }
+  if (strncmp(name, "OBJC_CLASS_$_", 13) == 0) {
+    return (void *)fake_framework_symbol(name);
+  }
+  return 0;
 }
 
 void *symbol_find_global(const char *name) {
@@ -679,8 +694,11 @@ int main(void) {
   expect_not_installed("a dylib dyld cannot name reports the entry stage", NULL,
                        "no self image path");
 
-  /* The host is image 0 even when the dylib is not the last image, so the run
-     below puts a second framework after it and keeps the host first. */
+  /* The process has images besides this dylib: the host executable, the
+     framework this tweak loads, and the Foundation it asks its questions of.
+     None of them may be taken for the copy that was called. The framework is
+     the one that matters, because its class address is what dladdr is asked
+     about when the version text is read. */
 
   prepare(chrome, installed_self, 1);
   list_host("/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app",
@@ -688,23 +706,17 @@ int main(void) {
             "com.google.chrome.ios");
   idevice_webkit_start();
   report = read_report(idevice_webkit_report_path);
-  expect("the host is image 0, not the last image",
-         report != NULL && found_in(report, "\t<integer>7</integer>"));
-
-  /* dyld loads other images after this one, and the Swift runtime libraries
-     take the last slot. Reading that slot answered libswift_RegexParser on the
-     device, so the copy check judged a neighbour and the constructor stopped at
-     stage 3. dladdr resolves the address of the constructor, which stays this
-     image whatever loads afterwards. */
+  expect("the host executable is not the copy that was called",
+         report != NULL && found_in(report, "\t<integer>7</integer>") &&
+             found_in(report, "\t<key>selfImage</key>\n\t<string>" installed_self "</string>"));
 
   prepare(safari, installed_self, 1);
-  fake_load_after_self("/usr/lib/swift/libswift_RegexParser.dylib");
   list_host("/Applications/MobileSafari.app",
             manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
             "com.apple.mobilesafari");
   idevice_webkit_start();
   report = read_report(idevice_webkit_report_path);
-  expect("a later image does not take the self image's place", report != NULL);
+  expect("a loaded framework does not take the self image's place", report != NULL);
   if (report != NULL) {
     expect("  the report still reaches the holding stage",
            found_in(report, "\t<integer>7</integer>"));
@@ -712,15 +724,16 @@ int main(void) {
            found_in(report, "\t<key>selfImage</key>\n\t<string>" installed_self "</string>"));
     expect("  no failed copy check is recorded",
            found_in(report, "\t<key>selfError</key>\n\t<string></string>"));
+    expect("  the framework is named by its own path, not by the self image",
+           found_in(report, "\t<key>imagePath</key>\n\t<string>" framework_path "</string>"));
   }
 
   prepare(safari, test_self, 1);
-  fake_load_after_self("/usr/lib/swift/libswift_RegexParser.dylib");
   list_host("/Applications/MobileSafari.app",
             manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
             "com.apple.mobilesafari");
   idevice_webkit_start();
-  expect_not_installed("a later image does not hide a test copy either", test_self,
+  expect_not_installed("a loaded framework does not hide a test copy either", test_self,
                        "self image is not in the TweakInject directory");
 
   /* The same Chrome process and manifest, with the dylib called from a test

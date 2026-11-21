@@ -81,5 +81,19 @@ if [ "$arch" = "arm64e" ]; then
   printf "\002\000\000\200" | dd of="$output_dir/WebSafeWebKit.dylib" bs=1 seek="$mach_header_subtype_offset" conv=notrunc status=none
 fi
 
+# The dyld of the device does not export the __dyld_* image table functions.
+# A reference to one of them leaves the undefined symbol unbound, and the whole
+# image is then skipped: dyld lists it under DYLD_PRINT_LIBRARIES and runs no
+# initializer, silently unless DYLD_PRINT_ERRORS is set, where the process dies
+# with "missing symbol called". The dylib therefore has to reach the images it
+# needs through dladdr, _NSGetExecutablePath and dlopen handles, and this check
+# keeps a reference from coming back.
+undefined="$(llvm-nm -u "$output_dir/WebSafeWebKit.dylib")"
+if printf '%s\n' "$undefined" | grep -q '^__dyld_'; then
+  echo "the dylib refers to a dyld symbol the device does not export:" >&2
+  printf '%s\n' "$undefined" | grep '^__dyld_' >&2
+  exit 1
+fi
+
 echo "arch: $arch"
 echo "built: $output_dir/WebSafeWebKit.dylib"

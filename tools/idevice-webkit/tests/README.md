@@ -1,13 +1,15 @@
 # idevice-webkit tests
 
 `test_main.c` compiles the same `src/` files the dylib is built from and
-replaces four sets of calls with test versions: the three dyld image table
-functions (`_dyld_image_count`, `_dyld_get_image_name`, `_dyld_get_image_header`)
-together with `dladdr`,
-the Foundation lookups (`NSBundle.bundleWithPath:`, `NSDictionary.dictionaryWithContentsOfFile:`
+replaces four sets of calls with test versions: the process calls
+(`_NSGetExecutablePath`, the `dlopen` handle of the framework and the address of
+one class it defines, together with `dladdr`), the Foundation lookups
+(`NSBundle.bundleWithPath:`, `NSDictionary.dictionaryWithContentsOfFile:`
 and the `NSDictionary.objectForKey:` / `NSString.stringWithUTF8String:` /
 `NSString.UTF8String` accessors), the Darwin file writer, and the two `dlsym`
-wrappers of `src/dyld_lookup.c`. The writer is replaced because the dylib
+wrappers of `src/dyld_lookup.c`. No `_dyld_*` image table function is replaced,
+because the dylib refers to none: the dyld of the device does not export them,
+and a reference to one keeps the whole image from binding. The writer is replaced because the dylib
 writes with the Darwin `open` flags `0x601`, which a Linux kernel reads as
 `O_WRONLY | O_TRUNC | O_APPEND`; without `O_CREAT` the call fails with
 `ENOENT`. It checks the host decisions of the constructor, not the device
@@ -17,8 +19,9 @@ observable on the device. The run also checks that the three device host paths
 (`/Applications`, a container under `/var/containers/Bundle/Application/` and
 the same container below `/private/preboot/.../procursus/Applications/`) reach
 the same manifest, that a tool below `/private/preboot/` is not taken for a
-host, that the host is image 0 rather than the last image, and that the ready
-marker appears next to the report.
+host, that the host is the executable `_NSGetExecutablePath` names rather than
+this dylib or a loaded neighbour, and that the ready marker appears next to the
+report.
 
 The copy check has its own cases, because the constructor writes its entry
 report before it judges the path it was loaded from. A dylib inside
@@ -32,15 +35,20 @@ report an earlier run left then has to stay as it was, because the constructor
 stops at its entry write instead of running on without a report.
 
 The path the constructor reports as its own comes from `dladdr`, not from the
-last slot of the image table, because dyld keeps loading images after this one
-and the Swift runtime libraries take that slot on the device. `fake_dyld.c`
+last slot of an image table, because dyld keeps loading images after this one
+and the Swift runtime libraries would take that slot on the device. `fake_dyld.c`
 answers `dladdr` for the address of the constructor with the path `fake_reset`
-recorded, and `fake_load_after_self` appends one more image so that the last
-slot belongs to a neighbour. Two cases use it: an installed copy behind such a
-later image still reaches the holding stage with its own path and no failed
-check, and a test copy behind one still reports
-`self image is not in the TweakInject directory`. Reading the last image again
-turns the first of them red.
+recorded. Two cases use it: an installed copy loaded next to a framework that
+also carries a class still reaches the holding stage with its own path and no
+failed check, and a test copy in the same position still reports
+`self image is not in the TweakInject directory`. The framework side is answered
+by `fake_framework_symbol`, and one case requires `imagePath` to be the
+framework's own path, which a lookup that reports the self image instead fails.
+The names are `a loaded framework does not take the self image's place` and
+`a loaded framework does not hide a test copy either`; in 1.0.6 they read
+`a later image does not take the self image's place` and
+`a later image does not hide a test copy either`, and the fixture appended an
+image to the table through `fake_load_after_self`.
 
 `fixtures/fake_bundle.c` answers the way Foundation does rather than by string
 equality: a bundle is a `.app` directory, so registering the executable inside
@@ -144,6 +152,15 @@ the signer as a module and hand `check_signature` shapes it has to reject: the
 has to exit non-zero with a message naming the field. A broken signer stops the
 run before the C cases, because a dylib dyld will not load makes every host
 decision below moot.
+
+Right after the signature checks, `run.sh` reads `llvm-nm -u` of both slices of
+`build/arm64/WebSafeWebKit.dylib` and `build/arm64e/WebSafeWebKit.dylib` and
+fails on any symbol with the `__dyld_` prefix, which is what a reference to the
+device's unexported image table functions looks like; a slice that is not on
+disk is skipped, so the check covers whatever the last build left. A passing run
+prints `the arm64 slice refers to no dyld symbol the device does not export
+pass` and the same line for `arm64e`. `build.sh` carries the same check on the
+slice it just linked, so a build cannot produce one.
 
 `dyld_lookup_test.c` covers the one thing `test_main.c` cannot see. That file
 stubs `symbol_find` and `symbol_find_global` whole, so a wrong handle inside

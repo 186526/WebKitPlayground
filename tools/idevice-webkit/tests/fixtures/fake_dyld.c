@@ -3,85 +3,95 @@
 #include "textkit.h"
 #include "types.h"
 
-/* Replaces the dyld image table functions the constructor uses, so a test can
-   describe a host without running on a device. */
+/* Replaces the three calls the constructor makes to ask where it is and what
+   it loaded: the executable path, the handle of the framework and the record
+   dladdr fills in. None of the __dyld_* image table functions is replaced,
+   because the dylib no longer refers to one: they are not exported by the dyld
+   of the device, and a reference to one keeps the whole image from binding.
 
-#define maximum_images 8
-
-static const char *image_paths[maximum_images];
-static u32 image_count_value = 0;
-
-/* The table keeps its own copies of the first and the last image, because the
-   test builds those paths in a buffer that later calls reuse, while dyld keeps
-   the paths it resolved. */
+   The test picks the answers, because the path of the test binary is not what
+   the cases are about. The framework is named `loaded` in fake_reset; it is
+   present only when that argument is not NULL. */
 
 #define fake_path_text 512
 
-static char first_text[fake_path_text];
+static char executable_text[fake_path_text];
 static char self_text[fake_path_text];
-static char later_text[fake_path_text];
+static char framework_text[fake_path_text];
 
-/* dladdr answers for the image this binary is in. The test picks the answer,
-   including none at all, because the path of the test binary is not what the
-   cases are about. */
+static const void *framework_class = 0;
+static const void *framework_base = 0;
+static const void *framework_handle = 0;
 
-static const char *dladdr_answer = 0;
+/* A byte that is not a Mach-O header: the image is there, but it says nothing
+   about its version. */
+static const u8 framework_header_text[8] = {0};
 
-static void fake_dladdr_answers(const char *path) {
-  dladdr_answer = path;
+void *fake_framework_handle(void) {
+  return (void *)framework_handle;
 }
 
-int dladdr(const void *address, dl_info *info) {
-  (void)address;
-  if (dladdr_answer == 0 || info == 0) {
-    return 0;
-  }
-  info->dli_fname = dladdr_answer;
-  info->dli_fbase = (void *)0;
-  info->dli_sname = 0;
-  info->dli_saddr = (void *)0;
-  return 1;
+/* Answers the address of a class the framework defines. The constructor hands
+   that address to dladdr, which is where the image base comes from. */
+
+const void *fake_framework_symbol(const char *name) {
+  (void)name;
+  return framework_class;
 }
 
 void fake_reset(const char *first, const char *preferences, const char *loaded,
                 const char *self) {
-  image_count_value = 0;
-  text_copy(first_text, first, fake_path_text);
-  image_paths[image_count_value++] = first_text;
-  image_paths[image_count_value++] = preferences;
-  if (loaded != 0) {
-    image_paths[image_count_value++] = loaded;
-  }
+  (void)preferences;
+  text_copy(executable_text, first, fake_path_text);
   if (self == 0) {
-    image_paths[image_count_value++] = 0;
-    fake_dladdr_answers(0);
-    return;
+    self_text[0] = 0;
+  } else {
+    text_copy(self_text, self, fake_path_text);
   }
-  text_copy(self_text, self, fake_path_text);
-  image_paths[image_count_value++] = self_text;
-  fake_dladdr_answers(self_text);
-}
-
-/* Adds an image after this dylib, the way the Swift runtime libraries arrive
-   after ellekit finishes loading us. The last slot then holds a neighbour, so
-   a lookup that reads it sees the wrong image. */
-
-void fake_load_after_self(const char *path) {
-  if (path != 0 && image_count_value < maximum_images) {
-    text_copy(later_text, path, fake_path_text);
-    image_paths[image_count_value++] = later_text;
+  framework_handle = 0;
+  framework_class = 0;
+  framework_base = 0;
+  if (loaded != 0) {
+    text_copy(framework_text, loaded, fake_path_text);
+    framework_class = (const void *)&framework_header_text;
+    framework_base = (const void *)framework_header_text;
+    framework_handle = (void *)&framework_text;
   }
 }
 
-u32 _dyld_image_count(void) {
-  return image_count_value;
-}
+/* The framework answers a class only while it is loaded, so a handle for an
+   image that is not there answers nothing. */
 
-const char *_dyld_get_image_name(u32 imageIndex) {
-  return imageIndex < image_count_value ? image_paths[imageIndex] : 0;
-}
-
-const void *_dyld_get_image_header(u32 imageIndex) {
-  (void)imageIndex;
+int _NSGetExecutablePath(char *buffer, u32 *size) {
+  usize length = text_length(executable_text);
+  if (buffer == 0 || size == 0 || *size < length + 1) {
+    if (size != 0) {
+      *size = (u32)(length + 1);
+    }
+    return -1;
+  }
+  text_copy(buffer, executable_text, *size);
+  *size = (u32)(length + 1);
   return 0;
+}
+
+int dladdr(const void *address, dl_info *info) {
+  if (address == 0 || info == 0) {
+    return 0;
+  }
+  if (framework_class != 0 && address == framework_class) {
+    info->dli_fname = framework_text;
+    info->dli_fbase = (void *)framework_base;
+    info->dli_sname = 0;
+    info->dli_saddr = (void *)0;
+    return 1;
+  }
+  if (self_text[0] == 0) {
+    return 0;
+  }
+  info->dli_fname = self_text;
+  info->dli_fbase = (void *)0;
+  info->dli_sname = 0;
+  info->dli_saddr = (void *)0;
+  return 1;
 }
