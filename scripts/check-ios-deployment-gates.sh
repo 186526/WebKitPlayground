@@ -294,9 +294,15 @@ version_gt() {
 # A malformed image makes llvm-objdump exit non-zero; under `set -o pipefail`
 # that would abort the whole run before the table is printed, so the exit
 # status is swallowed here and the caller's slice check reports the image.
+#
+# --arch all is passed for the same reason read_slice_versions passes it: a
+# strong link in a later slice of a universal image must fail the gate, and
+# relying on llvm-objdump printing every slice without the flag is undocumented
+# behaviour. For thin and universal images alike the flag does not change the
+# load-command text on LLVM 21.
 list_framework_links() {
     local binary="$1"
-    { "${OBJDUMP}" --macho --private-headers "${binary}" 2>/dev/null || true; } | awk -v needle="${FORBIDDEN_FRAMEWORK}" '
+    { "${OBJDUMP}" --macho --arch all --private-headers "${binary}" 2>/dev/null || true; } | awk -v needle="${FORBIDDEN_FRAMEWORK}" '
         /^[[:space:]]*cmd LC_LOAD_DYLIB[[:space:]]*$/ { kind = "strong"; next }
         /^[[:space:]]*cmd LC_LOAD_WEAK_DYLIB[[:space:]]*$/ { kind = "weak"; next }
         /^[[:space:]]*cmd LC_REEXPORT_DYLIB[[:space:]]*$/ { kind = "re-export"; next }

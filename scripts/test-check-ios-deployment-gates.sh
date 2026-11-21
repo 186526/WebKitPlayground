@@ -5,7 +5,8 @@
 #
 # Builds minimal synthetic Mach-O images, so nothing here needs a WebKit build,
 # a real .deb or a device. The images carry only an LC_BUILD_VERSION, which is
-# all the checker reads; llvm-lipo turns them into universal binaries.
+# all the checker reads; lipo (Xcode's `lipo`, or Linux's `llvm-lipo`) turns
+# them into universal binaries. Set LIPO to pick the tool explicitly.
 #
 # The case that matters is "unlabelled first slice": llvm-objdump omits its
 # "(architecture ...)" banner for a cputype it cannot name, and an earlier
@@ -15,6 +16,7 @@
 # pin the fix: every slice is reported, and the 18.5 slice fails the run.
 #
 # Usage: zsh scripts/test-check-ios-deployment-gates.sh
+#        LIPO=llvm-lipo zsh scripts/test-check-ios-deployment-gates.sh
 #
 set -euo pipefail
 
@@ -22,6 +24,34 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CHECKER="${SCRIPT_DIR}/check-ios-deployment-gates.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/check-gates-test.XXXXXX")"
 trap 'rm -rf "${WORK}"' EXIT
+
+# Xcode ships lipo but not llvm-lipo, and Linux ships llvm-lipo; ask xcrun
+# first so a macOS run picks up Xcode's tool, then fall back to PATH. LIPO
+# overrides the search, matching tools/idevice-webkit/package-deb.sh.
+find_lipo() {
+    local candidate=""
+    if [[ -n "${LIPO:-}" ]]; then
+        printf '%s\n' "${LIPO}"
+        return 0
+    fi
+    if command -v xcrun >/dev/null 2>&1; then
+        candidate="$(xcrun -f lipo 2>/dev/null || true)"
+    fi
+    if [[ -z "${candidate}" ]]; then
+        candidate="$(command -v lipo 2>/dev/null || true)"
+    fi
+    if [[ -z "${candidate}" ]]; then
+        candidate="$(command -v llvm-lipo 2>/dev/null || true)"
+    fi
+    printf '%s\n' "${candidate}"
+}
+
+LIPO_BIN="$(find_lipo)"
+if [[ -z "${LIPO_BIN}" ]]; then
+    printf 'Error: no lipo found; tried xcrun -f lipo, lipo and llvm-lipo.\n' >&2
+    printf 'Install Xcode command line tools, or set LIPO to the tool to use.\n' >&2
+    exit 2
+fi
 
 pass=0
 fail=0
@@ -116,7 +146,7 @@ check "thin 18.5 image fails and names 18.5" 1 \
 write_macho "${WORK}/fat-a" 16.1 0x0100000C 0
 write_macho "${WORK}/fat-b" 18.5 0x0100000C 0x80000002
 chmod 755 "${WORK}/fat-a" "${WORK}/fat-b"
-llvm-lipo -create "${WORK}/fat-a" "${WORK}/fat-b" -output "${WORK}/fat-ordered" >/dev/null
+"${LIPO_BIN}" -create "${WORK}/fat-a" "${WORK}/fat-b" -output "${WORK}/fat-ordered" >/dev/null
 make_deb "${WORK}/fat-ordered.deb" "${WEBKIT_REL}" "${WORK}/fat-ordered"
 check "universal image with a later 18.5 slice fails" 1 \
     "minos ios 18.5 is newer than 16.1 in the arm64e slice" \
@@ -127,7 +157,7 @@ check "universal image with a later 18.5 slice fails" 1 \
 # reported PASS before the fix because the first slice's 16.1 leaked forward.
 write_macho "${WORK}/fat-unknown" 16.1 30 0
 chmod 755 "${WORK}/fat-unknown"
-llvm-lipo -create "${WORK}/fat-unknown" "${WORK}/fat-b" -output "${WORK}/fat-unlabelled" >/dev/null
+"${LIPO_BIN}" -create "${WORK}/fat-unknown" "${WORK}/fat-b" -output "${WORK}/fat-unlabelled" >/dev/null
 make_deb "${WORK}/fat-unlabelled.deb" "${WEBKIT_REL}" "${WORK}/fat-unlabelled"
 check "unlabelled first slice does not leak its minos into the next" 1 \
     "minos ios 18.5 is newer than 16.1 in the arm64e slice" \
