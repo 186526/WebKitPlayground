@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.apple.mobilesafari</string>
+	<string>com.apple.SafariViewService</string>
 </dict>
 </plist>

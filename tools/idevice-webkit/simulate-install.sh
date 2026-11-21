@@ -5,10 +5,10 @@
 #   ./simulate-install.sh [--deb PATH]
 #
 # The host /var is never written. The script starts again under
-# `unshare -r -m` with a root of its own: a copy of /var/lib/dpkg made there,
-# the case root bind-mounted on /var, and every dpkg call made with
-# --root=/var and --force-script-chrootless, so the scripts see the /var/jb
-# paths a device has. The root is only ever read by dpkg: each case is staged
+# `unshare -r -m` with a root of its own: a copy of the host database made
+# there at /var/jb/var/lib/dpkg, the case root bind-mounted on /var, and every
+# dpkg call made with --root, --admindir and --force-script-chrootless, so the
+# scripts see the paths and the DPKG_ROOT a device gives them. The root is only ever read by dpkg: each case is staged
 # into the root, runs, and is put back on disk by moving the root back, which
 # a bind mount refuses.
 #
@@ -33,6 +33,7 @@
 #   8 uninstall after case 7
 #   9 fresh install with a symlink of another owner at the filter name
 #  10 uninstall after case 9
+#  11 upgrade from a 1.0.0 whose prerm never ran, then remove
 #
 # dpkg has already decided which files an unpack overwrites and which files a
 # removal deletes before it runs a maintainer script: a changed file is
@@ -45,7 +46,21 @@
 # symlinks into /var/jb/usr/lib/websafewebkit/, and that directory holds the
 # dylib, the four host manifests and the XML filter. The same XML filter also
 # sits under /var/jb/var/mobile/WebSafeWebKit as disabled-ellekit-filter.plist.
+#
+# The database lives where the device keeps it, /var/jb/var/lib/dpkg, and the
+# 1.0.0 file list names neither TweakInject link, as the device's copy does
+# not. Both facts matter: with the database in /var/lib/dpkg a prerm that
+# looked there would find its record and run, and with the links in the list
+# dpkg would delete them itself, hiding a prerm that never removes them.
 set -euo pipefail
+
+# A mount of its own is what lets the case root stand on /var for the length
+# of a dpkg call. The superuser namespace lasts for the whole run, so every
+# call starts in the same one. Re-exec before the arguments are read: they
+# have to reach the copy that runs inside the namespace.
+if [ "$(id -u)" -ne 0 ]; then
+  exec unshare -r -m bash "$0" "$@"
+fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 package="com.websafe.idevice"
@@ -59,11 +74,13 @@ old_filter="var/jb/var/mobile/WebSafeWebKit/disabled-ellekit-filter.plist"
 retired_directory="var/jb/var/mobile/WebSafeWebKit"
 report_path="var/jb/var/mobile/Library/Preferences/com.websafe.idevice.plist"
 sim_root="${SIM_ROOT:-${TMPDIR:-/tmp}/idevice-webkit-sim}"
+# A rootless device keeps the database here, not in /var/lib/dpkg.
+admin_path="var/jb/var/lib/dpkg"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --deb) deb="$2"; shift 2 ;;
-    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -72,27 +89,20 @@ done
 command -v dpkg >/dev/null || { echo "missing tool: dpkg" >&2; exit 1; }
 deb="$(cd "$(dirname "$deb")" && pwd)/$(basename "$deb")"
 
-# A mount of its own is what lets the case root stand on /var for the length
-# of a dpkg call. The superuser namespace lasts for the whole run, so every
-# call starts in the same one.
-if [ "$(id -u)" -ne 0 ]; then
-  exec unshare -r -m bash "$0" "$@"
-fi
-
 root="$sim_root/root"
 rm -rf "$sim_root"
-mkdir -p "$root/var/lib/dpkg"
+mkdir -p "$root/$admin_path"
 for entry in /var/lib/dpkg/* /var/lib/dpkg/.[!.]*; do
   [ -e "$entry" ] || continue
   case "$(basename "$entry")" in
     lock|lock-frontend|triggers) ;;
-    *) cp -r --no-preserve=ownership "$entry" "$root/var/lib/dpkg/" 2>/dev/null || : ;;
+    *) cp -r --no-preserve=ownership "$entry" "$root/$admin_path/" 2>/dev/null || : ;;
   esac
 done
-mkdir -p "$root/var/lib/dpkg/triggers"
+mkdir -p "$root/$admin_path/triggers"
 # A host that already has a package of this name has no place in the cases.
-sed -i '/^Package: com\.websafe\.idevice$/,/^$/d' "$root/var/lib/dpkg/status"
-mv "$root/var/lib/dpkg" "$sim_root/dpkg-base"
+sed -i '/^Package: com\.websafe\.idevice$/,/^$/d' "$root/$admin_path/status"
+mv "$root/$admin_path" "$sim_root/dpkg-base"
 rm -rf "$root"
 
 failures=0
@@ -131,18 +141,21 @@ essential_entry() {
 stage_case() {
   local name="$1" previous="${2:-}"
   local case_dir="$sim_root/cases/$name"
-  rm -rf "$root" && mkdir -p "$root/var/lib/dpkg/info"
-  cp -r --no-preserve=ownership "$sim_root/dpkg-base/." "$root/var/lib/dpkg/"
-  if [ "$previous" = previous ]; then
-    sed -i '/^Package: com\.websafe\.idevice$/,/^$/d' "$root/var/lib/dpkg/status"
+  rm -rf "$root" && mkdir -p "$root/$admin_path/info"
+  cp -r --no-preserve=ownership "$sim_root/dpkg-base/." "$root/$admin_path/"
+  if [ "$previous" = previous ] || [ "$previous" = previous-no-prerm ]; then
+    sed -i '/^Package: com\.websafe\.idevice$/,/^$/d' "$root/$admin_path/status"
     seed_previous "$root"
+    # dpkg runs the old package's prerm on an upgrade and nothing else old; a
+    # 1.0.0 whose prerm never ran leaves its links behind for this package.
+    [ "$previous" = previous-no-prerm ] && rm -f "$root/$admin_path/info/$package.prerm"
     printf 'Package: %s\nStatus: install ok installed\nPriority: optional\nSection: Tweaks\nArchitecture: iphoneos-arm64\nVersion: 1.0.0\nMaintainer: WebKitPlayground\nDescription: previous instalment used by the simulation\n\n' "$package" \
-      >> "$root/var/lib/dpkg/status"
+      >> "$root/$admin_path/status"
   else
-    sed -i '/^Package: com\.websafe\.idevice$/,/^$/d' "$root/var/lib/dpkg/status"
+    sed -i '/^Package: com\.websafe\.idevice$/,/^$/d' "$root/$admin_path/status"
   fi
-  essential_entry bash "$root/var/lib/dpkg/status"
-  essential_entry coreutils "$root/var/lib/dpkg/status"
+  essential_entry bash "$root/$admin_path/status"
+  essential_entry coreutils "$root/$admin_path/status"
   mkdir -p "$case_dir"
   printf '%s\n' "$case_dir"
 }
@@ -164,17 +177,37 @@ seed_previous() {
     printf '/%s\n' var var/jb var/jb/usr var/jb/usr/lib "$old_prefix"
     (cd "$root" && find "$old_prefix" -type f | sed 's|^|/|')
     printf '/%s\n' "$old_filter" var/jb/var/mobile/WebSafeWebKit var/jb/var/mobile/WebSafeWebKit/conf.d
-    printf '/%s\n' "$tweak_path/WebSafeWebKit.dylib" "$tweak_path/WebSafeWebKit.plist"
-  } | sort -u | sed 's|^//*|/|' > "$root/var/lib/dpkg/info/$package.list"
+  } | sort -u | sed 's|^//*|/|' > "$root/$admin_path/info/$package.list"
   (
     cd "$root"
     while IFS= read -r file; do
       file="${file#/}"
       [ -f "$file" ] && printf '%s  %s\n' "$(md5sum "$file" | cut -d' ' -f1)" "$file"
-    done < "$root/var/lib/dpkg/info/$package.list"
-  ) > "$root/var/lib/dpkg/info/$package.md5sums"
-  printf '#!/bin/sh\nexit 0\n' > "$root/var/lib/dpkg/info/$package.postinst"
-  chmod 0755 "$root/var/lib/dpkg/info/$package.postinst"
+    done < "$root/$admin_path/info/$package.list"
+  ) > "$root/$admin_path/info/$package.md5sums"
+  # The prerm 1.0.0 shipped: it clears the two links, but only while they still
+  # point into its own directory. Copied from the device's installed copy, so
+  # an upgrade runs what the device runs.
+  cat > "$root/$admin_path/info/$package.prerm" <<'OLD_PRERM'
+#!/bin/sh
+set -e
+tweak_dir=/var/jb/usr/lib/TweakInject
+payload_dir=/var/jb/usr/lib/websafewebkit
+unlink_if_ours() {
+  name="$1"
+  link="$tweak_dir/$name"
+  if [ -L "$link" ]; then
+    case "$(readlink "$link")" in
+      "$payload_dir"/*) rm -f "$link" ;;
+    esac
+  fi
+}
+unlink_if_ours WebSafeWebKit.dylib
+unlink_if_ours WebSafeWebKit.plist
+exit 0
+OLD_PRERM
+  printf '#!/bin/sh\nexit 0\n' > "$root/$admin_path/info/$package.postinst"
+  chmod 0755 "$root/$admin_path/info/$package.prerm" "$root/$admin_path/info/$package.postinst"
 }
 
 # The case root, mounted at /mnt for one dpkg call with --root=/mnt: dpkg
@@ -184,15 +217,18 @@ seed_previous() {
 dpkg_call() {
   local case_dir="$1"
   shift
-  mkdir -p "$root/var/lib/dpkg"
+  mkdir -p "$root/$admin_path"
   tar -c -f "$case_dir/lower.tar" -C "$root" .
   rm -rf "$root" && mkdir -p "$root"
   tar -x -f "$case_dir/lower.tar" -C "$root"
-  mkdir -p /mnt && mount --bind "$root" /mnt
-  mount --bind /mnt /var
+  mkdir -p /mnt "$root/var" && mount --bind "$root" /mnt
+  # A maintainer script of an older package names its paths absolutely, so the
+  # case's var has to answer for the real /var while the script runs. Mounting
+  # the whole case root on /var would put its var/jb at /var/var/jb.
+  mount --bind "$root/var" /var
   local status=0
   dpkg --force-architecture --force-depends --force-script-chrootless \
-    --log=/dev/null --root=/mnt "$@" || status=$?
+    --log=/dev/null --root=/mnt --admindir=/mnt/$admin_path "$@" || status=$?
   tar -c -f "$case_dir/after.tar" -C /mnt .
   umount /var
   umount /mnt
@@ -239,7 +275,7 @@ check "TweakInject holds exactly the six files" test "$(tweak_count)" = 6
 check "nothing in TweakInject is a symlink" no_link_in_tweak
 check "no report file was created" absent "$root/$report_path"
 check "dpkg lists the six files" \
-  bash -c '[ "$(grep -c "^/'"$tweak_path"'/" "$1")" = 6 ]' _ "$root/var/lib/dpkg/info/$package.list"
+  bash -c '[ "$(grep -c "^/'"$tweak_path"'/" "$1")" = 6 ]' _ "$root/$admin_path/info/$package.list"
 printf '  files in TweakInject:\n'
 show_tweak
 
@@ -347,6 +383,30 @@ check "nothing in TweakInject is a symlink" no_link_in_tweak
 printf '\ncase 10: uninstall after case 9\n'
 remove_package | show_run
 check "no file of the package is left" absent "$root/$tweak_path"
+
+# 11 upgrade from a 1.0.0 whose prerm never ran, then remove. dpkg runs the old
+#    package's prerm on an upgrade, so this package meets the leftover links
+#    only when it is removed; that is where its own cleanup has to work.
+#
+#    A file of another owner sits in TweakInject, as it does on a device where
+#    ellekit and other tweaks share the directory, so dpkg leaves the directory
+#    in place after the removal and each link can be checked on its own.
+case_dir="$(stage_case 11-leftover-links previous-no-prerm)"
+printf '\ncase 11: upgrade from a 1.0.0 whose prerm never ran, then remove\n'
+printf 'another tweak\n' > "$root/$tweak_path/another-tweak.dylib"
+printf '  before:\n'
+show_tweak
+install_package >/dev/null
+check "the leftover dylib link survives the upgrade" \
+  link_is "$root/$tweak_path/WebSafeWebKit.dylib" "/$old_prefix/WebSafeWebKit.dylib"
+check "the leftover filter link survives the upgrade" \
+  link_is "$root/$tweak_path/WebSafeWebKit.plist" "/$old_prefix/WebSafeWebKit.plist"
+remove_package | show_run
+check "the leftover dylib link is gone" absent "$root/$tweak_path/WebSafeWebKit.dylib"
+check "the leftover filter link is gone" absent "$root/$tweak_path/WebSafeWebKit.plist"
+check "the file of the other owner is untouched" \
+  bash -c '[ "$(cat "$1")" = "another tweak" ]' _ "$root/$tweak_path/another-tweak.dylib"
+check "the six files of the package are gone" test "$(tweak_count)" = 1
 
 printf '\n%s failed check(s)\n' "$failures"
 [ "$failures" -eq 0 ]

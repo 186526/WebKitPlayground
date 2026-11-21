@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- The value below is a placeholder, not a working host: every manifest in
+     host/ carries the bundle identifier of its own host, and that value has to
+     equal the CFBundleIdentifier in the host app's Info.plist. A copy left at
+     this value makes the host fail its check and overwrite the report. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.apple.mobilesafari</string>
+	<string>REPLACE-WITH-THE-HOSTS-CFBUNDLEIDENTIFIER</string>
 </dict>
 </plist>

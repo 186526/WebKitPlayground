@@ -7,9 +7,10 @@
 #   TweakInject/WebSafeWebKitFilter.plist                   ellekit filter
 #   TweakInject/com.websafe.idevice.host.*.plist            host manifests
 #
-# None of these paths is a symlink, and none of the names is as short as the
-# ones TweakInject failed to open on the device (a 12-byte name answered
-# ENOENT). ellekit derives the filter name from the dylib name: libinjector
+# None of these paths is a symlink. Two entries in TweakInject answer ENOENT
+# under their plain names because their names carry three leading spaces; this
+# package is never opened that way, since dpkg writes exactly the name in the
+# archive. ellekit derives the filter name from the dylib name: libinjector
 # builds "<dylib without .dylib>.plist", calls access() on it and drops the
 # dylib when the answer is not zero, so the two names have to be the same and
 # both read "WebSafeWebKitFilter".
@@ -80,7 +81,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --output) output="$2"; shift 2 ;;
     --arch-dir) slice_root="$2"; shift 2 ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -174,21 +175,29 @@ Description: Loads a self-built WebKit into the listed apps through ellekit.
  after the dylib.
 CONTROL
 
-# 7. prerm runs before dpkg deletes the installed files (checked: the file is
-#    still on disk when the script runs). dpkg hands every stage the root of
-#    the installation in DPKG_ROOT, and the stage that removes the installed
-#    copy is the one where that root holds this package's md5sums (or, after a
-#    failed configure, its file list). Each file is removed there and then,
-#    and only while its content still equals the packed md5sums. dpkg then
-#    finds the paths it lists already gone and keeps going, so a changed file
-#    cannot be kept: it is dpkg's own deletion that removes it.
+# 7. prerm runs before dpkg deletes the files this package owns (checked: the
+#    file is still on disk when the script runs). Each of them is removed there
+#    and then, and only while its content still equals the md5sums packed into
+#    this script, so a file somebody else replaced is never removed here; dpkg
+#    then finds those paths already gone and keeps going.
+#
+#    prerm does not ask whether this instalment is the one being removed. Its
+#    only test is content: a file of the packed content is this package's file
+#    wherever the stage runs, and one that differs is not. A guard on the
+#    installed md5sums was wrong twice over — a rootless device keeps its
+#    database in /var/jb/var/lib/dpkg rather than /var/lib/dpkg, so the guard
+#    skipped the whole script there, and the 1.0.0 file list never named the
+#    two TweakInject links anyway.
 cat > "$stage/DEBIAN/prerm" <<'PRERM'
 #!/bin/sh
 PACKAGE="@PACKAGE@"
 SUMS='@SUMS@'
 TWEAK_DIR="/@TWEAK_DIR@"
 OLD_DIR="/@OLD_DIR@"
-OLD_TWEAK_LINKS="@OLD_TWEAK_LINKS@"
+OLD_DYLIB_LINK="/@OLD_DYLIB_LINK@"
+OLD_DYLIB_TARGET="@OLD_DYLIB_TARGET@"
+OLD_FILTER_LINK="/@OLD_FILTER_LINK@"
+OLD_FILTER_TARGET="@OLD_FILTER_TARGET@"
 RETIRED_DIR="/@RETIRED_DIR@"
 NEW_FILTER_MD5="@NEW_FILTER_MD5@"
 OLD_SUMS='@OLD_SUMS@'
@@ -199,14 +208,15 @@ case "${1:-}" in
 esac
 
 root="${DPKG_ROOT:-}"
-info_dir="$root/var/lib/dpkg/info"
-[ -f "$info_dir/$PACKAGE.md5sums" ] || [ -f "$info_dir/$PACKAGE.list" ] || exit 0
 
 holds() {
   [ -f "$1" ] && [ ! -L "$1" ] && [ "$(md5sum "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ]
 }
 
-# A link 1.0.0 made into its own directory, under the name it was made for.
+# A link 1.0.0 made into its own directory, removed only while it still points
+# there. readlink prints the stored bytes, which name the payload by its
+# absolute path, so the comparison is against that path and not against the
+# root the script happens to run under.
 remove_old_link() {
   [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ] && rm -f "$1"
   return 0
@@ -219,14 +229,17 @@ done <<EOF
 $SUMS
 EOF
 
-for link in $OLD_TWEAK_LINKS; do
-  remove_old_link "$root/$link" "$OLD_DIR/${link#"$TWEAK_DIR"/}"
-done
+# 1.0.0 linked the dylib and the filter into TweakInject and named neither in
+# its file list, so dpkg left both behind. Its own prerm removed them, but only
+# when it ran; a package removed with --force-all, or a database restored from
+# a backup, leaves them for this script.
+remove_old_link "$root$OLD_DYLIB_LINK" "$OLD_DYLIB_TARGET"
+remove_old_link "$root$OLD_FILTER_LINK" "$OLD_FILTER_TARGET"
 
 while read -r sum what; do
   [ -n "$what" ] || continue
-  # A copy of the new filter at the old names is left by an upgrade that
-  # stopped between writing the new file and removing the old one.
+  # A copy of the new filter at an old name is left by an upgrade that stopped
+  # between writing the new file and removing the old one.
   if holds "$root/$what" "$sum" || holds "$root/$what" "$NEW_FILTER_MD5"; then
     rm -f "$root/$what"
   fi
@@ -263,8 +276,19 @@ PY
 write_prerm_list "$stage/DEBIAN/prerm" "@SUMS@" "$work/md5sums"
 printf '%s\n' "$old_sums" > "$work/old-sums"
 write_prerm_list "$stage/DEBIAN/prerm" "@OLD_SUMS@" "$work/old-sums"
+# 1.0.0 linked the dylib and the filter into TweakInject, each pointing at the
+# copy of the same name in its own directory. Both sides are spelled out rather
+# than derived, because the two names differ only in their extension.
+old_dylib_link="$tweak_dir/WebSafeWebKit.dylib"
+old_dylib_target="/${old_directory#/}/WebSafeWebKit.dylib"
+old_filter_link="$tweak_dir/WebSafeWebKit.plist"
+old_filter_target="/${old_directory#/}/WebSafeWebKit.plist"
+
 sed -i -e "s|@NEW_FILTER_MD5@|$(md5sum "$stage/$tweak_dir/$payload_name.plist" | cut -d' ' -f1)|" \
-  -e "s|@OLD_TWEAK_LINKS@|${old_tweak_links[*]}|" \
+  -e "s|@OLD_DYLIB_LINK@|$old_dylib_link|" \
+  -e "s|@OLD_DYLIB_TARGET@|$old_dylib_target|" \
+  -e "s|@OLD_FILTER_LINK@|$old_filter_link|" \
+  -e "s|@OLD_FILTER_TARGET@|$old_filter_target|" \
   -e "s|@PACKAGE@|$package_id|" \
   -e "s|@TWEAK_DIR@|$tweak_dir|" \
   -e "s|@OLD_DIR@|$old_directory|" \
@@ -287,26 +311,10 @@ fi
 exit 0
 POSTINST
 
-PRERM_NEW_FILTER_MD5="$(md5sum "$stage/$tweak_dir/$payload_name.plist" | cut -d' ' -f1)"
-export PRERM_NEW_FILTER_MD5
-
-python3 - "$stage/DEBIAN/prerm" "$work/md5sums" <<'PY'
-import pathlib
-import sys
-
-prerm_path, sums_path = sys.argv[1:3]
-SUMS = "@SUMS@"
-text = pathlib.Path(prerm_path).read_text()
-replacements = {
-    "@SUMS@": pathlib.Path(sums_path).read_text().rstrip("\n"),
-}
-for key, value in replacements.items():
-    if key == "@SUMS@":
-        text = text.replace("SUMS='@SUMS@'", "SUMS='" + value.replace("\n", "\n") + "'")
-PY
+cp "$work/md5sums" "$stage/DEBIAN/md5sums"
 
 chmod 0755 "$stage/DEBIAN/postinst" "$stage/DEBIAN/prerm"
-chmod 0644 "$stage/DEBIAN/control"
+chmod 0644 "$stage/DEBIAN/control" "$stage/DEBIAN/md5sums"
 chmod 0644 "$stage/$tweak_dir/"*.plist
 chmod 0755 "$stage/$tweak_dir/$payload_name.dylib"
 chmod 0755 "$stage" "$stage/DEBIAN" "$stage/var" "$stage/var/jb" \
