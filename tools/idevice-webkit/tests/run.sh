@@ -30,21 +30,51 @@ rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready \
 # leading underscore too few or too many is the failure, and both are refused
 # here.
 #
-# The header's cpusubtype has to stay 0x00000000, the value ld64.lld writes.
-# An image carrying the ARM64E subtype 0x80000002 is loaded on the device and
-# runs no initializer; a working image with those four bytes set is killed with
-# signal 9.
+# Three properties of the slice decide whether the device runs the
+# constructor, and it needs all three. They were measured on the device with
+# /var/jb/usr/bin/true and Safari:
+#
+#   subtype    fixups                 constructor
+#   0x0        LC_DYLD_INFO_ONLY      does not run
+#   0x80000002 LC_DYLD_INFO_ONLY      image loads, constructor does not run
+#   0x0        LC_DYLD_CHAINED_FIXUPS runs
+#   0x80000002 LC_DYLD_CHAINED_FIXUPS runs, and an abort() in it takes Safari
+#                                     down with the crash report naming abort()
+#
+# So the subtype has to be 0x80000002, the link has to produce chained fixups
+# with the constructor in __init_offsets, and the signature has to be written
+# after both, because it covers the header page. 1.0.9 held the subtype at 0
+# and read the first two rows as the device rejecting ARM64E; it does not, it
+# was acting on a signature that stopped matching once the byte changed.
 slice="$here/../build/arm64/WebSafeWebKit.dylib"
 [ -f "$slice" ] || { echo "missing slice: $slice" >&2; exit 1; }
 
 subtype_bytes="$(od -An -t x1 -j 8 -N 4 "$slice" | tr -d ' \n')"
-if [ "$subtype_bytes" != "00000000" ]; then
-  subtype_le="$(printf '%s' "$subtype_bytes" | sed 's/\(..\)\(..\)\(..\)\(..\)/\4\3\2\1/')"
-  echo "the arm64 slice carries a CPU subtype the device runs no initializer of:" >&2
-  echo "cpusubtype 0x$subtype_le, expected 0x00000000" >&2
+if [ "$subtype_bytes" != "02000080" ]; then
+  echo "the arm64 slice does not carry cpusubtype 0x80000002:" >&2
+  echo "read 0x${subtype_bytes}, the header has 02 00 00 80 when the device runs" >&2
   exit 1
 fi
-echo "the arm64 slice carries cpusubtype 0, the one the device runs pass"
+echo "the arm64 slice carries cpusubtype 0x80000002, the one the device runs pass"
+
+slice_headers="$(llvm-objdump --macho --private-headers "$slice")"
+if ! printf '%s\n' "$slice_headers" | grep -q 'LC_DYLD_CHAINED_FIXUPS'; then
+  echo "the arm64 slice carries no LC_DYLD_CHAINED_FIXUPS:" >&2
+  echo "the device loads such an image and runs no initializer of it" >&2
+  exit 1
+fi
+if printf '%s\n' "$slice_headers" | grep -q 'LC_DYLD_INFO_ONLY'; then
+  echo "the arm64 slice carries LC_DYLD_INFO_ONLY beside the chained fixups:" >&2
+  exit 1
+fi
+echo "the arm64 slice carries LC_DYLD_CHAINED_FIXUPS and no LC_DYLD_INFO_ONLY pass"
+
+if ! llvm-objdump --macho -h "$slice" | grep -q '__init_offsets'; then
+  echo "the constructor is not in __init_offsets:" >&2
+  echo "with the constructor in __mod_init_func the device runs none of it" >&2
+  exit 1
+fi
+echo "the constructor is registered in __init_offsets pass"
 
 if llvm-nm -u "$slice" | grep -q -e '^_dyld_' -e '^___dyld_'; then
   echo "the arm64 slice refers to a dyld symbol name the device does not export:" >&2

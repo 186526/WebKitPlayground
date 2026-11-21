@@ -3,9 +3,19 @@
 #
 #   ./sign-adhoc.py SLICE [IDENTIFIER]
 #
-# The signature is the one ldid -S produces, minus the entitlements and the
-# requirements blob: a SuperBlob holding one CodeDirectory, hashed with SHA-256
-# over 4 KiB pages, flagged ad-hoc. It is appended past the end of __LINKEDIT,
+# NOT USED FOR SHIPPED ARTEFACTS. The package is signed by ldid, from
+# package-deb.sh, and a dylib signed by this file does not load on the device:
+# taking a dylib that loads and replacing only its signature with this one stops
+# it loading, with every byte of code unchanged. The file is kept because
+# tests/signature_test.py uses it as a Mach-O writer and the disassembly work
+# compared against it. The reason it is not enough is written up in
+# docs/safari-injection-plan.md, in the signature section.
+#
+# The signature is a SuperBlob holding one CodeDirectory, hashed with SHA-256
+# over 4 KiB pages, flagged ad-hoc. ldid's own output holds two blobs (the
+# CodeDirectory and a requirements set) and leaves the flag word at 0; those
+# differences are part of why this file's output does not load. It is appended
+# past the end of __LINKEDIT,
 # and __LINKEDIT is grown to cover it. LC_CODE_SIGNATURE is placed in the unused
 # room between the existing load commands and the first section's data, so no
 # offset inside the file moves.

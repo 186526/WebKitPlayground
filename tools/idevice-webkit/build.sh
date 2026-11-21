@@ -11,15 +11,34 @@
 # The output name here is a local build name. package-deb.sh signs this file
 # and installs it under the name WebSafeWebKitFilter.dylib.
 #
-# The image has to keep the CPU subtype ld64.lld writes, ARM64 ALL (0x00000000).
-# clang gives its arm64e objects the subtype ARM64E (0x80000002), and 1.0.0
-# through 1.0.7 restored that subtype into the linked arm64e slice with a dd
-# patch. On the device that slice is loaded and its initializers never run; a
-# working image with the header's offset 8 changed to 0x80000002 and nothing
-# else touched is killed with signal 9. The same source built as arm64 with the
-# subtype left at 0 runs. The check below holds the subtype at 0, and the
-# package ships the arm64 slice alone: two slices with subtype 0 are the same
-# architecture to lipo, which refuses to put them in one file.
+# The image has to carry three things the device checks together, and 1.0.9
+# proved that a build missing any one of them is loaded without its
+# initializer ever running:
+#
+#   cpusubtype      0x80000002 (ARM64E), not the 0x0 ld64.lld writes
+#   fixup format    LC_DYLD_CHAINED_FIXUPS, with the constructor in
+#                   __init_offsets rather than __mod_init_func
+#   signature       written by ldid, after the two above are in place
+#
+# The device experiments behind this, all with /var/jb/usr/bin/true and Safari:
+#
+#   subtype    fixups                 constructor
+#   0x0        LC_DYLD_INFO_ONLY      does not run
+#   0x80000002 LC_DYLD_INFO_ONLY      image loads, constructor does not run
+#   0x0        LC_DYLD_CHAINED_FIXUPS runs
+#   0x80000002 LC_DYLD_CHAINED_FIXUPS runs, and an abort() inside it takes
+#                                     Safari down, with the crash report naming
+#                                     abort() called
+#
+# An earlier reading of the first two rows said the device rejects the ARM64E
+# subtype. It does not: those images carried LC_DYLD_INFO_ONLY, and once the
+# header byte was changed the signature no longer matched the page it covers,
+# which is what the device acted on. The same subtype with chained fixups and a
+# signature written after the change runs.
+#
+# ld64.lld refuses -fixup_chains on an arm64e target ("only supported on x86_64
+# and arm64 targets"), so the link is done as arm64 with -fixup_chains and the
+# subtype is written into the header afterwards, before signing.
 #
 # CLANG may hold a command with spaces, such as "xcrun -sdk iphoneos clang".
 set -euo pipefail
@@ -49,17 +68,18 @@ link_flags=(
   -arch "${arch}"
   -platform_version ios "${minimum_ios}" "${minimum_ios}"
   -undefined dynamic_lookup
+  -fixup_chains
   -install_name "${install_name}"
 )
 
+# The link is arm64 so that ld64.lld accepts -fixup_chains, and the subtype is
+# written into the header afterwards. Offsets are from the start of the image,
+# which is also the start of the slice: the package carries one slice.
 mach_header_subtype_offset=8
 
 if [ "$arch" != "arm64" ]; then
-  # A second slice cannot be shipped beside the arm64 one: with the subtype
-  # held at 0 both are the same architecture to lipo, which refuses to put them
-  # in one file, and the package carries a single slice.
-  echo "only the arm64 slice is built: a second slice would carry the same" >&2
-  echo "cpusubtype 0x00000000 and lipo cannot join the two into one file" >&2
+  echo "only the arm64 slice is built: ld64.lld accepts -fixup_chains on arm64" >&2
+  echo "and x86_64 alone, and the subtype is written into the header afterwards" >&2
   exit 1
 fi
 
@@ -80,15 +100,39 @@ done
 
 "$linker" "${link_flags[@]}" -o "$output_dir/WebSafeWebKit.dylib" "${objects[@]}"
 
-# dyld on the device runs no initializer of an image whose header carries the
-# ARM64E subtype (0x80000002), and kills one whose content works under another
-# subtype once the byte is set. ld64.lld writes 0, and 0 is what the device
-# accepted, so a build that changes it has to stop here.
+# The subtype is written before the signature, which package-deb.sh writes: the
+# signature covers the header page, so setting this byte afterwards would leave
+# a signature that does not match and the device acts on the mismatch rather
+# than loading the image.
+printf '\x02\x00\x00\x80' |
+  dd of="$output_dir/WebSafeWebKit.dylib" bs=1 seek="$mach_header_subtype_offset" \
+     conv=notrunc status=none
+
 subtype_bytes="$(od -An -t x1 -j "$mach_header_subtype_offset" -N 4 "$output_dir/WebSafeWebKit.dylib" | tr -d ' \n')"
-if [ "$subtype_bytes" != "00000000" ]; then
-  subtype_le="$(printf '%s' "$subtype_bytes" | sed 's/\(..\)\(..\)\(..\)\(..\)/\4\3\2\1/')"
-  echo "the dylib carries a CPU subtype the device runs no initializer of:" >&2
-  echo "cpusubtype 0x$subtype_le, expected 0x00000000" >&2
+if [ "$subtype_bytes" != "02000080" ]; then
+  echo "the dylib does not carry cpusubtype 0x80000002:" >&2
+  echo "read 0x$subtype_bytes, expected 0x02000080" >&2
+  exit 1
+fi
+
+# -fixup_chains is what makes the constructor reachable. Without it ld64.lld
+# writes LC_DYLD_INFO_ONLY and puts the constructor in __mod_init_func, and the
+# device loads such an image without running any of it. The two checks below
+# read the linked slice, so a linker that quietly ignored the flag cannot
+# produce a package.
+headers="$(llvm-objdump --macho --private-headers "$output_dir/WebSafeWebKit.dylib")"
+if ! printf '%s\n' "$headers" | grep -q 'LC_DYLD_CHAINED_FIXUPS'; then
+  echo "the dylib carries no LC_DYLD_CHAINED_FIXUPS, so the device runs no" >&2
+  echo "initializer of it; -fixup_chains was not honoured by $linker" >&2
+  exit 1
+fi
+if printf '%s\n' "$headers" | grep -q 'LC_DYLD_INFO_ONLY'; then
+  echo "the dylib carries LC_DYLD_INFO_ONLY beside the chained fixups:" >&2
+  printf '%s\n' "$headers" | grep 'LC_DYLD_INFO_ONLY' >&2
+  exit 1
+fi
+if ! llvm-objdump --macho -h "$output_dir/WebSafeWebKit.dylib" | grep -q '__init_offsets'; then
+  echo "the constructor is not in __init_offsets, so the device runs none of it" >&2
   exit 1
 fi
 

@@ -15,19 +15,27 @@
 # dylib when the answer is not zero, so the two names have to be the same and
 # both read "WebSafeWebKitFilter".
 #
-# The dylib is one arm64 slice with the cpusubtype ld64.lld writes, 0x00000000.
-# dyld on the device runs no initializer of an image carrying the ARM64E
-# subtype, so the slice has to stay at 0 and cannot be joined with an arm64e
-# slice: two slices of subtype 0 are the same architecture to lipo. It is
-# signed ad-hoc by sign-adhoc.py before it is copied into the stage; a slice
-# that cannot be signed stops the build, because an unsigned dylib does not
-# load on a device.
+# The dylib is one arm64 slice carrying cpusubtype 0x80000002 and
+# LC_DYLD_CHAINED_FIXUPS, and it is signed by ldid after both are in place.
+# build.sh sets the subtype and the link produces the chained fixups; the
+# signature has to come last because it covers the header page. A slice that
+# cannot be signed stops the packaging, because an unsigned dylib does not load
+# on a device.
+#
+# ldid is taken from LDID, then from PATH, then from /tmp/ldid-src/ldid, which
+# is a development path and not a published dependency; the error below prints
+# the commands that build one. sign-adhoc.py stays in the tree for the
+# signature tests and the disassembly comparisons, but its output does not load
+# on the device: replacing the signature of a dylib that loads, with its bytes
+# otherwise unchanged, stops it loading.
 #
 # The scripts change nothing beyond the files dpkg owns:
 #
-#   postinst  gives the tweak's report file back to mobile when it already
-#             exists. It does not create the file, touch a system plist,
-#             respring or restart ellekit.
+#   postinst  creates the two report files under the Preferences directory when
+#             that directory exists, and gives them to mobile with mode 0644.
+#             It does not touch a system plist, respring or restart ellekit.
+#             The presence of those files is not evidence the tweak ran: read
+#             the stage key inside them.
 #   prerm     runs while the installed copy is still on disk, checks every file
 #             on its list against the md5sums packed beside it, and removes the
 #             ones that still match. A file whose content changed belongs to
@@ -49,7 +57,7 @@ python="${PYTHON:-python3}"
 
 payload_name="WebSafeWebKitFilter"
 package_id="com.websafe.idevice"
-package_version="1.0.9-20261122"
+package_version="1.0.10-20261122"
 tweak_dir="var/jb/usr/lib/TweakInject"
 manifest_prefix="com.websafe.idevice.host."
 
@@ -82,9 +90,32 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for tool in "$dpkg_deb" "$python"; do
+for tool in "$dpkg_deb"; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
+
+# ldid has to sign the slice: a signature written any other way does not load
+# on the device, and a slice signed before the subtype was set covers the wrong
+# page. LDID wins, then PATH, then the development build.
+signer="${LDID:-$(command -v ldid || true)}"
+if [ -z "$signer" ] && [ -x /tmp/ldid-src/ldid ]; then
+  signer=/tmp/ldid-src/ldid
+fi
+if [ -z "$signer" ]; then
+  cat >&2 <<'SIGNER'
+missing signer: set LDID, or put ldid on PATH. A development build:
+  apt-get download libplist-dev
+  dpkg-deb -x libplist-dev_*.deb /tmp/pl
+  git clone --depth 1 https://github.com/ProcursusTeam/ldid.git /tmp/ldid-src
+  cd /tmp/ldid-src
+  make CXXFLAGS="-O2 -I/tmp/pl/root/usr/include" \
+       LIBPLIST_INCLUDES="-I/tmp/pl/root/usr/include" LIBCRYPTO_INCLUDES="" || true
+  g++ -o ldid ldid.cpp.o /usr/lib/x86_64-linux-gnu/libplist-2.0.so.12 -lcrypto
+make's own link step fails on a missing libplist-2.0.so symlink; the g++ line
+links the versioned library and is what produces a working ldid.
+SIGNER
+  exit 1
+fi
 
 slice="$slice_dir/WebSafeWebKit.dylib"
 [ -f "$slice" ] || { echo "missing slice: $slice" >&2; exit 1; }
@@ -96,8 +127,8 @@ mkdir -p "$stage/DEBIAN" "$stage/$tweak_dir"
 
 # 1. One signed copy of the slice.
 cp "$slice" "$stage/$tweak_dir/$payload_name.dylib"
-"$python" "$here/sign-adhoc.py" "$stage/$tweak_dir/$payload_name.dylib" "$payload_name" || {
-  echo "cannot sign the slice of $payload_name" >&2
+"$signer" -S "$stage/$tweak_dir/$payload_name.dylib" || {
+  echo "cannot sign the slice of $payload_name with $signer" >&2
   exit 1
 }
 

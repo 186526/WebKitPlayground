@@ -166,15 +166,16 @@ static bool is_host_path(const char *hostPath) {
   return true;
 }
 
-/* The framework copy under /var/jb is never found in the image table: the
-   three __dyld_* functions that would walk it are not exported by the dyld of
-   the device, and a reference to one of them keeps the whole image from being
-   bound, so the constructor never runs. The two images this code needs are
-   reached another way. The host is the main executable, which
-   _NSGetExecutablePath names, the same call libinjector makes before it loads
-   a tweak. The framework is loaded under its literal path, so a handle for it
-   answers whether the image is there, and one class it defines turns that
-   handle into the base address of the image for the version text. */
+/* The framework copy under /var/jb is never found in the image table, and the
+   two calls below are what replaced the three _dyld_* functions 1.0.0 to 1.0.6
+   used to walk it. That replacement was made because the functions were judged
+   unexported by the device's dyld; the judgement was wrong, and a device probe
+   that called _dyld_image_count() and printed the count (97) settled it. The
+   replacement stands on its own merits instead: two calls with no dependency
+   on the image table, one of them the same _NSGetExecutablePath libinjector
+   calls before it loads a tweak. The host is the main executable this names;
+   the framework is loaded under its literal path, and one class it defines
+   turns that handle into the base address for the version text. */
 
 static void host_path_of_this_process(char *out, usize capacity) {
   u32 size = (u32)capacity;
