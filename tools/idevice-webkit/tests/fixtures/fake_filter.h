@@ -18,6 +18,13 @@ void fake_filter_add_bundle(const char *identifier);
 void fake_class_register(const char *class_name);
 void fake_bundle_register(const char *identifier);
 
+/* What the last lowercased copy was made with, so a case can hold the call to
+   the three arguments CFStringCreateMutableCopy declares. The header comment
+   above the stub repeats this; keep the two together. */
+
+void *fake_filter_last_copy_allocator(void);
+i64 fake_filter_last_copy_capacity(void);
+
 /* The two calls the dylib looks up in the process and in Foundation, and the
    table every Foundation selector is answered from. */
 

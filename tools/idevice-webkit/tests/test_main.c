@@ -34,12 +34,19 @@ char *library_last_error(void) {
   return "test: no framework";
 }
 /* The constructor reaches the Objective-C runtime and Foundation through the
-   two lookups dyld_lookup.c and bundle_lookup.c make. The class lookup takes
-   no library and answers by the name it is given, so a case registers the
-   class names the process has; the other lookup reads the filter table. */
+   three lookups dyld_lookup.c and bundle_lookup.c make. symbol_find keeps the
+   meaning it has on the device: an absent library answers nothing. The class
+   lookup goes through the global table instead and answers by the name it is
+   given, so a case registers the class names the process has; the Foundation
+   lookup reads the filter table. */
 
 void *symbol_find(void *library, const char *name) {
   (void)library;
+  (void)name;
+  return NULL;
+}
+
+void *symbol_find_global(const char *name) {
   if (strcmp(name, "objc_getClass") == 0) {
     return (void *)fake_class_named;
   }
@@ -422,10 +429,60 @@ int main(void) {
              found_in(report, "<key>matchVia</key>\n\t<string>none</string>") &&
              found_in(report, "\t<integer>7</integer>"));
 
+  /* The template lists the two Safari identifiers before the container apps,
+     so WeChat is the third element. Reading only the first element would
+     report this process as matched by none. */
+
+  prepare(wechat, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_bundle("com.apple.mobilesafari");
+  fake_filter_add_bundle("com.apple.SafariViewService");
+  fake_filter_add_bundle("com.tencent.xin");
+  fake_filter_add_bundle("com.google.chrome.ios");
+  fake_bundle_register("com.tencent.xin");
+  list_host("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a bundle third in the list is matched through Bundles",
+         report != NULL &&
+             found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
+             found_in(report, "\t<integer>7</integer>"));
+
+  /* CFStringCreateMutableCopy takes the allocator, the capacity and the
+     string. The filter names the identifier in capitals and the registry
+     answers only the lowercased form, so the first lookup fails and the case
+     reads the copy the second lookup is made from. The stub records the first
+     two arguments, and calling CFAllocatorGetDefault is the only way to know
+     the allocator handed over is the object it returned, not the function. */
+
+  prepare(wechat, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_bundle("COM.TENCENT.XIN");
+  fake_bundle_register("com.tencent.xin");
+  list_host("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a capitalised identifier is matched through its lowercased copy",
+         report != NULL &&
+             found_in(report, "<key>matchVia</key>\n\t<string>bundles</string>") &&
+             found_in(report, "\t<integer>7</integer>"));
+  void *(*allocator_default)(void) =
+      (void *(*)(void))fake_foundation_symbol("CFAllocatorGetDefault");
+  expect("the lowercase copy is made with the default allocator",
+         allocator_default != NULL &&
+             fake_filter_last_copy_allocator() == allocator_default() &&
+             fake_filter_last_copy_allocator() != NULL);
+  expect("the lowercase copy has room for the identifier and its end",
+         fake_filter_last_copy_capacity() == (i64)strlen("COM.TENCENT.XIN") + 1);
+
+
   /* The four hosts below lose their manifest one at a time. The report is
      still written, and it says how the process was matched, because the match
      was decided before the manifest was read. */
-
   prepare(safari, installed_self, 1);
   add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
   idevice_webkit_start();

@@ -31,14 +31,26 @@ static void *value_for_key(void *dictionary, const char *key) {
   return keyObject == NULL ? NULL : objectForKey(dictionary, keyObject);
 }
 
-static void *first_element(void *array) {
+/* The array is walked from the first element to the last. libinjector tries
+   every element of the list it is given, and the filter lists four bundles, so
+   a process named by the fourth must not read as a process named by none. */
+
+typedef bool (*element_predicate)(void *element, void *context);
+
+static bool any_element(void *array, element_predicate matches, void *context) {
   i32 (*count)(void *) = (i32 (*)(void *))foundation_symbol("NSArray.count");
   void *(*objectAtIndex)(void *, usize) =
       (void *(*)(void *, usize))foundation_symbol("NSArray.objectAtIndex:");
-  if (array == NULL || count == NULL || objectAtIndex == NULL || count(array) < 1) {
-    return NULL;
+  if (array == NULL || count == NULL || objectAtIndex == NULL) {
+    return false;
   }
-  return objectAtIndex(array, 0);
+  i32 elements = count(array);
+  for (i32 index = 0; index < elements; index++) {
+    if (matches(objectAtIndex(array, (usize)index), context)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static bool element_text(void *element, char *out, usize capacity) {
@@ -53,59 +65,97 @@ static bool element_text(void *element, char *out, usize capacity) {
 
 /* The class branch is objc_getClass with the element as its C string: a class
    that exists in this process answers with its name, and the runtime answers
-   nil for a name it does not know. */
+   nil for a name it does not know. objc_getClass is in libobjc, which the host
+   loads on its own, so it is looked up in the global table rather than in
+   Foundation. */
 
-static bool class_matches(void *filter, char *scratch, usize capacity) {
+typedef struct class_lookup {
+  void *(*get_class)(const char *);
+} class_lookup;
+
+static bool class_present(void *element, void *context) {
+  class_lookup *lookup = context;
+  char name[bundle_identifier_capacity];
+  return element_text(element, name, sizeof(name)) && lookup->get_class(name) != NULL;
+}
+
+static bool class_matches(void *filter) {
+  void *array = value_for_key(filter, "Classes");
+  if (array == NULL) {
+    return false;
+  }
   void *(*get_class)(const char *) =
-      (void *(*)(const char *))symbol_find(NULL, "objc_getClass");
+      (void *(*)(const char *))symbol_find_global("objc_getClass");
   if (get_class == NULL) {
     return false;
   }
-  return element_text(first_element(value_for_key(filter, "Classes")), scratch, capacity) &&
-         get_class(scratch) != NULL;
+  class_lookup lookup = {get_class};
+  return any_element(array, class_present, &lookup);
 }
 
 /* The bundle branch is CFBundleGetBundleWithIdentifier, first with the bytes
    of the element and then with a lowercased copy, as libinjector does. A
    system application such as MobileSafari is not in the LaunchServices
-   registry this function reads, so only the class branch can match it. */
+   registry this function reads, so only the class branch can match it.
 
-static bool bundle_matches(void *filter, char *scratch, usize capacity) {
-  void *(*bundle_for_identifier)(void *) =
-      (void *(*)(void *))foundation_symbol("CFBundleGetBundleWithIdentifier");
-  void *(*mutable_copy)(void *(*allocator)(void), void *) = (void *(*)(void *(*)(void), void *))
-      foundation_symbol("CFStringCreateMutableCopy");
-  void (*lowercase)(void *, void *) =
-      (void (*)(void *, void *))foundation_symbol("CFStringLowercase");
-  void (*release_object)(void *) = (void (*)(void *))foundation_symbol("CFRelease");
-  void *(*allocator)(void) = (void *(*)(void))foundation_symbol("CFAllocatorGetDefault");
-  if (bundle_for_identifier == NULL || mutable_copy == NULL || lowercase == NULL ||
-      release_object == NULL || allocator == NULL) {
-    return false;
-  }
-  void *element = first_element(value_for_key(filter, "Bundles"));
-  if (!element_text(element, scratch, capacity)) {
-    return false;
-  }
-  if (bundle_for_identifier(element) != NULL) {
+   CFStringCreateMutableCopy takes three arguments: the allocator to use, a
+   capacity the copy may grow to, and the string to copy. CFAllocatorGetDefault
+   is itself a function, so its return value is the allocator to hand over. */
+
+typedef struct bundle_lookup {
+  void *(*bundle_for_identifier)(void *);
+  void *allocator;
+  void *(*mutable_copy)(void *, i64, void *);
+  void (*lowercase)(void *, void *);
+  void (*release_object)(void *);
+  i64 (*length_of)(void *);
+} bundle_lookup;
+
+static bool bundle_named(void *identifier, void *context) {
+  bundle_lookup *lookup = context;
+  if (lookup->bundle_for_identifier(identifier) != NULL) {
     return true;
   }
-  void *lowered = mutable_copy(allocator, element);
-  if (lowered == NULL) {
+  i64 length = lookup->length_of(identifier);
+  void *copy = lookup->mutable_copy(lookup->allocator, length + 1, identifier);
+  if (copy == NULL) {
     return false;
   }
-  lowercase(lowered, NULL);
-  bool matched = bundle_for_identifier(lowered) != NULL;
-  release_object(lowered);
+  lookup->lowercase(copy, NULL);
+  bool matched = lookup->bundle_for_identifier(copy) != NULL;
+  lookup->release_object(copy);
   return matched;
 }
 
+static bool bundle_matches(void *filter) {
+  void *array = value_for_key(filter, "Bundles");
+  if (array == NULL) {
+    return false;
+  }
+  bundle_lookup lookup;
+  lookup.bundle_for_identifier =
+      (void *(*)(void *))foundation_symbol("CFBundleGetBundleWithIdentifier");
+  void *(*allocator_default)(void) =
+      (void *(*)(void))foundation_symbol("CFAllocatorGetDefault");
+  lookup.mutable_copy =
+      (void *(*)(void *, i64, void *))foundation_symbol("CFStringCreateMutableCopy");
+  lookup.lowercase = (void (*)(void *, void *))foundation_symbol("CFStringLowercase");
+  lookup.release_object = (void (*)(void *))foundation_symbol("CFRelease");
+  lookup.length_of = (i64 (*)(void *))foundation_symbol("CFStringGetLength");
+  if (lookup.bundle_for_identifier == NULL || allocator_default == NULL ||
+      lookup.mutable_copy == NULL || lookup.lowercase == NULL ||
+      lookup.release_object == NULL || lookup.length_of == NULL) {
+    return false;
+  }
+  lookup.allocator = allocator_default();
+  return any_element(array, bundle_named, &lookup);
+}
+
 void filter_match_report(const char *filterPath) {
-  char scratch[bundle_identifier_capacity];
   void *filter = filter_dictionary(filterPath);
-  if (class_matches(filter, scratch, sizeof(scratch))) {
+  if (class_matches(filter)) {
     dylib_report_set_match(match_classes);
-  } else if (bundle_matches(filter, scratch, sizeof(scratch))) {
+  } else if (bundle_matches(filter)) {
     dylib_report_set_match(match_bundles);
   } else {
     dylib_report_set_match(match_none);

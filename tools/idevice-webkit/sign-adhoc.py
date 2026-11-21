@@ -10,6 +10,12 @@
 # room between the existing load commands and the first section's data, so no
 # offset inside the file moves.
 #
+# The SuperBlob index entry the signature starts with carries two numbers: a
+# slot type and a blob offset. The slot type is 0 for the CodeDirectory
+# (CSSLOT_CODEDIRECTORY), not the blob magic: dyld looks up slot 0 and skips the
+# whole image, without a message, when the entry names another slot. The magic
+# appears only inside the blob itself, at the offset the entry points to.
+#
 # The script exits non-zero when the input has no room for the load command, no
 # __LINKEDIT, an existing signature, or is not a thin little-endian dylib.
 import hashlib
@@ -20,6 +26,10 @@ LC_SEGMENT_64 = 0x19
 LC_CODE_SIGNATURE = 0x1D
 CSMAGIC_EMBEDDED_SIGNATURE = 0xFADE0CC0
 CSMAGIC_CODEDIRECTORY = 0xFADE0C02
+CSSLOT_CODEDIRECTORY = 0
+SUPERBLOB_HEADER_SIZE = 12
+SUPERBLOB_INDEX_SIZE = 8
+SUPERBLOB_BLOBS_OFFSET = SUPERBLOB_HEADER_SIZE + SUPERBLOB_INDEX_SIZE
 CS_ADHOC = 0x2
 CD_VERSION = 0x20400
 CD_HEADER_SIZE = 88
@@ -78,6 +88,37 @@ def first_section_offset(data, commands):
     return min(offsets)
 
 
+def check_signature(data, dataoff, superblob_length, code_directory_length, code_slots):
+    """Reads the signature back and refuses to write a file dyld would skip.
+
+    dyld finds the CodeDirectory by slot type 0 in the SuperBlob index. An
+    entry that names another slot, which is what writing the blob magic here
+    produces, makes dyld drop the whole image without printing anything.
+    """
+    magic, length, count = struct.unpack_from(">III", data, dataoff)
+    if magic != CSMAGIC_EMBEDDED_SIGNATURE:
+        fail(f"internal error: SuperBlob magic is {magic:#010x}")
+    if length != superblob_length:
+        fail(f"internal error: SuperBlob length is {length}, expected {superblob_length}")
+    if count != 1:
+        fail(f"internal error: SuperBlob holds {count} blobs, expected 1")
+    slot_type, offset = struct.unpack_from(">II", data, dataoff + SUPERBLOB_HEADER_SIZE)
+    if slot_type != CSSLOT_CODEDIRECTORY:
+        fail(f"internal error: SuperBlob slot type is {slot_type:#x}, "
+             f"expected {CSSLOT_CODEDIRECTORY}")
+    blob = dataoff + offset
+    blob_magic, blob_length = struct.unpack_from(">II", data, blob)
+    if blob_magic != CSMAGIC_CODEDIRECTORY:
+        fail(f"internal error: the blob in slot 0 has magic {blob_magic:#010x}")
+    if blob_length != code_directory_length:
+        fail(f"internal error: CodeDirectory length is {blob_length}, "
+             f"expected {code_directory_length}")
+    stored_slots = struct.unpack_from(">I", data, blob + 28)[0]
+    if stored_slots != code_slots:
+        fail(f"internal error: CodeDirectory lists {stored_slots} slots, "
+             f"expected {code_slots}")
+
+
 def main():
     if len(sys.argv) < 2:
         fail("usage: sign-adhoc.py SLICE [IDENTIFIER]")
@@ -117,7 +158,7 @@ def main():
     hash_offset = CD_HEADER_SIZE + len(identifier_bytes)
     code_slots = (dataoff + PAGE_SIZE - 1) // PAGE_SIZE
     code_directory_length = hash_offset + code_slots * HASH_SIZE
-    superblob_length = align_up(20 + code_directory_length, SIGNATURE_ALIGN)
+    superblob_length = align_up(SUPERBLOB_BLOBS_OFFSET + code_directory_length, SIGNATURE_ALIGN)
     data.extend(b"\0" * (dataoff + superblob_length - len(data)))
 
     struct.pack_into("<IIII", data, command_area, LC_CODE_SIGNATURE, 16, dataoff, superblob_length)
@@ -131,7 +172,8 @@ def main():
 
     signature = dataoff
     struct.pack_into(">III", data, signature, CSMAGIC_EMBEDDED_SIGNATURE, superblob_length, 1)
-    struct.pack_into(">II", data, signature + 12, CSMAGIC_CODEDIRECTORY, 20)
+    struct.pack_into(">II", data, signature + SUPERBLOB_HEADER_SIZE, CSSLOT_CODEDIRECTORY,
+                     SUPERBLOB_BLOBS_OFFSET)
     header = struct.pack(
         ">IIIIIIIIIBBBBIIIIQQQQ",
         CSMAGIC_CODEDIRECTORY,
@@ -158,7 +200,7 @@ def main():
     )
     if len(header) != CD_HEADER_SIZE:
         fail(f"internal error: CodeDirectory header is {len(header)} bytes")
-    code_directory_offset = dataoff + 20
+    code_directory_offset = dataoff + SUPERBLOB_BLOBS_OFFSET
     data[code_directory_offset:code_directory_offset + CD_HEADER_SIZE] = header
     data[code_directory_offset + CD_HEADER_SIZE:code_directory_offset + hash_offset] = identifier_bytes
     for slot in range(code_slots):
@@ -168,6 +210,8 @@ def main():
         data[offset:offset + HASH_SIZE] = digest
     if len(data) != dataoff + superblob_length:
         fail(f"internal error: file is {len(data)} bytes, expected {dataoff + superblob_length}")
+
+    check_signature(data, dataoff, superblob_length, code_directory_length, code_slots)
 
     with open(path, "wb") as target:
         target.write(data)

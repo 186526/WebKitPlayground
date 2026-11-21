@@ -7,9 +7,15 @@
 # on its own while UBSan only prints.
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
+python="${PYTHON:-python3}"
 work="${TMPDIR:-/tmp}/idevice-webkit-test"
 mkdir -p "$work"
-rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready "$work"/asan.log
+rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready \
+  "$work"/com.websafe.idevice.others.plist "$work"/asan.log
+
+# The signature is checked before the C suite: a dylib dyld will not load makes
+# every host decision below moot, so a broken signer stops the run first.
+"$python" "$here/signature_test.py"
 
 clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" -I"$here/fixtures" \
   "$here/test_main.c" -o "$work/test_main"

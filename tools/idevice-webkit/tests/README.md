@@ -5,7 +5,11 @@ replaces three sets of calls with test versions: the three dyld image table
 functions (`_dyld_image_count`, `_dyld_get_image_name`, `_dyld_get_image_header`),
 the Foundation lookups (`NSBundle.bundleWithPath:`, `NSDictionary.dictionaryWithContentsOfFile:`
 and the `NSDictionary.objectForKey:` / `NSString.stringWithUTF8String:` /
-`NSString.UTF8String` accessors), and the Darwin file writer. The writer is replaced because the dylib
+`NSString.UTF8String` accessors), and the Darwin file writer. It also defines
+the two `dlsym` wrappers of `src/dyld_lookup.c`: `symbol_find(library, name)`
+returns NULL for any arguments, which is what `dlsym(NULL, …)` does on the
+device, and `symbol_find_global(name)` answers `objc_getClass` from the class
+table. The writer is replaced because the dylib
 writes with the Darwin `open` flags `0x601`, which a Linux kernel reads as
 `O_WRONLY | O_TRUNC | O_APPEND`; without `O_CREAT` the call fails with
 `ENOENT`. It checks the host decisions of the constructor, not the device
@@ -58,6 +62,26 @@ more cases start Safari, WeChat, Chrome and SafariViewService without their
 manifest and read `matchVia` from the placeholder report, because the filter is
 read before the manifest is.
 
+Four cases pin the shape of the two branches as the filter really uses them.
+`a bundle third in the list is matched through Bundles` puts WeChat at index 2
+of four and asks for a match, so a branch that only reads element 0 fails it.
+`a capitalised identifier is matched through its lowercased copy` gives the
+filter `COM.TENCENT.XIN` and registers only the lowercased form, so the second
+lookup of the bundle branch has to produce it. The two `lowercase copy` cases
+record the allocator and capacity the fixture saw on
+`CFStringCreateMutableCopy`: the allocator has to be the object returned by
+`CFAllocatorGetDefault`, not the function pointer, and the capacity has to be
+`CFStringGetLength + 1`. The fixture declares the call with its three real
+parameters, so a two-parameter call written in `src/` fails to compile under
+`-Werror` before any case runs.
+
+The class branch is answered through `symbol_find_global`, which the stub maps
+to the class table, while `symbol_find` keeps the real NULL-handle semantics
+and answers nothing. That split is what makes the branch testable: every case
+that reads `matchVia` as `classes` depends on the class lookup reaching the
+table, so a `symbol_find(NULL, "objc_getClass")` call in `src/` turns those
+cases red at once.
+
 The report is split in two, because the filter names `UIApplication` and so
 every app on the device loads the dylib. The entry report and the placeholder
 of a process that is not one of the four hosts go to
@@ -73,6 +97,19 @@ Run from `tools/idevice-webkit`:
 ```sh
 sh tests/run.sh
 ```
+
+`run.sh` signs before it compiles anything: `signature_test.py` builds a
+minimal Mach-O in a temporary directory (a `__TEXT` segment with a `__text`
+section and a `__LINKEDIT` segment), runs the real `sign-adhoc.py` on it, and
+then parses the result with its own reader rather than with the signer's code.
+It checks that `LC_CODE_SIGNATURE` is there, that the SuperBlob magic, length
+and blob count match, that the index entry names slot 0, that the offset lands
+on a `0xfade0c02` CodeDirectory of the stated length, and that the index entry
+does not carry the blob magic itself. It then imports the signer as a module
+and hands `check_signature` the shape 1.0.0–1.0.4 wrote; the guard has to exit
+non-zero with a message naming the slot type. A broken signer stops the run
+before the C cases, because a dylib dyld will not load makes every host
+decision below moot.
 
 The script builds the test twice: once plainly and once with AddressSanitizer
 and UndefinedBehaviorSanitizer. The second run only counts when its log holds

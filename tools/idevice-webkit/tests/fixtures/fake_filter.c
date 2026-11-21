@@ -206,15 +206,35 @@ void *fake_class_named(const char *name) {
 /* The bundle branch asks for a lowercased copy of the identifier, so
    mutable_copy stands in for the copy and lowercase for the call that fills
    it. The copy remembers the element it was made from, which is what the
-   call after it reads; the table it writes holds room for every element. */
+   call after it reads; the table it writes holds room for every element.
+
+   The signature is CFStringCreateMutableCopy's, three arguments and all: the
+   allocator, the capacity, and the string. A stub that took two arguments
+   would let a two-argument call compile and run here while the device reads
+   the third register as garbage, which is how the call survived review once
+   already. */
 
 static char lowered_text[lowercase_room];
 static void *lowered_source = 0;
+static void *lowered_allocator = 0;
+static i64 lowered_capacity = 0;
 
-static void *mutable_copy(void *(*allocator)(void), void *text) {
-  (void)allocator;
+static void *mutable_copy(void *allocator, i64 capacity, void *text) {
+  lowered_allocator = allocator;
+  lowered_capacity = capacity;
   lowered_source = text;
   return text == 0 ? 0 : (void *)lowered_text;
+}
+
+/* What the last copy was made with, so a case can hold the call to the three
+   arguments CFStringCreateMutableCopy declares. */
+
+void *fake_filter_last_copy_allocator(void) {
+  return lowered_allocator;
+}
+
+i64 fake_filter_last_copy_capacity(void) {
+  return lowered_capacity;
 }
 
 static void lowercase(void *copy, void *locale) {
@@ -252,8 +272,26 @@ static void release_object(void *object) {
   (void)object;
 }
 
+/* A value that is neither null nor a function pointer, so a case can prove the
+   allocator reached the copy as the object CFAllocatorGetDefault returns and
+   not as the function itself. */
+
+static int default_allocator_object;
+
 static void *default_allocator(void) {
-  return 0;
+  return (void *)&default_allocator_object;
+}
+
+/* CFStringGetLength answers the number of UTF-16 units; the stub strings are
+   ASCII, so the byte length is the same number. */
+
+static i64 string_length(void *string) {
+  const char *text = text_of(string);
+  i64 length = 0;
+  while (text != 0 && text[length] != 0) {
+    length++;
+  }
+  return length;
 }
 
 void *fake_foundation_symbol(const char *name) {
@@ -289,6 +327,9 @@ void *fake_foundation_symbol(const char *name) {
   }
   if (text_equal(name, "CFAllocatorGetDefault")) {
     return (void *)default_allocator;
+  }
+  if (text_equal(name, "CFStringGetLength")) {
+    return (void *)string_length;
   }
   return 0;
 }
