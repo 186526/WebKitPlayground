@@ -106,6 +106,12 @@ If build fails with `'objc/objc-runtime.h' file not found`, run:
 sudo Tools/Scripts/configure-xcode-for-embedded-development
 ```
 
+A build against tag `Safari-18.3.1-iOS-18.3.2` also hits that error when `IPHONEOS_DEPLOYMENT_TARGET`
+is below 17, because `Configurations/WebKitProjectPaths.xcconfig:98` names the additions-SDK directory
+after the deployment target's major version and `WebKitLibraries/SDKs` only ships
+`iphoneos17.0-additions.sdk` and `iphoneos18.0-additions.sdk`. See the `Link the additions SDK the
+deployment target derives` step in `.github/workflows/build-webkit.yml`.
+
 ### Build parallelism
 
 If you want to increase compile/build parallelism globally in Xcode, run:

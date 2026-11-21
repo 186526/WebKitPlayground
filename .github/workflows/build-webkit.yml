@@ -21,6 +21,12 @@ jobs:
     name: Fetch, patch, build
     runs-on: macos-15
     timeout-minutes: 350
+    env:
+      # Single source of truth for the shipped minos: the Build step passes this as
+      # IPHONEOS_DEPLOYMENT_TARGET, and the additions-SDK step derives the directory name
+      # WebKitProjectPaths.xcconfig:98 builds from it. Two literals would let a future target
+      # change leave the pre-build assertion checking a path the build no longer reads.
+      WK_BUILD_DEPLOYMENT_TARGET: '16.1'
     steps:
       - uses: actions/checkout@v4
 
@@ -103,6 +109,73 @@ jobs:
             grep -E '^(MAJOR|MINOR|TINY)_VERSION' Source/WebKit/Configurations/Version.xcconfig || true
           du -sh .git
           df -h /
+
+      - name: Link the additions SDK the deployment target derives
+        run: |
+          set -euo pipefail
+          # Configurations/WebKitProjectPaths.xcconfig:98 turns the deployment target into the
+          # additions-SDK directory name:
+          #
+          #   WK_VERSIONED_SDK_ADDITIONS_PATH_ = $(WK_WORKSPACE_DIR)/WebKitLibraries/SDKs/$(PLATFORM_NAME)$($(DEPLOYMENT_TARGET_SETTING_NAME):base:base).0-additions.sdk
+          #
+          # With IPHONEOS_DEPLOYMENT_TARGET=16.1 that is WebKitLibraries/SDKs/iphoneos16.0-additions.sdk.
+          # At tag Safari-18.3.1-iOS-18.3.2 WebKitLibraries/SDKs holds only iphoneos17.0-additions.sdk and
+          # iphoneos18.0-additions.sdk, so the derived directory is missing. A missing directory is not
+          # an error: Configurations/SDKAdditions.xcconfig:35-39 still puts the path in ADDITIONAL_SDKS
+          # (Source/WebKit/Configurations/Base.xcconfig:111), xcodebuild degrades it to
+          # "warning: can't find additional SDK", no -isystem reaches the compiler, and the compile dies
+          # inside Source/JavaScriptCore/API/JSWrapperMap.h:28 on <objc/objc-runtime.h>. That header is
+          # one of the symlinks WebKitLibraries/SDKs/iphoneos18.0-additions.sdk/SymlinkedHeaders.xcfilelist
+          # creates into $(WK_DERIVED_SDK_HEADERS_DIR)/usr/include from $(SDK_DIR_macosx)/usr/include/objc/.
+          #
+          # So the 18.0 tree supplies headers and stub libraries while IPHONEOS_DEPLOYMENT_TARGET stays
+          # 16.1 and keeps setting the shipped minos. The symlink below is the load-bearing fix: the
+          # derived name then resolves for every target that reads WK_ADDITIONAL_SDKS, with no dependence
+          # on build-setting precedence. It exists only in the runner's clone, never in the repository.
+          additions_tree=iphoneos18.0-additions.sdk
+          deployment_target=$WK_BUILD_DEPLOYMENT_TARGET
+          derived_name="iphoneos${deployment_target%%.*}.0-additions.sdk"
+          sdk_root="$GITHUB_WORKSPACE/WebKit/WebKitLibraries/SDKs"
+
+          assert_additions_sdk() {
+            local path=$1 what=$2
+            if [ ! -d "$path" ]; then
+              echo "::error::missing additions SDK for IPHONEOS_DEPLOYMENT_TARGET=${deployment_target}: looked for ${path} (${what})"
+              echo "WebKitLibraries/SDKs at this ref contains:"
+              ls -1 "$sdk_root" 2>/dev/null || true
+              exit 1
+            fi
+            if [ ! -d "$path/usr/local/include" ]; then
+              echo "::error::additions SDK at ${path} (${what}) has no usr/local/include, so the objc headers cannot be produced"
+              exit 1
+            fi
+          }
+
+          assert_additions_sdk "$sdk_root/$additions_tree" "18.0 tree used as the link target"
+          # -d follows symlinks, so an existing derived path that does not resolve lands here as a
+          # dangling link rather than as a confusing ln failure; -L catches the dangling case, for
+          # which test -e is false.
+          if [ ! -d "$sdk_root/$derived_name" ] && { [ -e "$sdk_root/$derived_name" ] || [ -L "$sdk_root/$derived_name" ]; }; then
+            echo "::error::${sdk_root}/${derived_name} exists but does not resolve to a directory"
+            ls -l "$sdk_root/$derived_name"
+            exit 1
+          fi
+          if [ "$derived_name" = "$additions_tree" ] || [ -d "$sdk_root/$derived_name" ]; then
+            echo "derived additions SDK already present: $sdk_root/$derived_name"
+          else
+            ln -s "$additions_tree" "$sdk_root/$derived_name"
+            echo "linked $sdk_root/$derived_name -> $additions_tree"
+          fi
+          assert_additions_sdk "$sdk_root/$derived_name" "derived path the build reads"
+          if grep -qxF '$(SDK_DIR_macosx)/usr/include/objc/objc-runtime.h' \
+              "$sdk_root/$derived_name/SymlinkedHeaders.xcfilelist"; then
+            echo "objc/objc-runtime.h is listed in SymlinkedHeaders.xcfilelist"
+          else
+            echo "::warning::SymlinkedHeaders.xcfilelist under $derived_name does not list objc/objc-runtime.h"
+          fi
+          # The Build step names the same directory a second way, as a build setting rather than a
+          # symlink; the path is computed from the clone so no runner-specific prefix is hardcoded.
+          echo "WK_ADDITIONS_SDK_PATH=$sdk_root/$additions_tree" >> "$GITHUB_ENV"
 
       - name: Copy ABI shims
         run: |
@@ -223,10 +296,22 @@ jobs:
           # gate. Source/WTF/wtf/PlatformHave.h:1717-1724 wraps
           # HAVE_BROWSER_ENGINE_SUPPORTING_API in !defined(), so the command-line define wins
           # over the 170400 SDK check there as well.
+          #
+          # WK_VERSIONED_SDK_ADDITIONS_PATH is the second half of the additions-SDK fix, alongside
+          # the iphoneos16.0 -> iphoneos18.0 symlink in the step above. Configurations/
+          # WebKitProjectPaths.xcconfig:97 sets that key from WK_VERSIONED_SDK_ADDITIONS_PATH_$(USE_INTERNAL_SDK),
+          # and Configurations/SDKAdditions.xcconfig:35-39 copies it into WK_ADDITIONAL_SDKS, which
+          # Source/WebKit/Configurations/Base.xcconfig:111 renames to ADDITIONAL_SDKS. build-webkit
+          # hands every KEY=VALUE argument to xcodebuild unchanged (Tools/Scripts/build-webkit:370-381
+          # pass @ARGV into buildXcodeScheme / buildXCodeProject, and Tools/Scripts/webkitdirs.pm:2358,2368
+          # pass them on as xcodebuild arguments), and a command-line setting beats the xcconfig that
+          # assigns it. So this key pins the path even if a future ref stops naming the directory after
+          # the deployment target. The symlink alone would be enough; this makes the intent explicit.
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
             ARCHS='arm64e' \
-            IPHONEOS_DEPLOYMENT_TARGET='16.1' \
+            IPHONEOS_DEPLOYMENT_TARGET="$WK_BUILD_DEPLOYMENT_TARGET" \
+            WK_VERSIONED_SDK_ADDITIONS_PATH="$WK_ADDITIONS_SDK_PATH" \
             ONLY_ACTIVE_ARCH=NO \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             OTHER_CFLAGS='$(inherited) -Wno-error -DUSE_BROWSERENGINEKIT=0 -DUSE_EXTENSIONKIT=0 -DHAVE_BROWSER_ENGINE_SUPPORTING_API=0' \
