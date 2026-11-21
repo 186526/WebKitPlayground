@@ -292,10 +292,39 @@ jobs:
           # keys removes those -framework flags. Blanking the flags alone is not enough:
           # Source/WTF/wtf/PlatformUse.h:411-417 turns the two USE macros on from
           # __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400 and __has_include(<BrowserEngineKit/...>),
-          # both of which still hold under an 18.5 SDK, so the -D...=0 defines close the
-          # gate. Source/WTF/wtf/PlatformHave.h:1717-1724 wraps
-          # HAVE_BROWSER_ENGINE_SUPPORTING_API in !defined(), so the command-line define wins
-          # over the 170400 SDK check there as well.
+          # both of which still hold under an 18.5 SDK, so -DUSE_BROWSERENGINEKIT=0 and
+          # -DUSE_EXTENSIONKIT=0 close the gate. Only those two macros are forced here;
+          # HAVE_BROWSER_ENGINE_SUPPORTING_API is left to PlatformHave.h, for the reason below.
+          #
+          # HAVE_BROWSER_ENGINE_SUPPORTING_API is deliberately NOT defined on the command line.
+          # PlatformHave.h:1716-1723 computes it from __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400,
+          # which is 180500 under the 18.5 SDK, so it comes out 1. That is the value that matches
+          # the SDK, and it is what the four affected sites need, because the 18.5 SDK declares
+          # each of these APIs itself, all of them API_AVAILABLE(ios(17.4)), the same boundary
+          # PlatformHave.h uses:
+          #   IOSurfaceRef.h:452 declares IOSurfaceMemoryLedgerTags, so forcing the macro to 0 made
+          #   Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h:99 declare it a second time. That is the
+          #   redefinition that stopped run 44951295826.
+          #   UIScrollView.h:105,110 declare bouncesHorizontally and bouncesVertically, so forcing 0
+          #   made Source/WebKit/Platform/spi/ios/UIKitSPI.h:467 re-declare them inside
+          #   @interface UIScrollView (), which clang rejects as an illegal redeclaration.
+          #   AVContentKeySession.h:795 declares AVExternalContentProtectionStatus, so forcing 0 made
+          #   Source/WebCore/PAL/pal/spi/cocoa/AVFoundationSPI.h:250 re-declare that NS_ENUM.
+          #   AVVideoPerformanceMetrics.h is a public 18.5 header, so forcing 0 made
+          #   AVFoundationSPI.h:408 re-declare the whole @interface.
+          # With the macro absent, all four take the SDK branch and the three SPI headers stop
+          # duplicating the SDK. patches/ios18-public-sdk-iosurface-memory-ledger-tags.patch keeps
+          # that first site correct for anyone who does still force the macro to 0.
+          # Those last three sites were never compiled in run 44951295826: WebGPU stopped first and
+          # the PAL, WebCore and WebKit targets reached no CompileC at all.
+          #
+          # The metrics properties the 18.5 SDK gained are API_UNAVAILABLE(macos, ios, tvos, visionos),
+          # so with the macro at 1 the SDK branch is selected but the properties stay unusable on iOS.
+          # The four call sites never touch them on iOS because the existing patches branch away
+          # before the access: VideoMediaSampleRenderer.mm:463,474,485,496,
+          # LocalSampleBufferDisplayLayer.mm:412, MediaPlayerPrivateAVFoundationObjC.mm:3904 and
+          # MediaPlayerPrivateMediaSourceAVFObjC.mm:936 all return early under PLATFORM(IOS_FAMILY).
+          # Those patches must stay.
           #
           # WK_VERSIONED_SDK_ADDITIONS_PATH is the second half of the additions-SDK fix, alongside
           # the iphoneos16.0 -> iphoneos18.0 symlink in the step above. Configurations/
@@ -314,8 +343,8 @@ jobs:
             WK_VERSIONED_SDK_ADDITIONS_PATH="$WK_ADDITIONS_SDK_PATH" \
             ONLY_ACTIVE_ARCH=NO \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
-            OTHER_CFLAGS='$(inherited) -Wno-error -DUSE_BROWSERENGINEKIT=0 -DUSE_EXTENSIONKIT=0 -DHAVE_BROWSER_ENGINE_SUPPORTING_API=0' \
-            OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error -DUSE_BROWSERENGINEKIT=0 -DUSE_EXTENSIONKIT=0 -DHAVE_BROWSER_ENGINE_SUPPORTING_API=0' \
+            OTHER_CFLAGS='$(inherited) -Wno-error -DUSE_BROWSERENGINEKIT=0 -DUSE_EXTENSIONKIT=0' \
+            OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-error -DUSE_BROWSERENGINEKIT=0 -DUSE_EXTENSIONKIT=0' \
             WK_BROWSERENGINEKIT_LDFLAGS= \
             WK_WRITING_TOOLS_LDFLAGS_iphoneos= \
             COMPRESS_PNG_FILES=NO \

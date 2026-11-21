@@ -1,0 +1,20 @@
+diff --git a/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h b/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h
+--- a/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h
++++ b/Source/WTF/wtf/spi/cocoa/IOSurfaceSPI.h
+@@ -96,7 +96,15 @@ WTF_EXTERN_C_END
+ 
+ WTF_EXTERN_C_BEGIN
+ 
+-#if (HAVE(IOSURFACE_SET_OWNERSHIP) || HAVE(IOSURFACE_SET_OWNERSHIP_IDENTITY)) && !HAVE(BROWSER_ENGINE_SUPPORTING_API)
++#if (HAVE(IOSURFACE_SET_OWNERSHIP) || HAVE(IOSURFACE_SET_OWNERSHIP_IDENTITY)) \
++    && !HAVE(BROWSER_ENGINE_SUPPORTING_API) \
++    && !((PLATFORM(IOS) || PLATFORM(MACCATALYST)) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400)
++/* The iOS 17.4-and-later SDK declares this enum in IOSurfaceRef.h, which CoreVideo includes
++   ahead of every use of the tags below. HAVE_BROWSER_ENGINE_SUPPORTING_API is spelled 0 on
++   the command line because other SPI fallbacks need it, and that says nothing about what
++   the SDK declares, so the SDK boundary PlatformHave.h:1716-1723 uses for the macro decides
++   here too. Mac has already taken the branch above, so only the iOS and Mac Catalyst terms
++   are needed. */
+ typedef CF_ENUM(int, IOSurfaceMemoryLedgerTags)
+ {
+     kIOSurfaceMemoryLedgerTagDefault     = 0x00000001,
