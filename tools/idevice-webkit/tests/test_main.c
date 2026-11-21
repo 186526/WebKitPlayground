@@ -94,6 +94,57 @@ static int found_in(const char *text, const char *fragment) {
   return 0;
 }
 
+/* The value of one key, as the report spells it: the text between the string
+   tags, or the digits between the integer tags. */
+
+static int field_value(const char *report, const char *key, char *out, usize capacity) {
+  char opening[128];
+  snprintf(opening, sizeof(opening), "\t<key>%s</key>\n\t<", key);
+  const char *at = strstr(report, opening);
+  if (at == NULL) {
+    return 0;
+  }
+  at += strlen(opening);
+  const char *closing = NULL;
+  if (strncmp(at, "string>", 7) == 0) {
+    at += 7;
+    closing = "</string>";
+  } else if (strncmp(at, "integer>", 8) == 0) {
+    at += 8;
+    closing = "</integer>";
+  } else {
+    return 0;
+  }
+  const char *end = strstr(at, closing);
+  if (end == NULL || (usize)(end - at) >= capacity) {
+    return 0;
+  }
+  memcpy(out, at, (usize)(end - at));
+  out[end - at] = 0;
+  return 1;
+}
+
+/* The fields the two runs of a placeholder are read through. A host that
+   passed the copy check and then failed the host check leaves the path of its
+   copy here, while a host that passed both leaves the fields empty. */
+
+typedef struct placeholder_view {
+  char stage[16];
+  char matchVia[32];
+  char bundleId[plist_value_capacity];
+  char selfImage[plist_value_capacity];
+  char selfError[plist_value_capacity];
+} placeholder_view;
+
+static int read_placeholder(const char *report, placeholder_view *view) {
+  return report != NULL &&
+         field_value(report, "stage", view->stage, sizeof(view->stage)) &&
+         field_value(report, "matchVia", view->matchVia, sizeof(view->matchVia)) &&
+         field_value(report, "bundleId", view->bundleId, sizeof(view->bundleId)) &&
+         field_value(report, "selfImage", view->selfImage, sizeof(view->selfImage)) &&
+         field_value(report, "selfError", view->selfError, sizeof(view->selfError));
+}
+
 /* Each read has its own buffer, because a case reads the report, the file of
    the others and the marker in one expression, and one static buffer would
    hand the second read over the first one's text. */
@@ -558,6 +609,44 @@ int main(void) {
             "com.apple.mobilesafari");
   idevice_webkit_start();
   expect_placeholder("an executable path is not a bundle", 2, "classes");
+
+  /* The file of the others is the only one a process that is not a host leaves
+     behind, so it has to say which check stopped that process. A host that
+     passed both checks writes that file before the copy check and leaves both
+     self fields empty; a host that passed the copy check and then failed the
+     host check writes its own path there. The two records are the same at the
+     filter stage and differ in the copy check alone. */
+
+  prepare(safari, installed_self, 1);
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  placeholder_view accepted;
+  placeholder_view holding;
+  int accepted_read = read_placeholder(read_report(idevice_webkit_others_path), &accepted);
+  int holding_read = read_placeholder(read_report(idevice_webkit_report_path), &holding);
+  expect("a host that passed both checks leaves the copy check empty in the others file",
+         accepted_read && strcmp(accepted.stage, "2") == 0 &&
+             strcmp(accepted.matchVia, "classes") == 0 && accepted.bundleId[0] == 0 &&
+             accepted.selfImage[0] == 0 && accepted.selfError[0] == 0 && holding_read &&
+             strcmp(holding.stage, "7") == 0);
+
+  prepare(safari, installed_self, 1);
+  add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
+  idevice_webkit_start();
+  placeholder_view rejected;
+  int rejected_read = read_placeholder(read_report(idevice_webkit_others_path), &rejected);
+  expect("a host that failed the host check names its copy in the others file",
+         rejected_read && strcmp(rejected.stage, "2") == 0 &&
+             strcmp(rejected.matchVia, "classes") == 0 && rejected.bundleId[0] == 0 &&
+             strcmp(rejected.selfImage, installed_self) == 0 && rejected.selfError[0] == 0);
+  expect("the two records differ in the copy check alone",
+         accepted_read && rejected_read && strcmp(accepted.stage, rejected.stage) == 0 &&
+             strcmp(accepted.matchVia, rejected.matchVia) == 0 &&
+             strcmp(accepted.bundleId, rejected.bundleId) == 0 &&
+             strcmp(accepted.selfError, rejected.selfError) == 0 &&
+             strcmp(accepted.selfImage, rejected.selfImage) != 0);
 
   prepare(safari, test_self, 1);
   list_host("/Applications/MobileSafari.app",

@@ -101,6 +101,17 @@ report stays byte for byte what it was while the file of the others carries
 the `stage` 2 record of the unrelated app. Removing the split makes that case
 and the five placeholder cases fail.
 
+`write_placeholder()` writes the record as it stands instead of beginning it
+again, so the file of the others also says whether the copy check passed.
+Three cases read both fields: a Safari launch that passes both checks, and the
+same host with no manifest, which passes the copy check and then fails the host
+check. The first leaves `selfImage` and `selfError` empty in the others file
+and reaches stage 7 in the main one; the second leaves the installed path in
+`selfImage`. The third compares the two records field by field and requires
+them to differ in `selfImage` alone. A `dylib_report_begin("")` put back into
+`write_placeholder()` turns the last two red, and so does the 1.0.5 form that
+begins the record and then writes the stage back.
+
 Every write replaces the report whole, so the file only ever shows the last
 stage of a run. `host_file_writer.c` therefore also keeps a log of the writes
 with their path and the stage each one carried, and `fake_write_log_*` reads

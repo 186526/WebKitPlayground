@@ -217,15 +217,17 @@ static bool write_report(void) {
 }
 
 /* A process outside the host set leaves behind only the entry report, in the
-   file of the others, with whichever branch of the filter was given and the
-   stage the constructor had reached: a process the filter did not match
-   reports the entry stage, while a UIApplication process reports the filter
-   stage even though it named no host. The main report is not written here,
-   so the record of the last host stays readable. */
+   file of the others, with whichever branch of the filter was given, the
+   stage the constructor had reached and the answer of the copy check: a
+   process the filter did not match reports the entry stage with both self
+   fields empty, while a UIApplication process reports the filter stage, and a
+   process that got past the copy check reports its own path there. The record
+   is written as it stands: beginning it again would wipe that path and leave
+   a host that failed the host check with the same file as one that passed it.
+   The main report is not written here, so the record of the last host stays
+   readable. */
 
-static void write_placeholder(const char *bundleIdentifier) {
-  dylib_report_begin(bundleIdentifier);
-  stage_reach(stage_current());
+static void write_placeholder(void) {
   write_report();
 }
 
@@ -244,7 +246,7 @@ static bool host_is_target(host_images *images) {
   if (!is_host_path(images->host_path) ||
       !bundle_path_identifier(images->bundle_path, images->identifier,
                               sizeof(images->identifier))) {
-    write_placeholder("");
+    write_placeholder();
     return false;
   }
   join(manifest_name, sizeof(manifest_name), host_manifest_prefix, images->host_name);
@@ -252,7 +254,7 @@ static bool host_is_target(host_images *images) {
   join(manifest_path, sizeof(manifest_path), manifest_path, manifest_suffix);
   if (!plist_file_identifier(manifest_path, guest_path, sizeof(guest_path)) ||
       !text_equal(guest_path, images->identifier)) {
-    write_placeholder("");
+    write_placeholder();
     return false;
   }
   return true;
