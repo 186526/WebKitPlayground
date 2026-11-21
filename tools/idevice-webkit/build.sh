@@ -92,17 +92,16 @@ if [ "$subtype_bytes" != "00000000" ]; then
   exit 1
 fi
 
-# The dyld of the device does not export the __dyld_* image table functions.
-# A reference to one of them leaves the undefined symbol unbound, and the whole
-# image is then skipped: dyld lists it under DYLD_PRINT_LIBRARIES and runs no
-# initializer, silently unless DYLD_PRINT_ERRORS is set, where the process dies
-# with "missing symbol called". The dylib therefore has to reach the images it
-# needs through dladdr, _NSGetExecutablePath and dlopen handles, and this check
-# keeps a reference from coming back.
+# The three image table functions are real libSystem exports, and the C name of
+# one is _dyld_*, which becomes __dyld_* in the Mach-O symbol table. A source
+# that writes two underscores gets ___dyld_*, and that is the spelling the
+# device does not know: dyld binds nothing, runs no initializer of the image,
+# and says "missing symbol called" only under DYLD_PRINT_ERRORS. The check
+# therefore looks for three underscores, which no legitimate call produces.
 undefined="$(llvm-nm -u "$output_dir/WebSafeWebKit.dylib")"
-if printf '%s\n' "$undefined" | grep -q '^__dyld_'; then
-  echo "the dylib refers to a dyld symbol the device does not export:" >&2
-  printf '%s\n' "$undefined" | grep '^__dyld_' >&2
+if printf '%s\n' "$undefined" | grep -q '^___dyld_'; then
+  echo "the dylib refers to a dyld symbol name with one underscore too many:" >&2
+  printf '%s\n' "$undefined" | grep '^___dyld_' >&2
   exit 1
 fi
 

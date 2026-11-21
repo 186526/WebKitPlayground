@@ -49,7 +49,7 @@ python="${PYTHON:-python3}"
 
 payload_name="WebSafeWebKitFilter"
 package_id="com.websafe.idevice"
-package_version="1.0.8-20261122"
+package_version="1.0.9-20261122"
 tweak_dir="var/jb/usr/lib/TweakInject"
 manifest_prefix="com.websafe.idevice.host."
 
@@ -286,11 +286,33 @@ grep -q '@[A-Z_]*@' "$stage/DEBIAN/prerm" && {
 # 9. postinst
 cat > "$stage/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
-# The report file belongs to the app process that writes it. When an older
-# copy left one behind owned by root, hand it back; do not create it.
-report="${DPKG_ROOT:-}/var/jb/var/mobile/Library/Preferences/com.websafe.idevice.plist"
-if [ -f "$report" ] && [ ! -L "$report" ]; then
-  chown mobile:mobile "$report" 2>/dev/null || true
+# The two report files belong to the app process that writes them, and they
+# have to exist before the first write: a file the tweak creates itself lands
+# with a mode the device does not take from the request (0504 and 0740 have
+# both been seen), and a report whose owner cannot write it stops at stage 1.
+# Creating them here, owned by mobile and writable by it, leaves the tweak a
+# file it only has to truncate.
+#
+# touch creates them rather than a shell redirection: a redirection on a special
+# builtin such as `:` is fatal in dash when it fails, which turned a missing
+# Preferences directory into a postinst that exited 2 and left the package half
+# configured. The directory is only created when its parent exists, so a root
+# that is not the device is left alone.
+root="${DPKG_ROOT:-}"
+reports="${root}/var/jb/var/mobile/Library/Preferences"
+if [ ! -d "$reports" ] && [ -d "${root}/var/jb/var/mobile/Library" ]; then
+  mkdir -p "$reports" 2>/dev/null || true
+fi
+if [ -d "$reports" ]; then
+  for name in com.websafe.idevice.plist com.websafe.idevice.others.plist; do
+    report="$reports/$name"
+    [ -L "$report" ] && continue
+    [ -e "$report" ] || touch "$report" 2>/dev/null || true
+    if [ -e "$report" ]; then
+      chown mobile:mobile "$report" 2>/dev/null || true
+      chmod 0644 "$report" 2>/dev/null || true
+    fi
+  done
 fi
 exit 0
 POSTINST

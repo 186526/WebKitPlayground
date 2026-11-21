@@ -26,18 +26,24 @@
 static char work_directory[256];
 
 
+/* The load is the moment the framework image appears, so the test answers the
+   load by telling the fixture, and RTLD_NOLOAD keeps its device meaning: it
+   answers a handle only for an image already loaded, and the constructor asks
+   for the image after the load rather than before it. */
+
 void *library_load(const char *path) {
   (void)path;
-  return 0;
+  return fake_framework_load();
 }
 char *library_last_error(void) {
   return "test: no framework";
 }
 /* The constructor asks three things of the process: where the executable is
    (_NSGetExecutablePath), whether the framework is loaded (a dlopen handle for
-   its literal path) and what address a class it defines has (dladdr). The
-   fixture answers all three; these two wrappers route the lookups to it so no
-   part of the code under test is replaced. */
+   its literal path, then the same path without loading it) and what address a
+   class it defines has (dladdr). The fixture answers all three; these two
+   wrappers route the lookups to it so no part of the code under test is
+   replaced. */
 
 void *library_find(const char *path) {
   (void)path;
@@ -195,8 +201,7 @@ static char *read_report(const char *path) {
 
 
 static void prepare_keeping_reports(const char *host, const char *self, int withWebKit) {
-  fake_reset(host, "/private/var/mobile/Library/Preferences/com.apple.prefs.plist",
-             withWebKit ? "/var/jb/Library/Frameworks/WebKit.framework/WebKit" : 0, self);
+  fake_reset(host, withWebKit ? framework_path : 0, self);
 
   fake_bundles_reset();
   fake_filters_reset(idevice_webkit_filter_path);
@@ -724,8 +729,10 @@ int main(void) {
            found_in(report, "\t<key>selfImage</key>\n\t<string>" installed_self "</string>"));
     expect("  no failed copy check is recorded",
            found_in(report, "\t<key>selfError</key>\n\t<string></string>"));
-    expect("  the framework is named by its own path, not by the self image",
-           found_in(report, "\t<key>imagePath</key>\n\t<string>" framework_path "</string>"));
+    expect("  the framework is named by the path dladdr resolved",
+           found_in(report, "\t<key>imagePath</key>\n\t<string>/private" framework_path "</string>"));
+    expect("  and not by the literal path the load was given",
+           !found_in(report, "\t<key>imagePath</key>\n\t<string>" framework_path "</string>"));
   }
 
   prepare(safari, test_self, 1);

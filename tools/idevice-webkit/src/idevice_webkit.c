@@ -33,7 +33,6 @@ typedef struct host_images {
   char host_name[path_capacity];
   char bundle_path[path_capacity];
   char identifier[bundle_identifier_capacity];
-  bool web_kit_seen;
   const void *web_kit_header;
   char web_kit_path[path_capacity];
 } host_images;
@@ -190,14 +189,17 @@ static void host_path_of_this_process(char *out, usize capacity) {
    answers. A process that has not loaded the framework has no handle, and a
    handle whose image defines no such class leaves the answer empty. */
 
-static const void *web_kit_header(void *frameworkHandle) {
+static bool web_kit_image(void *frameworkHandle, host_images *images) {
   const void *address =
       frameworkHandle == NULL ? NULL : symbol_find(frameworkHandle, "OBJC_CLASS_$_WKWebView");
   dl_info info;
-  if (address == NULL || dladdr(address, &info) == 0) {
-    return NULL;
+  if (address == NULL || dladdr(address, &info) == 0 || info.dli_fbase == NULL) {
+    return false;
   }
-  return info.dli_fbase;
+  images->web_kit_header = info.dli_fbase;
+  text_copy(images->web_kit_path, info.dli_fname == NULL ? "" : info.dli_fname,
+            sizeof(images->web_kit_path));
+  return true;
 }
 
 static void collect_images(host_images *images) {
@@ -206,12 +208,6 @@ static void collect_images(host_images *images) {
   host_path_of_this_process(executable, sizeof(executable));
   if (executable[0] != 0) {
     host_path_from(executable, images->host_path, sizeof(images->host_path));
-  }
-  void *framework = library_find(framework_path);
-  images->web_kit_header = web_kit_header(framework);
-  if (images->web_kit_header != NULL) {
-    images->web_kit_seen = true;
-    text_copy(images->web_kit_path, framework_path, sizeof(images->web_kit_path));
   }
 }
 
@@ -298,10 +294,18 @@ static bool host_is_target(host_images *images) {
   return true;
 }
 
+/* The framework is loaded before its image is read: RTLD_NOLOAD answers only
+   for an image already in the process, and a host reaches this point with the
+   framework not loaded yet, so a lookup before the load would find nothing and
+   the version would never be reported. The handle the load returns is the one
+   its class is asked for, and dladdr turns that class into the base and the
+   path the version text is read from, which is the path dyld resolved, not the
+   literal one this code loaded. */
+
 static void attempt_load(host_images *images) {
   void *handle = library_load(framework_path);
   dylib_report_set_dlopen(framework_path, handle, handle == NULL ? library_last_error() : NULL);
-  if (images->web_kit_seen) {
+  if (web_kit_image(handle, images)) {
     char version[version_capacity];
     version[0] = 0;
     macho_version_text(images->web_kit_header, version, sizeof(version));

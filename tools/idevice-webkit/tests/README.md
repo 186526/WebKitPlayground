@@ -6,13 +6,19 @@ replaces four sets of calls with test versions: the process calls
 one class it defines, together with `dladdr`), the Foundation lookups
 (`NSBundle.bundleWithPath:`, `NSDictionary.dictionaryWithContentsOfFile:`
 and the `NSDictionary.objectForKey:` / `NSString.stringWithUTF8String:` /
-`NSString.UTF8String` accessors), the Darwin file writer, and the two `dlsym`
-wrappers of `src/dyld_lookup.c`. No `_dyld_*` image table function is replaced,
-because the dylib refers to none: the dyld of the device does not export them,
-and a reference to one keeps the whole image from binding. The writer is
-replaced because the dylib writes with the Darwin `open` flags `0x601`, which a
+`NSString.UTF8String` accessors), the Darwin file writer, the image reader
+(`macho_version_text`), and the two `dlsym` wrappers of `src/dyld_lookup.c`.
+No `_dyld_*` image table function is replaced, because the dylib refers to
+none: 1.0.6 and earlier referred to three of them, the device exports them, and
+1.0.7 dropped the references anyway in the belief that it did not; 1.0.9
+measured the device and found them present, so they stay out on the merits of
+the two calls that replaced them, not on export. The writer is replaced
+because the dylib writes with the Darwin `open` flags `0x601`, which a
 Linux kernel reads as `O_WRONLY | O_TRUNC | O_APPEND`; without `O_CREAT` the
-call fails with `ENOENT`. It checks the host decisions of the constructor, not
+call fails with `ENOENT`. The image reader is not replaced: the host cases
+compile it and answer `dladdr` with a header of eight zero bytes, since no real
+Mach-O sits behind the fake frame, so every host case reads an empty version
+and the scan needs its own cases. It checks the host decisions of the constructor, not
 the device behaviour: `dlopen` of the `/var/jb` framework, the real
 `TweakInject` plist parsing and the load of the arm64 slice in an arm64e
 process are only observable on the device. The run also checks that the three device host paths
@@ -42,11 +48,18 @@ recorded. Two cases use it: an installed copy loaded next to a framework that
 also carries a class still reaches the holding stage with its own path and no
 failed check, and a test copy in the same position still reports
 `self image is not in the TweakInject directory`. The framework side is answered
-by `fake_framework_symbol`, and one case requires `imagePath` to be the
-framework's own path, which a lookup that reports the self image instead fails.
-The names are `a loaded framework does not take the self image's place` and
-`a loaded framework does not hide a test copy either`; in 1.0.6 they read
-`a later image does not take the self image's place` and
+by `fake_framework_symbol`. 1.0.7 and 1.0.8 filled `imagePath` from a
+constant and asked for the handle with `RTLD_NOLOAD` before loading it, so the
+framework's path was a string the dylib already had rather than one dyld gave
+it. 1.0.9 loads first and takes `dli_fname` from `dladdr`, so `fake_reset`
+records the path `dladdr` answers separately from the path the load was given,
+and two cases read both: `the framework is named by the path dladdr resolved`
+and `and not by the literal path the load was given`. The fixture answers
+`/private` ahead of what `fake_reset` was handed, which is what the device
+does: the framework is at `/private/var/jb/...` while the load is given
+`/var/jb/...`. The names are `a loaded framework does not take the self
+image's place` and `a loaded framework does not hide a test copy either`; in
+1.0.6 they read `a later image does not take the self image's place` and
 `a later image does not hide a test copy either`, and the fixture appended an
 image to the table through `fake_load_after_self`.
 
@@ -154,16 +167,51 @@ run before the C cases, because a dylib dyld will not load makes every host
 decision below moot.
 
 Right after the signature checks, `run.sh` reads the slice the package is built
-from, `build/arm64/WebSafeWebKit.dylib`, and checks two things about it. The
+from, `build/arm64/WebSafeWebKit.dylib`, and checks three things about it. The
 Mach header's cpusubtype has to be 0, the value ld64.lld writes: an image
 carrying the ARM64E subtype 0x80000002 is loaded on the device and runs no
 initializer, and a working image with those four bytes set is killed with
-signal 9. It also reads `llvm-nm -u` and fails on any symbol with the `__dyld_`
-prefix, which is what a reference to the device's unexported image table
-functions looks like. A passing run prints `the arm64 slice carries cpusubtype
-0, the one the device runs pass` and `the arm64 slice refers to no dyld symbol
-the device does not export pass`. `build.sh` carries the same two checks on the
-slice it just linked, so a build cannot produce one.
+signal 9. It reads `llvm-nm -u` and fails on a symbol with the `___dyld_`
+prefix, three underscores: the device's own names are `_dyld_*`, so their
+linker-level names are `__dyld_*` with two, and 1.0.7 to 1.0.8 rejected those
+legitimate names with a `^__dyld_` pattern, which is the spelling mistake 1.0.9
+corrected. A passing run prints `the arm64 slice carries cpusubtype 0, the one
+the device runs pass` and `the arm64 slice refers to no misspelt dyld symbol
+pass`. `build.sh` carries the same two checks on the slice it just linked, so a
+build cannot produce one.
+
+The third check reads the disassembly of `_write_file` out of the same slice
+and fails if the function assigns `w2` before its call to `open`. Darwin's
+`open` is variadic: the mode travels on the stack, and a fixed three-parameter
+declaration makes the compiler put it in `w2` instead, where the device's `open`
+never looks. That is what left the reports at modes the code never asked for,
+`0504` for the test process and `0740` for the six values tried on the device,
+and stopped the stage clock at 1 because the owner could not write again. The check is on the
+linked slice rather than on the source, so a stale `build/` is caught too.
+
+`file_writer_test.c` covers the same function from the other side and doubles
+as the type guard. It renames `open`, `fchmod`, `close` and `write` to recorders
+before including `src/file_writer.c`, and the `open` recorder is variadic: a
+declaration that goes back to `open(path, flags, mode)` meets it as a
+conflicting type, so the revert cannot compile, let alone pass. The seven cases
+require the write to succeed, the flags to be `0x601`, the mode to arrive
+through the varargs as `0644`, `fchmod` to be called once with `0644` before
+`close`, and `close` to be called once.
+
+`macho_image_test.c` covers the scan the version string comes from, which the
+host cases cannot: they hand `dladdr` a header of eight zero bytes, so every one
+of them reads an empty version. It lays out a 0x4000-byte image the way
+dyld maps one: two `LC_SEGMENT_64` commands, two sections in each, `__first`
+ahead of `__cfstring`, and the string records holding real pointers rather than
+virtual addresses, which is the state dyld leaves them in. The cases require the
+64-bit command number to be recognised, the section record to be read at its
+real 80-byte width, a section's virtual address to be turned into a pointer
+instead of used as one, the version to be read from `__DATA_CONST` and from
+`__DATA`, and an image without the key or without a Mach-O header to answer an
+empty string. Each of those is a defect 1.0.9 fixed: the 32-bit `LC_SEGMENT`
+number, a 56-byte section record, a 24-byte string record, a virtual address
+used as a pointer, and a search that looked in `__DATA` alone.
+
 
 `dyld_lookup_test.c` covers the one thing `test_main.c` cannot see. That file
 stubs `symbol_find` and `symbol_find_global` whole, so a wrong handle inside

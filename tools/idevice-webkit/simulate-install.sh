@@ -64,7 +64,7 @@ fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 package="com.websafe.idevice"
-version="1.0.8-20261122"
+version="1.0.9-20261122"
 deb="$here/build/${package}_${version}_iphoneos-arm64.deb"
 payload_name="WebSafeWebKitFilter"
 tweak_path="var/jb/usr/lib/TweakInject"
@@ -73,6 +73,7 @@ old_prefix="var/jb/usr/lib/websafewebkit"
 old_filter="var/jb/var/mobile/WebSafeWebKit/disabled-ellekit-filter.plist"
 retired_directory="var/jb/var/mobile/WebSafeWebKit"
 report_path="var/jb/var/mobile/Library/Preferences/com.websafe.idevice.plist"
+others_report_path="var/jb/var/mobile/Library/Preferences/com.websafe.idevice.others.plist"
 sim_root="${SIM_ROOT:-${TMPDIR:-/tmp}/idevice-webkit-sim}"
 # A rootless device keeps the database here, not in /var/lib/dpkg.
 admin_path="var/jb/var/lib/dpkg"
@@ -218,6 +219,10 @@ dpkg_call() {
   local case_dir="$1"
   shift
   mkdir -p "$root/$admin_path"
+  # The device has this directory: the Preferences folder is where the reports
+  # live, and the postinst creates them there. A root without it would skip
+  # that step and hide the scripts that depend on it.
+  mkdir -p "$root/var/jb/var/mobile/Library/Preferences"
   tar -c -f "$case_dir/lower.tar" -C "$root" .
   rm -rf "$root" && mkdir -p "$root"
   tar -x -f "$case_dir/lower.tar" -C "$root"
@@ -273,7 +278,10 @@ for host in -Applications-MobileSafari.app-MobileSafari \
 done
 check "TweakInject holds exactly the six files" test "$(tweak_count)" = 6
 check "nothing in TweakInject is a symlink" no_link_in_tweak
-check "no report file was created" absent "$root/$report_path"
+check "postinst created the main report" present "$root/$report_path"
+check "the main report is 0644" test "$(stat -c %a "$root/$report_path")" = 644
+check "postinst created the report of the others" present "$root/$others_report_path"
+check "the report of the others is 0644" test "$(stat -c %a "$root/$others_report_path")" = 644
 check "dpkg lists the six files" \
   bash -c '[ "$(grep -c "^/'"$tweak_path"'/" "$1")" = 6 ]' _ "$root/$admin_path/info/$package.list"
 printf '  files in TweakInject:\n'

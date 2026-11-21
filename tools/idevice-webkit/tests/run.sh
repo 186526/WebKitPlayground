@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compiles the same sources the dylib is built from together with the test
-# fixtures that replace the dyld image table, the Info.plist lookup and the
-# Darwin file writer, so the host decisions can be checked without a device.
+# fixtures that replace the dyld calls of the process, the Info.plist lookup and
+# the Darwin file writer, so the host decisions can be checked without a device.
 # The plain build checks the expectations; the sanitizer build repeats the run
 # under ASan and UBSan, and its log is searched because ASan normally exits 1
 # on its own while UBSan only prints.
@@ -42,12 +42,27 @@ if [ "$subtype_bytes" != "00000000" ]; then
 fi
 echo "the arm64 slice carries cpusubtype 0, the one the device runs pass"
 
-if llvm-nm -u "$slice" | grep -q '^__dyld_'; then
-  echo "the arm64 slice refers to a dyld symbol the device does not export:" >&2
-  llvm-nm -u "$slice" | grep '^__dyld_' >&2
+if llvm-nm -u "$slice" | grep -q '^___dyld_'; then
+  echo "the arm64 slice refers to a dyld symbol name with one underscore too many:" >&2
+  llvm-nm -u "$slice" | grep '^___dyld_' >&2
   exit 1
 fi
-echo "the arm64 slice refers to no dyld symbol the device does not export pass"
+echo "the arm64 slice refers to no misspelt dyld symbol pass"
+
+# The mode of a new report file has to travel the variadic way. With the fixed
+# three-parameter declaration the compiler writes it into w2, and the device's
+# open never reads w2: the file came out 0504 and its owner could not write it
+# again, which stopped the report at stage 1. A `write_file` that assigns w2
+# before its call is that declaration come back, and the check is on the linked
+# slice so it also catches a stale build.
+write_file_body="$(llvm-objdump -d --no-show-raw-insn "$slice" 2>/dev/null |
+  sed -n '/<_write_file>:/,/^$/p')"
+if printf '%s\n' "$write_file_body" | grep -q 'mov[[:space:]]*w2,'; then
+  echo "the report writer passes the file mode in a register, which the device drops:" >&2
+  printf '%s\n' "$write_file_body" | grep 'mov[[:space:]]*w2,' >&2
+  exit 1
+fi
+echo "the report writer passes the file mode the variadic way pass"
 
 # The two handles this file hands to dlsym decide whether a lookup reaches the
 # process's own symbols or dies on an invalid handle, so they get their own
@@ -55,6 +70,24 @@ echo "the arm64 slice refers to no dyld symbol the device does not export pass"
 clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" \
   "$here/dyld_lookup_test.c" -o "$work/dyld_lookup_test"
 "$work/dyld_lookup_test"
+
+# The report writer is replaced for the host cases, so the one function that
+# reaches the device is checked here. The device ignores the mode an open asks
+# for, and the report came back as 0504 because of it, so the writer sets the
+# mode on the descriptor as well; the compiler also refuses a fixed-arity
+# declaration of the variadic open.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
+  "$here/file_writer_test.c" -o "$work/file_writer_test"
+"$work/file_writer_test"
+
+# The image reader is what turns the handle dladdr reports into a version
+# string. The host cases replace it, so the scan itself is checked here against
+# a synthetic image: which load command a segment is, how wide a section record
+# is, and that a section's address is a virtual address rather than a pointer.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
+  "$here/macho_image_test.c" "$here/../src/macho_image.c" "$here/../src/textkit.c" \
+  -o "$work/macho_image_test"
+"$work/macho_image_test"
 
 clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" -I"$here/fixtures" \
   "$here/test_main.c" -o "$work/test_main"
