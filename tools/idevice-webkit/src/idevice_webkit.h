@@ -11,7 +11,7 @@
 #define report_file_name "com.websafe.idevice.plist"
 #define marker_file_name "com.websafe.idevice.ready"
 #define framework_path "/var/jb/Library/Frameworks/WebKit.framework/WebKit"
-#define self_path "/var/jb/usr/lib/TweakInject/WebSafeWebKit.dylib"
+#define self_path "/var/jb/usr/lib/TweakInject/WebSafeWebKitFilter.dylib"
 #define stage_pause_microseconds 5000u
 #define path_capacity 2048
 #define version_capacity 128

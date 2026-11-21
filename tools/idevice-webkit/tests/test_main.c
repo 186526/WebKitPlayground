@@ -244,7 +244,7 @@ int main(void) {
   expect("a dylib that is not image 0 of a listed host writes no report",
          read_report(idevice_webkit_report_path) == NULL);
 
-  prepare(wechat, "/var/jb/usr/lib/TweakInject/WebSafeWebKit.dylib", 1);
+  prepare(wechat, "/var/jb/usr/lib/TweakInject/WebSafeWebKitFilter.dylib", 1);
   list_host("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
             manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
             "com.tencent.xin");

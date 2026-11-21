@@ -9,6 +9,9 @@
 #   ARCH=arm64e ./build.sh     one slice for the arm64e hosts
 #   lipo -create build/arm64/... build/arm64e/... -output build/WebSafeWebKit.dylib
 #
+# The output name here is a local build name. package-deb.sh lipos the two
+# slices under the installed name, WebSafeWebKitFilter.dylib.
+#
 # The installable artifact is the lipo output. A slice on its own only loads in
 # a process of its own architecture.
 #
@@ -26,7 +29,7 @@ read -r -a clang_command <<<"${CLANG:-clang}"
 linker="${LD64:-ld64.lld}"
 arch="${ARCH:-arm64}"
 output_dir="${OUTPUT_DIR:-$here/build/$arch}"
-install_name="${INSTALL_NAME:-/var/jb/usr/lib/TweakInject/WebSafeWebKit.dylib}"
+install_name="${INSTALL_NAME:-/var/jb/usr/lib/TweakInject/WebSafeWebKitFilter.dylib}"
 minimum_ios="${MINIMUM_IOS:-16.0}"
 
 compile_flags=(
