@@ -48,10 +48,13 @@ static u32 string_count;
 static named_entry bundles[fake_table];
 static named_entry plists[fake_table];
 
-/* The filter file and its two lists. */
+/* The filter file, its one top-level key, and the two lists of the Filter
+   dictionary. The file dictionary holds the lists only when a case asks for
+   the older flat shape, which is what fake_filters_flat does. */
 
 static char filter_file[fake_text];
 static bool filter_present;
+static bool filter_flat;
 static char filter_classes[fake_table][fake_text];
 static u32 filter_class_count;
 static char filter_bundles[fake_table][fake_text];
@@ -60,10 +63,14 @@ static u32 filter_bundle_count;
 static char registered_bundles[fake_table][fake_text];
 static u32 registered_bundle_count;
 
-/* The filter dictionary and its two arrays are three fixed objects, so an
-   array is told apart from a string by its address. */
+/* The file dictionary, the Filter dictionary inside it, and the two arrays are
+   four fixed objects, so an array is told apart from a string by its address.
+   The file dictionary holds Filter and nothing else, which is the shape the
+   device's plist has; a case that asks for the flat shape has the file
+   dictionary hold the two lists itself. */
 
 static char filter_dictionary_slot[8];
+static char filter_subdictionary_slot[8];
 static char class_array_slot[8];
 static char bundle_array_slot[8];
 
@@ -119,6 +126,7 @@ void fake_objc_reset(void) {
   reset_named(plists);
   filter_file[0] = 0;
   filter_present = false;
+  filter_flat = false;
   filter_class_count = 0;
   filter_bundle_count = 0;
   registered_bundle_count = 0;
@@ -157,9 +165,18 @@ void fake_plist_add(const char *path, const char *identifier) {
 void fake_filters_reset(const char *filterPath) {
   text_copy(filter_file, filterPath, fake_text);
   filter_present = false;
+  filter_flat = false;
   filter_class_count = 0;
   filter_bundle_count = 0;
   registered_bundle_count = 0;
+}
+
+/* A filter of the older flat shape: the lists are the file dictionary's own
+   keys rather than a Filter subdictionary's. Only the cases that pin the
+   compatibility branch ask for it; every other case gets the device's shape. */
+
+void fake_filters_flat(void) {
+  filter_flat = true;
 }
 
 void fake_filter_add_class(const char *class_name) {
@@ -269,7 +286,20 @@ static named_entry *plist_for_path(const char *path) {
 }
 
 static void *filter_value_for_key(void *dictionary, const char *key) {
-  if (dictionary != (void *)filter_dictionary_slot || key == 0) {
+  if (key == 0) {
+    return 0;
+  }
+  if (dictionary == (void *)filter_dictionary_slot) {
+    /* The file dictionary. Its one key is Filter, and only a flat filter has
+       the two lists as its own keys: a real one answers nil for Classes and
+       Bundles, which is the defect this fixture reproduces. */
+    if (text_equal(key, "Filter")) {
+      return filter_present ? filter_subdictionary_slot : 0;
+    }
+    if (!filter_flat) {
+      return 0;
+    }
+  } else if (dictionary != (void *)filter_subdictionary_slot) {
     return 0;
   }
   if (text_equal(key, "Classes") && filter_class_count > 0) {

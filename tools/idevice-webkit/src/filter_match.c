@@ -21,6 +21,20 @@ static void *value_for_key(void *dictionary, const char *key) {
   return object_for_key(dictionary, key);
 }
 
+/* The file's own dictionary holds one key, Filter, and the two lists sit in
+   its value: {"Filter": {"Classes": [...], "Bundles": [...]}}. Reading the
+   file dictionary for Classes answers nil, which is what every report of
+   1.0.13 and earlier said on the device: matchVia was none in every process.
+   A filter with no Filter key keeps the older flat shape, where the lists are
+   the file dictionary's own keys, so such a file still reads as before. When
+   both shapes are present the subdictionary is the one read, because that is
+   the shape libinjector reads and the other keys are then not the lists. */
+
+static void *filter_lists(void *file) {
+  void *lists = value_for_key(file, "Filter");
+  return lists == NULL ? file : lists;
+}
+
 /* The array is walked from the first element to the last. libinjector tries
    every element of the list it is given, and the filter lists four bundles, so
    a process named by the fourth must not read as a process named by none.
@@ -71,8 +85,8 @@ static bool class_present(void *element, void *context) {
   return element_text(element, name, sizeof(name)) && lookup->get_class(name) != NULL;
 }
 
-static bool class_matches(void *filter) {
-  void *array = value_for_key(filter, "Classes");
+static bool class_matches(void *lists) {
+  void *array = value_for_key(lists, "Classes");
   if (array == NULL) {
     return false;
   }
@@ -114,8 +128,8 @@ static bool bundle_named(void *identifier, void *context) {
   return matched;
 }
 
-static bool bundle_matches(void *filter) {
-  void *array = value_for_key(filter, "Bundles");
+static bool bundle_matches(void *lists) {
+  void *array = value_for_key(lists, "Bundles");
   if (array == NULL) {
     return false;
   }
@@ -139,10 +153,10 @@ static bool bundle_matches(void *filter) {
 }
 
 void filter_match_report(const char *filterPath) {
-  void *filter = dictionary_for_file(filterPath);
-  if (class_matches(filter)) {
+  void *lists = filter_lists(dictionary_for_file(filterPath));
+  if (class_matches(lists)) {
     dylib_report_set_match(match_classes);
-  } else if (bundle_matches(filter)) {
+  } else if (bundle_matches(lists)) {
     dylib_report_set_match(match_bundles);
   } else {
     dylib_report_set_match(match_none);

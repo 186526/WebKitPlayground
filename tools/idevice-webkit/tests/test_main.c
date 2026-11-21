@@ -517,6 +517,88 @@ int main(void) {
              found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>") &&
              found_in(report, "\t<integer>7</integer>"));
 
+  /* The device's filter has one top-level key, Filter, and the two lists sit
+     inside it. Asking the file dictionary for Classes answers nil and asking
+     the Filter dictionary answers the list, which is the pair every report of
+     1.0.13 and earlier got wrong: the file dictionary was asked alone, so
+     matchVia came out none in every process on the device. */
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
+  {
+    void *file = dictionary_for_file(idevice_webkit_filter_path);
+    void *filter = object_for_key(file, "Filter");
+    void *class_array = object_for_key(filter, "Classes");
+    void *first = class_array == NULL
+                      ? NULL
+                      : objc_send_object_index(class_array, objc_selector("objectAtIndex:"), 0);
+    const char *first_text = first == NULL ? NULL : objc_send_text(first, objc_selector("UTF8String"));
+    expect("the file dictionary answers no Classes of its own",
+           file != NULL && object_for_key(file, "Classes") == NULL);
+    expect("  and no Bundles of its own", object_for_key(file, "Bundles") == NULL);
+    expect("  the Filter dictionary answers the one-element Classes list",
+           filter != NULL && class_array != NULL &&
+               objc_send_count(class_array, objc_selector("count")) == 1 && first_text != NULL &&
+               strcmp(first_text, "UIApplication") == 0);
+  }
+
+  /* A class named only inside the Filter subdictionary still matches. The
+     reader of 1.0.13 asked the file dictionary alone, so this filter came out
+     as matchVia none; the case is the product-level half of the shape pair
+     above, and it is red whenever the Filter key is skipped. */
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a class listed only in the Filter subdictionary still matches",
+         report != NULL &&
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>") &&
+             found_in(report, "\t<integer>7</integer>"));
+
+  /* The same for the bundle branch: with no class to match and the identifier
+     in the subdictionary's Bundles list, matchVia is bundles. Read from the
+     file dictionary this filter would say none as well. */
+
+  prepare(wechat, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_bundle("com.tencent.xin");
+  fake_bundle_register("com.tencent.xin");
+  list_host("/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app",
+            manifest_path_for("-var-containers-Bundle-Application-12696398-6584-4CF1-82EA-4CB0536D964F-WeChat.app-WeChat"),
+            "com.tencent.xin");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a bundle listed only in the Filter subdictionary still matches",
+         report != NULL &&
+             found_in(report, "\t<key>matchVia</key>\n\t<string>bundles</string>") &&
+             found_in(report, "\t<integer>7</integer>"));
+
+  /* A filter that has no Filter key is the older flat shape, and it still
+     reads: the lists are the file dictionary's own keys there. */
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filters_flat();
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  report = read_report(idevice_webkit_report_path);
+  expect("a filter without a Filter key keeps the flat shape",
+         report != NULL &&
+             found_in(report, "\t<key>matchVia</key>\n\t<string>classes</string>") &&
+             found_in(report, "\t<integer>7</integer>"));
+
   prepare(safari, installed_self, 1);
   fake_filters_reset(idevice_webkit_filter_path);
   fake_filter_add_class("AWebContentProcessClass");

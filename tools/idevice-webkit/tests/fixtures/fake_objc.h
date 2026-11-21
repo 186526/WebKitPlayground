@@ -30,12 +30,19 @@ void fake_bundle_add(const char *path, const char *identifier);
 
 void fake_plist_add(const char *path, const char *identifier);
 
-/* The filter file the dylib reads back, with the two lists of its Filter
-   dictionary. Adding to either list is what makes the file present. */
+/* The filter file the dylib reads back. Its shape is the device's: one
+   top-level key, Filter, holding the Classes and Bundles arrays. Adding to
+   either list is what makes the file present. */
 
 void fake_filters_reset(const char *filterPath);
 void fake_filter_add_class(const char *class_name);
 void fake_filter_add_bundle(const char *identifier);
+
+/* Switches the file back to the older flat shape, where Classes and Bundles
+   are the file dictionary's own keys. Only the cases that pin the
+   compatibility branch call it. */
+
+void fake_filters_flat(void);
 
 /* The LaunchServices registry the bundle branch asks: an identifier that is
    registered names a bundle, and a system application is in the filter and not

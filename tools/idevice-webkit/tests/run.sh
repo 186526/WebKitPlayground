@@ -49,6 +49,16 @@ rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready \
 # branches to them with a plain br. The control experiment changed that header
 # word alone, back to 0x0, and the crash stopped while the constructor still
 # ran. The check below therefore holds the value down at 0x0.
+#
+# The arm64e slice is the other way round: 0x80000002 is right there because it
+# is a real arm64e link, not a rewritten arm64 one, so its pointers are arm64e
+# pointers and dyld may sign them. build.sh writes it on the device, with Apple
+# ld64 and -fixup_chains; ld64.lld refuses that flag for an arm64e target and
+# writes LC_DYLD_INFO_ONLY instead. When build/arm64e/WebSafeWebKit.dylib is
+# present it is held to the same four properties, through check-slice.py, the
+# reader build.sh uses: the device carries no llvm-objdump to run the checks
+# below. The two slices are what package-deb.sh lipos into one dylib, and
+# Safari, an arm64e process, loads only the arm64e one.
 slice="$here/../build/arm64/WebSafeWebKit.dylib"
 [ -f "$slice" ] || { echo "missing slice: $slice" >&2; exit 1; }
 
@@ -86,6 +96,18 @@ if llvm-nm -u "$slice" | grep -q -e '^_dyld_' -e '^___dyld_'; then
   exit 1
 fi
 echo "the arm64 slice refers to no dyld symbol name the device does not export pass"
+
+# The arm64e slice, when it has been built, is held to the same four properties
+# through the reader that runs where no objdump does. It is optional here
+# because it takes the device to build one; package-deb.sh refuses to package
+# without it, which is where its absence is caught.
+arm64e_slice="$here/../build/arm64e/WebSafeWebKit.dylib"
+if [ -f "$arm64e_slice" ]; then
+  "${PYTHON:-python3}" "$here/../check-slice.py" "$arm64e_slice" 02000080
+  echo "the arm64e slice carries cpusubtype 0x80000002, chained fixups and __init_offsets pass"
+else
+  echo "no arm64e slice at $arm64e_slice; package-deb.sh refuses to build without it"
+fi
 
 # The mode of a new report file has to travel the variadic way. With the fixed
 # three-parameter declaration the compiler writes it into w2, and the device's

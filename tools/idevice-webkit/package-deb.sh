@@ -3,7 +3,7 @@
 #
 # The package writes real files below /var/jb:
 #
-#   TweakInject/WebSafeWebKitFilter.dylib                   arm64, ad-hoc signed
+#   TweakInject/WebSafeWebKitFilter.dylib                   arm64 + arm64e, ad-hoc signed
 #   TweakInject/WebSafeWebKitFilter.plist                   ellekit filter
 #   TweakInject/com.websafe.idevice.host.*.plist            host manifests
 #
@@ -15,15 +15,31 @@
 # dylib when the answer is not zero, so the two names have to be the same and
 # both read "WebSafeWebKitFilter".
 #
-# The dylib is one arm64 slice carrying cpusubtype 0x0 and
-# LC_DYLD_CHAINED_FIXUPS, and it is signed by ldid after the link.
-# The subtype is the value ld64.lld writes for an arm64 target; rewriting it to
-# 0x80000002 once made the device sign every fixed-up pointer, including the
-# function addresses dlsym answers, and 1.0.11 crashed on the first message
-# because this code branches to them with a plain br. The link produces the
-# chained fixups; the signature has to come last because it covers the header
-# page. A slice that cannot be signed stops the packaging, because an unsigned
-# dylib does not load on a device.
+# The dylib is a fat file holding two thin slices:
+#
+#   build/arm64/WebSafeWebKit.dylib    cpusubtype 0x0,           LC_DYLD_CHAINED_FIXUPS
+#   build/arm64e/WebSafeWebKit.dylib   cpusubtype 0x80000002,    LC_DYLD_CHAINED_FIXUPS
+#
+# Safari is an arm64e process, and ellekit injects a dylib only when it holds
+# an arm64e slice: 1.0.13's arm64-only package was never loaded there. Each
+# slice is signed on its own, then the two are joined with lipo; the signatures
+# survive the join because each one sits at the end of its own slice and lipo
+# copies slices whole.
+#
+# The signs have to be separate, and each has to name the file
+# WebSafeWebKitFilter.dylib while ldid runs: ldid takes the file's base name as
+# the CodeDirectory identifier, and a signature made under a build name such as
+# t2.dylib makes the kernel kill the process with SIGKILL CODESIGNING / "Invalid
+# Page". check-signature.py reads each slice back and fails the package unless
+# the identifier is that name and the flags word is 0x0. The signature has to
+# come last, because it covers the header page and the chained fixups.
+#
+# The arm64e slice cannot be linked on the build host: ld64.lld refuses
+# -fixup_chains for an arm64e target, and the classic-fixup image it writes
+# instead is loaded with no initializer. Build it on the device with
+# `ARCH=arm64e ./build.sh`, which uses Apple ld64 and the iPhoneOS SDK there,
+# and copy build/arm64e/WebSafeWebKit.dylib back. The arm64 slice is the one
+# `./build.sh` writes on the host.
 #
 # ldid is taken from LDID, then from PATH, then from /tmp/ldid-src/ldid, which
 # is a development path and not a published dependency; the error below prints
@@ -47,20 +63,24 @@
 #
 # Usage:
 #
-#   ./build.sh
-#   ./package-deb.sh [--output PATH] [--slice-dir DIR]
+#   ./build.sh                       # the arm64 slice, on the build host
+#   ARCH=arm64e ./build.sh           # the arm64e slice, on the device
+#   ./package-deb.sh [--output PATH] [--arm64-slice PATH] [--arm64e-slice PATH]
 #
-# Without --slice-dir the slice is read from build/arm64/WebSafeWebKit.dylib.
+# Without the options the slices are read from build/arm64/WebSafeWebKit.dylib
+# and build/arm64e/WebSafeWebKit.dylib. A missing slice stops the packaging:
+# one slice on its own loads only in a process of its own architecture.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 staging_parent="${STAGING_PARENT:-${TMPDIR:-/tmp}}"
 dpkg_deb="${DPKG_DEB:-dpkg-deb}"
 python="${PYTHON:-python3}"
+lipo="${LIPO:-lipo}"
 
 payload_name="WebSafeWebKitFilter"
 package_id="com.websafe.idevice"
-package_version="1.0.13-20261122"
+package_version="1.0.14-20261122"
 tweak_dir="var/jb/usr/lib/TweakInject"
 manifest_prefix="com.websafe.idevice.host."
 
@@ -82,24 +102,27 @@ afad50b29108cdebdb3bd5b5912849dd  var/jb/usr/lib/websafewebkit/com.websafe.idevi
 7a235d24524c9f997ec27e35383ae212  var/jb/var/mobile/WebSafeWebKit/disabled-ellekit-filter.plist'
 
 output="$here/build/${package_id}_${package_version}_iphoneos-arm64.deb"
-slice_dir="$here/build/arm64"
+arm64_slice="$here/build/arm64/WebSafeWebKit.dylib"
+arm64e_slice="$here/build/arm64e/WebSafeWebKit.dylib"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --output) output="$2"; shift 2 ;;
-    --slice-dir) slice_dir="$2"; shift 2 ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    --arm64-slice) arm64_slice="$2"; shift 2 ;;
+    --arm64e-slice) arm64e_slice="$2"; shift 2 ;;
+    --slice-dir) echo "--slice-dir is gone: the package takes both slices" >&2; exit 2 ;;
+    -h|--help) sed -n '2,68p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-for tool in "$dpkg_deb"; do
+for tool in "$dpkg_deb" "$lipo"; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
 
-# ldid has to sign the slice: a signature written any other way does not load
-# on the device, and a slice signed before the subtype was set covers the wrong
-# page. LDID wins, then PATH, then the development build.
+# ldid has to sign each slice: a signature written any other way does not load
+# on the device, and a slice signed before the chained fixups were written
+# covers the wrong bytes. LDID wins, then PATH, then the development build.
 signer="${LDID:-$(command -v ldid || true)}"
 if [ -z "$signer" ] && [ -x /tmp/ldid-src/ldid ]; then
   signer=/tmp/ldid-src/ldid
@@ -120,20 +143,58 @@ SIGNER
   exit 1
 fi
 
-slice="$slice_dir/WebSafeWebKit.dylib"
-[ -f "$slice" ] || { echo "missing slice: $slice" >&2; exit 1; }
+for slice in "$arm64_slice" "$arm64e_slice"; do
+  [ -f "$slice" ] || {
+    echo "missing slice: $slice" >&2
+    echo "build it first: ./build.sh for the arm64 slice, ARCH=arm64e ./build.sh" >&2
+    echo "on the device for the arm64e one; a package with one slice is not loaded" >&2
+    echo "by a process of the other architecture" >&2
+    exit 1
+  }
+done
 
 work="$(mktemp -d "$staging_parent/idevice-webkit-deb.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 stage="$work/stage"
 mkdir -p "$stage/DEBIAN" "$stage/$tweak_dir"
 
-# 1. One signed copy of the slice.
-cp "$slice" "$stage/$tweak_dir/$payload_name.dylib"
-"$signer" -S "$stage/$tweak_dir/$payload_name.dylib" || {
-  echo "cannot sign the slice of $payload_name with $signer" >&2
+# 1. Both slices, each signed on its own under the install name.
+#
+# ldid takes the file's base name as the CodeDirectory identifier, so each
+# slice is signed while it is called $payload_name.dylib, in a directory of its
+# own. Signing a build name such as WebSafeWebKit.dylib and renaming afterwards
+# leaves that name in the signature, and the kernel kills the host with SIGKILL
+# CODESIGNING / "Invalid Page". check-signature.py reads the result back and
+# fails the package unless the identifier and the 0x0 flags word match.
+for arch in arm64 arm64e; do
+  slice_var="${arch}_slice"
+  signed="$work/$arch/$payload_name.dylib"
+  mkdir -p "$work/$arch"
+  cp "${!slice_var}" "$signed"
+  "$signer" -S "$signed" || {
+    echo "cannot sign the $arch slice of $payload_name with $signer" >&2
+    exit 1
+  }
+  "$python" "$here/check-signature.py" "$signed" "$payload_name.dylib" || {
+    echo "the $arch slice is not signed as $payload_name.dylib with flags 0x0" >&2
+    exit 1
+  }
+done
+
+# 2. The two signed slices joined into one fat dylib. lipo copies each slice
+#    whole, signature included, so the identifier and flags checked above are
+#    still the ones in the package.
+"$lipo" -create "$work/arm64/$payload_name.dylib" "$work/arm64e/$payload_name.dylib" \
+  -output "$stage/$tweak_dir/$payload_name.dylib" || {
+  echo "lipo could not join the two slices" >&2
   exit 1
 }
+
+fat_archs="$("$lipo" -archs "$stage/$tweak_dir/$payload_name.dylib" | tr -d '[:space:]')"
+if [ "$fat_archs" != "arm64arm64e" ]; then
+  echo "the fat dylib holds '$fat_archs', expected 'arm64 arm64e'" >&2
+  exit 1
+fi
 
 # 3. Files from the repository, one copy each
 cp "$here/$payload_name.plist" "$work/filter.plist"
@@ -188,9 +249,10 @@ Installed-Size: $install_size
 Section: Tweaks
 Priority: optional
 Description: Loads a self-built WebKit into the listed apps through ellekit.
- Installs one ad-hoc signed arm64 dylib and its ellekit filter as real files in
- TweakInject, with no symlinks. The filter is a binary property list named
- after the dylib.
+ Installs one ad-hoc signed fat dylib, arm64 and arm64e, and its ellekit filter
+ as real files in TweakInject, with no symlinks. Safari is an arm64e process and
+ loads only the arm64e slice. The filter is a binary property list named after
+ the dylib.
 CONTROL
 
 # 7. prerm runs before dpkg deletes the files this package owns (checked: the

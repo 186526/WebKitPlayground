@@ -71,7 +71,12 @@ why removing the derivation in `bundle_directory()` makes the suite fail.
 
 `fixtures/fake_objc.c` also stands in for the ellekit filter and for the two
 registries its branches ask. The filter is one `NSDictionary` the dylib reads
-by path, with a `Classes` array and a `Bundles` array; `objc_getClass` answers
+by path, with the device's shape: its one top-level key is `Filter`, and the
+`Classes` and `Bundles` arrays live in that subdictionary. Asking the file
+dictionary for `Classes` answers nil, which is what every report of 1.0.13 and
+earlier said on the device. `fake_filters_flat()` switches a case to the older
+flat shape, where the two arrays are the file dictionary's own keys; only the
+case that pins the compatibility branch calls it. `objc_getClass` answers
 from a class table and `CFBundleGetBundleWithIdentifier` from a bundle table
 (`fake_bundle_register`, `fake_objc.c:179`), and the two tables are separate
 because a system app such as MobileSafari is in a filter and not in the
@@ -81,6 +86,17 @@ bundle branch from the first. Every object the dylib receives is a slot of a
 string table, and the fixture types `NSString.UTF8String` and `NSArray.count`
 exactly as the dylib declares them, because a call through a pointer of another
 type is what UBSan reports.
+
+Three cases pin the shape directly. `the file dictionary answers no Classes of
+its own` and `and no Bundles of its own` read the file dictionary and require
+nil, and `the Filter dictionary answers the one-element Classes list` reads the
+subdictionary and requires `{UIApplication}`. They hold the fixture to the
+device's shape rather than the dylib; the product behaviour is pinned by `a
+class listed only in the Filter subdictionary still matches` and `a bundle
+listed only in the Filter subdictionary still matches`, which are red whenever
+`src/filter_match.c` asks the file dictionary alone, as 1.0.13 did.
+`a filter without a Filter key keeps the flat shape` pins the compatibility
+branch.
 
 The two path methods are the exception that gives the suite its grip on the
 1.0.12 crash. `bundleWithPath:` and `dictionaryWithContentsOfFile:` declare an
@@ -198,8 +214,21 @@ linker-level names are `__dyld_*` with two, and 1.0.7 to 1.0.8 rejected those
 legitimate names with a `^__dyld_` pattern, which is the spelling mistake 1.0.9
 corrected. A passing run prints `the arm64 slice keeps cpusubtype 0x0, so no
 pointer is signed pass` and `the arm64 slice refers to no dyld symbol name the
-device does not export pass`. `build.sh` runs the same checks on the slice it
-just linked, so a build cannot produce one that fails them.
+device does not export pass`. When `build/arm64e/WebSafeWebKit.dylib` exists,
+`run.sh` also runs `check-slice.py` on it with the expected subtype `02000080`,
+and prints `the arm64e slice carries cpusubtype 0x80000002, chained fixups and
+__init_offsets pass`. The arm64e slice is optional there, because building it
+takes the device; `package-deb.sh` is where its absence stops a release.
+
+`build.sh` runs the same four checks on the slice it just linked, through
+`check-slice.py` rather than `llvm-objdump`/`llvm-nm`: the device that links the
+arm64e slice has neither, only `llvm-otool-16` and `llvm-nm-16`. `check-slice.py`
+parses the Mach-O itself, so the arm64e path can run where the arm64 path's
+`llvm-objdump` checks cannot. The `-fixup_chains` flag is what the arm64e link
+has to be given: the device's own ld64 writes `LC_DYLD_INFO_ONLY` and
+`__mod_init_func` for this image without it, and `LC_DYLD_CHAINED_FIXUPS` with
+`__init_offsets` when it is passed. `check-slice.py` is what makes the two
+outcomes distinguishable in a build, and it is red on the flagless slice.
 
 The last check reads the disassembly of `_write_file` out of the same slice
 and fails if the function assigns `w2` before its call to `open`. Darwin's
