@@ -420,39 +420,27 @@ jobs:
           # assigns it. So this key pins the path even if a future ref stops naming the directory after
           # the deployment target. The symlink alone would be enough; this makes the intent explicit.
           #
-          # OTHER_TAPI_FLAGS repeats the two -D values because GenerateTAPI parses the headers that
-          # Source/WebKit/Configurations/WebKit.xcconfig:284 names as -extra-private-header and
-          # -extra-public-header, and it does that with its own clang invocation, which inherits
-          # neither OTHER_CFLAGS nor OTHER_CPLUSPLUSFLAGS. WebKit.xcconfig:286 adds
-          # -Xparser -include -Xparser config.h, so Source/WebKit/config.h pulls in
-          # Source/WTF/wtf/PlatformUse.h, and PlatformUse.h:411-413 turns USE_EXTENSIONKIT back on
-          # from __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400, which the 18.5 SDK satisfies. Without
-          # the matching -D the TAPI parse sees USE(EXTENSIONKIT)=1 while the compiled binary was
-          # built with 0, so installapi demands symbols the library never defined. Run 45020788469
-          # ended at exactly that point, in GenerateTAPI for WebKit.framework/WebKit.tbd:
-          #   Source/WebKit/Platform/ExtraPrivateSymbolsForTAPI.h:45:12: error: declaration has
-          #   external linkage, but dynamic library doesn't have symbol 'WKGrant'
-          #   Source/WebKit/Platform/ExtraPrivateSymbolsForTAPI.h:48:12: error: declaration has
-          #   external linkage, but dynamic library doesn't have symbol 'WKProcessExtension'
-          # ExtraPrivateSymbolsForTAPI.h:42 is one of fifteen headers that read
-          # USE(EXTENSIONKIT), so gating only that declaration would leave the other fourteen
-          # disagreeing with the binary in the same way. Forcing the macro for TAPI makes the
-          # parse agree with the compile through the same -D that the compile received.
+          # OTHER_TAPI_FLAGS repeats the two -D values because GenerateTAPI parses those headers
+          # with its own clang run, which inherits neither OTHER_CFLAGS nor OTHER_CPLUSPLUSFLAGS.
+          # WebKit.xcconfig:286 adds -Xparser -include -Xparser config.h, so the parse reads
+          # PlatformUse.h:411-413 and turns USE_EXTENSIONKIT back on from
+          # __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400, which the 18.5 SDK satisfies. The parse
+          # then sees 1 where the binary was built with 0. Run 45020788469 ended in exactly that,
+          # at GenerateTAPI for WebKit.framework/WebKit.tbd, reporting only WKGrant and
+          # WKProcessExtension, from ExtraPrivateSymbolsForTAPI.h:45 and :48: those @interface
+          # declarations are the only gated content that has to become an exported symbol, the
+          # rest being member declarations, forward protocol declarations and soft-link macros,
+          # which is why the mismatch showed up twice and not once per gated header.
           #
-          # A bare -D on the installapi command line does reach the parser that reads
-          # -Xparser -include config.h. In tapi's source, lib/Driver/Options.cpp:1084-1094
-          # collects unclaimed -D and -U arguments into frontendOptions.macros,
-          # lib/Driver/InstallAPIDriver.cpp:662 copies that into job.macros, and
-          # lib/Frontend/Frontend.cpp:385-391 appends each one to the clang argv as -D<value>,
-          # before lib/Frontend/Frontend.cpp:443-445 appends job.clangExtraArgs, which is where
-          # -Xparser -include config.h lands. Both travel in one argv, and PlatformUse.h:411 tests
-          # !defined(USE_EXTENSIONKIT), so their order does not matter. The same build shows a -D
-          # from OTHER_TAPI_FLAGS already travelling that path:
-          # -DRELEASE_WITHOUT_OPTIMIZATIONS, which Source/WebKit/Configurations/Base.xcconfig:124
-          # sets in OTHER_TAPI_FLAGS, is on the installapi command for WebKit.tbd. $(inherited) is
-          # what keeps everything else in place; the exported OTHER_TAPI_FLAGS in the build log
-          # carries both the -extra-private-header paths from WebKit.xcconfig:284 and
-          # -Xparser -include -Xparser config.h from :286.
+          # Fixing headers instead would mean judging that per declaration and re-judging it as
+          # refs move: fifteen headers read USE(EXTENSIONKIT), thirteen through a bare #if and two
+          # through a compound one, and six read USE(BROWSERENGINEKIT). The -D does reach the
+          # parse: in tapi (tapi-1600.0.11.8, b824911e) Options.cpp:1083-1094 collects unclaimed
+          # -D into frontendOptions.macros, InstallAPIDriver.cpp:662 copies them to job.macros,
+          # and Frontend.cpp:385-391 appends each as -D before :444-446 appends clangExtraArgs,
+          # where -Xparser -include config.h lands; PlatformUse.h:411 tests !defined, so order
+          # does not matter. $(inherited) keeps the -extra-private-header list from
+          # WebKit.xcconfig:284 and the -Xparser flags from :286.
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
             ARCHS='arm64e' \
