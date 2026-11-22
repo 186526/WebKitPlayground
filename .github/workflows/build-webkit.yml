@@ -193,7 +193,12 @@ jobs:
           # patches/ios18-public-sdk-libpas-ulock-flags.patch guards PAS_USE_ULOCK_FLAGS_API,
           # which does not exist before tag Safari-18.2, so on an older ref the patch cannot
           # apply and a skip there is correct rather than stale.
+          #
+          # patches/ios18-public-sdk-pal-swift-include-paths.patch edits keys that only exist from
+          # tag Safari-18.0 on, where the Swift PAL landed. A 16.x or 17.x ref has no
+          # OTHER_SWIFT_FLAGS in PAL.xcconfig at all, so a skip there is correct for the same reason.
           ref_needs_ulock_flags_api=0
+          ref_has_pal_swift=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -204,7 +209,17 @@ jobs:
               }' <<< "${ref_name}"; then
             ref_needs_ulock_flags_api=1
           fi
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2 }
+              END {
+                  if (major == "") exit 1
+                  exit !((major + 0) >= 18)
+              }' <<< "${ref_name}"; then
+            ref_has_pal_swift=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
+          echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -215,6 +230,12 @@ jobs:
               case "$(basename "$p")" in
                 ios18-public-sdk-libpas-ulock-flags.patch)
                   if [ "$ref_needs_ulock_flags_api" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
+                ios18-public-sdk-pal-swift-include-paths.patch)
+                  if [ "$ref_has_pal_swift" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1
                   fi
@@ -230,6 +251,20 @@ jobs:
             git -C WebKit apply -v "$PWD/$p"
             echo "APPLIED: $p"
           done
+
+      - name: Check the PAL Swift include paths expand at the shipped deployment target
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          # patches/ios18-public-sdk-pal-swift-include-paths.patch is what puts the two -I flags
+          # into OTHER_SWIFT_FLAGS at this deployment target. Resolving the key chain here proves
+          # that before the build spends an hour reaching PAL, instead of failing on
+          # "no such module 'PALSwift'" in CryptoKitShim.swift. The script prints the expanded
+          # WK_IOS_17 and OTHER_SWIFT_FLAGS, so a regression shows the keys it resolved.
+          python3 scripts/check-pal-swift-include-paths.py \
+            --pal-xcconfig WebKit/Source/WebCore/PAL/Configurations/PAL.xcconfig \
+            --conditionals-xcconfig WebKit/Configurations/WebKitTargetConditionals.xcconfig \
+            --deployment-target "$WK_BUILD_DEPLOYMENT_TARGET"
 
       - name: Configure embedded development
         run: sudo WebKit/Tools/Scripts/configure-xcode-for-embedded-development || true
