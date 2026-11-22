@@ -203,9 +203,16 @@ jobs:
           # HAVE_NW_PROXY_CONFIG consumer in NetworkSessionCocoa.mm reads it. A 16.x ref has neither
           # the declaration nor a HAVE(NW_PROXY_CONFIG) block, so it has nothing to fix and a skip
           # there is correct rather than stale.
+          #
+          # patches/ios18-public-sdk-restricted-opener-domains.patch gates the
+          # RestrictedOpenerDomainsController call in WebProcessPoolCocoa.mm. That class first
+          # appeared in tag Safari-18.0: Safari-17.6-iOS-17.6 has neither the class in
+          # WebPrivacyHelpers.h nor the registerNotifyCallback block that calls it. A 17.x or 16.x
+          # ref therefore has nothing to gate and a skip there is correct rather than stale.
           ref_needs_ulock_flags_api=0
           ref_has_pal_swift=0
           ref_needs_networkcontext_property=0
+          ref_needs_restricted_opener_domains=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -234,9 +241,19 @@ jobs:
               }' <<< "${ref_name}"; then
             ref_needs_networkcontext_property=1
           fi
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2 }
+              END {
+                  if (major == "") exit 1
+                  exit !((major + 0) >= 18)
+              }' <<< "${ref_name}"; then
+            ref_needs_restricted_opener_domains=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
+          echo "RestrictedOpenerDomainsController present in ${WEBKIT_REF}: ${ref_needs_restricted_opener_domains}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -259,6 +276,12 @@ jobs:
                   ;;
                 ios18-public-sdk-networkcontext-property.patch)
                   if [ "$ref_needs_networkcontext_property" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
+                ios18-public-sdk-restricted-opener-domains.patch)
+                  if [ "$ref_needs_restricted_opener_domains" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1
                   fi

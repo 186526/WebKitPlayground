@@ -1,0 +1,15 @@
+diff --git a/Source/WebKit/UIProcess/Cocoa/WebProcessPoolCocoa.mm b/Source/WebKit/UIProcess/Cocoa/WebProcessPoolCocoa.mm
+--- a/Source/WebKit/UIProcess/Cocoa/WebProcessPoolCocoa.mm
++++ b/Source/WebKit/UIProcess/Cocoa/WebProcessPoolCocoa.mm
+@@ -341,9 +341,11 @@ void WebProcessPool::platformInitialize(NeedsGlobalStaticInitialization needsGlob
+             logProcessPoolState(pool.get());
+     });
+ 
++#if ENABLE(ADVANCED_PRIVACY_PROTECTIONS)
+     PAL::registerNotifyCallback("com.apple.WebKit.restrictedDomains"_s, ^{
+         RestrictedOpenerDomainsController::shared();
+     });
++#endif
+ 
+ }
+ 
