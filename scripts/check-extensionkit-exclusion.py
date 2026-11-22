@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-"""Resolve BaseExtension.xcconfig's EXCLUDED_SOURCE_FILE_NAMES the way xcodebuild does.
+"""Resolve BaseExtension.xcconfig's two exclusion settings the way xcodebuild does.
 
 patches/ios18-public-sdk-extensionkit-extension-exclusion.patch replaces
 
+    SWIFT_OBJC_BRIDGING_HEADER[sdk=iphone*] = Shared/AuxiliaryProcessExtensions/AuxiliaryProcessExtensionBridge.h;
     EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] = ;
 
-with a value read from the WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED switch, so the four ExtensionKit
-targets compile no sources when the build asks for that. Those targets declare conformance to a
-BrowserEngineKit protocol whose configuration property is API_AVAILABLE(ios(17.4)); a Swift
-availability check is evaluated against IPHONEOS_DEPLOYMENT_TARGET and cannot be turned off with a
--D, so a 16.1 deployment target cannot compile WebContentProcessExtension.swift or
-NetworkingProcessExtension.swift at all.
+with values read from the WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED switch, so the four ExtensionKit
+targets compile no sources and generate no bridging-header PCH when the build asks for that. Those
+targets declare conformance to a BrowserEngineKit protocol whose configuration property is
+API_AVAILABLE(ios(17.4)); a Swift availability check is evaluated against IPHONEOS_DEPLOYMENT_TARGET
+and cannot be turned off with a -D, so a 16.1 deployment target cannot compile
+WebContentProcessExtension.swift or NetworkingProcessExtension.swift at all.
 
-The switch defaults to empty, which leaves EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] empty exactly as
-upstream has it. That default is what this script guards: a future ref that reshapes these keys must
-not silently start excluding sources for every iOS build.
+The two settings are paired on purpose. Every state where upstream sets
+EXCLUDED_SOURCE_FILE_NAMES = * also blanks the bridging header: macos, 17.0 through 17.3, and xr.
+A zero-source target that still names a bridging header is a combination upstream never ships, and it
+is the one that emits "SwiftGeneratePch ... Compiling bridging header" — the command that failed for
+GPUExtension in build.log:268012.
+
+The switch defaults to empty, which leaves both settings exactly as upstream has them. That default
+is what this script guards: a future ref that reshapes these keys must not silently change every
+iOS build.
 
 Usage:
   scripts/check-extensionkit-exclusion.py \
@@ -36,6 +43,12 @@ REFERENCE = re.compile(r"\$\(([^()]*)\)")
 
 SWITCH = "WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED"
 EXCLUSIONS = "EXCLUDED_SOURCE_FILE_NAMES"
+BRIDGING_HEADER = "SWIFT_OBJC_BRIDGING_HEADER"
+BRIDGING_HEADER_VALUE = "Shared/AuxiliaryProcessExtensions/AuxiliaryProcessExtensionBridge.h"
+
+# The two settings the patch rewrites. Upstream pairs them in every platform and SDK state, so the
+# checker asserts both in each direction.
+PAIRED = (EXCLUSIONS, BRIDGING_HEADER)
 
 
 def split_assignment(line: str) -> tuple[str, str] | None:
@@ -125,15 +138,16 @@ def expand(value: str, assignments: list[tuple[str, str | None, str]], sdk: str,
 
 
 def is_patched(assignments: list[tuple[str, str | None, str]]) -> bool:
-    """Report whether the exclusion value reads the switch.
+    """Report whether both paired settings read the switch.
 
-    The patch does not add a key named after the switch, it points the platform-wide
-    EXCLUDED_SOURCE_FILE_NAMES at $(EXCLUDED_SOURCE_FILE_NAMES_$(WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED)).
-    An unpatched file leaves that key empty and never mentions the switch.
+    The patch does not add a key named after the switch, it points the platform-wide values at
+    $(..._$(WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED)). An unpatched file never mentions the switch; a
+    half-patched file mentions it in one of the two, which is the state that leaves a zero-source
+    target holding a bridging header.
     """
-    return any(
-        name == EXCLUSIONS and SWITCH in value
-        for name, _, value in assignments
+    return all(
+        any(name == setting and SWITCH in value for name, _, value in assignments)
+        for setting in PAIRED
     )
 
 
@@ -141,12 +155,13 @@ def version_scoped_conditions(assignments: list[tuple[str, str | None, str]]) ->
     """Return the SDK patterns that scope an exclusion by SDK *version* rather than platform.
 
     Upstream writes [sdk=iphone*] for the whole platform and [sdk=iphone*17.0*] and friends for
-    individual SDK releases. Only the first can reveal what the switch alone does.
+    individual SDK releases. Only the first can reveal what the switch alone does. Both paired
+    settings carry the same version-scoped keys, so either one can supply them.
     """
     return sorted({
         condition
         for name, condition, _ in assignments
-        if name == EXCLUSIONS and condition is not None and condition.count("*") > 1
+        if name in PAIRED and condition is not None and condition.count("*") > 1
     })
 
 
@@ -164,27 +179,42 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not args.base_extension_xcconfig.is_file():
+        print(f"SKIP: {args.base_extension_xcconfig} does not exist at this ref")
+        return 0
+
     assignments = parse_xcconfig(args.base_extension_xcconfig)
     extra = {SWITCH: args.excluded_switch}
-    excluded = expand("$(EXCLUDED_SOURCE_FILE_NAMES)", assignments, args.sdk, extra)
+    excluded = expand(f"$({EXCLUSIONS})", assignments, args.sdk, extra)
+    bridging_header = expand(f"$({BRIDGING_HEADER})", assignments, args.sdk, extra)
 
     print(f"sdk = {args.sdk}")
     print(f"{SWITCH} = {args.excluded_switch!r}")
-    print(f"EXCLUDED_SOURCE_FILE_NAMES = {excluded!r}")
+    print(f"{EXCLUSIONS} = {excluded!r}")
+    print(f"{BRIDGING_HEADER} = {bridging_header!r}")
 
     if not is_patched(assignments):
-        print(f"SKIP: this tag's BaseExtension.xcconfig never reads {SWITCH}, so the patch is not applied")
+        print(f"SKIP: this tag's BaseExtension.xcconfig never reads {SWITCH} in both "
+              f"{' and '.join(PAIRED)}, so the patch is not applied")
         return 0
 
     if args.excluded_switch:
+        failures: list[str] = []
         if excluded != "*":
-            print(
-                f"FAIL: with {SWITCH}={args.excluded_switch} the ExtensionKit targets must compile "
-                f"no sources, so EXCLUDED_SOURCE_FILE_NAMES must be '*', not {excluded!r}",
-                file=sys.stderr,
-            )
+            failures.append(f"{EXCLUSIONS} must be '*', not {excluded!r}")
+        if bridging_header:
+            failures.append(f"{BRIDGING_HEADER} must be empty, not {bridging_header!r}")
+        if failures:
+            # A zero-source target that still names a bridging header is the combination that
+            # emits the SwiftGeneratePch command that failed for GPUExtension.
+            for failure in failures:
+                print(
+                    f"FAIL: with {SWITCH}={args.excluded_switch} the ExtensionKit targets must skip "
+                    f"all Swift work, but {failure}",
+                    file=sys.stderr,
+                )
             return 1
-        print("OK: the switch excludes every source")
+        print("OK: the switch excludes every source and blanks the bridging header")
         return 0
 
     scoped = [
@@ -199,14 +229,21 @@ def main() -> int:
         )
         return 0
 
+    failures = []
     if excluded:
-        print(
-            f"FAIL: with {SWITCH} unset EXCLUDED_SOURCE_FILE_NAMES must stay empty so an ordinary "
-            f"iOS build keeps compiling these targets, but it resolved to {excluded!r}",
-            file=sys.stderr,
-        )
+        failures.append(f"{EXCLUSIONS} must stay empty, not {excluded!r}")
+    if bridging_header != BRIDGING_HEADER_VALUE:
+        failures.append(
+            f"{BRIDGING_HEADER} must stay {BRIDGING_HEADER_VALUE}, not {bridging_header!r}")
+    if failures:
+        for failure in failures:
+            print(
+                f"FAIL: with {SWITCH} unset an ordinary iOS build must keep compiling these "
+                f"targets, but {failure}",
+                file=sys.stderr,
+            )
         return 1
-    print("OK: with the switch unset the file excludes nothing, as upstream has it")
+    print("OK: with the switch unset the file keeps the upstream values")
     return 0
 
 

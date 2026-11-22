@@ -28,16 +28,21 @@ jobs:
       # change leave the pre-build assertion checking a path the build no longer reads.
       WK_BUILD_DEPLOYMENT_TARGET: '16.1'
       # patches/ios18-public-sdk-extensionkit-extension-exclusion.patch makes BaseExtension.xcconfig
-      # read this switch and exclude every source when it is YES. The four ExtensionKit targets
-      # (WebContentExtension, WebContentCaptivePortalExtension, NetworkingExtension, GPUExtension)
-      # conform to BrowserEngineKit protocols whose configuration property is API_AVAILABLE(ios(17.4)).
-      # Swift evaluates that availability against IPHONEOS_DEPLOYMENT_TARGET, and no -D can turn it
-      # off, so at 16.1 an unswitched build cannot compile WebContentProcessExtension.swift
-      # (build.log:267936, :267969) or NetworkingProcessExtension.swift (:268002). Upstream already
-      # excludes these targets by SDK version in BaseExtension.xcconfig; this extends the same idea to
-      # the 18.5 SDK, which upstream does not exclude. Nothing is lost from the deb: none of the
-      # three Extension bundles appears in scripts/package-webkit-device-deb.sh's required,
-      # recommended or on-demand lists, and the device loads the four XPC services instead.
+      # read this switch and, when it is YES, exclude every source and blank the bridging header of
+      # the four ExtensionKit targets (WebContentExtension, WebContentCaptivePortalExtension,
+      # NetworkingExtension, GPUExtension). Those targets conform to BrowserEngineKit protocols whose
+      # configuration property is API_AVAILABLE(ios(17.4)). Swift evaluates that availability against
+      # IPHONEOS_DEPLOYMENT_TARGET, and no -D can turn it off, so at 16.1 an unswitched build cannot
+      # compile WebContentProcessExtension.swift (build.log:267936, :267969) or
+      # NetworkingProcessExtension.swift (:268002). GPUExtension raised no availability diagnostic,
+      # but it did not pass either: it is in the failure list with "SwiftGeneratePch ... Compiling
+      # bridging header" (:268012-268013), which is why the switch has to cover both settings.
+      # Upstream pairs them in every platform and SDK state it excludes, and never ships a
+      # zero-source target that still names a bridging header. Upstream already excludes these
+      # targets by SDK version; this extends the same idea to the 18.5 SDK, which it does not cover.
+      # Nothing is lost from the deb: none of the four Extension bundles appears in
+      # scripts/package-webkit-device-deb.sh's required, recommended or on-demand lists, and the
+      # device loads the four XPC services instead.
       WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED: 'YES'
     steps:
       - uses: actions/checkout@v4
@@ -355,16 +360,18 @@ jobs:
           set -euo pipefail
           # patches/ios18-public-sdk-extensionkit-extension-exclusion.patch makes
           # BaseExtension.xcconfig read WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED, which the Build step
-          # sets. Both directions are asserted here, against the ref's own file: with the switch
-          # set the four ExtensionKit targets must compile nothing, and with it unset the file must
-          # exclude nothing, so a ref that reshapes these keys cannot silently change ordinary
-          # iOS builds that leave the switch alone.
+          # sets. Both directions are asserted here, against the ref's own file, for both paired
+          # settings: with the switch set the four ExtensionKit targets must compile nothing and
+          # carry no bridging header, and with it unset the file must keep the upstream values, so a
+          # ref that reshapes these keys cannot silently change ordinary iOS builds that leave the
+          # switch alone.
           python3 scripts/check-extensionkit-exclusion.py \
             --base-extension-xcconfig WebKit/Source/WebKit/Configurations/BaseExtension.xcconfig \
             --sdk "iphoneos$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.5)" \
             --excluded-switch "$WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED"
           # The default direction: a build that leaves the switch alone must still compile these
-          # targets, so the patched file has to resolve to the upstream empty value.
+          # targets with their bridging header, so the patched file has to resolve to the upstream
+          # values.
           python3 scripts/check-extensionkit-exclusion.py \
             --base-extension-xcconfig WebKit/Source/WebKit/Configurations/BaseExtension.xcconfig \
             --sdk "iphoneos$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.5)" \

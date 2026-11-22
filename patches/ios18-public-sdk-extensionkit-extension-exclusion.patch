@@ -1,14 +1,17 @@
 diff --git a/Source/WebKit/Configurations/BaseExtension.xcconfig b/Source/WebKit/Configurations/BaseExtension.xcconfig
-index 256ca678bb..1ba79bc4f0 100644
+index 256ca678bb..96d85157ea 100644
 --- a/Source/WebKit/Configurations/BaseExtension.xcconfig
 +++ b/Source/WebKit/Configurations/BaseExtension.xcconfig
-@@ -49,7 +49,8 @@ SUPPORTS_MACCATALYST = NO;
- SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
- TARGETED_DEVICE_FAMILY = 1,2,7;
+@@ -37,3 +37,5 @@ SKIP_INSTALL[sdk=macos*] = YES;
+ SWIFT_OBJC_BRIDGING_HEADER = ;
+-SWIFT_OBJC_BRIDGING_HEADER[sdk=iphone*] = Shared/AuxiliaryProcessExtensions/AuxiliaryProcessExtensionBridge.h;
++SWIFT_OBJC_BRIDGING_HEADER[sdk=iphone*] = $(SWIFT_OBJC_BRIDGING_HEADER_$(WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED));
++SWIFT_OBJC_BRIDGING_HEADER_ = Shared/AuxiliaryProcessExtensions/AuxiliaryProcessExtensionBridge.h;
++SWIFT_OBJC_BRIDGING_HEADER_YES = ;
+ SWIFT_OBJC_BRIDGING_HEADER[sdk=iphone*17.0*] = ;
+@@ -51,3 +53,4 @@ TARGETED_DEVICE_FAMILY = 1,2,7;
  EXCLUDED_SOURCE_FILE_NAMES = *;
 -EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] = ;
 +EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] = $(EXCLUDED_SOURCE_FILE_NAMES_$(WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED));
 +EXCLUDED_SOURCE_FILE_NAMES_YES = *;
  EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*17.0*] = *;
- EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*17.1*] = *;
- EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*17.2*] = *;
