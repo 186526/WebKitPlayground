@@ -1,0 +1,19 @@
+diff --git a/Source/WebCore/PAL/pal/spi/cf/CFNetworkSPI.h b/Source/WebCore/PAL/pal/spi/cf/CFNetworkSPI.h
+--- a/Source/WebCore/PAL/pal/spi/cf/CFNetworkSPI.h
++++ b/Source/WebCore/PAL/pal/spi/cf/CFNetworkSPI.h
+@@ -407,7 +407,14 @@ typedef NS_ENUM(NSInteger, NSURLSessionCompanionProxyPreference) {
+ #if HAVE(APP_SSO)
+ + (void)_disableAppSSO;
+ #endif
+-#if HAVE(SYSTEM_SUPPORT_FOR_ADVANCED_PRIVACY_PROTECTIONS)
++/* NetworkSessionCocoa.mm reads this property in clearProxyConfigData() and setProxyConfigData(),
++   both inside HAVE(NW_PROXY_CONFIG). PlatformHave.h:1376-1384 selects that macro from
++   __IPHONE_OS_VERSION_MAX_ALLOWED, while PlatformHave.h:1492-1499 selects
++   HAVE_SYSTEM_SUPPORT_FOR_ADVANCED_PRIVACY_PROTECTIONS from __IPHONE_OS_VERSION_MIN_REQUIRED, so
++   a 17-or-later SDK with a 16.1 deployment target opens the consumer and shuts this declaration.
++   Declare the property under either macro, as CFNetworkSPI.h:121-132 already does for the
++   nw_proxy_config declarations. */
++#if HAVE(NW_PROXY_CONFIG) || HAVE(SYSTEM_SUPPORT_FOR_ADVANCED_PRIVACY_PROTECTIONS)
+ @property (readonly) nw_context_t _networkContext;
+ #endif
+ @end
