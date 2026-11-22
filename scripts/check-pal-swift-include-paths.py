@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 ASSIGNMENT = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*?);\s*$")
+ASSIGNMENT_UNTERMINATED = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$")
 REFERENCE = re.compile(r"\$\(([^()]*)\)")
 REQUIRED_FLAGS = ("-Xcc -std=c++20", "-I {srcroot}/pal", "-I {srcroot}/PAL/pal")
 
@@ -43,6 +44,10 @@ def parse_xcconfig(path: Path) -> dict[str, str]:
         if "[" in line.split("=", 1)[0]:
             continue
         match = ASSIGNMENT.match(line)
+        if not match:
+            # SDKVariant.xcconfig writes its WK_AND_* / WK_OR_* table without a trailing
+            # semicolon, and those keys decide the boolean combinations other files use.
+            match = ASSIGNMENT_UNTERMINATED.match(line)
         if not match:
             continue
         settings[match.group(1)] = match.group(2)
