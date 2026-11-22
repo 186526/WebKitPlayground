@@ -27,6 +27,18 @@ jobs:
       # WebKitProjectPaths.xcconfig:98 builds from it. Two literals would let a future target
       # change leave the pre-build assertion checking a path the build no longer reads.
       WK_BUILD_DEPLOYMENT_TARGET: '16.1'
+      # patches/ios18-public-sdk-extensionkit-extension-exclusion.patch makes BaseExtension.xcconfig
+      # read this switch and exclude every source when it is YES. The four ExtensionKit targets
+      # (WebContentExtension, WebContentCaptivePortalExtension, NetworkingExtension, GPUExtension)
+      # conform to BrowserEngineKit protocols whose configuration property is API_AVAILABLE(ios(17.4)).
+      # Swift evaluates that availability against IPHONEOS_DEPLOYMENT_TARGET, and no -D can turn it
+      # off, so at 16.1 an unswitched build cannot compile WebContentProcessExtension.swift
+      # (build.log:267936, :267969) or NetworkingProcessExtension.swift (:268002). Upstream already
+      # excludes these targets by SDK version in BaseExtension.xcconfig; this extends the same idea to
+      # the 18.5 SDK, which upstream does not exclude. Nothing is lost from the deb: none of the
+      # three Extension bundles appears in scripts/package-webkit-device-deb.sh's required,
+      # recommended or on-demand lists, and the device loads the four XPC services instead.
+      WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED: 'YES'
     steps:
       - uses: actions/checkout@v4
 
@@ -209,10 +221,18 @@ jobs:
           # appeared in tag Safari-18.0: Safari-17.6-iOS-17.6 has neither the class in
           # WebPrivacyHelpers.h nor the registerNotifyCallback block that calls it. A 17.x or 16.x
           # ref therefore has nothing to gate and a skip there is correct rather than stale.
+          # patches/ios18-public-sdk-extensionkit-extension-exclusion.patch edits
+          # Source/WebKit/Configurations/BaseExtension.xcconfig. Safari-17.4 is the first tag that
+          # has that file, and it keys the whole thing on USE_INTERNAL_SDK
+          # (EXCLUDED_SOURCE_FILE_NAMES_ = *), so against the public SDK it already excludes every
+          # source and needs no patch. Safari-17.6 is the first tag with the sdk-keyed
+          # EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] the patch rewrites. Safari-17.2 and 16.6 have no
+          # such file at all, so a skip on those refs is correct rather than stale.
           ref_needs_ulock_flags_api=0
           ref_has_pal_swift=0
           ref_needs_networkcontext_property=0
           ref_needs_restricted_opener_domains=0
+          ref_needs_extensionkit_sdk_exclusion=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -250,10 +270,21 @@ jobs:
               }' <<< "${ref_name}"; then
             ref_needs_restricted_opener_domains=1
           fi
+          # Safari-17.6 is the first tag whose BaseExtension.xcconfig keys the exclusion on sdk=.
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2; minor = $3 }
+              END {
+                  if (major == "" || minor == "") exit 1
+                  exit !((major + 0) > 17 || ((major + 0) == 17 && (minor + 0) >= 6))
+              }' <<< "${ref_name}"; then
+            ref_needs_extensionkit_sdk_exclusion=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
           echo "RestrictedOpenerDomainsController present in ${WEBKIT_REF}: ${ref_needs_restricted_opener_domains}"
+          echo "BaseExtension.xcconfig keys exclusion on sdk= in ${WEBKIT_REF}: ${ref_needs_extensionkit_sdk_exclusion}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -286,6 +317,12 @@ jobs:
                     exit 1
                   fi
                   ;;
+                ios18-public-sdk-extensionkit-extension-exclusion.patch)
+                  if [ "$ref_needs_extensionkit_sdk_exclusion" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
                 ios18-public-sdk-*)
                   echo "REQUIRED PATCH DOES NOT APPLY: $p"
                   exit 1
@@ -311,6 +348,27 @@ jobs:
             --pal-xcconfig WebKit/Source/WebCore/PAL/Configurations/PAL.xcconfig \
             --conditionals-xcconfig WebKit/Configurations/WebKitTargetConditionals.xcconfig \
             --deployment-target "$WK_BUILD_DEPLOYMENT_TARGET"
+
+      - name: Check the ExtensionKit exclusion follows the deployment-target switch
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          # patches/ios18-public-sdk-extensionkit-extension-exclusion.patch makes
+          # BaseExtension.xcconfig read WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED, which the Build step
+          # sets. Both directions are asserted here, against the ref's own file: with the switch
+          # set the four ExtensionKit targets must compile nothing, and with it unset the file must
+          # exclude nothing, so a ref that reshapes these keys cannot silently change ordinary
+          # iOS builds that leave the switch alone.
+          python3 scripts/check-extensionkit-exclusion.py \
+            --base-extension-xcconfig WebKit/Source/WebKit/Configurations/BaseExtension.xcconfig \
+            --sdk "iphoneos$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.5)" \
+            --excluded-switch "$WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED"
+          # The default direction: a build that leaves the switch alone must still compile these
+          # targets, so the patched file has to resolve to the upstream empty value.
+          python3 scripts/check-extensionkit-exclusion.py \
+            --base-extension-xcconfig WebKit/Source/WebKit/Configurations/BaseExtension.xcconfig \
+            --sdk "iphoneos$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.5)" \
+            --excluded-switch ""
 
       - name: Configure embedded development
         run: sudo WebKit/Tools/Scripts/configure-xcode-for-embedded-development || true
@@ -445,6 +503,7 @@ jobs:
             WK_USE_CCACHE=YES \
             ARCHS='arm64e' \
             IPHONEOS_DEPLOYMENT_TARGET="$WK_BUILD_DEPLOYMENT_TARGET" \
+            WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED="$WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED" \
             WK_VERSIONED_SDK_ADDITIONS_PATH="$WK_ADDITIONS_SDK_PATH" \
             ONLY_ACTIVE_ARCH=NO \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
