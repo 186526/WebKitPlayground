@@ -427,10 +427,10 @@ jobs:
           # __IPHONE_OS_VERSION_MAX_ALLOWED >= 170400, which the 18.5 SDK satisfies. The parse
           # then sees 1 where the binary was built with 0. Run 45020788469 ended in exactly that,
           # at GenerateTAPI for WebKit.framework/WebKit.tbd, reporting only WKGrant and
-          # WKProcessExtension, from ExtraPrivateSymbolsForTAPI.h:45 and :48: those @interface
-          # declarations are the only gated content that has to become an exported symbol, the
-          # rest being member declarations, forward protocol declarations and soft-link macros,
-          # which is why the mismatch showed up twice and not once per gated header.
+          # WKProcessExtension, from ExtraPrivateSymbolsForTAPI.h:45 and :48. Of the headers
+          # WebKit.xcconfig:284 lists as -extra-private-header and -extra-public-header, that one
+          # is the only one carrying a USE() gate; XPCEndpoint.h, XPCEndpointClient.h and
+          # ExtraPublicSymbolsForTAPI.h carry none.
           #
           # Fixing headers instead would mean judging that per declaration and re-judging it as
           # refs move: fifteen headers read USE(EXTENSIONKIT), thirteen through a bare #if and two
