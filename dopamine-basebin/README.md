@@ -200,13 +200,16 @@ To check that step, run the merger yourself and assert the hooks survive it:
 
 ```sh
 gmake -C BaseBin/MachOMerger MACOS=1
-llvm-lipo -thin arm64e /usr/lib/dyld -output /tmp/host-dyld.arm64e
+xcrun lipo -thin arm64e /usr/lib/dyld -output /tmp/host-dyld.arm64e
 sh /path/to/WebKitPlayground/dopamine-basebin/verify-merged-dyld.sh \
    BaseBin/MachOMerger/MachOMerger /tmp/host-dyld.arm64e \
    BaseBin/dyldhook/dyldhook_merge.arm64e.iOS16-17.dylib
 ```
 
-`llvm-lipo -thin` is required on a macOS host. `/usr/lib/dyld` is a universal
+`xcrun lipo -thin` is required on a macOS host, and it has to be the Xcode
+`lipo`: a macos-15 runner has no `llvm-lipo` on PATH, so that name fails with
+exit 127. `xcrun lipo -archs /usr/lib/dyld` prints the slices (`x86_64` and
+`arm64e`) when you need to confirm the second name. `/usr/lib/dyld` is a universal
 binary there, and `MachOMerger` reads a thin Mach-O: handed the fat file it aborts
 with `SwiftMachO.MachOError.FatNotMachO` and merges nothing, which the script
 reports as exit 3. Its arm64e slice is a genuine arm64e dyld, and it exports

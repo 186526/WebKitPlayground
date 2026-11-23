@@ -303,7 +303,11 @@ jobs:
           # and never merges anything.  Its arm64e slice is a real arm64e dyld
           # that exports the two functions the new hooks attach to, so slicing it
           # is what makes this step exercise the merge instead of skipping it.
-          llvm-lipo -thin arm64e "$input_dyld" -output "$LOGS/host-dyld.arm64e"
+          #
+          # xcrun lipo, not llvm-lipo: the macos-15 image ships Xcode's lipo and
+          # has no llvm-lipo on PATH, so the LLVM name fails with exit 127.
+          xcrun lipo -archs "$input_dyld"
+          xcrun lipo -thin arm64e "$input_dyld" -output "$LOGS/host-dyld.arm64e"
           input_dyld="$LOGS/host-dyld.arm64e"
           file "$input_dyld"
           for sym in \
