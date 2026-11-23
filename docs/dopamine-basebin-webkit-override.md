@@ -285,18 +285,18 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 
 ### 十一·一 改了哪几行
 
-补丁只动 `BaseBin/systemhook/src/common/common.c`（Dopamine tag `3.0.13`），`+74 −1`。行号按打完补丁后的文件给出，括号里是官方原行号。
+补丁只动 `BaseBin/systemhook/src/common/common.c`（Dopamine tag `3.0.13`），`+76 −1`。行号按打完补丁后的文件给出，括号里是官方原行号。
 
 | 行 | 内容 |
 | --- | --- |
-| `:151-156`（新增） | 静态函数 `envbuf_variable_matches(envp, name, wanted)` |
-| `:207-214` | 两条 `JBROOT_PATH` 与说明注释，得到 `jbFrameworkPath`、`jbLibraryPath` |
-| `:216-226` | 表 `searchPathVariables`，四个变量各配一个目录 |
-| `:228-236` | 读 `DisableJBFrameworkPath`，得到 `enableSearchPath` |
-| `:238-255` | 逐个比对，得到 `searchPathPresent[]`、`allSearchPathsPresent`、`anySearchPathPresent` |
-| `:377-378`（官方 `:316`） | 「环境已经正确，直接透传」的快路径条件 |
-| `:398-402`（官方 `if (shouldInsertJBEnv)` 块从 `:325` 起，`DYLD_INSERT_LIBRARIES` 在 `:333`） | 设置四个里尚未就位的那些 |
-| `:431-435`（官方 unset `_SafeMode` 在 `:363`） | 按条件 unset 已就位的那些 |
+| `:148-157`（新增） | 静态函数 `envbuf_variable_matches(envp, name, wanted)`，`wanted` 为 `NULL` 时直接返回假 |
+| `:209-216` | 两条 `JBROOT_PATH` 与说明注释，得到 `jbFrameworkPath`、`jbLibraryPath` |
+| `:218-228` | 表 `searchPathVariables`，四个变量各配一个目录 |
+| `:230-238` | 读 `DisableJBFrameworkPath`，得到 `enableSearchPath`（`JBROOT_PATH` 为 `NULL` 时也为假） |
+| `:240-257` | 逐个比对，得到 `searchPathPresent[]`、`allSearchPathsPresent`、`anySearchPathPresent` |
+| `:379-380`（官方 `:316`） | 「环境已经正确，直接透传」的快路径条件 |
+| `:400-404`（官方 `if (shouldInsertJBEnv)` 块从 `:325` 起，`DYLD_INSERT_LIBRARIES` 在 `:333`） | 设置四个里尚未就位的那些 |
+| `:433-437`（官方 unset `_SafeMode` 在 `:363`） | 按条件 unset 已就位的那些 |
 
 四个变量与各自的值：
 
@@ -307,7 +307,7 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 | `DYLD_LIBRARY_PATH` | `JBROOT_PATH("/Library/WebKitOverride/usr/lib")` | 裸文件名 |
 | `__XPC_DYLD_LIBRARY_PATH` | 同上 | 同上 |
 
-`JBROOT_PATH` 在 `libjailbreak/src/jbroot.h:38` 展开成 `__jbroot_convert_path`，读 `get_jbroot()`；`systemhook/src/main.c:27` 把它实现成返回 `JB_RootPath`，该值由 `initializer()`（`main.c:355` 起）在任何 spawn hook 装上之前填好，所以调用时是有效指针。两条路径都在 `spawn_exec_hook_common` 里各求值一次，`JBROOT_PATH` 为 `NULL` 时 `enableSearchPath` 直接为假，整段跳过。
+`JBROOT_PATH` 在 `libjailbreak/src/jbroot.h:38` 展开成 `__jbroot_convert_path`，读 `get_jbroot()`；`systemhook/src/main.c:27` 把它实现成返回 `JB_RootPath`，该值由 `initializer()`（`main.c:355` 起）在任何 spawn hook 装上之前填好，所以调用时是有效指针。两条路径在 `spawn_exec_hook_common` 里各求值一次；任一条为 `NULL` 时 `enableSearchPath` 为假，`:400-404` 与 `:433-437` 两个循环都不写也不删变量，快路径退回官方条件（与开关关闭时同一状态）。
 
 ### 十一·二 为什么四个变量都要设，且两个目录都必须是专用的
 
@@ -380,15 +380,15 @@ if ( strcmp(framework, &leaf[1]) == 0 ) {
 
 这是任务点名要求写清的一处判断。`envbuf_setenv` 本身是「存在就替换、不存在就追加」，不会让一条变量在 envp 里出现两份。真正要避免的是**每一代子进程都重新走一遍重建**：父进程把变量交给子进程，子进程若无条件再调 `envbuf_setenv`，每次都重建整个缓冲，快路径永远走不到。
 
-补丁仿照官方 `existingLibraryInserts`（官方 `:186`）的取值方式，先用 `envbuf_getenv` 读出现值，由 `:238-255` 的循环得出 `searchPathPresent[]` 与两个汇总量。`envbuf_variable_matches`（`:151-156`）只有一句实质逻辑——取到值且与目标值完全相等才为真；**值不同也算未就位**，所以别处设过别的 `DYLD_LIBRARY_PATH`（包括指向 `/var/jb/usr/lib` 的旧值）会被改成我们的值，不会误判成「已经有了」。
+补丁仿照官方 `existingLibraryInserts`（官方 `:186`）的取值方式，先用 `envbuf_getenv` 读出现值，由 `:240-257` 的循环得出 `searchPathPresent[]` 与两个汇总量。`envbuf_variable_matches`（`:148-157`）实质只有两行——先拒绝 `NULL` 的 `wanted`，再要求取到的值与目标值完全相等；**值不同也算未就位**，所以别处设过别的 `DYLD_LIBRARY_PATH`（包括指向 `/var/jb/usr/lib` 的旧值）会被改成我们的值，不会误判成「已经有了」。
 
 三处用到它：
 
-1. **快路径（`:377-378`）**：四个都就位才允许 `shouldInsertJBEnv` 一侧原样透传 envp；`shouldInsertJBEnv` 为假时要求一个都不在。第一代进程通常不满足，走重建分支；它拉起的子进程继承这四个变量，第二代起命中快路径。
-2. **设置（`:398-402`）**：只设未就位的那几个，已就位的不重写。
-3. **清除（`:431-435`）**：`shouldInsertJBEnv` 为假时撤掉它们，但只撤「值等于我们写的那个」的项，别人设的别的值不动（官方 unset `_SafeMode` 是无条件删，这里没有照抄）。
+1. **快路径（`:379-380`）**：四个都就位才允许 `shouldInsertJBEnv` 一侧原样透传 envp；`shouldInsertJBEnv` 为假时要求一个都不在。第一代进程通常不满足，走重建分支；它拉起的子进程继承这四个变量，第二代起命中快路径。
+2. **设置（`:400-404`）**：只设未就位的那几个，已就位的不重写。
+3. **清除（`:433-437`）**：`shouldInsertJBEnv` 为假时撤掉它们，但只撤「值等于我们写的那个」的项，别人设的别的值不动（官方 unset `_SafeMode` 是无条件删，这里没有照抄）。
 
-这套判断在 Linux 上验证过：`/tmp/k2-logic/harness.c` 把补丁里**实际的代码块**从打过补丁的 `common.c` 中抽出来编译，链接官方 `envbuf.c` 原样编译出的目标文件，14 项断言全过：
+这套判断在 Linux 上验证过：`/tmp/k2-logic/harness.c` 把补丁里**实际的代码块**从打过补丁的 `common.c` 中抽出来编译，链接官方 `envbuf.c` 原样编译出的目标文件，17 项断言全过：
 
 ```
 PASS: nothing set: not all present
@@ -405,9 +405,14 @@ PASS: third-party library value: not claimed as ours
 PASS: third-party library value: not all present
 PASS: switch off, nothing set: fast path exactly as stock
 PASS: switch off, nothing set: no search path considered present
+PASS: null root: no variable considered present
+PASS: null root: fast path exactly as stock
+PASS: null root: nothing announced as present
 ```
 
-关键的两条：只有 framework 那两个就位时，library 那两个仍会被写入（不会因为「已有一半」就整体跳过）；`/var/jb/usr/lib` 这种旧值被视为不匹配，因而会被改成专用目录的值。
+关键的三条：只有 framework 那两个就位时，library 那两个仍会被写入（不会因为「已有一半」就整体跳过）；`/var/jb/usr/lib` 这种旧值被视为不匹配，因而会被改成专用目录的值；`JBROOT_PATH` 返回 `NULL` 时既不做 `strcmp`，也不把任何变量当作已就位，快路径与未打补丁时一致。
+
+`JBROOT_PATH` 那个守卫放在 `envbuf_variable_matches` 里面，而不是只靠 `enableSearchPath`。`:240-257` 的循环在检查 `enableSearchPath` 之前就跑了；若让 `wanted` 直接进 `strcmp`，`NULL` 会在那里被比较，属未定义行为。函数自己拒绝 `NULL` 之后，循环无论 `enableSearchPath` 是什么都不会碰到空指针。
 
 ### 十一·五 与 dyldhook 那一半缺一不可
 
@@ -470,10 +475,10 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 /var/jb/usr/bin/plutil -remove DisableJBFrameworkPath /var/jb/basebin/config.plist
 ```
 
-键不存在、文件不可读、或值不是布尔真时一律视为启用。写入 `true` 后，`:238-255` 的循环算完四个变量后被强制改成 `allSearchPathsPresent = true`、`anySearchPathPresent = false`，效果是：
+键不存在、文件不可读、或值不是布尔真时一律视为启用。写入 `true` 后，`:240-257` 的循环算完四个变量后被强制改成 `allSearchPathsPresent = true`、`anySearchPathPresent = false`，效果是：
 
-- 设置分支（`:398-402`）里四个变量全部跳过；
-- 清除分支（`:431-435`）里一个都不 unset；
+- 设置分支（`:400-404`）里四个变量全部跳过；
+- 清除分支（`:433-437`）里一个都不 unset；
 - 快路径退回官方 `:316` 原式：`(shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1) || (!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable)`。
 
 也就是关掉之后 `common.c` 的行为与未打补丁时逐条相同，不是「大概一样」。这一条由 harness 的 `switch off, nothing set: fast path exactly as stock` 与 `switch off, nothing set: no search path considered present` 两项固定。
@@ -498,7 +503,7 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 
 | 文件 | 作用 |
 | --- | --- |
-| `dopamine-basebin/0001-systemhook-set-search-paths.patch` | 唯一源码改动，只动 `common.c`，`+74 −1` |
+| `dopamine-basebin/0001-systemhook-set-search-paths.patch` | 唯一源码改动，只动 `common.c`，`+76 −1` |
 | `dopamine-basebin/verify-systemhook-search-paths.py` | 对构建出的 `systemhook.dylib` 做静态断言 |
 | `dopamine-basebin/test-verify-systemhook-search-paths.py` | 上面脚本自身的回归测试，24 个用例 |
 
@@ -515,10 +520,10 @@ git apply --check 0001-systemhook-set-search-paths.patch             # 对 tag 3
 python3 test-verify-systemhook-search-paths.py                        # 24/24 通过
 python3 verify-systemhook-search-paths.py <真实编译的四变量 Mach-O>    # 通过（/tmp/k2-macho/new4.dylib，arm64）
 python3 verify-systemhook-search-paths.py <官方 dylib>                # 8 条断言失败，退出 1
-cc harness.c -o harness && ./harness                                  # 14/14 通过
+cc harness.c -o harness && ./harness                                  # 17/17 通过
 cc t.c -o t && ./t                                                    # getFrameworkPartialPath 移植，五位输入结果见十一·二
 ```
 
 `harness.c` 用的不是仿写：`block.inc` 与 `helper.inc` 由脚本从打过补丁的 `common.c` 里直接提取，链接官方 `envbuf.c` 原样编译出的目标文件。所以跑的是补丁里的实际代码，不是重新实现。
 
-**未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「真实构建出的 `systemhook.dylib` 带着这四个字符串」这一步没有在真实产物上跑过，本 mission 用三件事替代：脚本对真实编译出的 Mach-O 判定正确（上表第三条），反例被判失败（第四条），以及补丁行为由 24 个静态用例与 14 项逻辑断言双向固定。
+**未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「真实构建出的 `systemhook.dylib` 带着这四个字符串」这一步没有在真实产物上跑过，本 mission 用三件事替代：脚本对真实编译出的 Mach-O 判定正确（上表第三条），反例被判失败（第四条），以及补丁行为由 24 个静态用例与 17 项逻辑断言双向固定。

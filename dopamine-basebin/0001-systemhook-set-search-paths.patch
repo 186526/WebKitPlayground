@@ -1,16 +1,18 @@
 diff --git a/BaseBin/systemhook/src/common/common.c b/BaseBin/systemhook/src/common/common.c
-index d9cb86f..8a9fd20 100644
+index d9cb86f..a674a48 100644
 --- a/BaseBin/systemhook/src/common/common.c
 +++ b/BaseBin/systemhook/src/common/common.c
-@@ -145,10 +145,21 @@ static kSpawnConfig spawn_config_for_executable(const char* path, char *const ar
+@@ -145,10 +145,23 @@ static kSpawnConfig spawn_config_for_executable(const char* path, char *const ar
  	return (kSpawnConfigInject | kSpawnConfigTrust);
  }
  
 +// True when envp carries name with exactly this value. A spawned process passes its environment
 +// down, so a child of an already overridden parent matches here and keeps its envp untouched
 +// instead of rebuilding the buffer and appending another copy on every generation.
++// wanted is NULL when JBROOT_PATH could not resolve the jailbreak root; nothing can match then.
 +static bool envbuf_variable_matches(const char *envp[], const char *name, const char *wanted)
 +{
++	if (wanted == NULL) return false;
 +	const char *existingValue = envbuf_getenv(envp, name);
 +	return existingValue && !strcmp(existingValue, wanted);
 +}
@@ -24,7 +26,7 @@ index d9cb86f..8a9fd20 100644
  
  static int spawn_exec_hook_common(bool isExec,
  						   const char *path,
-@@ -193,6 +204,56 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -193,6 +206,56 @@ static int spawn_exec_hook_common(bool isExec,
  		});
  	}
  
@@ -81,7 +83,7 @@ index d9cb86f..8a9fd20 100644
  	int JBEnvAlreadyInsertedCount = (int)systemHookAlreadyInserted;
  
  	// Check if we can find at least one reason to not insert jailbreak related environment variables
-@@ -313,7 +374,8 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -313,7 +376,8 @@ static int spawn_exec_hook_common(bool isExec,
  
  	pid_t childPid = -1;
  
@@ -91,7 +93,7 @@ index d9cb86f..8a9fd20 100644
  		// we're already good, just call orig
  		r = orig(&childPid, envp);
  	}
-@@ -332,6 +394,12 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -332,6 +396,12 @@ static int spawn_exec_hook_common(bool isExec,
  				}
  				envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert);
  			}
@@ -104,7 +106,7 @@ index d9cb86f..8a9fd20 100644
  		}
  		else {
  			if (systemHookAlreadyInserted && existingLibraryInserts) {
-@@ -360,6 +428,11 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -360,6 +430,11 @@ static int spawn_exec_hook_common(bool isExec,
  					free(newLibraryInsert);
  				}
  			}
