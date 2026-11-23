@@ -175,6 +175,44 @@ def case_broken_payload(label: str, cp_body: str, expected_text: str) -> None:
     print(f"PASS {label}")
 
 
+def case_stray_top_level_copy() -> None:
+    """A top-level copy that reaches the payload must be dropped, not moved to usr/lib."""
+    label = "a stray top-level overlay copy is dropped instead of moved to usr/lib"
+    before = len(failures)
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        # The overlay copy also leaves a sibling under Library/Frameworks, which is the top-level
+        # shape STEP 4 sweeps.  Without the exclusion it lands in usr/lib, where WebKit never
+        # looks for it.
+        frameworks_dir = "${argument%/WebKit.framework/Frameworks/" + OVERLAY + "}"
+        write_shims(bin_dir, f'''for argument in "$@"; do
+  case "$argument" in
+    */{OVERLAY_REL})
+      {CP} -fL "$2" "$argument" || exit 1
+      {CP} -fL "$2" "{frameworks_dir}/{OVERLAY}" || exit 1
+      exit 0;;
+  esac
+done
+exec {CP} "$@"''')
+        product = build_product(root)
+        deb = root / "webkit.deb"
+        result = run_script(product, deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        if "dropping the top-level copy" not in combined:
+            failures.append(f"{label}: STEP 4 did not drop the top-level copy\n{combined}")
+            return
+        unpacked = root / "unpacked"
+        unpack(deb, unpacked)
+        expect_layout(label, unpacked, "var/jb", product)
+    if len(failures) == before:
+        print(f"PASS {label}")
+
+
 def case_absent_overlay() -> None:
     """A product without the overlay legitimately has none, and building must still succeed."""
     label = "a product without the overlay is packaged without one"
@@ -226,6 +264,7 @@ exec {CP} "$@"''',
         f"Payload is missing {OVERLAY_REL}",
     )
     case_absent_overlay()
+    case_stray_top_level_copy()
 
     if failures:
         print(f"\n{len(failures)} failure(s):", file=sys.stderr)
