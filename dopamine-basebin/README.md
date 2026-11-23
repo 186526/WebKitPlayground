@@ -165,9 +165,17 @@ sh /path/to/WebKitPlayground/dopamine-basebin/verify-dyldhook-merge.sh BaseBin/d
 ```
 
 The verifier checks the three arm64e dylibs. The iOS 16-17 and iOS 18+ dylibs
-must define both new hooks, the iOS 15 dylib must not, all three must keep
-`dlopen_from` and `__fcntl`, and none may have an undefined symbol. It exits
-non-zero on any violation.
+must define both new hooks and the iOS 15 dylib must not; `__fcntl` must be
+defined on all three; none may have an undefined symbol. It exits non-zero on any
+violation.
+
+`dlopen_from` is the exception, and running the build is what surfaced it:
+`BaseBin/dyldhook/src/fakelib_redirect.c` wraps that hook in `#if IOS < 18`
+(upstream commit `2ae46a8`, "Add support for (at least) iPad 7 18.7.1"), so the
+iOS 18+ dylib ships the trampoline pair and deliberately no hook. The verifier
+therefore asserts the trampoline on iOS 18+ and the hook everywhere else. It
+accepts the hook on iOS 18+ too, so whichever direction upstream moves, the
+dylib that carries it passes and the one that drops the symbols fails.
 
 Then check the tar the device will actually receive:
 
@@ -192,18 +200,27 @@ To check that step, run the merger yourself and assert the hooks survive it:
 
 ```sh
 gmake -C BaseBin/MachOMerger MACOS=1
+llvm-lipo -thin arm64e /usr/lib/dyld -output /tmp/host-dyld.arm64e
 sh /path/to/WebKitPlayground/dopamine-basebin/verify-merged-dyld.sh \
-   BaseBin/MachOMerger/MachOMerger /usr/lib/dyld \
+   BaseBin/MachOMerger/MachOMerger /tmp/host-dyld.arm64e \
    BaseBin/dyldhook/dyldhook_merge.arm64e.iOS16-17.dylib
 ```
 
+`llvm-lipo -thin` is required on a macOS host. `/usr/lib/dyld` is a universal
+binary there, and `MachOMerger` reads a thin Mach-O: handed the fat file it aborts
+with `SwiftMachO.MachOError.FatNotMachO` and merges nothing, which the script
+reports as exit 3. Its arm64e slice is a genuine arm64e dyld, and it exports
+`isOverridablePath`, `isAlwaysOverridablePath` and `__fcntl`, so the merge has
+real functions to attach the hooks to.
+
 The assertion is that the merged output carries all four
 `_MACHOMERGER_HOOK_*` symbols: `isOverridablePath`, `isAlwaysOverridablePath`,
-`dlopen_from` and `__fcntl`. The host's `/usr/lib/dyld` is not the iOS dyld, so
+`dlopen_from` and `__fcntl`, which is the full set when the dylib handed to
+`MachOMerger` is the iOS 16-17 one this command names. The host's `/usr/lib/dyld` is not the iOS dyld, so
 the merger can fail to attach the hooks to it at all; in that case the script
 exits 3 and says it could not merge, rather than reporting the hooks verified.
-Point the third argument at an iOS dyld when one is at hand, and the exit status
-becomes meaningful for that dyld too.
+Point the second argument at a device's `/usr/lib/dyld` pulled over scp to check
+that exact dyld, and the exit status becomes meaningful for it too.
 
 ## The same build on CI
 
