@@ -9,6 +9,10 @@
 #              -> /var/jb/Library/Frameworks  (rootless)
 #   Dylibs    -> /usr/lib              (rootful)
 #              -> /var/jb/usr/lib       (rootless)
+#
+# libWebKitSwift.dylib is the one dylib that stays inside the
+# framework bundle: WebKit opens it at runtime through the
+# bundle-relative path "Frameworks/libWebKitSwift.dylib".
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -27,6 +31,12 @@ PACKAGE_AUTHOR="WebKitPlayground Builder"
 PACKAGE_DESCRIPTION="Custom-built WebKit frameworks for iOS device injection."
 STEP_INDEX=0
 TOTAL_STEPS=0
+
+# WebKit opens the Swift overlay through the bundle-relative path
+# "Frameworks/libWebKitSwift.dylib", so the file has to sit next to the
+# frameworks rather than in usr/lib like the other dylibs.
+SWIFT_OVERLAY_NAME="libWebKitSwift.dylib"
+SWIFT_OVERLAY_REL="WebKit.framework/Frameworks/${SWIFT_OVERLAY_NAME}"
 
 # ── colours ──────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -235,6 +245,41 @@ for item in "${required_items[@]}"; do
     fi
 done
 
+# The build product keeps the real overlay at top level and puts a symlink to it
+# at WebKit.framework/Frameworks/libWebKitSwift.dylib.  Copying WebKit.framework
+# alone therefore carries a link whose target never enters the payload, and the
+# symlink pass below would delete it.  Copy the real file over that link instead.
+install_swift_overlay() {
+    local source="${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}"
+    local destination="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
+    [[ -e "${source}" ]] || return 1
+    mkdir -p "$(dirname "${destination}")"
+    rm -f "${destination}"
+    cp -fL "${source}" "${destination}"
+    log_info "Placed Swift overlay at ${SWIFT_OVERLAY_REL}"
+}
+
+install_swift_overlay || log_note "Swift overlay not in the product: ${SWIFT_OVERLAY_NAME}"
+
+# A symlink satisfies -e but not the check below: dyld opens the path at runtime and a relative
+# link in the payload has no sibling file to reach.  This runs before STEP 2 so the build stops
+# on the real defect rather than on the deletion STEP 2 would make of it.
+verify_swift_overlay() {
+    local payload="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
+    [[ -e "${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}" ]] || return 0
+    if [[ -L "${payload}" ]]; then
+        log_error "Payload has ${SWIFT_OVERLAY_REL} as a symlink; WebKit needs a regular file there."
+        return 1
+    fi
+    if [[ ! -f "${payload}" ]]; then
+        log_error "Payload is missing ${SWIFT_OVERLAY_REL}: the product has ${SWIFT_OVERLAY_NAME} but the package does not ship it."
+        return 1
+    fi
+    log_info "Verified ${SWIFT_OVERLAY_REL} is a regular file in the payload."
+}
+
+verify_swift_overlay || exit 1
+
 for item in "${recommended_items[@]}"; do
     if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
         if item_is_already_covered_in_framework "${item}"; then
@@ -302,6 +347,13 @@ done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type d -name '*.xpc' -pr
 log_step "Moving dylibs to ${INSTALL_USRLIB_DIR}..."
 while IFS= read -r -d '' dylib; do
     base="$(basename "${dylib}")"
+    if [[ "${base}" == "${SWIFT_OVERLAY_NAME}" ]]; then
+        # The bundle-relative copy is the one WebKit loads.  A top-level copy
+        # would only add a second file the loader never reads.
+        log_note "Keeping ${base} inside WebKit.framework only; dropping the top-level copy."
+        rm -f "${dylib}"
+        continue
+    fi
     cp -f "${dylib}" "${USRLIB_DIR}/${base}"
     rm -f "${dylib}"
 done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type f -name '*.dylib' -print0)
