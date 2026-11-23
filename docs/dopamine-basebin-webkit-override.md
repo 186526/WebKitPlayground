@@ -418,7 +418,7 @@ mtime 判定通过（11-18 晚于 11-03），但两个新 hook 的计数都是 `
 | WebContent 进程数与可执行文件 | 设备 `ps -Ao pid,ppid,comm` 取样，筛 `com.apple.WebKit.WebContent` 得 13 条（reviewer-k1c 另一次取样 11 条），`comm` 全为 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，`ppid` 全为 1 |
 | `getFrameworkPartialPath` 的归约规则与例外 | `dyld-1042.1`，`DyldProcessConfig.cpp:2007-2016` 注释、`:2017` 实现、`:1872-1897` 两条分支 |
 | 自建 WebCore 的依赖与运行时 dylib | 设备 `/var/jb/Library/Frameworks/WebCore.framework/WebCore` 头部 8 MiB，37 条 `LC_LOAD_DYLIB` 中无 `libwebrtc`/`libANGLE`，字符串表含两者绝对路径 |
-| `/var/jb/Library/WebKitOverride` 两层布局 | M40 的接口约定（本文未在设备上建立该目录） |
+| `/var/jb/Library/WebKitOverride` 两层布局 | M40 的接口约定；设备已按十一·三建好（7 个文件，2026-11-23 22:25），并见十一·三的 `DYLD_PRINT_SEARCHING` 实测 |
 | `libwebrtc`/`libANGLE` 走 library 分支的两个前提 | `dyld-1378`，`Loader.cpp:719` 的 `skipFallbacks` 只屏蔽 fallback 分支、`:850` 的短路要求 `!originalPathIsOverridableInDyldCache` |
 | `/var/jb/usr/lib` 与共享缓存同名 | M40 worker 实测 137 ∩ 197；本机只读核对 `liblzma.5.dylib`、`libmrc.dylib` 存在且 `/usr/lib` 下无同名文件 |
 ## 十一、另一半：让 systemhook 设置搜索路径

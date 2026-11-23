@@ -105,22 +105,40 @@ def arch_name(cputype, cpusubtype):
     return ARM64_SUBTYPES.get(subtype, "arm64-subtype-%d" % subtype)
 
 
+OK = "ok"
+MISSING = "missing"
+NOT_MACHO = "not-macho"
+WRONG_ARCH = "wrong-arch"
+UNREADABLE = "unreadable"
+
+FAILING_KINDS = (MISSING, NOT_MACHO, WRONG_ARCH, UNREADABLE)
+
+
 def describe(path):
+    """Return (size_text, mtime_text, state_text, kind).
+
+    kind is one of OK, MISSING, NOT_MACHO, WRONG_ARCH, UNREADABLE. The caller
+    counts by kind rather than by matching the state text, so a new failure
+    state cannot silently count as a pass again.
+    """
     if not os.path.isfile(path):
-        return ("-", "-", "missing")
-    size = os.path.getsize(path)
-    stamp = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S")
+        return ("-", "-", "missing", MISSING)
+    try:
+        size = os.path.getsize(path)
+        stamp = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S")
+    except OSError as error:
+        return ("-", "-", "unreadable: %s" % error, UNREADABLE)
     try:
         with open(path, "rb") as handle:
             arches = read_arches(handle.read(4096))
     except OSError as error:
-        return (str(size), stamp, "unreadable: %s" % error)
+        return (str(size), stamp, "unreadable: %s" % error, UNREADABLE)
     if not arches:
-        return (str(size), stamp, "not Mach-O")
+        return (str(size), stamp, "not Mach-O", NOT_MACHO)
     names = [arch_name(cputype, cpusubtype) for cputype, cpusubtype in arches]
     if "arm64e" in names:
-        return (str(size), stamp, "arm64e (%s)" % ",".join(names))
-    return (str(size), stamp, ",".join(names) + " - " + NOT_ARM64E)
+        return (str(size), stamp, "arm64e (%s)" % ",".join(names), OK)
+    return (str(size), stamp, ",".join(names) + " - " + NOT_ARM64E, WRONG_ARCH)
 
 
 override_root, source_frameworks, source_libraries = sys.argv[1:4]
@@ -149,24 +167,33 @@ for name in libraries:
 print("\nSources")
 print("  %-20s %12s  %-19s  %s" % ("file", "bytes", "mtime", "state"))
 for name, path_source, _ in rows:
-    size, stamp, state = describe(path_source)
+    size, stamp, state, _ = describe(path_source)
     print("  %-20s %12s  %-19s  %s" % (name, size, stamp, state))
 
 print("\nTargets")
 print("  %-20s %12s  %-19s  %s" % ("file", "bytes", "mtime", "state"))
-missing = 0
-not_arm64e = 0
+counts = dict.fromkeys(FAILING_KINDS, 0)
 for name, _, path_target in rows:
-    size, stamp, state = describe(path_target)
-    if state == "missing":
-        missing += 1
-    elif "not arm64e" in state or state == "not Mach-O":
-        not_arm64e += 1
+    size, stamp, state, kind = describe(path_target)
+    if kind in counts:
+        counts[kind] += 1
     print("  %-20s %12s  %-19s  %s" % (name, size, stamp, state))
 
+failures = sum(counts.values())
 print("")
-if missing or not_arm64e:
-    print("Result: %d of %d missing, %d not arm64e." % (missing, len(rows), not_arm64e))
+if failures:
+    print(
+        "Result: %d of %d unusable - %d missing, %d unreadable, "
+        "%d not Mach-O, %d not arm64e."
+        % (
+            failures,
+            len(rows),
+            counts[MISSING],
+            counts[UNREADABLE],
+            counts[NOT_MACHO],
+            counts[WRONG_ARCH],
+        )
+    )
     sys.exit(1)
-print("Result: all %d files present and arm64e." % len(rows))
+print("Result: all %d files present, readable and arm64e." % len(rows))
 PYTHON

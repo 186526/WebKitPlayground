@@ -86,15 +86,44 @@ preflight_sources() {
     fi
 }
 
+refuse_symlinked_directory() {
+    if [ -L "$1" ]; then
+        die "$1 is a symlink; refusing to create directories through it, because that would write outside ${OVERRIDE_ROOT}"
+    fi
+    if [ -e "$1" ] && [ ! -d "$1" ]; then
+        die "$1 exists and is not a directory"
+    fi
+}
+
+# The directories the layout needs, one per line. The list lives here once so
+# the pre-check pass and the create pass cannot drift apart.
+layout_directories() {
+    printf '%s\n' "${OVERRIDE_ROOT}"
+    printf '%s\n' "${OVERRIDE_ROOT}/usr"
+    printf '%s\n' "${OVERRIDE_LIBRARIES}"
+    for name in ${FRAMEWORK_NAMES}; do
+        printf '%s\n' "${OVERRIDE_ROOT}/${name}.framework"
+    done
+}
+
 create_layout() {
     if [ -d "${OVERRIDE_ROOT}/WebKitOverride" ]; then
         die "${OVERRIDE_ROOT}/WebKitOverride exists: an earlier run nested the directory. Remove ${OVERRIDE_ROOT} with scripts/uninstall-webkit-override.sh and run this again."
     fi
-    mkdir -p "${OVERRIDE_ROOT}"
-    for name in ${FRAMEWORK_NAMES}; do
-        mkdir -p "${OVERRIDE_ROOT}/${name}.framework"
+    # mkdir -p walks through an existing symlinked directory without a word, so
+    # every directory is checked before any is created: a symlink anywhere must
+    # leave the tree untouched, not half-built. A symlinked OVERRIDE_ROOT would
+    # scatter the files elsewhere and leave a directory uninstall refuses to
+    # remove; a symlinked <name>.framework would overwrite a file that is not
+    # ours. Both passes run in this shell, not in a pipeline, so die() really
+    # stops the script.
+    directories=$(layout_directories)
+    for path_directory in ${directories}; do
+        refuse_symlinked_directory "${path_directory}"
     done
-    mkdir -p "${OVERRIDE_LIBRARIES}"
+    for path_directory in ${directories}; do
+        mkdir -p "${path_directory}"
+    done
 }
 
 copy_from_source() {
