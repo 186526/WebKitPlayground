@@ -29,13 +29,14 @@ The values must not point at /var/jb/usr/lib: it shares liblzma.5.dylib and libm
 names with the shared cache, and every process would treat those as candidates.
 
 What a string dump can and cannot show: it proves the four names and the two directories are
-present, and it proves no other directory string was added, but it cannot pair a name with its
-value.  In a real build the four names sit in one run of __cstring and the two directories in
-another, because the patch stores them as an array of {name, value} whose value fields are the
-run-time pointers jbFrameworkPath and jbLibraryPath -- the directory literals themselves are the
-JBROOT_PATH argument strings elsewhere in the same section.  Pairing therefore has to be checked
-where the pairs are written, in common.c; logic-harness/run.py does that by driving the extracted
-code against a stock envbuf.c and asserting which variable receives which directory.
+present, and it proves none of the shared roots (/Library/Frameworks, /usr/lib and their /var/jb
+forms) appears as a whole entry, but it cannot pair a name with its value.  In a real build the
+four names sit in one run of __cstring and the two directories in another, because the patch
+stores them as an array of {name, value} whose value fields are the run-time pointers
+jbFrameworkPath and jbLibraryPath -- the directory literals themselves are the JBROOT_PATH
+argument strings elsewhere in the same section.  Pairing therefore has to be checked where the
+pairs are written, in common.c; logic-harness/run.py does that by driving the extracted code
+against a stock envbuf.c and asserting which variable receives which directory.
 
 The strings are read from the __cstring section of every architecture slice, by parsing the
 Mach-O here rather than shelling out, so the script runs anywhere python3 does.  The undefined
@@ -84,6 +85,18 @@ REQUIRED_STRINGS = (
 # The two directories the array must name, in either order.  Pairing a name with its directory
 # is checked in logic-harness/run.py; see the module docstring for why a string dump cannot.
 EXPECTED_DIRS = (FRAMEWORK_DIR, LIBRARY_DIR)
+# Directory strings a search-path value must never be.  These are the shared roots the dedicated
+# directories exist to avoid: /Library/Frameworks holds other packages' frameworks, and /usr/lib
+# shares liblzma.5.dylib and libmrc.dylib leaf names with the shared cache.  The /var/jb/ forms are
+# listed as well so a patch that hardcodes the resolved root instead of using JBROOT_PATH fails
+# here rather than at run time.  Matched as whole entries, so a legitimate path such as
+# /usr/lib/systemhook.dylib does not trip them.
+FORBIDDEN_STRINGS = (
+    "/Library/Frameworks",
+    "/usr/lib",
+    "/var/jb/Library/Frameworks",
+    "/var/jb/usr/lib",
+)
 PRESERVED_STRINGS = ("DYLD_INSERT_LIBRARIES",)
 
 
@@ -224,6 +237,14 @@ def main(argv: list[str]) -> int:
             check(f"{arch}: keeps {wanted}", wanted in entries)
         for wanted in EXPECTED_DIRS:
             check(f"{arch}: contains the directory {wanted}", wanted in entries)
+        # The dedicated directories exist so the shared roots are never named.  Exact entries, so a
+        # legitimate file path under /usr/lib is not mistaken for the directory itself.
+        forbidden = [name for name in FORBIDDEN_STRINGS if name in entries]
+        check(
+            f"{arch}: names no shared search root",
+            not forbidden,
+            ", ".join(forbidden),
+        )
 
     symbols = undefined_symbols(args.binary)
     if symbols is None:

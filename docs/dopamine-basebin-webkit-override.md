@@ -6,7 +6,9 @@
 
 ## 一、结论
 
-**两个 hook 能解除 dyld 对共享缓存路径的短路，但它们单独装上不会让 Safari 用上自建 WebKit。** 缺的另一半是搜索路径：官方 Dopamine 3.0.13 的 `systemhook` 只设置 `DYLD_INSERT_LIBRARIES`，不设置任何 framework 或 library 搜索路径。没有这些变量，dyld 即使愿意去磁盘找，也没有目录可找。第五、六、九节讲 dyldhook 那一半，第十一节交付 systemhook 那一半：四个变量，两个专用目录。
+**两个 hook 能解除 dyld 对共享缓存路径的短路，但单独装上它们不会让 Safari 用上自建 WebKit。** 缺的另一半是搜索路径：官方 Dopamine 3.0.13 的 `systemhook` 只设置 `DYLD_INSERT_LIBRARIES`，不设置任何 framework 或 library 搜索路径。没有这些变量，dyld 即使愿意去磁盘找，也没有目录可找。第五、六、九节讲 dyldhook 那一半，第十一节交付 systemhook 那一半：四个变量，两个专用目录。
+
+即使这一半补上，Safari 换成自建 WebKit 也只覆盖 UI 进程。网页由系统的 `com.apple.WebKit.WebContent` 进程解析。那个进程带自己的 `LC_DYLD_ENVIRONMENT`，第十一节按设备实测说明它与 app 进程的覆盖手段不同。
 
 ## 二、官方 3.0.13 为什么不能覆盖共享缓存
 
@@ -51,7 +53,7 @@ bool ProcessConfig::DyldCache::isOverridablePath(const char* dylibPath) const
 
 ### 从缓存里直接取出的 PrebuiltLoader 走另一条判定
 
-缓存里的镜像有预编译的 loader 记录，加载依赖时不经过 `Loader::getLoader()`，而是走 `PrebuiltLoader::isLoaded` 里的 root 检查。`dyld/PrebuiltLoader.cpp:644-655`：
+缓存里的镜像有预编译的 loader 记录，加载依赖时不经过 `Loader::getLoader()`，而是走加载校验：`PrebuiltLoader::isValid`（`dyld/PrebuiltLoader.cpp:533`）在 `:581` 调 `PrebuiltLoader::invalidateInIsolation`（`:630`）。root 检查就在后者里，`:644-655`：
 
 ```cpp
 bool checkForRoots = false;
@@ -117,8 +119,8 @@ _MACHOMERGER_HOOK___fcntl
 ```
 /System/Library/Frameworks/WebKit.framework/WebKit                        -> WebKit.framework/WebKit
 /System/Library/PrivateFrameworks/WebCore.framework/WebCore               -> WebCore.framework/WebCore
-/System/Library/PrivateFrameworks/JavaScriptCore.framework/JavaScriptCore -> JavaScriptCore.framework/JavaScriptCore
-/System/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy            -> WebKitLegacy.framework/WebKitLegacy
+/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore        -> JavaScriptCore.framework/JavaScriptCore
+/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy      -> WebKitLegacy.framework/WebKitLegacy
 /usr/lib/system/libsystem_kernel.dylib                                    -> (nullptr)
 ```
 
@@ -130,7 +132,7 @@ _MACHOMERGER_HOOK___fcntl
 
 `Lessica/Dopamine` 分支 `feat/dyld-framework-overrides` 的 `BaseBin/dyldhook/src/roothider.c` 注册 5 个 hook。逐个说明：
 
-**`Loader::expandAtLoaderPath`：不需要。** 它服务的是 roothide 自己的 `@loader_path/.jbroot` 前缀（`roothider.c:15` 的 `ROOTHIUDE_LOADER_PREFIX`），用来让应用 bundle 内的二进制相对定位到 jbroot。我们的路径来自 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH`，是绝对路径，不带这个前缀。读 `roothider.c:332-351` 可见它对不以该前缀开头的路径直接透传原返回值，不改变我们的路径。
+**`Loader::expandAtLoaderPath`：不需要。** 它服务的是 roothide 自己的 `@loader_path/.jbroot` 前缀（`roothider.c:15` 的 `ROOTHIUDE_LOADER_PREFIX`），用来让应用 bundle 内的二进制相对定位到 jbroot。我们的路径来自 `DYLD_FRAMEWORK_PATH`，是绝对路径，不带这个前缀。读 `roothider.c:332-351` 可见它对不以该前缀开头的路径直接透传原返回值，不改变我们的路径。
 
 **`Loader::applyCachePatches`：不需要。** 它往共享缓存镜像的 `__TEXT` 写 trampoline，目的是就地改写缓存本体，处理缓存 stub 优化把调用直接指向缓存副本的情况。我们走的是「磁盘副本覆盖缓存项」，由 `Loader.cpp:623` 的 `possiblePathOverridesCache` 承担，不改缓存本体。
 
@@ -140,11 +142,16 @@ _MACHOMERGER_HOOK___fcntl
 
 两个 hook 解除的是「dyld 愿不愿意去磁盘找」。要找到，还得有目录被放进搜索路径。
 
-本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 的 `shouldInsertJBEnv` 为真的分支内，且都是 `DYLD_INSERT_LIBRARIES`（`:333` 与 `:358`）。全文没有 `DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`，也没有 `DYLD_ROOT_PATH`。本机 `/var/jb/basebin/` 下的二进制 `grep -a -l DYLD_FRAMEWORK_PATH` 同样无命中。
+本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 内，且都是 `DYLD_INSERT_LIBRARIES`：`:333` 在 `shouldInsertJBEnv` 真分支内，`:358` 在其 else 分支内。全文没有 `DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`，也没有 `DYLD_ROOT_PATH`。本机 `/var/jb/basebin/` 下的二进制 `grep -a -l DYLD_FRAMEWORK_PATH` 同样无命中。
 
 所以需要单独改的一处是：`spawn_exec_hook_common` 里 `shouldInsertJBEnv` 为真的分支（`common.c:325` 起的 `if (shouldInsertJBEnv) { ... }`），在那里追加 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH`（各带一个 `__XPC_` 版本），分别指向两个专用目录。
 
-这一处曾不在本 mission 范围内：第五节只记录缺口，第十一节交付实际补丁（四个变量，framework 两个指向 `/var/jb/Library/WebKitOverride`，library 两个指向 `/var/jb/Library/WebKitOverride/usr/lib`）。第五节其余内容保留作为背景：它说明了为什么 dyld 会读这些变量。
+这一处曾不在本 mission 范围内：第五、六、九节讲 dyldhook 那一半，第十一节交付实际补丁（四个变量，framework 两个指向 `/var/jb/Library/WebKitOverride`，library 两个指向 `/var/jb/Library/WebKitOverride/usr/lib`）。本节保留作为背景：它说明 dyld 为什么读这些变量，以及为什么单靠环境变量到不了 WebContent。
+
+本节末的「方案上限」里有一个未验证点（`__XPC_` 前缀的转交位置），第十一节给出了不依赖它的覆盖手段：
+
+- launchd 通过 XPC 服务名拉起 `com.apple.WebKit.WebContent.xpc` 时，`posix_spawn` 的 envp 是否经过 `systemhook` 的这个 hook。
+- `xpcproxy` 是否按 `__XPC_` 前缀转发环境变量。
 
 ### dyld 是否采纳这两个路径变量：已证实采纳
 
@@ -164,6 +171,56 @@ _MACHOMERGER_HOOK___fcntl
 所以 dyld 愿意读这两类路径变量，也会把目录拼成候选路径。它缺的是「允许磁盘副本替换缓存项」这一判定，而那是 `isOverridablePath` 与 `isAlwaysOverridablePath` 的职责，也就是本补丁加的两个 hook。两者分工：路径变量决定「去哪里找」，两个 hook 决定「找到之后用不用」。这也说明两半必须同时上线：只补路径变量，候选路径会在 `Loader.cpp:565` 被短路；只补两个 hook，没有目录可找。
 
 上游在更新的 dyld 里另加了一道更严的门（`dyld-1378` 的 `AMFI_DYLD_OUTPUT_ALLOW_DEVELOPMENT_VARS`，bit 8，配合 `allowAnyOverrides`，见 `dyld-1378` 的 `DyldProcessConfig.cpp:1825`）。本机的 `dyld-1041.5` 没有这道门：反汇编 `gen/dyld.orig` 的 `isOverridablePath`（`:19e90`）只有「development 标志为真则返回 1，否则 `strcmp` 比对 `/usr/lib/system/libdispatch.dylib`」两条分支，全程一次 `bl`（`strcmp`）。所以在本机，`0xff` 加上两个 hook 就能让磁盘副本生效，不需要 bit 8。
+
+### 方案上限：网页由系统 WebContent 进程解析
+
+入口镜像换成自建 WebKit 之后，Safari 自身用上了自建 WebKit，但页面解析仍然在另一个进程里完成。
+
+设备实测（`ps -Ao pid,ppid,comm`）：取样时有 13 个 `com.apple.WebKit.WebContent` 进程，可执行文件全部是 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，父进程都是 1（由 `launchd` 直接拉起，不继承 Safari 的父进程关系）。这个数字随页面与标签数浮动，reviewer-k1c 同一台设备另一次取样得到 11，进程归属与可执行文件路径两次相同。
+
+这条事实决定了上限。WebKit 的多进程架构里，Safari 进程只负责 UI 与网络，DOM、布局、脚本执行都在 WebContent 进程里，那个进程加载的是它自己的 WebKit。要换渲染内核，必须让 `com.apple.WebKit.WebContent` 这个 XPC 服务启动时就用自建 WebKit。
+
+XPC 服务的启动链是 `launchd` 经 `xpcproxy` 转交。本机 Dopamine 3.0.13 的 `systemhook` 只 hook 了 `posix_spawn` 与 `execve` 路径（`main.c:241/252/405-417`，实现在 `spawn_exec_hook_common`），`xpcproxy` 拉起服务进程不走这条路径。要让变量穿过 `xpcproxy`，按 Apple 的惯例要写成 `__XPC_DYLD_FRAMEWORK_PATH`：`xpcproxy` 只转发带 `__XPC_` 前缀的变量，去掉前缀后交给服务进程。
+
+本机对这条链路的验证程度如下：`ps` 取样时的进程数与可执行文件路径是实测；`xpcproxy` 只认 `__XPC_` 前缀这一条未在本机验证，`/usr/libexec/xpcproxy` 的只读抓取里没有 `__XPC_DYLD_` 字面量（`grep -a` 无命中，该二进制只链接 `libSystem.B.dylib` 与 `libobjc.A.dylib`），因此前缀的转发规则在 `libxpc` 内部，无法从手头这个二进制反推。这一段按待验证处理。
+
+**这条链路不是唯一的一条。** 设备上五个 WebKit `.xpc` 各自带 4 条 `LC_DYLD_ENVIRONMENT`，其中两条是绝对路径 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`，它们由 `.xpc` 自己的加载命令提供，不需要任何人转发。所以 `.xpc` 的覆盖不依赖 `__XPC_` 前缀的转交行为；app 进程（Safari 等）没有这类加载命令，只能靠环境变量。两种进程的分工与实测见十一·七。
+
+所以完整的方案要这几部分同时生效：本 mission 的两个 hook 让 dyld 愿意用磁盘副本；`DYLD_FRAMEWORK_PATH` 指向自建 framework 目录，`DYLD_LIBRARY_PATH` 指向 `usr/lib/` 那一层，让 dyld 有第二个候选；两个变量各带一份 `__XPC_` 前缀版本，让它们进入 WebContent 进程；`.xpc` 自身的加载命令是这套变量之外的独立一层。
+
+### 与 M40 的接口：专用目录与布局
+
+自建 framework 不放在 `/var/jb/Library/Frameworks`。那个目录是 Procursus 的框架安装位置，里面已有 `AltList`、`CydiaSubstrate`、`webpushd` 等与 WebKit 无关的东西，覆盖时容易连带影响别的包。M40 已定下专用目录 `/var/jb/Library/WebKitOverride`。
+
+目录分两层，各由一个环境变量指向：
+
+```
+/var/jb/Library/WebKitOverride/            ← DYLD_FRAMEWORK_PATH
+    WebKit.framework/WebKit
+    WebCore.framework/WebCore
+    JavaScriptCore.framework/JavaScriptCore
+    WebGPU.framework/WebGPU
+    WebKitLegacy.framework/WebKitLegacy
+/var/jb/Library/WebKitOverride/usr/lib/    ← DYLD_LIBRARY_PATH
+    libwebrtc.dylib                        ← 裸文件名
+    libANGLE-shared.dylib                  ← 裸文件名
+```
+
+上层 5 项是 framework 二进制，归约方式相同：`getFrameworkPartialPath` 把 `/System/Library/.../X.framework/X` 归约成 `X.framework/X`，拼上 `DYLD_FRAMEWORK_PATH` 的目录即得候选路径。
+
+下层两条 dylib 的 install name 是绝对路径 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib` 与 `…/libANGLE-shared.dylib`，但 `getFrameworkPartialPath` 对它们返回空：该函数要求 `.framework/` 前那段目录名等于最后一段 leaf 名，而这里 leaf 是 `libwebrtc.dylib`、前一段是 `Frameworks`，对不上（`dyld-1042.1` 的 `DyldProcessConfig.cpp:2007-2016`，`dyld-1378` 的 `:2588-2598`；注释明确写了 `…/foo.framework/Libraries/bar.dylib` 与 `…/foo.framework/bar` 都返回空）。归约为空时走 `DYLD_LIBRARY_PATH` 分支，只取 leaf 名拼目录（`dyld-1042.1` 的 `:1888-1897`，`dyld-1378` 的 `:2395-2409`）。
+
+所以磁盘上的摆放不需要照抄 install name 的目录形状。归约发生在 dyld 内部：它先从 install name 抽出叶子名，再拼环境变量里给的目录，`WebCore.framework/Frameworks/` 这一段不参与拼接。把加载命令里那整条绝对路径搬到磁盘上，并不能让候选命中：若把文件摆在顶层目录下的 `WebCore.framework/Frameworks/` 里、只把顶层目录 `/var/jb/Library/WebKitOverride` 给 `DYLD_LIBRARY_PATH`，拼出的候选是 `/var/jb/Library/WebKitOverride/libwebrtc.dylib`，找不到。要命中，给 `DYLD_LIBRARY_PATH` 的目录必须直接包含裸文件名。本文取 `WebKitOverride/usr/lib/`，把两个裸文件放在那一层。
+
+`DYLD_LIBRARY_PATH` 也不能直接指 `/var/jb/usr/lib`。那个目录下有 137 个 `.dylib`，其中 `liblzma.5.dylib` 与 `libmrc.dylib` 与共享缓存里的镜像同名。指过去之后，所有经 `systemhook` 注入的进程在解析这两个名字时都会多出 `/var/jb/usr/lib/` 下的候选，两个 hook 又会解除短路，于是这些进程可能改用 Procursus 那份。M40 worker 实测的重叠记为 137 ∩ 197；本机只读核对到这两个文件名在 `/var/jb/usr/lib` 下确实存在，且 `/usr/lib` 下没有同名文件，重叠集合未复核。
+
+两条 dylib 走 library 分支还有一个前提容易漏：`Loader.cpp:719`（`dyld-1378`）的 `skipFallbacks` 会屏蔽 `DYLD_FALLBACK_LIBRARY_PATH` 那一路候选，但它不屏蔽 `_dylibPathOverridesEnv` 的循环。所以即使 load 路径是绝对路径，`DYLD_LIBRARY_PATH` 的候选仍然会被枚举。而 `Loader.cpp:850` 的短路要求 `!originalPathIsOverridableInDyldCache`，正是本 mission 的两个 hook 改掉的那一项。
+
+这两条在 load command 数组里是弱链接（`LC_LOAD_WEAK_DYLIB`），缺失被 dyld 容忍，因此少了它们不会让 WebCore 加载失败。代价是覆盖不完整：新的 WebCore 可能绑定到共享缓存副本缺少的符号，问题要到实际调用时才暴露，位置也更难定位。
+
+dyld 的容忍路径可查：`JustInTimeLoader.cpp:460`（`dyld-1042.1`）把弱依赖设成 `depOptions.canBeMissing = isWeak`，`Loader.cpp:793-795` 在找不到时 `diag.clearError()` 并返回空，加载继续。
+
+这两条 dylib 的 install name 与归约结论都未在真机上验证：设备 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/` 目录存在但为空（两个 dylib 只在共享缓存里，取不到二进制直接读 `LC_LOAD_DYLIB`）。归约结论来自 `dyld-1042.1` 与 `dyld-1378` 源码与按源码复写的 Python 复现；install name 来自 M40 的接口约定。二者的弱链接身份已在本机从自建 WebCore 头部直接解析得到：37 条 `LC_LOAD_DYLIB` 之外另有 12 条 `LC_LOAD_WEAK_DYLIB`，`libwebrtc.dylib` 与 `libANGLE-shared.dylib` 都在其中。
 
 ## 六、gen/dyld 是怎么来的，补丁为什么足够
 
@@ -230,6 +287,24 @@ ssh -t mobile@192.168.2.136 'sudo /var/jb/basebin/jbctl update basebin /var/mobi
 
 ## 九、风险
 
+**设备上真实发生的失败：入口镜像换成了自建 WebKit，依赖仍解析到系统 JavaScriptCore。** 注入记录在 `/var/jb/var/mobile/Library/Preferences/com.websafe.idevice.plist`，`bundleId` 为 `com.apple.mobilesafari`，`stage` 为 `7`，`matchVia` 为 `classes`，`handleOk` 为 `false`，`path` 为 `/var/jb/Library/Frameworks/WebKit.framework/WebKit`，`error` 原文如下（路径按原样抄录，只是把中间那段 preboot 目录缩写为 `…`）：
+
+```
+dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001): Symbol not found: _WTFSignpostIndirectLoggingEnabled
+  Referenced from: <486B6135-91E7-3F7B-BC9B-2EBCF07EA1B4> …/procursus/Library/Frameworks/WebKit.framework/WebKit
+  Expected in:     <D309AA36-B494-3228-BE7D-44E5674ED663> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+```
+
+这份记录要分三层读。
+
+第一层，入口镜像确实换成了自建那份。`<486B6135-91E7-3F7B-BC9B-2EBCF07EA1B4>` 是 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 的 `LC_UUID`，两者相同，说明 tweak 的 `dlopen` 打开的是自建镜像。`Referenced from` 里出现 `procursus` 的真实路径，是因为 `/var/jb` 本身就是指向该 preboot 目录的符号链接。
+
+第二层，这一层的加载不需要 hook 参与。报错里 `Referenced from` 记的是磁盘路径，UUID 就是本镜像自己的，说明 dyld 是按磁盘镜像把它装进来的。共享缓存按 `/System/...` 这类系统路径建索引，`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 不是其中之一，所以这一步没有缓存项可命中。两个 hook 解除的是「缓存命中之后要不要用磁盘副本」，对这一步不起作用。
+
+第三层，失败发生在依赖解析。自建 WebKit 有 53 条依赖（51 条 `LC_LOAD_DYLIB`、1 条 `LC_LOAD_WEAK_DYLIB`、1 条 `LC_REEXPORT_DYLIB`，不含 `LC_ID_DYLIB`），路径全部为绝对路径，例如 `/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`。`forEachPathVariant` 先用 `getFrameworkPartialPath` 把它归约成 `JavaScriptCore.framework/JavaScriptCore`，再拼 `DYLD_FRAMEWORK_PATH` 的每个目录。该变量为空时，候选路径只剩原路径本身，于是命中共享缓存里的系统 JavaScriptCore。`Expected in` 指向的 `<D309AA36-…>` 就是这个缓存副本，报错正文写明该符号在那里找不到；自建 JavaScriptCore 的符号表里有 `_WTFSignpostIndirectLoggingEnabled`（`grep -a -c` 命中 1）。系统 JavaScriptCore 在磁盘上只有 framework 目录与 `Info.plist`，二进制本身在共享缓存里，因此无法另取一份二进制比对。符号校验因此失败。
+
+结论是 tweak 的 `dlopen` 只决定了入口镜像的来源，决定不了子镜像的来源。子镜像的路径写在入口镜像自己的加载命令里，dyld 拿到该路径后重新查一次；可供替换的目录列表来自环境变量，tweak 改的是进程内存里的 `dlopen` 参数，触及不到这一层。要让依赖也换成自建版本，目标进程必须带上第五节末的搜索路径。
+
 **改的是越狱引导层。** `gen/dyld` 是每个进程的 dyld。合并或签名出错时 `basebin_generate` 返回 2、3 或 4，`launchdhook` 在 `update.m:225-229` 随即调 `abort_with_reason(7, 1, ...)` 中止这次越狱更新。表现是这次用户空间重启没能建起新的 `gen/dyld`，与某个 app 崩溃不同。
 
 **两个 hook 无条件返回真，改变了所有镜像的路径判定。** dyld 从此对缓存里每个镜像都去 `stat()` 磁盘副本并比对 inode。本机实测了这条通道的落点：`/System/Library/Frameworks/{Foundation,UIKit,CoreFoundation,Security}.framework`、`/System/Library/PrivateFrameworks/WebCore.framework/WebCore`、`/usr/lib/{libSystem.B,libobjc.A,libc++.1,libsqlite3}.dylib` 在磁盘上都不存在。`.fakelib` 里落在 `/usr/lib` 下的真实文件只有 `libRPAC`、`libMTLCapture`、`libMTLToolsDiagnostics`、`libCoreKE`、`libFaultOrdering`、`libBacktraceRecording`、`libMainThreadChecker`、`libSystem.B_asan`、`libSystem_asan` 与 `swift/libswiftRemoteMirror.dylib`，都不在共享缓存里；`/var/jb/basebin/.fakelib/system/` 下只有 `introspection/libdispatch.dylib`，不是 dyld 用来比对的 `/usr/lib/system/libdispatch.dylib`。
@@ -243,7 +318,9 @@ ssh -t mobile@192.168.2.136 'sudo /var/jb/basebin/jbctl update basebin /var/mobi
 **未验证项：**
 
 - 完整 `gmake -C BaseBin` 与 `jbctl update basebin` 尚未在本机执行。本 mission 只做到：补丁对 tag `3.0.13` `git apply --check` 通过；两个 hook 在 `-DIOS=16` 下编译后 `llvm-nm -u` 为空；`main.S` 在 `IOS=15/16/18` 下分别汇编通过且 15 上不带符号。
-- hook 生效后，app 进程（Safari 等）与 `.xpc` 服务进程是否真的用上自建 WebKit，还取决于第五节的搜索路径缺口是否补上。AMFI 已证实采纳这两类路径变量；第十一节交付四个变量，其中 app 进程只能靠它，`.xpc` 由自身的 `LC_DYLD_ENVIRONMENT` 覆盖、M40 是双保险（十一·七）。补丁本身未在**打过补丁**的真机构建产物上跑过。补上之后可以用下面的命令直接观察，不需要间接推断。
+- hook 生效后，app 进程（Safari 等）与 `.xpc` 服务进程是否真的用上自建 WebKit，取决于第五节的搜索路径缺口是否补上。AMFI 已证实采纳这两类路径变量；第十一节交付四个变量，其中 app 进程只能靠它，`.xpc` 由自身的 `LC_DYLD_ENVIRONMENT` 覆盖、M40 是双保险（十一·七）。补丁本身未在**打过补丁**的真机构建产物上跑过。
+- `xpcproxy` 是否按 `__XPC_` 前缀转发环境变量，未在本机验证。设备 `/usr/libexec/xpcproxy` 的只读抓取里没有 `__XPC_DYLD_` 字面量，无法从该二进制反推转发规则。
+- `libwebrtc.dylib` 与 `libANGLE-shared.dylib` 的 install name，以及它们经 `getFrameworkPartialPath` 归约到 `DYLD_LIBRARY_PATH` 分支的结论，未在真机上验证。设备上这两个文件只存在于共享缓存，取不到二进制读 `LC_LOAD_DYLIB`。
 - 重复加载的代价（第四节第三点）在真机上的实际内存增量未测。
 
 ### 上线后怎么确认 hook 真的在起作用
@@ -251,14 +328,53 @@ ssh -t mobile@192.168.2.136 'sudo /var/jb/basebin/jbctl update basebin /var/mobi
 `allowEnvVarsPrint`（bit 4，`DyldProcessConfig.cpp:674`）在 `0xff` 下同样被置起，`DYLD_PRINT_SEARCHING` 可用（`:771`）。它让 dyld 打印每个查找尝试过的候选路径。给目标进程加上
 
 ```
-DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
+DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride
 ```
 
-若输出里出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/Frameworks/WebKit.framework/WebKit"`，说明候选路径进入了搜索；若随后出现 `found: dylib-from-disk-to-override-cache: "/var/jb/Library/Frameworks/WebKit.framework/WebKit"`，说明磁盘副本确实顶替了缓存项。没有本补丁的第二个 hook 时，缓存命中会让候选路径在 `Loader.cpp:565` 处被直接 `return` 掉，输出里根本不会出现这个候选。
+若输出里出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/WebKit.framework/WebKit"`，说明候选路径进入了搜索；若随后出现 `found: dylib-from-disk-to-override-cache: "/var/jb/Library/WebKitOverride/WebKit.framework/WebKit"`，说明磁盘副本确实顶替了缓存项。没有本补丁的第二个 hook 时，候选路径会在 `Loader.cpp:565` 处被直接 `return` 掉，输出里根本不会出现这个候选。
 
-这两个字符串的来源是 `dyld/Loader.cpp:568` 与 `:715`（本机 `dyld-1042.1`），`typeName` 的返回值在 `dyld/DyldProcessConfig.cpp` 的 `PathOverrides::typeName` 里定义（`pathDirOverride` 对应 `DYLD_FRAMEWORK/LIBRARY_PATH`）。
+对 `libwebrtc.dylib` 与 `libANGLE-shared.dylib`，观察点是 `DYLD_LIBRARY_PATH=/var/jb/Library/WebKitOverride/usr/lib`，输出里出现的是 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/usr/lib/libwebrtc.dylib"`。要观察 WebContent 进程，这两个变量都要带 `__XPC_` 前缀。
+
+这两个字符串的来源是 `dyld/Loader.cpp:568` 与 `:715`，`typeName` 的返回值在 `dyld/DyldProcessConfig.cpp` 的 `PathOverrides::typeName` 里定义（`pathDirOverride` 对应 `DYLD_FRAMEWORK/LIBRARY_PATH`）。
 
 `DYLD_PRINT_SEARCHING` 默认写到 stderr；`DYLD_PRINT_TO_FILE=/path` 需要 `allowEnvVarsSharedCache`（bit 2，`0xff` 同样置起，见 `DyldProcessConfig.cpp:776-783`），因此也可用。Safari 这类 GUI 进程的 stderr 不进终端，用 `DYLD_PRINT_TO_FILE` 或 Console.app 取。
+
+**在 `.xpc` 上看候选行时要先分清来源。** 这类进程自身带 4 条 `LC_DYLD_ENVIRONMENT`（十一·七），所以即使 M40 关闭也有候选行，只是目录不同：内嵌那对给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`，M40 给出 `/var/jb/Library/WebKitOverride/...`。要确认 M40 生效，看候选路径落在哪个目录，而不是看候选行有没有出现。设备上直接跑 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1`，总计 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，其中包含 `.../WebContent.xpc/../systemhook.dylib`（不存在）与 `/var/jb/usr/lib/systemhook.dylib`（`found:` 落在这里）。
+
+app 进程本身没有 `LC_DYLD_ENVIRONMENT`，所以对它们「候选行出现与否」才是 M40 是否生效的判据。
+
+### 安装后确认 `gen/dyld` 真的重建过
+
+`gen/dyld` 不在 `basebin.tar` 里。设备实测 `Dopamine.app/basebin.tar`（6082560 字节，2026-11-03）只有 31 个条目，`basebin/` 下是 `launchdhook.dylib`、`systemhook.dylib`、`jbctl`、`MachOMerger` 与六个 `dyldhook_merge.*.dylib`，**没有 `gen/` 目录**。`gen/dyld` 是 `jbctl update basebin` 触发用户空间重启时，由 `basebin_gen.m` 用 `gen/dyld.orig` 加对应的 `dyldhook_merge.*.dylib` 现场合成的（第六节）。
+
+所以「tar 装上了」不等于「hook 生效了」：如果重启没走完，`gen/dyld` 还是旧的那一份，表面看一切正常。三条只读命令可以判定（不需要 root）：
+
+```sh
+stat -c %Y /var/jb/basebin/gen/dyld
+stat -c %Y /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
+python3 -c "print(open('/var/jb/basebin/gen/dyld','rb').read().count(b'_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc'))"
+```
+
+判定：
+
+1. `gen/dyld` 的 mtime 必须**晚于** `dyldhook_merge.*.dylib`。反了说明 `gen/dyld` 是合并旧 dylib 得到的。
+2. 计数必须为 `1`。为 `0` 说明 `gen/dyld` 里没有 `isOverridablePath` 这个 hook，M39 没生效。
+3. `gen/dyld.orig` 的 mtime 应停在装机时间（本机为 2022-10-19 13:29），它由 `basebin_gen.m:150` 从原件复制，更新流程不覆盖它。
+
+本机当前实测（可作为「未安装 M39」的对照）：
+
+| 文件/计数 | 本机当前值 |
+| --- | --- |
+| `gen/dyld` mtime | 2026-11-18 10:08（1794967717） |
+| `dyldhook_merge.arm64e.iOS16-17.dylib` mtime | 2026-11-03 01:04（1793639078） |
+| `gen/dyld.orig` mtime | 2022-10-19 13:29（1666157389） |
+| `gen/dyld` 里 `...isOverridablePath...` hook 计数 | **0** |
+| `gen/dyld` 里 `...isAlwaysOverridablePath...` hook 计数 | **0** |
+| `gen/dyld` 里 `_MACHOMERGER_HOOK_` 符号 | 2 个：`dlopen_from` 与 `__fcntl` |
+
+mtime 判定通过（11-18 晚于 11-03），但计数是 `0`：这台设备装的是**未打 M39 补丁的原始 basebin**，`gen/dyld` 里只有 Dopamine 原带的两个 hook。M39 从未在这台设备上部署过。所以「mtime 新」只说明 `gen/dyld` 在最近一次更新里被重建过，不说明它是哪个 `dyldhook_merge` 合出来的；符号计数才是 hook 是否在场的直接证据。三者一起看才完整。
+
+`gen/dyld.orig` 是回滚锚点，不要拿 `gen/dyld` 自身当备份：更新时 `gen/dyld` 被改名成 `gen/dyld.old`（`basebin_gen.m:158-163`），只保留一代，再更新一次它就没了。
 
 ## 十、证据来源
 
@@ -271,19 +387,26 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 | MachOMerger 符号规则 | Dopamine `3.0.13`，`BaseBin/MachOMerger/Sources/MachOMerger/main.swift:327-410` |
 | 现有 hook 清单 | 设备 `dyldhook_merge.arm64e.iOS16-17.dylib`，`llvm-nm -g` |
 | AMFI 标志被改写为 `0xff` | Dopamine `3.0.13`，`BaseBin/libjailbreak/src/basebin_gen.m:45-62`；设备 `gen/dyld` 与 `gen/dyld.orig` 的 `getAMFI` 反汇编 |
-| `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 的读取与使用 | `dyld-1042.1`，`DyldProcessConfig.cpp:61/675/1410-1416/1576/1577/1868/1872-1885/1886-1899/2017/2051` |
-| `getFrameworkPartialPath` 对 WebCore 嵌套 install name 返回 `nullptr` | 按 `dyld-1042.1` `dyld/DyldProcessConfig.cpp:2017-2048` 逐字移植成 C 后实测（五位输入，见十一·二） |
-| 两个专用目录的必要性 | 设备 `/var/jb/usr/lib` 137 个 `.dylib` 与共享缓存 197 个 `/usr/lib/*.dylib` 叶子名求交集得 `liblzma.5.dylib`/`libmrc.dylib`；`/var/jb/Library/Frameworks` 清单 |
-| 那两个 dylib 是弱链接依赖 | 设备上用 python3 解析 `WebCore.framework/WebCore` 与 `WebKit.framework/WebKit` 的 load command（`LC_LOAD_WEAK_DYLIB` 计数与路径）；`dyld-1042.1` 的 `JustInTimeLoader.cpp:460`、`Loader.cpp:793-795` |
+| `DYLD_FRAMEWORK_PATH` 的读取与使用 | `dyld-1042.1`，`DyldProcessConfig.cpp:61/675/1410-1416/1577/1876-1881` |
 | 打印调试开关 | `dyld-1042.1`，`DyldProcessConfig.cpp:674/771/776-783`；`Loader.cpp:568/715`；`PathOverrides::typeName` |
 | 本机磁盘上不存在缓存镜像 | 设备 `ls` 逐个检查 `Foundation`/`UIKit`/`CoreFoundation`/`Security`/`WebCore`/`libSystem.B`/`libobjc.A`/`libc++.1`/`libsqlite3` 与 `.fakelib` 清单 |
 | 五个 hook 的参考实现 | `Lessica/Dopamine` 分支 `feat/dyld-framework-overrides`，`BaseBin/dyldhook/src/roothider.c:332-413`、`roothider.S:19-60` |
 | 路径软链与挂载 | 设备 `ls -l /usr/lib/dyld`、`mount`、`readlink /var/jb/basebin/.fakelib/dyld` |
+| `gen/dyld` 不由 `basebin.tar` 提供 | 设备 `tar -tf /var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar`，31 个条目，无 `gen/`；`gen/dyld` 由 `basebin_gen.m:150-154` 合成 |
+| 本机 `gen/dyld` 里没有 M39 的两个 hook | 设备 python3 读 `gen/dyld`，`_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` 计数 0、`...23isAlwaysOverridablePathEPKc` 计数 0、`_MACHOMERGER_HOOK_` 共 2 个（`dlopen_from`、`__fcntl`）；mtime 2026-11-18 10:08 vs dylib 2026-11-03 01:04 |
 | 五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 各 4 条 | 设备上 python3 解析 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices/*.xpc/*` 的 load command；`BaseXPCService.xcconfig:68,78` 提供前两条，本仓 `patches/ios18-public-sdk-xpc-main.patch:12` 提供后两条 |
 | `MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 为 0 条 | 设备上 python3 解析 `/Applications/MobileSafari.app/MobileSafari` 的 load command |
 | `.xpc` 的 `@executable_path/..` 两条是死的 | `dyld-1042.1` `DyldProcessConfig.cpp:2135-2141`；设备上以 `DYLD_PRINT_SEARCHING=1` 直接跑 `com.apple.WebKit.WebContent`，候选行落在 `.../WebContent.xpc/../systemhook.dylib`，`found:` 落在 `/var/jb/usr/lib/systemhook.dylib` |
 | 官方 `systemhook.dylib` 不带这四个变量 | 设备 `/usr/lib/systemhook.dylib` 拷回本机（233520 字节，arm64 + arm64e），用 `verify-systemhook-search-paths.py` 判定，每个切片 6 条失败、共 12 条，退出 1 |
-
+| 设备上的注入失败原文 | 设备 `/var/jb/var/mobile/Library/Preferences/com.websafe.idevice.plist`，字段 `stage`/`matchVia`/`error` |
+| 自建 WebKit 的 UUID 与依赖清单 | 设备 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 头部 6 MiB，`LC_UUID` 与 53 条依赖（51 条 `LC_LOAD_DYLIB`、1 条 `LC_LOAD_WEAK_DYLIB`、1 条 `LC_REEXPORT_DYLIB`）逐条解析 |
+| `_WTFSignpostIndirectLoggingEnabled` 存在于自建 JavaScriptCore | 设备 `LC_ALL=C grep -a -c _WTFSignpostIndirectLoggingEnabled /var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`，命中 1 |
+| WebContent 进程数与可执行文件 | 设备 `ps -Ao pid,ppid,comm` 取样，筛 `com.apple.WebKit.WebContent` 得 13 条（reviewer-k1c 另一次取样 11 条），`comm` 全为 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，`ppid` 全为 1 |
+| `getFrameworkPartialPath` 的归约规则与例外 | `dyld-1042.1`，`DyldProcessConfig.cpp:2007-2016` 注释、`:2017` 实现、`:1872-1897` 两条分支 |
+| 自建 WebCore 的依赖与运行时 dylib | 设备 `/var/jb/Library/Frameworks/WebCore.framework/WebCore` 头部 8 MiB，37 条 `LC_LOAD_DYLIB` 中无 `libwebrtc`/`libANGLE`，字符串表含两者绝对路径 |
+| `/var/jb/Library/WebKitOverride` 两层布局 | M40 的接口约定（本文未在设备上建立该目录） |
+| `libwebrtc`/`libANGLE` 走 library 分支的两个前提 | `dyld-1378`，`Loader.cpp:719` 的 `skipFallbacks` 只屏蔽 fallback 分支、`:850` 的短路要求 `!originalPathIsOverridableInDyldCache` |
+| `/var/jb/usr/lib` 与共享缓存同名 | M40 worker 实测 137 ∩ 197；本机只读核对 `liblzma.5.dylib`、`libmrc.dylib` 存在且 `/usr/lib` 下无同名文件 |
 ## 十一、另一半：让 systemhook 设置搜索路径
 
 第九节之前回答「dyld 肯不肯用磁盘副本」，那是 `dyldhook` 的补丁。这一节补上接着的一半：**要让 dyld 有目录可找，得由 `systemhook` 把搜索路径交给被拉起的进程**。第五节把它记为缺口，本节把它补上。交付物在同目录：`0001-systemhook-set-search-paths.patch`、`verify-systemhook-search-paths.py`、`test-verify-systemhook-search-paths.py`，以及 `logic-harness/run.py`。
@@ -558,14 +681,14 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 | --- | --- |
 | `dopamine-basebin/0001-systemhook-set-search-paths.patch` | 唯一源码改动，只动 `common.c`，`+111 −1` |
 | `dopamine-basebin/verify-systemhook-search-paths.py` | 对构建出的 `systemhook.dylib` 做静态断言 |
-| `dopamine-basebin/test-verify-systemhook-search-paths.py` | 上面脚本自身的回归测试，24 个用例 |
+| `dopamine-basebin/test-verify-systemhook-search-paths.py` | 上面脚本自身的回归测试，25 个用例 |
 | `dopamine-basebin/logic-harness/run.py` | 把补丁里的静态函数抽出来编译运行，44 项断言（32 行为 + 12 源码配对） |
 
 验证脚本自己解析 Mach-O 的 `__cstring`，只用 `python3`，不需要 LLVM、Xcode 或越狱设备。字符串按 NUL 切分后做精确匹配，不是子串匹配——`DYLD_FRAMEWORK_PATH` 是 `__XPC_DYLD_FRAMEWORK_PATH` 的子串，子串匹配会在「裸名变量的那条 hunk 丢了」时仍然通过，这个洞是测试自己抓出来的。
 
-对每个架构切片断言四件事：四个变量名都在；两个目录字符串都在（`/Library/WebKitOverride` 与 `/Library/WebKitOverride/usr/lib`）；`DYLD_INSERT_LIBRARIES` 仍在（丢了它等于弄坏 Dopamine 的注入）；文件本身是 Mach-O。
+对每个架构切片断言五件事：四个变量名都在；两个目录字符串都在（`/Library/WebKitOverride` 与 `/Library/WebKitOverride/usr/lib`）；`/Library/Frameworks`、`/usr/lib` 及它们的 `/var/jb` 形式都没有作为整条目出现（负向断言，见下）；`DYLD_INSERT_LIBRARIES` 仍在（丢了它等于弄坏 Dopamine 的注入）；文件本身是 Mach-O。
 
-**这一层不检查「哪个变量配哪个目录」。** 真实产物里四个变量名排在 `__cstring` 的一段、两个目录串排在另一段，中间没有配对关系：补丁把目录存成 `{name, value}` 数组，而 value 字段是运行期的 `jbFrameworkPath`、`jbLibraryPath` 两个指针，目录字面量本身是别处的 `JBROOT_PATH` 实参。所以静态脚本只能证明「名字在、目录在、没有多出别的目录」，配对要回到写配对的地方查。`logic-harness/run.py` 的 12 项配对断言读 `common.c` 里的两条 `JBROOT_PATH` 与 `searchPathVariables` 数组，检查每个变量名绑定到哪个指针，并核对脚本自己那张表是否相同。实测把 `DYLD_LIBRARY_PATH` 的值改成 `jbFrameworkPath` 后，这一项报 `FAIL: common.c binds DYLD_LIBRARY_PATH to jbLibraryPath`、退出 1。
+**这一层不检查「哪个变量配哪个目录」。** 真实产物里四个变量名排在 `__cstring` 的一段、两个目录串排在另一段，中间没有配对关系：补丁把目录存成 `{name, value}` 数组，而 value 字段是运行期的 `jbFrameworkPath`、`jbLibraryPath` 两个指针，目录字面量本身是别处的 `JBROOT_PATH` 实参。所以静态脚本能证明「四个名字在、两个专用目录在、四个共享根不在」，不能证明名字与目录的对应关系，配对要回到写配对的地方查。`logic-harness/run.py` 的 12 项配对断言读 `common.c` 里的两条 `JBROOT_PATH` 与 `searchPathVariables` 数组，检查每个变量名绑定到哪个指针，并核对脚本自己那张表是否相同。实测把 `DYLD_LIBRARY_PATH` 的值改成 `jbFrameworkPath` 后，这一项报 `FAIL: common.c binds DYLD_LIBRARY_PATH to jbLibraryPath`、退出 1。
 
 `llvm-nm` 存在时才额外查未定义符号：`systemhook/Makefile` 没有 `CHECK_SELF_CONTAINED`（该规则只在 `dyldhook/Makefile:12`），所以未定义符号属正常，默认只报数量，给 `--baseline <原版 dylib>` 时才比对有没有新增。
 
@@ -573,7 +696,7 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 
 ```
 git apply --check 0001-systemhook-set-search-paths.patch             # 对 tag 3.0.13 pristine 源码树，通过
-python3 test-verify-systemhook-search-paths.py                        # 24/24 通过
+python3 test-verify-systemhook-search-paths.py                        # 25/25 通过
 python3 verify-systemhook-search-paths.py <真实编译的四变量 Mach-O>    # 通过（/tmp/k2-macho/new4.dylib，arm64）
 python3 verify-systemhook-search-paths.py <官方 systemhook.dylib>     # 每个切片 6 条失败，共 12 条，退出 1
 python3 logic-harness/run.py <Dopamine tree>                          # 44/44 通过
@@ -593,4 +716,6 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 | 两者叠加 | 5 项失败 |
 | 旧 unset 缺陷（门槛去掉且比对常跑） | 5 项失败，含 `unset, switch off: all four inherited values kept` |
 
-**未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「**打过本补丁**构建出的 `systemhook.dylib` 带着这四个字符串」没有在真实产物上跑过。本 mission 用四件事替代：脚本对真实编译出的 Mach-O 判定正确，脚本对设备上取回的真实官方 dylib 判失败，补丁行为由 24 个静态用例固定，以及由 44 项逻辑与配对断言固定。
+**未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「**打过本补丁**构建出的 `systemhook.dylib` 带着这四个字符串」没有在真实产物上跑过。本 mission 用四件事替代：脚本对真实编译出的 Mach-O 判定正确，脚本对设备上取回的真实官方 dylib 判失败，补丁行为由 25 个静态用例固定，以及由 44 项逻辑与配对断言固定。
+
+**负向断言补的是 reviewer-k2c 指出的一个洞。** 先前只有正向检查（`EXPECTED_DIRS` 里的两个目录在不在），一个把两个专用目录与 `/Library/Frameworks`、`/usr/lib` 一起塞进去的 Mach-O 会照样通过、退出 0。现在每个切片另查一条 `names no shared search root`：四个共享根作为**整条目**出现即失败。用整条目匹配而不是子串，是因为真实 `__cstring` 里有 `/usr/lib/systemhook.dylib` 这类合法文件路径（官方 dylib 的 29 条绝对路径里就有），子串匹配会误报。回归用例里两条都固定了：塞共享根必须退出 1，塞 `/usr/lib/systemhook.dylib` 必须退出 0。

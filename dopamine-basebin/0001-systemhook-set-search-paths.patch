@@ -136,8 +136,8 @@ index d9cb86f..61c7a22 100644
  				envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert);
  			}
 +
-+			// The bare variables cover the spawned process itself. An XPC service such as
-+			// WebContent is started through xpcproxy, which passes along the __XPC_ copy.
++			// Both spellings are set: where an XPC service's __XPC_ copy is forwarded from is
++			// not verified, and either one being honoured covers the override.
 +			jbSearchPathSet(&envc, searchPathVariables, &searchPathState);
  		}
  		else {

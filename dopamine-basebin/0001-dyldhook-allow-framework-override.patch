@@ -1,0 +1,80 @@
+diff --git a/BaseBin/dyldhook/src/framework_override.c b/BaseBin/dyldhook/src/framework_override.c
+new file mode 100644
+index 0000000..febc97a
+--- /dev/null
++++ b/BaseBin/dyldhook/src/framework_override.c
+@@ -0,0 +1,43 @@
++// Let a framework on disk override its shared cache copy.
++//
++// On a customer (production) shared cache dyld only stats the file system for a
++// dylib that is already in the cache when isOverridablePath() answers true, and
++// Loader::getLoader() skips every non-cache candidate unless the original path
++// is overridable.  PrebuiltLoaders copied out of the cache consult
++// isAlwaysOverridablePath() for the same decision.  Both answer true only for
++// /usr/lib/system/libdispatch.dylib, so a WebKit.framework installed outside
++// the system path is never looked at.
++//
++// Returning true unconditionally makes dyld search the DYLD_FRAMEWORK_PATH
++// candidates before the cache for every image, which is what a framework
++// override needs.
++//
++// Neither hook may call anything: ../Makefile runs nm -u on the produced dylib
++// and fails the build on any undefined symbol, so both bodies are a bare
++// return.
++
++#if IOS >= 16
++
++#include <stdint.h>
++#include <stdbool.h>
++
++#include "machomerger_hook.h"
++
++// dyld4::ProcessConfig::DyldCache::isOverridablePath(char const*) const
++extern bool ORIG(_ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc)(const void *dyldCache, const char *dylibPath);
++bool HOOK(_ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc)(const void *dyldCache, const char *dylibPath)
++{
++	(void)dyldCache;
++	(void)dylibPath;
++	return true;
++}
++
++// dyld4::ProcessConfig::DyldCache::isAlwaysOverridablePath(char const*)
++extern bool ORIG(_ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc)(const char *dylibPath);
++bool HOOK(_ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc)(const char *dylibPath)
++{
++	(void)dylibPath;
++	return true;
++}
++
++#endif
+diff --git a/BaseBin/dyldhook/src/main.S b/BaseBin/dyldhook/src/main.S
+index 97f6853..54f80c7 100644
+--- a/BaseBin/dyldhook/src/main.S
++++ b/BaseBin/dyldhook/src/main.S
+@@ -48,6 +48,26 @@ _MACHOMERGER_ORIG__ZN5dyld44APIs11dlopen_fromEPKciPv:
+ _MACHOMERGER_HOOKTRAMPOLINE__ZN5dyld44APIs11dlopen_fromEPKciPv:
+     b .
+ 
++#if IOS >= 16
++
++.global _MACHOMERGER_ORIG__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc
++.global _MACHOMERGER_HOOKTRAMPOLINE__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc
++_MACHOMERGER_ORIG__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc:
++    nop // Will be replaced with the original first instruction by machomerger
++    // FALLTHROUGH
++_MACHOMERGER_HOOKTRAMPOLINE__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc:
++    b .
++
++.global _MACHOMERGER_ORIG__ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc
++.global _MACHOMERGER_HOOKTRAMPOLINE__ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc
++_MACHOMERGER_ORIG__ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc:
++    nop // Will be replaced with the original first instruction by machomerger
++    // FALLTHROUGH
++_MACHOMERGER_HOOKTRAMPOLINE__ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc:
++    b .
++
++#endif // IOS >= 16
++
+ MAKE_TRAMPOLINE(MACHOMERGER_REAL_START)
+ MAKE_TRAMPOLINE(cerror)
+ MAKE_TRAMPOLINE_ALIAS(__getpid, getpid)

@@ -196,19 +196,30 @@ def main() -> int:
                 out,
             )
 
-        # --- a build that names the shared library dir instead of the dedicated one must fail: the
-        # whole point of the dedicated paths is that /var/jb/usr/lib is never named.  Entries are
-        # exact, so the substring /usr/lib does not satisfy the LIBRARY_DIR assertion.
-        wrong_dir = root / "wrong-dir" / "systemhook.dylib"
-        wrong_dir.parent.mkdir(parents=True)
-        wrong_dir.write_bytes(build_macho(REQUIRED + LEGACY + (FRAMEWORK_DIR, "/usr/lib")))
-        rc, out = run_verify(wrong_dir)
-        check("a library path pointing at the shared dir fails", rc == 1, out)
+        # --- naming a shared root must fail even when both dedicated directories are present.
+        # This is the case a positive-only check let through: all four names and both dedicated
+        # directories in place, plus /Library/Frameworks and /usr/lib, and it exited 0.
+        shared_roots = root / "shared-roots" / "systemhook.dylib"
+        shared_roots.parent.mkdir(parents=True)
+        shared_roots.write_bytes(
+            build_macho(REQUIRED + LEGACY + VALUES + ("/Library/Frameworks", "/usr/lib"))
+        )
+        rc, out = run_verify(shared_roots)
+        check("naming a shared root fails", rc == 1, out)
         check(
-            "the missing dedicated library dir is named",
-            f"FAIL: arm64e: contains the directory {LIBRARY_DIR}" in out,
+            "the shared roots are named in the failure",
+            "FAIL: arm64e: names no shared search root" in out,
             out,
         )
+
+        # --- a legitimate file path under /usr/lib must not be mistaken for the directory itself
+        file_under_shared = root / "file-under-shared" / "systemhook.dylib"
+        file_under_shared.parent.mkdir(parents=True)
+        file_under_shared.write_bytes(
+            build_macho(REQUIRED + LEGACY + VALUES + ("/usr/lib/systemhook.dylib",))
+        )
+        rc, out = run_verify(file_under_shared)
+        check("a file path under /usr/lib does not trip the root check", rc == 0, out)
 
         # --- a universal build is checked slice by slice
         universal = root / "universal" / "systemhook.dylib"
