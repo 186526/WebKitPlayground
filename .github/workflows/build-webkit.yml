@@ -782,8 +782,10 @@ jobs:
           # shipping a deb that only reveals the problem after it is installed.
           python3 scripts/check-xpc-service-bundle-identifiers.py --deb "$PWD/packages/webkit-rootless.deb" || {
             echo "This deb ships XPC services iOS never selects, so installing it replaces nothing."
-            echo "On a Safari-18.x ref that means patches/ios16-xpc-service-bundle-identifier.patch"
-            echo "did not reach the build: this run had apply_patch=${{ inputs.apply_patch }}."
+            echo "Either a bundle is missing (see the FAIL lines above) or one still carries the"
+            echo ".Service suffix. On a Safari-18.x ref the suffix means"
+            echo "patches/ios16-xpc-service-bundle-identifier.patch did not reach the build;"
+            echo "this run had apply_patch=${{ inputs.apply_patch }}."
             exit 1
           }
           # The checker reads plists out of ar and tar, so the cases that pin both directions need

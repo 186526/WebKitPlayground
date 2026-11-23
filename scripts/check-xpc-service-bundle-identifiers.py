@@ -23,9 +23,10 @@ fix underneath it stays invisible.
 
 patches/ios16-xpc-service-bundle-identifier.patch drops the suffix from that one line in
 each of the three files. This script reads the CFBundleIdentifier of every .xpc the package
-ships and fails when an identifier carries the suffix or disagrees with its own directory name.
-It reads a .deb directly (ar + data.tar, without dpkg-deb) so CI can check the artifact it just
-built, and an already-unpacked payload tree for local work.
+ships, fails when a bundle is absent, carries the suffix, or disagrees with its own directory
+name, and requires all four names the device's XPCServices directory has. It reads a .deb
+directly (ar + data.tar, without dpkg-deb) so CI can check the artifact it just built, and an
+already-unpacked payload tree for local work; both modes apply the same rules.
 
 Usage:
   scripts/check-xpc-service-bundle-identifiers.py --deb packages/webkit-rootless.deb
@@ -44,10 +45,11 @@ import tarfile
 from pathlib import Path
 
 # The four XPC services /System/Library/Frameworks/WebKit.framework/XPCServices holds on
-# iOS 16.1, listed from the device over ssh. Only these four are expected to agree with the
-# device; a package may also ship bundles the device does not have, and those are reported
-# without failing. See check() for why .Development is one of them.
-SYSTEM_IDENTIFIERS = (
+# iOS 16.1, listed from the device over ssh. All four are required: ProcessLauncherCocoa.mm:190-212
+# asks for each by name, so a package missing one ships nothing those callers can launch. A
+# package may also carry bundles outside this list, such as .Development, and those are checked
+# for the suffix only.
+REQUIRED_IDENTIFIERS = (
     "com.apple.WebKit.GPU",
     "com.apple.WebKit.Networking",
     "com.apple.WebKit.WebContent",
@@ -164,13 +166,14 @@ def identifier(bundle: str, plist: bytes) -> str:
 def check(bundles: dict[str, bytes]) -> tuple[list[str], list[str], list[str]]:
     """Return the per-bundle table rows, the failures and the notes, in that order.
 
-    Two things make an identifier unusable on the device. The .Service suffix is what the 18.5
-    SDK appends for a pre-17.0 deployment target, and no caller asks for it. A directory name
-    that disagrees with its own CFBundleIdentifier is also fatal on its own: the system
-    enumerates the directory while the caller asks for the identifier.
+    Three things make a package unusable on the device. The .Service suffix is what the 18.5 SDK
+    appends for a pre-17.0 deployment target, and no caller asks for it. A directory name that
+    disagrees with its own CFBundleIdentifier is fatal on its own: the system enumerates the
+    directory while the caller asks for the identifier. A required bundle that is absent is also
+    fatal: ProcessLauncherCocoa.mm:190-212 asks for each of the four by name, so a package that
+    dropped one ships nothing the corresponding call can launch.
 
-    Absence is not a failure here. scripts/package-webkit-device-deb.sh owns which bundles are
-    required, and its lists already vary by tag, so a missing bundle is reported as a note.
+    A bundle outside REQUIRED_IDENTIFIERS is checked for the suffix and reported, not failed.
     """
     rows: list[str] = []
     failures: list[str] = []
@@ -192,21 +195,23 @@ def check(bundles: dict[str, bytes]) -> tuple[list[str], list[str], list[str]]:
             failures.append(
                 f"{bundle}{XPC_SUFFIX}: directory says {bundle} but CFBundleIdentifier says {value}")
             verdict = "mismatch"
-        if bundle not in SYSTEM_IDENTIFIERS and verdict == "ok":
+        if bundle not in REQUIRED_IDENTIFIERS and verdict == "ok":
             # Only reached by a bundle that is correctly named for a bundle the device does not
             # have. .Development is the case: iOS asks for it only when the UI process sets
             # nonValidInjectedCodeAllowed, which a shipped Safari does not, so it is reported
             # rather than failed. A wrongly named bundle is already in `failures`.
-            notes.append(f"{bundle}{XPC_SUFFIX}: no bundle of this name in the device's "
-                         f"{CONTAINER} directory; only the suffix was checked")
+            notes.append(f"{bundle}{XPC_SUFFIX}: not one of the four required names; only the "
+                         f"suffix and the directory/identifier agreement were checked")
         rows.append(f"  {bundle}{XPC_SUFFIX}: {value}  [{verdict}]")
 
-    missing = [name for name in SYSTEM_IDENTIFIERS if name not in bundles]
-    if missing:
-        # One line rather than one per name: which bundles a package must ship is decided by
-        # scripts/package-webkit-device-deb.sh, whose lists differ per tag.
-        notes.append(f"absent from this package: {', '.join(missing)}; the required-artifact "
-                     f"lists live in scripts/package-webkit-device-deb.sh")
+    for name in REQUIRED_IDENTIFIERS:
+        if name not in bundles:
+            # One failure per name so the log names every one that is gone, not just a count.
+            # This is the case a SKIP_INSTALL change would produce: the bundle is simply not in
+            # the package, and the caller that asks for it has nothing to launch.
+            failures.append(
+                f"{name}{XPC_SUFFIX} is missing from this package; ProcessLauncherCocoa.mm:190-212 "
+                f"asks for {name} by name, so nothing would answer that call")
     return rows, failures, notes
 
 
@@ -247,10 +252,11 @@ def main() -> int:
 
     if not bundles:
         # A package with no XPC service replaces no WebContent, Networking or GPU process, so
-        # accepting it would report success for a build that cannot work.
+        # accepting it would report success for a build that cannot work. The names go in the
+        # message because "no bundle at all" is the extreme of the missing-required case.
         print(f"FAIL: {described} ships no {FRAMEWORK}/{CONTAINER}/<name>{XPC_SUFFIX}/{PLIST_NAME}, "
-              f"so there is nothing to check and no process this package could replace",
-              file=sys.stderr)
+              f"so there is nothing to check and no process this package could replace; all four "
+              f"of {', '.join(REQUIRED_IDENTIFIERS)} are missing", file=sys.stderr)
         return 1
 
     rows, failures, notes = check(bundles)
@@ -263,7 +269,8 @@ def main() -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"OK: all {len(bundles)} bundle(s) carry an identifier iOS asks for")
+    print(f"OK: all {len(REQUIRED_IDENTIFIERS)} required bundle(s) are present and carry an "
+          f"identifier iOS asks for ({len(bundles)} shipped)")
     return 0
 
 

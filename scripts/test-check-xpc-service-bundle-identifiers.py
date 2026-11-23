@@ -172,7 +172,20 @@ def case_root_directory() -> None:
             destination.write_bytes(body)
         case_result("the unpacked device layout passes via --root",
                     run([sys.executable, str(SCRIPT), "--root", str(root)]), 0,
-                    ("4 XPC bundle(s)", "OK: all 4 bundle(s)"))
+                    ("4 XPC bundle(s)", "OK: all 4 required bundle(s) are present"))
+
+
+def case_root_partial(present: tuple[str, ...], missing: str) -> None:
+    """A partial tree read by --root must fail exactly as the same partial deb does."""
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work) / "unpacked"
+        for name, body in bundle_files(present).items():
+            destination = root / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(body)
+        case_result(f"--root with only {len(present)} bundle(s) fails and names {missing}",
+                    run([sys.executable, str(SCRIPT), "--root", str(root)]), 1,
+                    (f"FAIL: {missing}.xpc is missing from this package", "asks for"))
 
 
 def case_compression() -> None:
@@ -235,13 +248,29 @@ def main() -> int:
     case_deb("a package named the way the device is passes",
              bundle_files(DEVICE_NAMES), 0,
              ("4 XPC bundle(s)", "com.apple.WebKit.WebContent.xpc: com.apple.WebKit.WebContent  [ok]",
-              "OK: all 4 bundle(s)"))
+              "OK: all 4 required bundle(s) are present"))
 
     # A package that also ships the Development bundle. iOS 16.1 has no such bundle and asks
     # for it only when nonValidInjectedCodeAllowed is set, so it is reported, not failed.
     case_deb("an extra Development bundle is reported but does not fail",
              bundle_files(DEVICE_NAMES + ("com.apple.WebKit.WebContent.Development",)), 0,
-             ("NOTE: com.apple.WebKit.WebContent.Development.xpc", "OK: all 5 bundle(s)"))
+             ("NOTE: com.apple.WebKit.WebContent.Development.xpc",
+              "OK: all 4 required bundle(s) are present and carry an identifier iOS asks for "
+              "(5 shipped)"))
+
+    # A package that dropped two of the four required bundles. This is the shape a SKIP_INSTALL
+    # change would produce, and it shipped green until the four names became required.
+    case_deb("a package missing WebContent fails and names it",
+             bundle_files(("com.apple.WebKit.GPU", "com.apple.WebKit.Networking")), 1,
+             ("FAIL: com.apple.WebKit.WebContent.xpc is missing from this package",
+              "FAIL: com.apple.WebKit.WebContent.CaptivePortal.xpc is missing from this package",
+              "nothing would answer that call"))
+
+    # Only the CaptivePortal WebContent present, so the plain WebContent bundle is the one gone.
+    case_deb("a package with only the CaptivePortal WebContent still fails",
+             bundle_files(("com.apple.WebKit.GPU", "com.apple.WebKit.Networking",
+                           "com.apple.WebKit.WebContent.CaptivePortal")), 1,
+             "FAIL: com.apple.WebKit.WebContent.xpc is missing from this package")
 
     # The reverse direction for the other ways a wrong identifier can ship.
     case_deb("a directory whose identifier disagrees with it fails",
@@ -265,6 +294,14 @@ def main() -> int:
 
     case_compression()
     case_root_directory()
+    # The same partial package the deb cases above reject, read from a tree instead: the two
+    # modes must agree on what a package is missing, or a local --root repro would pass a
+    # package the CI deb check rejects.
+    case_root_partial(("com.apple.WebKit.GPU", "com.apple.WebKit.Networking"),
+                      "com.apple.WebKit.WebContent")
+    case_root_partial(("com.apple.WebKit.GPU", "com.apple.WebKit.Networking",
+                       "com.apple.WebKit.WebContent.CaptivePortal"),
+                      "com.apple.WebKit.WebContent")
     case_deb_missing("a missing deb fails")
     case_not_an_archive("a file that is not an ar archive fails")
     case_patch_produces_the_device_names()
