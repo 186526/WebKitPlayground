@@ -152,7 +152,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="verify-systemhook-") as tmp:
         root = Path(tmp)
 
-        # --- the patched dylib passes and names every variable with its directory
+        # --- the patched dylib passes and carries every variable and both directories
         patched = root / "patched" / "systemhook.dylib"
         patched.parent.mkdir(parents=True)
         patched.write_bytes(build_macho(REQUIRED + LEGACY + VALUES))
@@ -196,16 +196,17 @@ def main() -> int:
                 out,
             )
 
-        # --- variables present but pointing at the wrong directory must fail: the whole point of
-        # the dedicated paths is that /var/jb/usr/lib is never named.
+        # --- a build that names the shared library dir instead of the dedicated one must fail: the
+        # whole point of the dedicated paths is that /var/jb/usr/lib is never named.  Entries are
+        # exact, so the substring /usr/lib does not satisfy the LIBRARY_DIR assertion.
         wrong_dir = root / "wrong-dir" / "systemhook.dylib"
         wrong_dir.parent.mkdir(parents=True)
         wrong_dir.write_bytes(build_macho(REQUIRED + LEGACY + (FRAMEWORK_DIR, "/usr/lib")))
         rc, out = run_verify(wrong_dir)
         check("a library path pointing at the shared dir fails", rc == 1, out)
         check(
-            "the wrong library path is named",
-            f"FAIL: arm64e: __XPC_DYLD_LIBRARY_PATH names {LIBRARY_DIR}" in out,
+            "the missing dedicated library dir is named",
+            f"FAIL: arm64e: contains the directory {LIBRARY_DIR}" in out,
             out,
         )
 

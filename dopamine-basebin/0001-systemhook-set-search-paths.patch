@@ -1,20 +1,73 @@
 diff --git a/BaseBin/systemhook/src/common/common.c b/BaseBin/systemhook/src/common/common.c
-index d9cb86f..a674a48 100644
+index d9cb86f..61c7a22 100644
 --- a/BaseBin/systemhook/src/common/common.c
 +++ b/BaseBin/systemhook/src/common/common.c
-@@ -145,10 +145,23 @@ static kSpawnConfig spawn_config_for_executable(const char* path, char *const ar
+@@ -145,10 +145,76 @@ static kSpawnConfig spawn_config_for_executable(const char* path, char *const ar
  	return (kSpawnConfigInject | kSpawnConfigTrust);
  }
  
 +// True when envp carries name with exactly this value. A spawned process passes its environment
 +// down, so a child of an already overridden parent matches here and keeps its envp untouched
 +// instead of rebuilding the buffer and appending another copy on every generation.
-+// wanted is NULL when JBROOT_PATH could not resolve the jailbreak root; nothing can match then.
++// Both values are non-NULL at every call site: the caller clears the enabled flag when JBROOT_PATH
++// returned NULL, and nothing below runs then, so NULL never reaches strcmp or envbuf_setenv.
 +static bool envbuf_variable_matches(const char *envp[], const char *name, const char *wanted)
 +{
-+	if (wanted == NULL) return false;
 +	const char *existingValue = envbuf_getenv(envp, name);
 +	return existingValue && !strcmp(existingValue, wanted);
++}
++
++// The search paths this hook hands to spawned processes, and what is already in place.
++#define JB_SEARCH_PATH_COUNT 4
++
++typedef struct {
++	const char *name;
++	const char *value;
++} jbSearchPathVariable;
++
++typedef struct {
++	bool enabled;
++	bool present[JB_SEARCH_PATH_COUNT];
++	bool allPresent;
++	bool anyPresent;
++} jbSearchPathState;
++
++// Records which variables already hold the value this hook would write. With the switch off
++// nothing is compared, and both aggregates keep the values that leave the fast paths and both
++// branches behaving exactly as the unpatched code did.
++static jbSearchPathState jbSearchPathStateFor(const char *envp[], bool enabled, const jbSearchPathVariable variables[JB_SEARCH_PATH_COUNT])
++{
++	jbSearchPathState state = { .enabled = enabled, .present = { false }, .allPresent = true, .anyPresent = false };
++	if (!enabled) return state;
++	for (int i = 0; i < JB_SEARCH_PATH_COUNT; i++) {
++		state.present[i] = envbuf_variable_matches(envp, variables[i].name, variables[i].value);
++		if (state.present[i]) {
++			state.anyPresent = true;
++		}
++		else {
++			state.allPresent = false;
++		}
++	}
++	return state;
++}
++
++// Writes the variables that are not already in place. With the switch off nothing is written.
++static void jbSearchPathSet(char **envpp[], const jbSearchPathVariable variables[JB_SEARCH_PATH_COUNT], const jbSearchPathState *state)
++{
++	if (!state->enabled) return;
++	for (int i = 0; i < JB_SEARCH_PATH_COUNT; i++) {
++		if (!state->present[i]) envbuf_setenv(envpp, variables[i].name, variables[i].value);
++	}
++}
++
++// Removes only the values this hook would have written, so a third party that set the same
++// variable for its own purposes keeps it. With the switch off nothing is removed.
++static void jbSearchPathUnset(char **envpp[], const jbSearchPathVariable variables[JB_SEARCH_PATH_COUNT], const jbSearchPathState *state)
++{
++	if (!state->enabled) return;
++	for (int i = 0; i < JB_SEARCH_PATH_COUNT; i++) {
++		if (state->present[i]) envbuf_unsetenv(envpp, variables[i].name);
++	}
 +}
 +
  // 1. Ensure the binary about to be spawned and all of it's dependencies are trust cached
@@ -26,7 +79,7 @@ index d9cb86f..a674a48 100644
  
  static int spawn_exec_hook_common(bool isExec,
  						   const char *path,
-@@ -193,6 +206,56 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -193,6 +259,41 @@ static int spawn_exec_hook_common(bool isExec,
  		});
  	}
  
@@ -43,78 +96,60 @@ index d9cb86f..a674a48 100644
 +	// takes bare file names: dyld reduces an install name such as
 +	// /System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib to its leaf
 +	// and appends only that leaf here, because getFrameworkPartialPath returns NULL for it.
-+	struct { const char *name; const char *value; } searchPathVariables[] = {
++	const jbSearchPathVariable searchPathVariables[JB_SEARCH_PATH_COUNT] = {
 +		{ "DYLD_FRAMEWORK_PATH",       jbFrameworkPath },
 +		{ "__XPC_DYLD_FRAMEWORK_PATH", jbFrameworkPath },
 +		{ "DYLD_LIBRARY_PATH",         jbLibraryPath },
 +		{ "__XPC_DYLD_LIBRARY_PATH",   jbLibraryPath },
 +	};
-+	const int searchPathVariableCount = (int)(sizeof(searchPathVariables) / sizeof(searchPathVariables[0]));
 +
 +	// A DisableJBFrameworkPath boolean in /var/jb/basebin/config.plist turns this off without a
-+	// rebuild. With the key absent, or the file unreadable, the search paths stay on.
-+	xpc_object_t disableSearchPath = jbuserconfig_get_value("DisableJBFrameworkPath");
++	// rebuild. A NULL from JBROOT_PATH turns it off as well, and is decided here rather than at each
++	// use: envbuf_setenv reads its value, so a NULL must never reach the helpers below. With the key
++	// absent, or the file unreadable, the search paths stay on.
 +	bool enableSearchPath = jbFrameworkPath != NULL && jbLibraryPath != NULL;
-+	if (enableSearchPath && disableSearchPath) {
-+		if (xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL && xpc_bool_get_value(disableSearchPath)) {
-+			enableSearchPath = false;
++	if (enableSearchPath) {
++		xpc_object_t disableSearchPath = jbuserconfig_get_value("DisableJBFrameworkPath");
++		if (disableSearchPath) {
++			if (xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL && xpc_bool_get_value(disableSearchPath)) {
++				enableSearchPath = false;
++			}
 +		}
 +	}
-+
-+	// True when that variable already holds the value this hook would write. With the switch off,
-+	// the two flags below take the values that leave both fast paths exactly as they were.
-+	bool searchPathPresent[sizeof(searchPathVariables) / sizeof(searchPathVariables[0])];
-+	bool allSearchPathsPresent = true;
-+	bool anySearchPathPresent = false;
-+	for (int i = 0; i < searchPathVariableCount; i++) {
-+		searchPathPresent[i] = envbuf_variable_matches((const char **)envp, searchPathVariables[i].name, searchPathVariables[i].value);
-+		if (searchPathPresent[i]) {
-+			anySearchPathPresent = true;
-+		}
-+		else {
-+			allSearchPathsPresent = false;
-+		}
-+	}
-+	if (!enableSearchPath) {
-+		allSearchPathsPresent = true;
-+		anySearchPathPresent = false;
-+	}
++	jbSearchPathState searchPathState = jbSearchPathStateFor((const char **)envp, enableSearchPath, searchPathVariables);
 +
  	int JBEnvAlreadyInsertedCount = (int)systemHookAlreadyInserted;
  
  	// Check if we can find at least one reason to not insert jailbreak related environment variables
-@@ -313,7 +376,8 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -313,7 +414,8 @@ static int spawn_exec_hook_common(bool isExec,
  
  	pid_t childPid = -1;
  
 -	if ((shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1) || (!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable)) {
-+	if ((shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1 && allSearchPathsPresent) ||
-+		(!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable && !anySearchPathPresent)) {
++	if ((shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1 && searchPathState.allPresent) ||
++		(!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable && !searchPathState.anyPresent)) {
  		// we're already good, just call orig
  		r = orig(&childPid, envp);
  	}
-@@ -332,6 +396,12 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -332,6 +434,10 @@ static int spawn_exec_hook_common(bool isExec,
  				}
  				envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert);
  			}
 +
 +			// The bare variables cover the spawned process itself. An XPC service such as
 +			// WebContent is started through xpcproxy, which passes along the __XPC_ copy.
-+			for (int i = 0; i < searchPathVariableCount; i++) {
-+				if (!searchPathPresent[i]) envbuf_setenv(&envc, searchPathVariables[i].name, searchPathVariables[i].value);
-+			}
++			jbSearchPathSet(&envc, searchPathVariables, &searchPathState);
  		}
  		else {
  			if (systemHookAlreadyInserted && existingLibraryInserts) {
-@@ -360,6 +430,11 @@ static int spawn_exec_hook_common(bool isExec,
+@@ -360,6 +466,10 @@ static int spawn_exec_hook_common(bool isExec,
  					free(newLibraryInsert);
  				}
  			}
 +			// Only drop the value this hook would have written, so a third party that set the
-+			// same variable for its own purposes keeps it.
-+			for (int i = 0; i < searchPathVariableCount; i++) {
-+				if (searchPathPresent[i]) envbuf_unsetenv(&envc, searchPathVariables[i].name);
-+			}
++			// same variable for its own purposes keeps it. With the switch off nothing is touched,
++			// so the environment passes through as the unpatched code left it.
++			jbSearchPathUnset(&envc, searchPathVariables, &searchPathState);
  			envbuf_unsetenv(&envc, "_SafeMode");
  			envbuf_unsetenv(&envc, "_MSSafeMode");
  		}

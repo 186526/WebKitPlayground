@@ -238,10 +238,12 @@ ssh -t mobile@192.168.2.136 'sudo /var/jb/basebin/jbctl update basebin /var/mobi
 
 **安全模式挡不住 dyld 本身。** 见第八节，`.safe_mode` 只停注入。
 
+**内嵌的 `DYLD_LIBRARY_PATH=/var/jb/usr/lib` 无条件生效，不受任何开关控制。** 五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 里有一条指向 `/var/jb/usr/lib`（来自本仓 `patches/ios18-public-sdk-xpc-main.patch:12`），它是链接期常量，只能重新链接才能去掉。该目录 157 个条目、137 个 `.dylib` 全部成为这类进程的 library 搜索候选。M39 生效后与共享缓存重名的 `liblzma.5.dylib`（190560 字节）与 `libmrc.dylib`（150928 字节）会在这些进程里被 jbroot 的磁盘副本替换。第十一节的 M40 把 library 路径指向专用目录正是为避免这件事，但内嵌那条躲不开。本 mission 不改它：删掉它会让 `.xpc` 完全押在 `__XPC_DYLD_FRAMEWORK_PATH` 的转交行为上，而那个行为尚未验证（十一·七）。
+
 **未验证项：**
 
 - 完整 `gmake -C BaseBin` 与 `jbctl update basebin` 尚未在本机执行。本 mission 只做到：补丁对 tag `3.0.13` `git apply --check` 通过；两个 hook 在 `-DIOS=16` 下编译后 `llvm-nm -u` 为空；`main.S` 在 `IOS=15/16/18` 下分别汇编通过且 15 上不带符号。
-- hook 生效后，Safari 与 WebContent 是否真的用上自建 WebKit，还取决于第五节的搜索路径缺口是否补上；AMFI 已证实采纳这两类路径变量，补丁（第十一节）也已交付四个变量，但补丁本身未在真机构建产物上跑过。补上之后可以用下面的命令直接观察，不需要间接推断。
+- hook 生效后，app 进程（Safari 等）与 `.xpc` 服务进程是否真的用上自建 WebKit，还取决于第五节的搜索路径缺口是否补上。AMFI 已证实采纳这两类路径变量；第十一节交付四个变量，其中 app 进程只能靠它，`.xpc` 由自身的 `LC_DYLD_ENVIRONMENT` 覆盖、M40 是双保险（十一·七）。补丁本身未在**打过补丁**的真机构建产物上跑过。补上之后可以用下面的命令直接观察，不需要间接推断。
 - 重复加载的代价（第四节第三点）在真机上的实际内存增量未测。
 
 ### 上线后怎么确认 hook 真的在起作用
@@ -277,27 +279,34 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 | 本机磁盘上不存在缓存镜像 | 设备 `ls` 逐个检查 `Foundation`/`UIKit`/`CoreFoundation`/`Security`/`WebCore`/`libSystem.B`/`libobjc.A`/`libc++.1`/`libsqlite3` 与 `.fakelib` 清单 |
 | 五个 hook 的参考实现 | `Lessica/Dopamine` 分支 `feat/dyld-framework-overrides`，`BaseBin/dyldhook/src/roothider.c:332-413`、`roothider.S:19-60` |
 | 路径软链与挂载 | 设备 `ls -l /usr/lib/dyld`、`mount`、`readlink /var/jb/basebin/.fakelib/dyld` |
+| 五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 各 4 条 | 设备上 python3 解析 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices/*.xpc/*` 的 load command；`BaseXPCService.xcconfig:68,78` 提供前两条，本仓 `patches/ios18-public-sdk-xpc-main.patch:12` 提供后两条 |
+| `MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 为 0 条 | 设备上 python3 解析 `/Applications/MobileSafari.app/MobileSafari` 的 load command |
+| `.xpc` 的 `@executable_path/..` 两条是死的 | `dyld-1042.1` `DyldProcessConfig.cpp:2135-2141`；设备上以 `DYLD_PRINT_SEARCHING=1` 直接跑 `com.apple.WebKit.WebContent`，候选行落在 `.../WebContent.xpc/../systemhook.dylib`，`found:` 落在 `/var/jb/usr/lib/systemhook.dylib` |
+| 官方 `systemhook.dylib` 不带这四个变量 | 设备 `/usr/lib/systemhook.dylib` 拷回本机（233520 字节，arm64 + arm64e），用 `verify-systemhook-search-paths.py` 判定，每个切片 6 条失败、共 12 条，退出 1 |
 
 ## 十一、另一半：让 systemhook 设置搜索路径
 
-第九节之前回答「dyld 肯不肯用磁盘副本」，那是 `dyldhook` 的补丁。这一节补上接着的一半：**要让 dyld 有目录可找，得由 `systemhook` 把搜索路径交给被拉起的进程**。第五节把它记为缺口，本节把它补上。交付物是同目录下的 `0001-systemhook-set-search-paths.patch`、`verify-systemhook-search-paths.py` 与 `test-verify-systemhook-search-paths.py`。
+第九节之前回答「dyld 肯不肯用磁盘副本」，那是 `dyldhook` 的补丁。这一节补上接着的一半：**要让 dyld 有目录可找，得由 `systemhook` 把搜索路径交给被拉起的进程**。第五节把它记为缺口，本节把它补上。交付物在同目录：`0001-systemhook-set-search-paths.patch`、`verify-systemhook-search-paths.py`、`test-verify-systemhook-search-paths.py`，以及 `logic-harness/run.py`。
 
 结论先写：**两个补丁都装上才有效，任一半单独上线时行为与现在一致。** 依据在十一·五。
 
 ### 十一·一 改了哪几行
 
-补丁只动 `BaseBin/systemhook/src/common/common.c`（Dopamine tag `3.0.13`），`+76 −1`。行号按打完补丁后的文件给出，括号里是官方原行号。
+补丁只动 `BaseBin/systemhook/src/common/common.c`（Dopamine tag `3.0.13`），`+111 −1`。行号按打完补丁后的文件给出，括号里是官方原行号。
 
 | 行 | 内容 |
 | --- | --- |
-| `:148-157`（新增） | 静态函数 `envbuf_variable_matches(envp, name, wanted)`，`wanted` 为 `NULL` 时直接返回假 |
-| `:209-216` | 两条 `JBROOT_PATH` 与说明注释，得到 `jbFrameworkPath`、`jbLibraryPath` |
-| `:218-228` | 表 `searchPathVariables`，四个变量各配一个目录 |
-| `:230-238` | 读 `DisableJBFrameworkPath`，得到 `enableSearchPath`（`JBROOT_PATH` 为 `NULL` 时也为假） |
-| `:240-257` | 逐个比对，得到 `searchPathPresent[]`、`allSearchPathsPresent`、`anySearchPathPresent` |
-| `:379-380`（官方 `:316`） | 「环境已经正确，直接透传」的快路径条件 |
-| `:400-404`（官方 `if (shouldInsertJBEnv)` 块从 `:325` 起，`DYLD_INSERT_LIBRARIES` 在 `:333`） | 设置四个里尚未就位的那些 |
-| `:433-437`（官方 unset `_SafeMode` 在 `:363`） | 按条件 unset 已就位的那些 |
+| `:153-157`（新增） | 静态函数 `envbuf_variable_matches(envp, name, wanted)`：取到值且与 `wanted` 完全相等才算就位 |
+| `:160-172`（新增） | 常量 `JB_SEARCH_PATH_COUNT` 与两个结构体 `jbSearchPathVariable`、`jbSearchPathState` |
+| `:177-191`（新增） | `jbSearchPathStateFor`：开关关闭时直接返回初始状态，否则逐个比对得出 `present[]` 与两个汇总量 |
+| `:194-200`（新增） | `jbSearchPathSet`：开关关闭时直接返回，否则写入尚未就位的变量 |
+| `:204-210`（新增） | `jbSearchPathUnset`：开关关闭时直接返回，否则撤掉已就位的变量 |
+| `:216-217` | 函数头注释新增第 5 条 |
+| `:262-280` | 两条 `JBROOT_PATH`、表 `searchPathVariables`（四个变量各配一个目录） |
+| `:282-295` | 读 `DisableJBFrameworkPath`，得到 `enableSearchPath`，再求 `searchPathState`（`JBROOT_PATH` 为 `NULL` 时 `enableSearchPath` 为假） |
+| `:417-418`（官方 `:316`） | 「环境已经正确，直接透传」的快路径条件 |
+| `:440`（官方 `DYLD_INSERT_LIBRARIES` 写在 `:333`） | 调用 `jbSearchPathSet` |
+| `:472`（官方 unset `_SafeMode` 在 `:363`） | 调用 `jbSearchPathUnset` |
 
 四个变量与各自的值：
 
@@ -308,7 +317,10 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 | `DYLD_LIBRARY_PATH` | `JBROOT_PATH("/Library/WebKitOverride/usr/lib")` | 裸文件名 |
 | `__XPC_DYLD_LIBRARY_PATH` | 同上 | 同上 |
 
-`JBROOT_PATH` 在 `libjailbreak/src/jbroot.h:38` 展开成 `__jbroot_convert_path`，读 `get_jbroot()`；`systemhook/src/main.c:27` 把它实现成返回 `JB_RootPath`，该值由 `initializer()`（`main.c:355` 起）在任何 spawn hook 装上之前填好，所以调用时是有效指针。两条路径在 `spawn_exec_hook_common` 里各求值一次；任一条为 `NULL` 时 `enableSearchPath` 为假，`:400-404` 与 `:433-437` 两个循环都不写也不删变量，快路径退回官方条件（与开关关闭时同一状态）。
+`JBROOT_PATH` 在 `libjailbreak/src/jbroot.h:38` 展开成 `__jbroot_convert_path`，读 `get_jbroot()`；`systemhook/src/main.c:27` 把它实现成返回 `JB_RootPath`，该值由 `initializer()`（`main.c:355` 起）在任何 spawn hook 装上之前填好，所以调用时是有效指针。
+
+任一条 `JBROOT_PATH` 为 `NULL` 时 `enableSearchPath` 为假（`:286`），`jbSearchPathStateFor` 在 `:180` 直接返回初始状态，两个循环在 `:196` 与 `:206` 各自直接返回，快路径退回官方条件。`NULL` 判定发生在任何 `envbuf_getenv`、`strcmp`、`envbuf_setenv` 之前，所以 `NULL` 不会到达任何一个读取它内容的位置。
+
 
 ### 十一·二 为什么四个变量都要设，且两个目录都必须是专用的
 
@@ -392,39 +404,33 @@ dyld 侧的两处源码对应：`JustInTimeLoader.cpp:460` 设 `depOptions.canBe
 
 这是任务点名要求写清的一处判断。`envbuf_setenv` 本身是「存在就替换、不存在就追加」，不会让一条变量在 envp 里出现两份。真正要避免的是**每一代子进程都重新走一遍重建**：父进程把变量交给子进程，子进程若无条件再调 `envbuf_setenv`，每次都重建整个缓冲，快路径永远走不到。
 
-补丁仿照官方 `existingLibraryInserts`（官方 `:186`）的取值方式，先用 `envbuf_getenv` 读出现值，由 `:240-257` 的循环得出 `searchPathPresent[]` 与两个汇总量。`envbuf_variable_matches`（`:148-157`）实质只有两行——先拒绝 `NULL` 的 `wanted`，再要求取到的值与目标值完全相等；**值不同也算未就位**，所以别处设过别的 `DYLD_LIBRARY_PATH`（包括指向 `/var/jb/usr/lib` 的旧值）会被改成我们的值，不会误判成「已经有了」。
+补丁仿照官方 `existingLibraryInserts`（官方 `:186`）的取值方式，先用 `envbuf_getenv` 读出现值，由 `jbSearchPathStateFor`（`:177-191`）的循环得出 `present[]` 与两个汇总量。`envbuf_variable_matches`（`:153-157`）实质只有两行——先要求 `envbuf_getenv` 取到值，再要求它与目标值完全相等；**值不同也算未就位**，所以别处设过别的 `DYLD_LIBRARY_PATH`（包括指向 `/var/jb/usr/lib` 的旧值）会被改成我们的值，不会误判成「已经有了」。
 
 三处用到它：
 
-1. **快路径（`:379-380`）**：四个都就位才允许 `shouldInsertJBEnv` 一侧原样透传 envp；`shouldInsertJBEnv` 为假时要求一个都不在。第一代进程通常不满足，走重建分支；它拉起的子进程继承这四个变量，第二代起命中快路径。
-2. **设置（`:400-404`）**：只设未就位的那几个，已就位的不重写。
-3. **清除（`:433-437`）**：`shouldInsertJBEnv` 为假时撤掉它们，但只撤「值等于我们写的那个」的项，别人设的别的值不动（官方 unset `_SafeMode` 是无条件删，这里没有照抄）。
+1. **快路径（`:417-418`）**：四个都就位才允许 `shouldInsertJBEnv` 一侧原样透传 envp；`shouldInsertJBEnv` 为假时要求一个都不在。第一代进程通常不满足，走重建分支；它拉起的子进程继承这四个变量，第二代起命中快路径。
+2. **设置（`jbSearchPathSet`，`:194-200`，调用点 `:440`）**：只设未就位的那几个，已就位的不重写。
+3. **清除（`jbSearchPathUnset`，`:204-210`，调用点 `:472`）**：`shouldInsertJBEnv` 为假时撤掉它们，但只撤「值等于我们写的那个」的项，别人设的别的值不动（官方 unset `_SafeMode` 是无条件删，这里没有照抄）。
 
-这套判断在 Linux 上验证过：`/tmp/k2-logic/harness.c` 把补丁里**实际的代码块**从打过补丁的 `common.c` 中抽出来编译，链接官方 `envbuf.c` 原样编译出的目标文件，17 项断言全过：
+这套判断在 Linux 上验证过：`dopamine-basebin/logic-harness/run.py` 把补丁里**实际的代码块**从打过补丁的 `common.c` 中抽出来编译，链接官方 `envbuf.c` 原样编译出的目标文件，44 项断言全过（32 项行为断言，12 项源码配对断言）：
 
 ```
-PASS: nothing set: not all present
-PASS: nothing set: nothing present
-PASS: only insert: not all present
-PASS: all four: all present (fast path taken)
-PASS: all four: any present
-PASS: framework only: not all present, so library vars still get written
-PASS: framework only: the two framework vars are present
-PASS: framework only: the two library vars are absent
-PASS: library pointing at the shared dir: treated as not matching
-PASS: library pointing at the shared dir: must be overwritten
-PASS: third-party library value: not claimed as ours
-PASS: third-party library value: not all present
-PASS: switch off, nothing set: fast path exactly as stock
-PASS: switch off, nothing set: no search path considered present
-PASS: null root: no variable considered present
-PASS: null root: fast path exactly as stock
-PASS: null root: nothing announced as present
+python3 dopamine-basebin/logic-harness/run.py /tmp/k2-final/Dopamine-3.0.13
 ```
 
-关键的三条：只有 framework 那两个就位时，library 那两个仍会被写入（不会因为「已有一半」就整体跳过）；`/var/jb/usr/lib` 这种旧值被视为不匹配，因而会被改成专用目录的值；`JBROOT_PATH` 返回 `NULL` 时既不做 `strcmp`，也不把任何变量当作已就位，快路径与未打补丁时一致。
+行为断言覆盖这些组：
 
-`JBROOT_PATH` 那个守卫放在 `envbuf_variable_matches` 里面，而不是只靠 `enableSearchPath`。`:240-257` 的循环在检查 `enableSearchPath` 之前就跑了；若让 `wanted` 直接进 `strcmp`，`NULL` 会在那里被比较，属未定义行为。函数自己拒绝 `NULL` 之后，循环无论 `enableSearchPath` 是什么都不会碰到空指针。
+- **状态判定**：空环境、只有 `DYLD_INSERT_LIBRARIES`、四个全在、只有 framework 那两个、library 指向 `/var/jb/usr/lib` 的旧值、第三方设的别的值。
+- **设置**：空环境写入四个；已有 framework 两个时补写 library 两个；四个都在时不动；第三方值被替换成我们的值；旧共享目录值被替换成专用目录。
+- **清除**：四个都是我们的值时全删；`DYLD_INSERT_LIBRARIES` 保留；第三方值不删；只撤已就位的那些。
+- **开关关闭**（`enabled=false`）：设置循环在空环境上不写任何变量且环境仍为空；清除循环保留继承来的四个值；`jbSearchPathStateFor` 不做任何比对，`present[]` 全假。
+- **`JBROOT_PATH` 为 `NULL`**：两个循环都不动环境，前后一致。
+
+关键的四条：只有 framework 那两个就位时，library 那两个仍会被写入（不会因为「已有一半」就整体跳过）；`/var/jb/usr/lib` 这种旧值被视为不匹配，因而会被改成专用目录的值；开关关闭时两个循环各自在入口返回，是「原样不碰」而不是把变量 unset 掉；`JBROOT_PATH` 返回 `NULL` 时同样两个循环都不执行，快路径与未打补丁时一致。
+
+`NULL` 判定在循环之前：`enableSearchPath` 在 `:286` 由两条 `JBROOT_PATH` 的结果决定，`:180` 与两个循环入口的 `:196`、`:206` 都以它为门槛。所以 `envbuf_getenv`、`strcmp`、`envbuf_setenv` 都不会收到空指针——`envbuf_setenv` 对值做 `strlen`，收到 `NULL` 会直接段错误。这一条由行为断言 `null root, both loops: environment unchanged` 固定。
+
+12 项源码配对断言读 `common.c` 的两条 `JBROOT_PATH` 与 `searchPathVariables` 数组，检查四个变量名各自绑定到哪个指针，以及脚本自己那张表是否与之相同。它是补 P2 指出的一个缺口：行为断言跑的是 harness 里的表，补丁若把某个变量的值换成另一个目录，行为断言仍然全绿。实测把 `DYLD_LIBRARY_PATH` 的值改成 `jbFrameworkPath` 后，这一项报 `FAIL: common.c binds DYLD_LIBRARY_PATH to jbLibraryPath`、退出 1。
 
 ### 十一·五 与 dyldhook 那一半缺一不可
 
@@ -459,20 +465,49 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 
 两半的回滚手段不同：这一半可以运行时停用（十一·八），那一半要换回旧 `basebin.tar` 并触发一次用户空间重启（第八节）。
 
-### 十一·七 四个变量各服务哪条路径
+### 十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对
 
-- `DYLD_FRAMEWORK_PATH`：服务被 spawn 的进程本身，例如 Safari、微信、Chrome 这些宿主进程，用于 `<名字>.framework/<同名叶子>` 形状的 install name。
-- `__XPC_DYLD_FRAMEWORK_PATH`：服务经 `xpcproxy` 拉起的 XPC 服务进程，WebKit 的 `WebContent`、`Networking` 是这一类，处理的 install name 形状同上。
-- `DYLD_LIBRARY_PATH`：与 `DYLD_FRAMEWORK_PATH` 同一批进程，处理 `getFrameworkPartialPath` 归约失败的那些 install name（`WebCore.framework/Frameworks/libwebrtc.dylib` 这类）。
-- `__XPC_DYLD_LIBRARY_PATH`：与 `__XPC_DYLD_FRAMEWORK_PATH` 同一批 XPC 进程，处理同一批归约失败的 install name。
+进程分两类，覆盖手段不同。
+
+**app 进程只认环境变量。** `/Applications/MobileSafari.app/MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 是 0 条，只导入 `MobileSafariUI`、`Foundation`、`libobjc.A.dylib`、`libSystem.B.dylib`。这类进程没有自己的搜索路径声明，dyld 只能从环境里拿到目录，所以四个变量是它们唯一的来源。
+
+**`.xpc` 服务进程由自身的 load command 覆盖。** 设备上五个 `.xpc`（`com.apple.WebKit.GPU`、`Networking`、`WebContent`、`WebContent.CaptivePortal`、`WebContent.Development`）各带 4 条 `LC_DYLD_ENVIRONMENT`：
+
+```
+DYLD_FRAMEWORK_PATH=@executable_path/..
+DYLD_LIBRARY_PATH=@executable_path/..
+DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
+DYLD_LIBRARY_PATH=/var/jb/usr/lib
+```
+
+这 4 条是链接期写进二进制的，不是事后注入：全仓没有 `install_name_tool -add_rpath`，也没有 `insert_dylib`。前两条来自上游 `BaseXPCService.xcconfig:68,78`，后两条来自本仓的 `patches/ios18-public-sdk-xpc-main.patch:12`（`WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 展开成两条 `-Wl,-dyld_env`）。
+
+**前两条是死的。** `DyldProcessConfig.cpp:2135-2141` 把 `@executable_path` 相对 `mainExecutablePath` 展开。WebContent 的 `mainExecutablePath` 是
+
+```
+.../WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent
+```
+
+于是 `@executable_path/..` 指向 `.../XPCServices/com.apple.WebKit.WebContent.xpc/..`，也就是 `.../XPCServices/`。按搜索结果拼出来的候选是
+
+```
+.../com.apple.WebKit.WebContent.xpc/../systemhook.dylib
+.../com.apple.WebKit.WebContent.xpc/../WebKit.framework/WebKit
+```
+
+两者都不存在：`XPCServices/` 下只有 `.xpc` 包，没有 `systemhook.dylib`，也没有 `WebKit.framework`。设备上直接跑该 `.xpc` 并置 `DYLD_PRINT_SEARCHING=1` 能看到这两条候选确实被打印出来，而加载最终走的是别的路径：`find path "/usr/lib/systemhook.dylib"` 的候选里有 `.../WebContent.xpc/../systemhook.dylib` 与 `/var/jb/usr/lib/systemhook.dylib` 两条，`found:` 落在后者。所以 `.xpc` 真正依靠的是后两条绝对路径。前两条不改写：它们来自上游 xcconfig，删掉会让上游行为偏离。
+
+**M40 与内嵌那一对叠加时是什么关系。** 不是「内嵌那对不够用」，而是「内嵌那对不可关闭，M40 可关闭」：内嵌变量要重新链接才能去掉，M40 有 `DisableJBFrameworkPath` 运行期开关（十一·八）。两者同时在场时 M40 排在内嵌之前被 dyld 读到，覆盖内嵌的 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`；`WebKitOverride` 目录不存在时 M40 的候选全部 `stat` 失败，dyld 自动落回内嵌那对，行为与只装内嵌时相同。所以 M40 对 `.xpc` 是双保险，对 app 进程是唯一来源。
+
+**新增风险：内嵌的 `DYLD_LIBRARY_PATH=/var/jb/usr/lib` 不受 M40 开关控制。** 它会把 `/var/jb/usr/lib` 下 157 个条目（其中 137 个 `.dylib`）全部加进每个 `.xpc` 进程的 library 搜索路径。M39 的 `isOverridablePath` 生效后，与共享缓存重名的 `liblzma.5.dylib`（190560 字节）与 `libmrc.dylib`（150928 字节）会在这类进程里被 jbroot 的磁盘副本替换，替换对象是与 WebKit 无关的系统库。十一·二 把 M40 的 library 路径挪到 `/var/jb/Library/WebKitOverride/usr/lib` 正是为了避开这件事，而内嵌那条躲不开，因为它只能靠重新链接去掉。本 mission 不改它：删掉 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 会让 `.xpc` 完全押在 `__XPC_DYLD_FRAMEWORK_PATH` 的转交行为上（见下），而那个行为尚未验证。
 
 裸名与 `__XPC_` 版本两两成对，因为 dyld 对两者的归约逻辑完全相同，区别只在 dyld 从哪个变量读到目录。
 
-**这一条的证据强度必须写明：`__XPC_` 前缀在设备上的具体转交位置没有定位到。** 查过的三处都没有这个字符串：`/usr/libexec/xpcproxy` 的字符串表、`/sbin/launchd`、以及共享缓存（能搜到 3 处 `__XPC_` 字面量，但没有 `__XPC_DYLD_FRAMEWORK_PATH` 这个完整字符串）。`xpcproxy` 与 `libxpc` 的源码不在 `apple-oss-distributions` 的公开仓库里（`libxpc` 仓库 404，`launchd` 仓库只有 `support/launchproxy.c`）。
+**`__XPC_` 前缀在设备上的具体转交位置没有定位到。** 查过的三处都没有这个字符串：`/usr/libexec/xpcproxy` 的字符串表、`/sbin/launchd`、以及共享缓存（能搜到 3 处 `__XPC_` 字面量，但没有 `__XPC_DYLD_FRAMEWORK_PATH` 这个完整字符串）。`xpcproxy` 与 `libxpc` 的源码不在 `apple-oss-distributions` 的公开仓库里（`libxpc` 仓库 404，`launchd` 仓库只有 `support/launchproxy.c`）。
 
-所以「`xpcproxy` 只透传 `__XPC_` 版本」这句话是按 Lessica 分支的既有实现推断的，不是本机验证过的结论。这不影响补丁本身：两个都设，不依赖哪一个是唯一有效的那条。**未验证**：`WebContent` 是否真的因为 `__XPC_DYLD_FRAMEWORK_PATH` 而拿到覆盖，需按十一·九在设备上观察。
+所以「`xpcproxy` 只透传 `__XPC_` 版本」这句话是按 Lessica 分支的既有实现推断的，不是本机验证过的结论。保留内嵌那一对正是为了不依赖它：`.xpc` 读自己的 load command，不需要任何人转发。四个变量仍然都设，任何一条单独失效都不影响覆盖。
 
-另外一条与 M39 交叉的事实：`systemhook/src/main.c:218-222` 的 `tweaksDisabledPathSuffixes` 把 `/usr/libexec/xpcproxy` 排除在 **tweak 注入**之外（即不给它塞 `TweakLoader`），这不影响 `spawn_exec_hook_common` 设置别的环境变量。所以不能指望 `DYLD_INSERT_LIBRARIES` 顺带把路径带给 WebContent——这正是 `__XPC_` 那份要单独设的原因。
+另外一条与 M39 交叉的事实：`systemhook/src/main.c:218-222` 的 `tweaksDisabledPathSuffixes` 把 `/usr/libexec/xpcproxy` 排除在 **tweak 注入**之外（即不给它塞 `TweakLoader`），这不影响 `spawn_exec_hook_common` 设置别的环境变量。所以不能指望 `DYLD_INSERT_LIBRARIES` 顺带把路径带给 WebContent。
 
 ### 十一·八 开关与回退
 
@@ -487,13 +522,15 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 /var/jb/usr/bin/plutil -remove DisableJBFrameworkPath /var/jb/basebin/config.plist
 ```
 
-键不存在、文件不可读、或值不是布尔真时一律视为启用。写入 `true` 后，`:240-257` 的循环算完四个变量后被强制改成 `allSearchPathsPresent = true`、`anySearchPathPresent = false`，效果是：
+键不存在、文件不可读、或值不是布尔真时一律视为启用。写入 `true` 后 `enableSearchPath` 为假，`jbSearchPathStateFor`（`:177-191`）在入口 `:180` 直接返回初始状态（`present[]` 全假、`allPresent = true`、`anyPresent = false`），两个循环在各自入口 `:196` 与 `:206` 直接返回。效果是：
 
-- 设置分支（`:400-404`）里四个变量全部跳过；
-- 清除分支（`:433-437`）里一个都不 unset；
-- 快路径退回官方 `:316` 原式：`(shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1) || (!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable)`。
+- 设置循环与清除循环都不执行，四个变量一个不写、一个不删，环境原样透传；
+- 快路径的两项条件取到 `allPresent = true`、`anyPresent = false`，于是 `:417-418` 化简成官方 `:316` 的原式：`(shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1) || (!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable)`。
+- 四个变量也不参与任何比对，所以一个「本来就在环境里、值也对」的项不会被误认成我们的。
 
-也就是关掉之后 `common.c` 的行为与未打补丁时逐条相同，不是「大概一样」。这一条由 harness 的 `switch off, nothing set: fast path exactly as stock` 与 `switch off, nothing set: no search path considered present` 两项固定。
+也就是关掉之后 `common.c` 的行为与未打补丁时逐条相同，不是「大概一样」。这一条由 harness 的四项固定：`set, switch off, empty env: no variable written`、`set, switch off, empty env: environment still empty`、`unset, switch off: all four inherited values kept`、`switch off, nothing set: fast path exactly as stock`。
+
+「原样不碰」而不是「unset 掉」是要点：开关关闭时若还把四个变量 unset，等于替用户改环境；补丁的目标是回到未打补丁的行为，那时这四个变量根本不被提起。
 
 没有用 `#ifdef`，因为那需要重新构建才能在设备上验证开关本身，而运行期开关可以在装好的机器上直接试。
 
@@ -505,7 +542,11 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 DYLD_PRINT_SEARCHING=1 /var/jb/usr/bin/ls /nonexistent-k2
 ```
 
-出现哪一条取决于该进程要加载哪些镜像。`/var/jb/usr/bin/ls` 依赖 `libiosexec.1.dylib`，它的 install name 是 `/usr/lib/libiosexec.1.dylib`，归约同样失败，所以 `ls` 打印的是 library 那条候选（设备实测输出为 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/libiosexec.1.dylib"`，目录换成本节的专用目录即可）。要看 framework 那条候选，用真的加载 `WebKit.framework` 的进程，例如 Safari 或 `com.apple.WebKit.WebContent`，输出里才会出现 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`；要看 `libwebrtc.dylib` 那条，用 `WebContent` 或 `com.apple.WebKit.Networking`。有候选行说明 systemhook 把目录交给了 dyld 且 dyld 采纳；若后面还跟着 `found: dylib-from-disk-to-override-cache: "..."`，说明 M39 那一半也在起作用。缺 systemhook 这一半时候选行不出现；缺 dyldhook 那一半时候选行出现但不被采用——两种情况可以直接区分。
+出现哪一条取决于该进程要加载哪些镜像。`/var/jb/usr/bin/ls` 依赖 `libiosexec.1.dylib`，它的 install name 是 `/usr/lib/libiosexec.1.dylib`，归约同样失败，所以 `ls` 打印的是 library 那条候选（设备实测输出为 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/libiosexec.1.dylib"`，目录换成本节的专用目录即可）。要看 framework 那条候选，用真的加载 `WebKit.framework` 的 app 进程，例如 Safari；要看 `libwebrtc.dylib` 那条，用 `WebContent` 或 `com.apple.WebKit.Networking`。有候选行说明 systemhook 把目录交给了 dyld 且 dyld 采纳；若后面还跟着 `found: dylib-from-disk-to-override-cache: "..."`，说明 M39 那一半也在起作用。缺 systemhook 这一半时候选行不出现；缺 dyldhook 那一半时候选行出现但不被采用——两种情况可以直接区分。
+
+**在 `.xpc` 上看候选行时要先分清来源。** 这类进程自身带 4 条 `LC_DYLD_ENVIRONMENT`（十一·七），所以即使 M40 关闭也有候选行，只是目录不同：内嵌那对给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`，M40 给出 `/var/jb/Library/WebKitOverride/...`。要确认 M40 生效，看候选路径落在哪个目录，而不是看候选行有没有出现。设备上直接跑 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1`，总计 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行。
+
+app 进程本身没有 `LC_DYLD_ENVIRONMENT`，所以对它们「候选行出现与否」才是 M40 是否生效的判据。
 
 `typeName` 对 framework 与 library 两类变量返回同一个字符串 `DYLD_FRAMEWORK/LIBRARY_PATH`，所以打印里看不出是哪一个变量供的目录，只能从候选路径落在哪个目录反推。
 
@@ -515,13 +556,16 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 
 | 文件 | 作用 |
 | --- | --- |
-| `dopamine-basebin/0001-systemhook-set-search-paths.patch` | 唯一源码改动，只动 `common.c`，`+76 −1` |
+| `dopamine-basebin/0001-systemhook-set-search-paths.patch` | 唯一源码改动，只动 `common.c`，`+111 −1` |
 | `dopamine-basebin/verify-systemhook-search-paths.py` | 对构建出的 `systemhook.dylib` 做静态断言 |
 | `dopamine-basebin/test-verify-systemhook-search-paths.py` | 上面脚本自身的回归测试，24 个用例 |
+| `dopamine-basebin/logic-harness/run.py` | 把补丁里的静态函数抽出来编译运行，44 项断言（32 行为 + 12 源码配对） |
 
 验证脚本自己解析 Mach-O 的 `__cstring`，只用 `python3`，不需要 LLVM、Xcode 或越狱设备。字符串按 NUL 切分后做精确匹配，不是子串匹配——`DYLD_FRAMEWORK_PATH` 是 `__XPC_DYLD_FRAMEWORK_PATH` 的子串，子串匹配会在「裸名变量的那条 hunk 丢了」时仍然通过，这个洞是测试自己抓出来的。
 
-对每个架构切片断言四件事：四个变量名都在；每个变量各自命名正确的目录（`DYLD_FRAMEWORK_PATH` 与 `__XPC_DYLD_FRAMEWORK_PATH` 对着 `/Library/WebKitOverride`，`DYLD_LIBRARY_PATH` 与 `__XPC_DYLD_LIBRARY_PATH` 对着 `/Library/WebKitOverride/usr/lib`）；`DYLD_INSERT_LIBRARIES` 仍在（丢了它等于弄坏 Dopamine 的注入）；文件本身是 Mach-O。
+对每个架构切片断言四件事：四个变量名都在；两个目录字符串都在（`/Library/WebKitOverride` 与 `/Library/WebKitOverride/usr/lib`）；`DYLD_INSERT_LIBRARIES` 仍在（丢了它等于弄坏 Dopamine 的注入）；文件本身是 Mach-O。
+
+**这一层不检查「哪个变量配哪个目录」。** 真实产物里四个变量名排在 `__cstring` 的一段、两个目录串排在另一段，中间没有配对关系：补丁把目录存成 `{name, value}` 数组，而 value 字段是运行期的 `jbFrameworkPath`、`jbLibraryPath` 两个指针，目录字面量本身是别处的 `JBROOT_PATH` 实参。所以静态脚本只能证明「名字在、目录在、没有多出别的目录」，配对要回到写配对的地方查。`logic-harness/run.py` 的 12 项配对断言读 `common.c` 里的两条 `JBROOT_PATH` 与 `searchPathVariables` 数组，检查每个变量名绑定到哪个指针，并核对脚本自己那张表是否相同。实测把 `DYLD_LIBRARY_PATH` 的值改成 `jbFrameworkPath` 后，这一项报 `FAIL: common.c binds DYLD_LIBRARY_PATH to jbLibraryPath`、退出 1。
 
 `llvm-nm` 存在时才额外查未定义符号：`systemhook/Makefile` 没有 `CHECK_SELF_CONTAINED`（该规则只在 `dyldhook/Makefile:12`），所以未定义符号属正常，默认只报数量，给 `--baseline <原版 dylib>` 时才比对有没有新增。
 
@@ -531,11 +575,22 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 git apply --check 0001-systemhook-set-search-paths.patch             # 对 tag 3.0.13 pristine 源码树，通过
 python3 test-verify-systemhook-search-paths.py                        # 24/24 通过
 python3 verify-systemhook-search-paths.py <真实编译的四变量 Mach-O>    # 通过（/tmp/k2-macho/new4.dylib，arm64）
-python3 verify-systemhook-search-paths.py <官方 dylib>                # 8 条断言失败，退出 1
-cc harness.c -o harness && ./harness                                  # 17/17 通过
+python3 verify-systemhook-search-paths.py <官方 systemhook.dylib>     # 每个切片 6 条失败，共 12 条，退出 1
+python3 logic-harness/run.py <Dopamine tree>                          # 44/44 通过
 cc t.c -o t && ./t                                                    # getFrameworkPartialPath 移植，五位输入结果见十一·二
 ```
 
-`harness.c` 用的不是仿写：`block.inc` 与 `helper.inc` 由脚本从打过补丁的 `common.c` 里直接提取，链接官方 `envbuf.c` 原样编译出的目标文件。所以跑的是补丁里的实际代码，不是重新实现。
+官方 `systemhook.dylib` 那条用的是设备上 `/usr/lib/systemhook.dylib`（233520 字节，arm64 与 arm64e 两个切片）原样拷回来的文件，不是合成的 fixture：每个切片 6 条断言失败（四个变量名 + 两个目录），两切片共 12 条，退出 1。
 
-**未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「真实构建出的 `systemhook.dylib` 带着这四个字符串」这一步没有在真实产物上跑过，本 mission 用三件事替代：脚本对真实编译出的 Mach-O 判定正确（上表第三条），反例被判失败（第四条），以及补丁行为由 24 个静态用例与 17 项逻辑断言双向固定。
+`logic-harness/run.py` 用的不是仿写：它按标记从打过补丁的 `common.c` 里截出 `envbuf_variable_matches` 到三个静态函数这一整段原样编译（`helpers.inc`），链接官方 `envbuf.c` 原样编译出的目标文件，编译选项 `-std=gnu11 -Wall -Wextra -Werror`。所以跑的是补丁里的实际代码，不是重新实现。
+
+harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，未落盘）：
+
+| 变异 | 结果 |
+| --- | --- |
+| `jbSearchPathSet` 去掉 `enabled` 门槛 | 2 项失败 |
+| 恢复旧形状（关闭开关仍做比对） | 3 项失败 |
+| 两者叠加 | 5 项失败 |
+| 旧 unset 缺陷（门槛去掉且比对常跑） | 5 项失败，含 `unset, switch off: all four inherited values kept` |
+
+**未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「**打过本补丁**构建出的 `systemhook.dylib` 带着这四个字符串」没有在真实产物上跑过。本 mission 用四件事替代：脚本对真实编译出的 Mach-O 判定正确，脚本对设备上取回的真实官方 dylib 判失败，补丁行为由 24 个静态用例固定，以及由 44 项逻辑与配对断言固定。

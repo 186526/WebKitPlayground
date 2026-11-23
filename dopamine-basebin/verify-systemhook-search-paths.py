@@ -3,8 +3,8 @@
 
 Dopamine 3.0.13's systemhook sets only DYLD_INSERT_LIBRARIES, so dyld is never told where a
 WebKit built outside the shared cache lives.  The patch in this directory adds four variables;
-this script proves each one is in the produced dylib with the right value, and that the variable
-Dopamine already relied on is still there.
+this script proves all four names are in the produced dylib, that both search directories are
+there, and that the variable Dopamine already relied on is still there.
 
 A search path is a directory that dyld appends a relative name to, and which name it appends
 depends on the install name.  The layout the patch expects is therefore two directories:
@@ -27,6 +27,15 @@ leaf, so the file must sit at the top of the library directory.
 
 The values must not point at /var/jb/usr/lib: it shares liblzma.5.dylib and libmrc.dylib leaf
 names with the shared cache, and every process would treat those as candidates.
+
+What a string dump can and cannot show: it proves the four names and the two directories are
+present, and it proves no other directory string was added, but it cannot pair a name with its
+value.  In a real build the four names sit in one run of __cstring and the two directories in
+another, because the patch stores them as an array of {name, value} whose value fields are the
+run-time pointers jbFrameworkPath and jbLibraryPath -- the directory literals themselves are the
+JBROOT_PATH argument strings elsewhere in the same section.  Pairing therefore has to be checked
+where the pairs are written, in common.c; logic-harness/run.py does that by driving the extracted
+code against a stock envbuf.c and asserting which variable receives which directory.
 
 The strings are read from the __cstring section of every architecture slice, by parsing the
 Mach-O here rather than shelling out, so the script runs anywhere python3 does.  The undefined
@@ -72,12 +81,9 @@ REQUIRED_STRINGS = (
     "DYLD_LIBRARY_PATH",
     "__XPC_DYLD_LIBRARY_PATH",
 )
-EXPECTED_VALUES = {
-    "DYLD_FRAMEWORK_PATH": FRAMEWORK_DIR,
-    "__XPC_DYLD_FRAMEWORK_PATH": FRAMEWORK_DIR,
-    "DYLD_LIBRARY_PATH": LIBRARY_DIR,
-    "__XPC_DYLD_LIBRARY_PATH": LIBRARY_DIR,
-}
+# The two directories the array must name, in either order.  Pairing a name with its directory
+# is checked in logic-harness/run.py; see the module docstring for why a string dump cannot.
+EXPECTED_DIRS = (FRAMEWORK_DIR, LIBRARY_DIR)
 PRESERVED_STRINGS = ("DYLD_INSERT_LIBRARIES",)
 
 
@@ -216,8 +222,8 @@ def main(argv: list[str]) -> int:
             check(f"{arch}: contains {wanted}", wanted in entries)
         for wanted in PRESERVED_STRINGS:
             check(f"{arch}: keeps {wanted}", wanted in entries)
-        for name, value in EXPECTED_VALUES.items():
-            check(f"{arch}: {name} names {value}", value in entries)
+        for wanted in EXPECTED_DIRS:
+            check(f"{arch}: contains the directory {wanted}", wanted in entries)
 
     symbols = undefined_symbols(args.binary)
     if symbols is None:
