@@ -19,6 +19,7 @@ Usage: python3 scripts/test-check-text-extraction-availability.py
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -202,14 +203,77 @@ import Foundation
 failures: list[str] = []
 
 
+def apply_hunk(text: str) -> str:
+    """Apply the patch's single hunk to `text`, the way git apply would.
+
+    The context lines decide where the insertion lands, so a patch whose context no longer
+    matches the fixture must fail here rather than splice itself in at a guessed anchor. Only
+    one hunk is supported, which is all this patch has; a second hunk is reported as a mismatch
+    instead of being silently ignored.
+    """
+    hunk_lines: list[str] = []
+    in_hunk = False
+    for line in PATCH.read_text(encoding="utf-8").splitlines():
+        if line.startswith("@@") or line.startswith("diff ") or line.startswith("--- ") or line.startswith("+++ "):
+            if line.startswith("@@"):
+                in_hunk = True
+                hunk_lines.append(line)
+            else:
+                in_hunk = False
+            continue
+        if in_hunk and line[:1] in (" ", "+", "-"):
+            hunk_lines.append(line)
+    starts = [line for line in hunk_lines if line.startswith("@@")]
+    if len(starts) != 1:
+        raise ValueError(f"expected one hunk in {PATCH.name}, found {len(starts)}")
+
+    old_start = int(re.match(r"@@ -(\d+)", starts[0]).group(1))
+    # Split the hunk into the context before the addition, the added lines, and the context
+    # after. The context is only verified against the fixture; re-inserting it would duplicate
+    # lines the fixture already has.
+    before: list[str] = []
+    added: list[str] = []
+    after: list[str] = []
+    for line in hunk_lines:
+        if line.startswith("@@"):
+            continue
+        marker, body = line[0], line[1:]
+        if marker == "-":
+            raise ValueError("this patch removes no line, so a removal means it changed shape")
+        if marker == "+":
+            added.append(body)
+        elif added:
+            after.append(body)
+        else:
+            before.append(body)
+    if not added:
+        raise ValueError("this patch adds no line, so it would not fix anything")
+
+    # git apply counts both sides from the hunk header, so both context runs must match exactly.
+    first = old_start - 1
+    text_lines = text.splitlines()
+    if text_lines[first:first + len(before)] != before:
+        raise ValueError(
+            "the patch context before the addition does not match the fixture:\n"
+            f"  patch:   {before}\n"
+            f"  fixture: {text_lines[first:first + len(before)]}"
+        )
+    after_start = first + len(before)
+    if text_lines[after_start:after_start + len(after)] != after:
+        raise ValueError(
+            "the patch context after the addition does not match the fixture:\n"
+            f"  patch:   {after}\n"
+            f"  fixture: {text_lines[after_start:after_start + len(after)]}"
+        )
+    return "\n".join(text_lines[:after_start] + added + text_lines[after_start:]) + "\n"
+
+
 def patched_text() -> str:
-    """Splice the patch's added lines into the unpatched fixture at its anchor."""
-    added = [
-        line[1:]
-        for line in PATCH.read_text(encoding="utf-8").splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    ]
-    return UNPATCHED.replace(REQUEST_DECLARATION, "\n".join(added) + "\n" + REQUEST_DECLARATION)
+    """The fixture with the patch applied, rebuilt from the patch rather than from an anchor."""
+    try:
+        return apply_hunk(UNPATCHED)
+    except ValueError as error:
+        raise AssertionError(f"the patch does not apply to the fixture: {error}") from error
 
 
 def run(text: str) -> subprocess.CompletedProcess[str]:
@@ -255,6 +319,14 @@ def case_missing_file() -> None:
     print("PASS a tag without the file is skipped")
 
 
+def _first_difference(left: str, right: str) -> int:
+    """Return the 1-based line number where two texts first differ, for a readable failure."""
+    for index, (left_line, right_line) in enumerate(zip(left.splitlines(), right.splitlines()), 1):
+        if left_line != right_line:
+            return index
+    return min(len(left.splitlines()), len(right.splitlines())) + 1
+
+
 def case_patch_matches_fixture() -> None:
     """The patch must be the only change to the fixture, and it must be one added line."""
     added = [
@@ -273,10 +345,21 @@ def case_patch_matches_fixture() -> None:
     if removed:
         failures.append(f"the patch must not change any existing line, removes {removed}")
         return
-    if patched_text() != UNPATCHED.replace(
+    # patched_text() rebuilds the file from the patch's own hunk, so this compares the patch's
+    # result against the real upstream file instead of against a second copy of the same anchor.
+    try:
+        spliced = patched_text()
+    except AssertionError as error:
+        failures.append(str(error))
+        return
+    expected = UNPATCHED.replace(
         REQUEST_DECLARATION, added[0] + "\n" + REQUEST_DECLARATION
-    ):
-        failures.append("splicing the patch into the fixture did not reproduce the patched file")
+    )
+    if spliced != expected:
+        failures.append(
+            "the patch's hunk does not reproduce the annotated fixture; "
+            f"first difference at line {_first_difference(spliced, expected)}"
+        )
         return
     print("PASS the patch adds one annotation line and touches nothing else")
 
@@ -290,10 +373,18 @@ def main() -> int:
          ("FAIL: WKTextExtractionRequest (line 124) references WKTextExtractionItem",
           "but WKTextExtractionRequest carries no @available annotation;",
           "9 top-level @objc declaration(s)"))
-    case("the patched 18.3.1 file passes",
-         patched_text(), 0,
-         ("WKTextExtractionRequest (line 125): iOS 17.0, macOS 12.0  references: WKTextExtractionItem",
-          "OK: all 9 available type(s)"))
+    try:
+        applied = patched_text()
+    except AssertionError as error:
+        # A patch that no longer applies is the failure mode this case exists to catch, so it
+        # joins the failure list instead of escaping as a traceback and hiding later cases.
+        failures.append(str(error))
+        applied = None
+    if applied is not None:
+        case("the patched 18.3.1 file passes",
+             applied, 0,
+             ("WKTextExtractionRequest (line 125): iOS 17.0, macOS 12.0  references: WKTextExtractionItem",
+              "OK: all 9 available type(s)"))
     # The reverse direction has to fail for each way the missing annotation can come back, or a
     # green run says nothing about the patch.
     case("an annotation naming a lower version than the type it references fails",
