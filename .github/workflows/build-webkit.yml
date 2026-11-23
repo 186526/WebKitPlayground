@@ -233,11 +233,29 @@ jobs:
           # source and needs no patch. Safari-17.6 is the first tag with the sdk-keyed
           # EXCLUDED_SOURCE_FILE_NAMES[sdk=iphone*] the patch rewrites. Safari-17.2 and 16.6 have no
           # such file at all, so a skip on those refs is correct rather than stale.
+          #
+          # patches/ios18-public-sdk-text-extraction-availability.patch annotates
+          # WKTextExtractionRequest in Source/WebKit/WebKitSwift/TextExtraction/WKTextExtractionItem.swift.
+          # Safari-18.0 is the first tag that ships WebKitSwift/TextExtraction at all; Safari-17.6,
+          # 17.4, 17.2, 16.6 and 17.0 have no such directory, so a skip on those refs is correct
+          # rather than stale. Safari-18.0 and 18.3.1 ship the file byte for byte identical, which
+          # is why one patch covers both.
+          #
+          # WKWebView.mm needs no change for the same reason the annotation is enough on the Swift
+          # side: Source/WebKit/UIProcess/API/Cocoa/WKWebView.mm:5071-5107 includes the hand-written
+          # Source/WebKit/UIProcess/Cocoa/WKTextExtractionItem.h, which carries no availability
+          # annotation at all. The ObjC category therefore compiles at 16.1 with or without the
+          # annotation on the Swift class (run 45078008945: 0 errors from any .mm), and adding
+          # @available to the Swift declaration does not make the ObjC header's own declarations
+          # unavailable. The same directory's WKWebView+TextExtraction.swift is entirely inside
+          # #if canImport(UIIntelligenceSupport), false against this SDK, so it emits no
+          # -primary-file job and no diagnostic.
           ref_needs_ulock_flags_api=0
           ref_has_pal_swift=0
           ref_needs_networkcontext_property=0
           ref_needs_restricted_opener_domains=0
           ref_needs_extensionkit_sdk_exclusion=0
+          ref_has_webkit_swift_text_extraction=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -285,11 +303,22 @@ jobs:
               }' <<< "${ref_name}"; then
             ref_needs_extensionkit_sdk_exclusion=1
           fi
+          # Safari-18.0 is the first tag that ships WebKitSwift/TextExtraction at all.
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2 }
+              END {
+                  if (major == "") exit 1
+                  exit !((major + 0) >= 18)
+              }' <<< "${ref_name}"; then
+            ref_has_webkit_swift_text_extraction=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
           echo "RestrictedOpenerDomainsController present in ${WEBKIT_REF}: ${ref_needs_restricted_opener_domains}"
           echo "BaseExtension.xcconfig keys exclusion on sdk= in ${WEBKIT_REF}: ${ref_needs_extensionkit_sdk_exclusion}"
+          echo "WebKitSwift text extraction present in ${WEBKIT_REF}: ${ref_has_webkit_swift_text_extraction}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -324,6 +353,12 @@ jobs:
                   ;;
                 ios18-public-sdk-extensionkit-extension-exclusion.patch)
                   if [ "$ref_needs_extensionkit_sdk_exclusion" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
+                ios18-public-sdk-text-extraction-availability.patch)
+                  if [ "$ref_has_webkit_swift_text_extraction" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1
                   fi
@@ -376,6 +411,28 @@ jobs:
             --base-extension-xcconfig WebKit/Source/WebKit/Configurations/BaseExtension.xcconfig \
             --sdk "iphoneos$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.5)" \
             --excluded-switch ""
+
+      - name: Check every WebKitSwift text-extraction type is gated for the types it references
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          # patches/ios18-public-sdk-text-extraction-availability.patch annotates
+          # WKTextExtractionRequest, which has no @available of its own but names
+          # WKTextExtractionItem in its stored completion handler, its init and fulfill(item:).
+          # WKTextExtractionItem is @available(iOS 17.0, macOS 12.0, *), so a 16.1 deployment
+          # target reaches those three sites and Swift rejects each one:
+          #
+          #   WKTextExtractionItem.swift:126:38: error: 'WKTextExtractionItem' is only available
+          #   in iOS 17.0 or newer        (build.log of run 45078008945, also :128:78 and :133:47)
+          #
+          # Upstream never saw this because WebKitSwift did not compile below 17.0 until this
+          # build lowered IPHONEOS_DEPLOYMENT_TARGET to 16.1, so the annotation was never needed.
+          #
+          # The script reads the patched file rather than matching the one line, so a future ref
+          # that adds a declaration cannot reintroduce the error silently. Tags before Safari-18.0
+          # ship no WebKitSwift/TextExtraction directory and print SKIP.
+          python3 scripts/check-text-extraction-availability.py \
+            --swift WebKit/Source/WebKit/WebKitSwift/TextExtraction/WKTextExtractionItem.swift
 
       - name: Configure embedded development
         run: sudo WebKit/Tools/Scripts/configure-xcode-for-embedded-development || true
