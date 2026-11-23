@@ -212,7 +212,16 @@ jobs:
           # BaseBin/Makefile's `subprojects` and `basebin.tar` rules spell out the
           # whole target list; one -j over BaseBin runs them in dependency order
           # and assembles the tar last.
-          gmake -j"$(sysctl -n hw.logicalcpu)" -C BaseBin 2>&1 | tee "$LOGS/basebin-build.log"
+          #
+          # BUILD_STANDALONE has to be passed explicitly.  Nine subproject
+          # Makefiles write `-D BUILD_STANDALONE=$(BUILD_STANDALONE)` into CFLAGS
+          # and none of them defaults it; the only default is an `export
+          # BUILD_STANDALONE ?= 0` in the repository root Makefile.  Building
+          # BaseBin directly skips that file, the macro expands to nothing, and
+          # BaseBin/dopamine/src/main.m:80 fails with "expected value in
+          # expression" on `#if BUILD_STANDALONE`.  0 is the value the root
+          # Makefile defaults to, and it is the one the shipped basebin uses.
+          gmake -j"$(sysctl -n hw.logicalcpu)" -C BaseBin BUILD_STANDALONE=0 2>&1 | tee "$LOGS/basebin-build.log"
           test -f BaseBin/basebin.tar
 
       - name: Dump dyldhook symbols

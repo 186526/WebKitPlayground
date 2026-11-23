@@ -9,6 +9,16 @@ can override the copy inside the dyld shared cache.
 | `0001-dyldhook-allow-framework-override.patch` | Adds `src/framework_override.c` and its trampoline symbols in `src/main.S`. Applies to tag `3.0.13`. |
 | `verify-dyldhook-merge.sh` | Static assertions on the built `dyldhook_merge.*.dylib` or the merged `gen/dyld`. Needs only `llvm-nm`. |
 | `test-verify-dyldhook-merge.py` | Regression tests for the verifier. Needs only `python3`. |
+| `verify-basebin-tar.sh` | Unpacks a built `basebin.tar` and asserts the six dyldhook dylibs are under the names the device asks for, then re-runs `verify-dyldhook-merge.sh` on the shipped bytes. |
+| `verify-merged-dyld.sh` | Runs `MachOMerger` the way `jbctl update basebin` does and asserts the merged dyld carries all four hooks. |
+| `test-verify-basebin-artifacts.py` | Regression tests for both new verifiers. Needs only `python3`. |
+
+A second patch, `0001-systemhook-set-search-paths.patch`, comes from the
+systemhook work and is applied from the same directory when present. It adds
+`DYLD_FRAMEWORK_PATH`, `__XPC_DYLD_FRAMEWORK_PATH`, `DYLD_LIBRARY_PATH` and
+`__XPC_DYLD_LIBRARY_PATH` to every process Dopamine spawns, so dyld knows where
+`/var/jb/Library/WebKitOverride` is. That directory also carries its own
+`verify-systemhook-search-paths.py`.
 
 The rationale, the dyld call sites each hook covers, and the install and
 rollback steps are in `../docs/dopamine-basebin-webkit-override.md`.
@@ -126,8 +136,19 @@ git status --short
 ```sh
 export THEOS="${BASEDIR}/theos"
 export PATH="$BASEDIR/bin:$(brew --prefix make)/libexec/gnubin:$PATH"
-gmake -j"$(sysctl -n hw.logicalcpu)" -C BaseBin
+gmake -j"$(sysctl -n hw.logicalcpu)" -C BaseBin BUILD_STANDALONE=0
 ```
+
+`BUILD_STANDALONE=0` is not optional when `-C BaseBin` is used. Nine subproject
+Makefiles put `-D BUILD_STANDALONE=$(BUILD_STANDALONE)` into their CFLAGS and
+none of them defaults it; the only default is `export BUILD_STANDALONE ?= 0` in
+the repository root Makefile, which `-C BaseBin` skips. Without the argument the
+macro expands to nothing and the build stops at
+`BaseBin/dopamine/src/main.m:80: #if BUILD_STANDALONE` with "expected value in
+expression". `0` is what the root Makefile defaults to and what the shipped
+basebin uses; `1` is the standalone build. Running `gmake` from the repository
+root instead needs no argument because that Makefile exports the default to the
+sub-makes.
 
 The result is `BaseBin/basebin.tar`. The six
 `BaseBin/dyldhook/dyldhook_merge.*.dylib` files stay in place afterwards, so
@@ -148,24 +169,105 @@ must define both new hooks, the iOS 15 dylib must not, all three must keep
 `dlopen_from` and `__fcntl`, and none may have an undefined symbol. It exits
 non-zero on any violation.
 
-Alternatively point it at the merged dyld the device will run:
+Then check the tar the device will actually receive:
 
 ```sh
-BaseBin/MachOMerger gen/dyld.orig BaseBin/dyldhook/dyldhook_merge.arm64e.iOS16-17.dylib /tmp/gen-dyld
-sh /path/to/WebKitPlayground/dopamine-basebin/verify-dyldhook-merge.sh /tmp/gen-dyld
+sh /path/to/WebKitPlayground/dopamine-basebin/verify-basebin-tar.sh BaseBin/basebin.tar
 ```
 
-## The patch is format-checked, not built here
+That script unpacks the tar and asserts the six names
+`dyldhook_dylib_for_platform()` can ask for (`dyldhook_merge.<arch>.<profile>.dylib`
+for arm64e and arm64, over iOS15, iOS16-17 and iOS18+), `basebin.tc`,
+`systemhook.dylib`, and the same hook assertions as above read from the shipped
+bytes. It also asserts that the tar carries no `gen/dyld`.
 
-`git apply --check` against a fresh clone of tag `3.0.13` passes. The two hook
-bodies compile with `clang -target arm64e-apple-ios16.0 -DIOS=16` and leave
-`llvm-nm -u` empty. `main.S` assembles with the new block for `IOS=16` and
-`IOS=18`, and omits it for `IOS=15`.
+`gen/dyld` is deliberately not in the tar. `libjailbreak/src/basebin_gen.m`
+builds it on the device: `jbctl update basebin` copies `/usr/lib/dyld`, patches
+its `getAMFI` and `LC_UUID`, runs `MachOMerger` over it with the one dyldhook
+dylib matching the running iOS version, and writes the result to
+`/var/jb/basebin/gen/dyld`. A tar that shipped one would hand every device the
+same dyld, built from whichever `/usr/lib/dyld` the build host had.
 
-The full `gmake -C BaseBin` run has not been executed: it needs macOS, theos,
-an iPhoneOS SDK and the trustcache tool. The verifier's own cases are covered by
-`test-verify-dyldhook-merge.py`, which runs anywhere with `python3`:
+To check that step, run the merger yourself and assert the hooks survive it:
+
+```sh
+gmake -C BaseBin/MachOMerger MACOS=1
+sh /path/to/WebKitPlayground/dopamine-basebin/verify-merged-dyld.sh \
+   BaseBin/MachOMerger/MachOMerger /usr/lib/dyld \
+   BaseBin/dyldhook/dyldhook_merge.arm64e.iOS16-17.dylib
+```
+
+The assertion is that the merged output carries all four
+`_MACHOMERGER_HOOK_*` symbols: `isOverridablePath`, `isAlwaysOverridablePath`,
+`dlopen_from` and `__fcntl`. The host's `/usr/lib/dyld` is not the iOS dyld, so
+the merger can fail to attach the hooks to it at all; in that case the script
+exits 3 and says it could not merge, rather than reporting the hooks verified.
+Point the third argument at an iOS dyld when one is at hand, and the exit status
+becomes meaningful for that dyld too.
+
+## The same build on CI
+
+`.github/workflows/basebin-build.yml` runs the seven steps above on `macos-15`.
+It is triggered by `workflow_dispatch`, and by a push that touches this
+directory or the workflow file.
+
+Inputs:
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `dopamine_ref` | `3.0.13` | Tag, branch or commit to clone. |
+| `patches` | `all` | `all` applies every `*.patch` in this directory, sorted. A space-separated list applies only those, and a name that does not exist fails the job. |
+
+Because the default is `all`, a patch that has not merged yet is simply absent
+from the list instead of breaking the build. The systemhook assertions read the
+list back: when no patch whose name contains `systemhook` was applied, the job
+prints a `SKIPPED` notice for `DYLD_FRAMEWORK_PATH` and
+`__XPC_DYLD_FRAMEWORK_PATH` and still checks `DYLD_INSERT_LIBRARIES`. It never
+passes that check silently.
+
+Artifacts:
+
+| Artifact | Contents |
+| --- | --- |
+| `basebin-tar` | `basebin.tar`, its `.sha256`, the `.version` Dopamine wrote into it, and the Dopamine commit it was built from. |
+| `basebin-build-logs` | `basebin-build.log` (the whole `gmake` output), `nm/` with `llvm-nm -g` and `-u` for each of the six dylibs, every verifier's output, `systemhook-strings.txt`, and `theos-install.log`. Uploaded with `if: always()`, so it survives a failed build. |
+
+Download with `gh run download <run-id> -n basebin-tar`, or from the run page.
+
+### Installing on the device
+
+`jbctl update basebin` rewrites `/var/jb/basebin` and restarts userspace, which
+drops every running app and re-springs the device. It is not something to run
+unattended, and this repository never runs it for you.
+
+```sh
+scp basebin.tar root@<device>:/var/mobile/Documents/basebin.tar
+ssh root@<device> "/var/jb/basebin/jbctl update basebin /var/mobile/Documents/basebin.tar"
+```
+
+`jbctl` regenerates `gen/dyld` as part of that command, which is why the tar
+does not carry one. If the update refuses with "Failed to locate dyldhook.dylib",
+the tar is missing the dylib name for the device's architecture and iOS version;
+`verify-basebin-tar.sh` is the check that catches that before the device does.
+
+## What has and has not been built
+
+`git apply --check` against a fresh clone of tag `3.0.13` passes for this patch,
+and the commit recorded the run that proved it. The hook bodies compile with
+`clang -target arm64e-apple-ios16.0 -DIOS=16` and leave `llvm-nm -u` empty;
+`main.S` assembles with the new block for `IOS=16` and `IOS=18` and omits it for
+`IOS=15`.
+
+The verifier scripts' own cases are covered by two regression suites, which run
+anywhere with `python3`:
 
 ```sh
 python3 /path/to/WebKitPlayground/dopamine-basebin/test-verify-dyldhook-merge.py
+python3 /path/to/WebKitPlayground/dopamine-basebin/test-verify-basebin-artifacts.py
 ```
+
+The first drives `verify-dyldhook-merge.sh` with a fake `llvm-nm`. The second
+does the same for `verify-basebin-tar.sh` and `verify-merged-dyld.sh`, including
+the cases where each must refuse: a tar missing one of the six dylibs, a dylib
+that lost a hook, a baked-in `gen/dyld`, a merge whose output lost `dlopen_from`,
+and a merger that cannot run at all.
