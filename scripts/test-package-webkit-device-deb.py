@@ -5,9 +5,13 @@ The cases pin the layout run 45117186601 shipped and the reason it was broken:
 
   the build product keeps the real libWebKitSwift.dylib at top level and puts a symlink to it at
   WebKit.framework/Frameworks/libWebKitSwift.dylib.  The packaging script copied WebKit.framework
-  only, so the symlink had no target in the payload, STEP 2 deleted it ("Warning: removing broken
-  symlink"), and STEP 4 moved a top-level copy to usr/lib that nothing loads: WebKit opens the
-  overlay through the bundle-relative path "Frameworks/libWebKitSwift.dylib".
+  only, and libWebKitSwift.dylib was in none of its artifact lists, so the symlink had no target in
+  the payload and STEP 2 deleted it ("Warning: removing broken symlink").  The package therefore
+  carried no overlay, while WebKit opens it through the bundle-relative path
+  "Frameworks/libWebKitSwift.dylib".
+
+  STEP 4's exclusion and the stray-copy case guard the shape where a top-level copy would reach the
+  payload; in run 45117186601 no such copy existed, so STEP 4 never swept one to usr/lib.
 
 Each case writes a fixture product tree and runs the real script against it.  ditto and ldid are
 stand-ins on Linux; dpkg-deb and zsh are the host's.  The cases that need a broken payload put a
