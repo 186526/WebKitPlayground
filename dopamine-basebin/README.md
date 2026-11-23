@@ -226,15 +226,15 @@ that exact dyld, and the exit status becomes meaningful for it too.
 
 `.github/workflows/basebin-build.yml` runs the seven steps above on `macos-15`.
 It is triggered by `workflow_dispatch`, and by a push that touches this
-directory or the workflow file.
+directory or the workflow file. The patches always come from the workflow's own
+checkout, so a build reproduces the branch it ran on.
 
 Inputs:
 
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `dopamine_ref` | `3.0.13` | Tag, branch or commit to clone. |
-| `patches` | `all` | `all` applies every `*.patch` in the patch source, sorted. A space-separated list applies only those, and a name that does not exist fails the job. |
-| `patch_ref` | empty | Ref in this repository to take `dopamine-basebin/` from. Empty means this checkout. Set it to a branch that carries a patch which has not merged yet, so its build is proven before the merge. |
+| `patches` | `all` | `all` applies every `*.patch` in this directory, sorted. A space-separated list applies only those, and a name that does not exist fails the job. |
 
 Because the default is `all`, a patch that has not merged yet is simply absent
 from the list instead of breaking the build. The systemhook assertions read the
@@ -275,7 +275,7 @@ the tar is missing the dylib name for the device's architecture and iOS version;
 | [45221890249](https://github.com/186526/WebKitPlayground/actions/runs/45221890249) | build failed | `gmake -C BaseBin` stopped at `BaseBin/dopamine/src/main.m:80` with "expected value in expression" because `BUILD_STANDALONE` was empty. Step 6 now passes `BUILD_STANDALONE=0`. |
 | [45224133796](https://github.com/186526/WebKitPlayground/actions/runs/45224133796) | gate failed | BaseBin compiled for the first time. The gate then rejected the iOS 18+ dylib for lacking the `dlopen_from` hook, which upstream compiles out on purpose. `verify-dyldhook-merge.sh` now asserts the trampoline there. |
 | [45225831431](https://github.com/186526/WebKitPlayground/actions/runs/45225831431) | success | Every step passed and `basebin.tar` shipped. The merged-dyld step reported exit 3 (`FatNotMachO`): `/usr/lib/dyld` is universal and `MachOMerger` reads a thin Mach-O. |
-| [45227991502](https://github.com/186526/WebKitPlayground/actions/runs/45227991502) | superseded | Added the `llvm-lipo -thin arm64e` slice so the merged-dyld step merges a real arm64e dyld instead of skipping. Superseded before it started by the `patch_ref` run below. |
+| [45227991502](https://github.com/186526/WebKitPlayground/actions/runs/45227991502), [45230084681](https://github.com/186526/WebKitPlayground/actions/runs/45230084681) | cancelled | Queued, then cancelled by the concurrency group when the next push landed. No result of their own. |
 
 The artifact from the latest successful run is `basebin-tar`, holding
 `basebin.tar`, `basebin.tar.sha256`, the `version` Dopamine wrote into the tar

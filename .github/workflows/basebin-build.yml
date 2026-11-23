@@ -11,10 +11,6 @@ on:
         description: 'Space-separated patch names under dopamine-basebin/, or "all" for every *.patch there'
         required: true
         default: 'all'
-      patch_ref:
-        description: 'Git ref in this repository to take dopamine-basebin/ patches from (empty = this checkout)'
-        required: false
-        default: ''
   # A push trigger alongside dispatch: GitHub only offers workflow_dispatch for a
   # workflow that already exists on the default branch, so before this file lands
   # there the dispatch button does not exist.  The push trigger also re-runs the
@@ -43,7 +39,6 @@ jobs:
       # mean the same thing as the dispatch defaults.
       DOPAMINE_REF: ${{ inputs.dopamine_ref || '3.0.13' }}
       PATCHES: ${{ inputs.patches || 'all' }}
-      PATCH_REF: ${{ inputs.patch_ref || '' }}
       # BaseBin/dyldhook/Makefile links with -Xlinker -add_split_seg_info, which
       # only Xcode's ld64 accepts, and every other subproject looks up its
       # iPhoneOS SDK through xcrun.  The job therefore relies on the image's
@@ -162,59 +157,31 @@ jobs:
           set -euo pipefail
           cd Dopamine
 
-          # Where the patch files come from.  An empty patch_ref means this
-          # checkout; a ref lets a build exercise a patch that is still on its own
-          # branch, which is how the systemhook patch gets built before it merges.
+          # Every patch this checkout carries, sorted.  The two are
+          # 0001-dyldhook-allow-framework-override.patch and
+          # 0001-systemhook-set-search-paths.patch; a later patch needs no edit
+          # here.  Reading the directory instead of naming files also means a
+          # branch without one of them still builds, which is what let this
+          # workflow land before the systemhook patch merged.
           patch_dir="$BASEDIR/dopamine-basebin"
-          if [ -n "$PATCH_REF" ]; then
-            git clone --quiet --filter=blob:none --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/patchsrc"
-            git -C "$RUNNER_TEMP/patchsrc" fetch --quiet --depth 1 origin "$PATCH_REF"
-            git -C "$RUNNER_TEMP/patchsrc" checkout --quiet FETCH_HEAD -- dopamine-basebin
-            patch_dir="$RUNNER_TEMP/patchsrc/dopamine-basebin"
-            echo "patches taken from $PATCH_REF"
-          fi
           ls -l "$patch_dir" | tee "$LOGS/patch-source.txt"
-
-          # `all` means every patch in the source directory, sorted, so a later
-          # patch needs no workflow edit.  It also tolerates an absent patch,
-          # which is what lets a build run before a patch has merged.
-          requested="$PATCHES"
-          if [ "$requested" = "all" ]; then
-            files=$(cd "$patch_dir" && ls *.patch 2>/dev/null)
-          else
-            files=$requested
-          fi
-          test -n "$files" || { echo "no patches to apply" >&2; exit 1; }
+          files=$(cd "$patch_dir" && ls *.patch 2>/dev/null)
+          test -n "$files" || { echo "no patches under $patch_dir" >&2; exit 1; }
 
           : > "$LOGS/applied-patches.txt"
-          applied=''
           for name in $files; do
-            patch="$patch_dir/$name"
-            if [ ! -f "$patch" ]; then
-              # A missing patch named explicitly is an operator error: the job
-              # was asked to apply something that is not there.  `all` cannot hit
-              # this because its list comes from ls.
-              if [ "$requested" = "all" ]; then
-                echo "::warning::patch $name is not in $patch_dir; skipping"
-                continue
-              fi
-              echo "patch $name does not exist under $patch_dir" >&2
-              exit 1
-            fi
             echo "== $name"
-            git apply --check "$patch"
-            git apply "$patch"
-            applied="$applied $name"
+            git apply --check "$patch_dir/$name"
+            git apply "$patch_dir/$name"
             echo "$name" >> "$LOGS/applied-patches.txt"
           done
 
           git status --short | tee "$LOGS/git-status.txt"
-          printf 'applied:%s\n' "$applied"
 
-          # The systemhook assertions only make sense when its patch ran, so the
-          # next steps read this switch and say they skipped rather than pass
-          # silently.
-          if printf '%s' "$applied" | grep -q systemhook; then
+          # The systemhook assertions need its patch to have run.  It is in this
+          # checkout now, so the normal path is 1; the 0 branch stays so that a
+          # branch built before the patch landed still reports what it skipped.
+          if grep -q systemhook "$LOGS/applied-patches.txt"; then
             echo "SYSTEMHOOK_PATCH_APPLIED=1" >> "$GITHUB_ENV"
           else
             echo "SYSTEMHOOK_PATCH_APPLIED=0" >> "$GITHUB_ENV"
