@@ -53,7 +53,7 @@ bool ProcessConfig::DyldCache::isOverridablePath(const char* dylibPath) const
 
 ### 从缓存里直接取出的 PrebuiltLoader 走另一条判定
 
-缓存里的镜像有预编译的 loader 记录，加载依赖时不经过 `Loader::getLoader()`，而是走 `PrebuiltLoader::isLoaded` 里的 root 检查。`dyld/PrebuiltLoader.cpp:644-655`：
+缓存里的镜像有预编译的 loader 记录，加载依赖时不经过 `Loader::getLoader()`，而是走加载校验：`PrebuiltLoader::isValid`（`dyld/PrebuiltLoader.cpp:533`）在 `:581` 调 `PrebuiltLoader::invalidateInIsolation`（`:630`）。root 检查就在后者里，`:644-655`：
 
 ```cpp
 bool checkForRoots = false;
@@ -120,7 +120,7 @@ _MACHOMERGER_HOOK___fcntl
 /System/Library/Frameworks/WebKit.framework/WebKit                        -> WebKit.framework/WebKit
 /System/Library/PrivateFrameworks/WebCore.framework/WebCore               -> WebCore.framework/WebCore
 /System/Library/PrivateFrameworks/JavaScriptCore.framework/JavaScriptCore -> JavaScriptCore.framework/JavaScriptCore
-/System/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy            -> WebKitLegacy.framework/WebKitLegacy
+/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy      -> WebKitLegacy.framework/WebKitLegacy
 /usr/lib/system/libsystem_kernel.dylib                                    -> (nullptr)
 ```
 
@@ -173,13 +173,13 @@ _MACHOMERGER_HOOK___fcntl
 
 入口镜像换成自建 WebKit 之后，Safari 自身用上了自建 WebKit，但页面解析仍然在另一个进程里完成。
 
-设备实测（`ps -Ao pid,ppid,comm`）：当前有 13 个 `com.apple.WebKit.WebContent` 进程，可执行文件全部是 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，父进程都是 1（由 `launchd` 直接拉起，不继承 Safari 的父进程关系）。
+设备实测（`ps -Ao pid,ppid,comm`）：取样时有 13 个 `com.apple.WebKit.WebContent` 进程，可执行文件全部是 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，父进程都是 1（由 `launchd` 直接拉起，不继承 Safari 的父进程关系）。这个数字随页面与标签数浮动，reviewer-k1c 同一台设备另一次取样得到 11，进程归属与可执行文件路径两次相同。
 
 这条事实决定了上限。WebKit 的多进程架构里，Safari 进程只负责 UI 与网络，DOM、布局、脚本执行都在 WebContent 进程里，那个进程加载的是它自己的 WebKit。要换渲染内核，必须让 `com.apple.WebKit.WebContent` 这个 XPC 服务启动时就用自建 WebKit。
 
 XPC 服务的启动链是 `launchd` 经 `xpcproxy` 转交。本机 Dopamine 3.0.13 的 `systemhook` 只 hook 了 `posix_spawn` 与 `execve` 路径（`main.c:241/252/405-417`，实现在 `spawn_exec_hook_common`），`xpcproxy` 拉起服务进程不走这条路径。要让变量穿过 `xpcproxy`，按 Apple 的惯例要写成 `__XPC_DYLD_FRAMEWORK_PATH`：`xpcproxy` 只转发带 `__XPC_` 前缀的变量，去掉前缀后交给服务进程。
 
-本机对这条链路的验证程度如下：`ps` 的 13 个进程与可执行文件路径是实测；`xpcproxy` 只认 `__XPC_` 前缀这一条未在本机验证，`/usr/libexec/xpcproxy` 的只读抓取里没有 `__XPC_DYLD_` 字面量（`grep -a` 无命中，该二进制只链接 `libSystem.B.dylib` 与 `libobjc.A.dylib`），因此前缀的转发规则在 `libxpc` 内部，无法从手头这个二进制反推。这一段按待验证处理。
+本机对这条链路的验证程度如下：`ps` 取样时的进程数与可执行文件路径是实测；`xpcproxy` 只认 `__XPC_` 前缀这一条未在本机验证，`/usr/libexec/xpcproxy` 的只读抓取里没有 `__XPC_DYLD_` 字面量（`grep -a` 无命中，该二进制只链接 `libSystem.B.dylib` 与 `libobjc.A.dylib`），因此前缀的转发规则在 `libxpc` 内部，无法从手头这个二进制反推。这一段按待验证处理。
 
 所以完整的方案要这几部分同时生效：本 mission 的两个 hook 让 dyld 愿意用磁盘副本；`DYLD_FRAMEWORK_PATH` 指向自建 framework 目录，`DYLD_LIBRARY_PATH` 指向 `usr/lib/` 那一层，让 dyld 有第二个候选；两个变量各带一份 `__XPC_` 前缀版本，让它们进入 WebContent 进程。
 
@@ -211,9 +211,11 @@ XPC 服务的启动链是 `launchd` 经 `xpcproxy` 转交。本机 Dopamine 3.0.
 
 两条 dylib 走 library 分支还有一个前提容易漏：`Loader.cpp:719`（`dyld-1378`）的 `skipFallbacks` 会屏蔽 `DYLD_FALLBACK_LIBRARY_PATH` 那一路候选，但它不屏蔽 `_dylibPathOverridesEnv` 的循环。所以即使 load 路径是绝对路径，`DYLD_LIBRARY_PATH` 的候选仍然会被枚举。而 `Loader.cpp:850` 的短路要求 `!originalPathIsOverridableInDyldCache`，正是本 mission 的两个 hook 改掉的那一项。
 
-少了这两条 dylib，WebCore 加载会因缺符号失败。
+这两条在 load command 数组里是弱链接（`LC_LOAD_WEAK_DYLIB`），缺失被 dyld 容忍，因此少了它们不会让 WebCore 加载失败。代价是覆盖不完整：新的 WebCore 可能绑定到共享缓存副本缺少的符号，问题要到实际调用时才暴露，位置也更难定位。
 
-这两条 dylib 的 install name 与归约结论都未在真机上验证：设备 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/` 目录存在但为空（两个 dylib 只在共享缓存里，取不到二进制直接读 `LC_LOAD_DYLIB`）。归约结论来自 `dyld-1042.1` 与 `dyld-1378` 源码与按源码复写的 Python 复现；install name 来自 M40 的接口约定。自建 WebCore 的 37 条 `LC_LOAD_DYLIB` 里没有这两条，但字符串表里有它们的绝对路径，说明 WebCore 在运行时用 `dlopen` 打开，与上述归约路径一致。
+dyld 的容忍路径可查：`JustInTimeLoader.cpp:460`（`dyld-1042.1`）把弱依赖设成 `depOptions.canBeMissing = isWeak`，`Loader.cpp:793-795` 在找不到时 `diag.clearError()` 并返回空，加载继续。
+
+这两条 dylib 的 install name 与归约结论都未在真机上验证：设备 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/` 目录存在但为空（两个 dylib 只在共享缓存里，取不到二进制直接读 `LC_LOAD_DYLIB`）。归约结论来自 `dyld-1042.1` 与 `dyld-1378` 源码与按源码复写的 Python 复现；install name 来自 M40 的接口约定。二者的弱链接身份已在本机从自建 WebCore 头部直接解析得到：37 条 `LC_LOAD_DYLIB` 之外另有 12 条 `LC_LOAD_WEAK_DYLIB`，`libwebrtc.dylib` 与 `libANGLE-shared.dylib` 都在其中。
 
 ## 六、gen/dyld 是怎么来的，补丁为什么足够
 
@@ -294,7 +296,7 @@ dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001): Symbol not f
 
 第二层，这一层的加载不需要 hook 参与。报错里 `Referenced from` 记的是磁盘路径，UUID 就是本镜像自己的，说明 dyld 是按磁盘镜像把它装进来的。共享缓存按 `/System/...` 这类系统路径建索引，`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 不是其中之一，所以这一步没有缓存项可命中。两个 hook 解除的是「缓存命中之后要不要用磁盘副本」，对这一步不起作用。
 
-第三层，失败发生在依赖解析。自建 WebKit 的 52 条依赖里有 51 条 `LC_LOAD_DYLIB` 与 1 条 `LC_LAZY_LOAD_DYLIB`，路径全部为绝对路径，例如 `/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`。`forEachPathVariant` 先用 `getFrameworkPartialPath` 把它归约成 `JavaScriptCore.framework/JavaScriptCore`，再拼 `DYLD_FRAMEWORK_PATH` 的每个目录。该变量为空时，候选路径只剩原路径本身，于是命中共享缓存里的系统 JavaScriptCore。`Expected in` 指向的 `<D309AA36-…>` 就是这个缓存副本，报错正文写明该符号在那里找不到；自建 JavaScriptCore 的符号表里有 `_WTFSignpostIndirectLoggingEnabled`（`grep -a -c` 命中 1）。系统 JavaScriptCore 在磁盘上只有 framework 目录与 `Info.plist`，二进制本身在共享缓存里，因此无法另取一份二进制比对。符号校验因此失败。
+第三层，失败发生在依赖解析。自建 WebKit 有 53 条依赖（51 条 `LC_LOAD_DYLIB`、1 条 `LC_LOAD_WEAK_DYLIB`、1 条 `LC_REEXPORT_DYLIB`，不含 `LC_ID_DYLIB`），路径全部为绝对路径，例如 `/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`。`forEachPathVariant` 先用 `getFrameworkPartialPath` 把它归约成 `JavaScriptCore.framework/JavaScriptCore`，再拼 `DYLD_FRAMEWORK_PATH` 的每个目录。该变量为空时，候选路径只剩原路径本身，于是命中共享缓存里的系统 JavaScriptCore。`Expected in` 指向的 `<D309AA36-…>` 就是这个缓存副本，报错正文写明该符号在那里找不到；自建 JavaScriptCore 的符号表里有 `_WTFSignpostIndirectLoggingEnabled`（`grep -a -c` 命中 1）。系统 JavaScriptCore 在磁盘上只有 framework 目录与 `Info.plist`，二进制本身在共享缓存里，因此无法另取一份二进制比对。符号校验因此失败。
 
 结论是 tweak 的 `dlopen` 只决定了入口镜像的来源，决定不了子镜像的来源。子镜像的路径写在入口镜像自己的加载命令里，dyld 拿到该路径后重新查一次；可供替换的目录列表来自环境变量，tweak 改的是进程内存里的 `dlopen` 参数，触及不到这一层。要让依赖也换成自建版本，目标进程必须带上第五节末的搜索路径。
 
@@ -347,9 +349,9 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride
 | 五个 hook 的参考实现 | `Lessica/Dopamine` 分支 `feat/dyld-framework-overrides`，`BaseBin/dyldhook/src/roothider.c:332-413`、`roothider.S:19-60` |
 | 路径软链与挂载 | 设备 `ls -l /usr/lib/dyld`、`mount`、`readlink /var/jb/basebin/.fakelib/dyld` |
 | 设备上的注入失败原文 | 设备 `/var/jb/var/mobile/Library/Preferences/com.websafe.idevice.plist`，字段 `stage`/`matchVia`/`error` |
-| 自建 WebKit 的 UUID 与依赖清单 | 设备 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 头部 6 MiB，`LC_UUID` 与 52 条依赖（51 条 `LC_LOAD_DYLIB`、1 条 `LC_LAZY_LOAD_DYLIB`）逐条解析 |
+| 自建 WebKit 的 UUID 与依赖清单 | 设备 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 头部 6 MiB，`LC_UUID` 与 53 条依赖（51 条 `LC_LOAD_DYLIB`、1 条 `LC_LOAD_WEAK_DYLIB`、1 条 `LC_REEXPORT_DYLIB`）逐条解析 |
 | `_WTFSignpostIndirectLoggingEnabled` 存在于自建 JavaScriptCore | 设备 `LC_ALL=C grep -a -c _WTFSignpostIndirectLoggingEnabled /var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`，命中 1 |
-| WebContent 进程数与可执行文件 | 设备 `ps -Ao pid,ppid,comm`，筛 `com.apple.WebKit.WebContent` 得 13 条，`comm` 全为 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，`ppid` 全为 1 |
+| WebContent 进程数与可执行文件 | 设备 `ps -Ao pid,ppid,comm` 取样，筛 `com.apple.WebKit.WebContent` 得 13 条（reviewer-k1c 另一次取样 11 条），`comm` 全为 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，`ppid` 全为 1 |
 | `getFrameworkPartialPath` 的归约规则与例外 | `dyld-1042.1`，`DyldProcessConfig.cpp:2007-2016` 注释、`:2017` 实现、`:1872-1897` 两条分支 |
 | 自建 WebCore 的依赖与运行时 dylib | 设备 `/var/jb/Library/Frameworks/WebCore.framework/WebCore` 头部 8 MiB，37 条 `LC_LOAD_DYLIB` 中无 `libwebrtc`/`libANGLE`，字符串表含两者绝对路径 |
 | `/var/jb/Library/WebKitOverride` 两层布局 | M40 的接口约定（本文未在设备上建立该目录） |
