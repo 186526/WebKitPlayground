@@ -1,0 +1,24 @@
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index 8cf5528..bb547cc 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -1629,8 +1629,18 @@
+ #define HAVE_AUDIOFORMATPROPERTY_VARIABLEPACKET_SUPPORTED 1
+ #endif
+ 
++/* corecrypto gained cccurve25519_make_priv, cccurve25519_make_pub and cccurve25519_make_key_pair
++   in iOS 17 and macOS 14. Below that version CoreCryptoSPI.h defines the three inline over
++   cccurve25519 and the ccrng_state function pointer, which iOS 16.1 does export; taking this arm
++   instead imports them strongly and the device then fails to dlopen WebCore with "Symbol not
++   found: _cccurve25519_make_key_pair". The HAVE_AUDIOFORMATPROPERTY_VARIABLEPACKET_SUPPORTED
++   block just above splits this same platform list the same way, on
++   __IPHONE_OS_VERSION_MIN_REQUIRED >= 170000, so this only applies the header's own convention.
++   VISION, APPLETV and WATCHOS keep the value they already had. */
+ #if (PLATFORM(MAC) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 140000) \
+-    || PLATFORM(MACCATALYST) || PLATFORM(IOS_FAMILY)
++    || (PLATFORM(MACCATALYST) && __IPHONE_OS_VERSION_MIN_REQUIRED >= 170000) \
++    || (PLATFORM(IOS) && __IPHONE_OS_VERSION_MIN_REQUIRED >= 170000) \
++    || PLATFORM(VISION) || PLATFORM(APPLETV) || PLATFORM(WATCHOS)
+ #define HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE 1
+ #endif
+ 
