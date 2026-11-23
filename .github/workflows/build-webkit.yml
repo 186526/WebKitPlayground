@@ -91,15 +91,16 @@ jobs:
           # over that run), and the two runs before it built the same WebKit commit
           # 1b670a0c with an in-run hit rate of 53.1%, so the trimming rather than a source
           # change is what caps the hit rate.
-          # The full working set is an estimate, not a measurement: 33.7 GB of original data
-          # compressed 5.57x into the 6.1 GB that survived the trimming, so holding all of it
-          # needs 11-13 GB. No single cache entry can hold that, because @actions/cache
-          # rejects an archive over 10 GiB (CacheFileSizeLimit in the toolkit constants, and
-          # "is over the 10GB limit, not saving cache" in cache.ts). A decimal 10G is
-          # 10,000,000,000 B, so it stays under that limit even at the 100.9% overshoot seen
-          # above, and it is the largest entry that always saves. The part of the working set
-          # that still does not fit is trimmed as before; the capacity report before the save
-          # measures how much trimming is left.
+          # The working set is larger than one entry can hold, but its size is not measured:
+          # --show-compression counts only the entries still in the cache, so its 33.7 GB
+          # original size stops at the 6.1 GB that survived the trimming and cannot be divided
+          # back into the trimmed entries. What sets 10G is the archive limit instead:
+          # @actions/cache rejects an archive over 10 GiB (CacheFileSizeLimit in the toolkit
+          # constants, and "is over the 10GB limit, not saving cache" in cache.ts). A decimal
+          # 10G is 10,000,000,000 B, so it stays under that limit even at the 100.9% overshoot
+          # seen above, and it is the largest limit whose entry always saves. The part of the
+          # working set that still does not fit is trimmed as before; the capacity report
+          # before the save measures how much trimming is left.
           echo "CCACHE_MAXSIZE=10G" >> "$GITHUB_ENV"
 
       - name: Configure ccache
@@ -654,14 +655,11 @@ jobs:
           args=()
           [ -f "$baseline" ] && args+=(--baseline "$baseline")
           [ -f "$compression_report" ] && args+=(--compression "$compression_report")
-          python3 scripts/report-ccache-capacity.py "${args[@]}" || true
-
-      - name: Save ccache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.ccache
-          key: ${{ steps.ccache.outputs.cache-primary-key }}
+          # macOS /bin/bash is 3.2, where "${args[@]}" on an empty array under `set -u` aborts
+          # the step during word expansion, so `|| true` cannot catch it. The +"..." form
+          # expands to nothing when the array is unset or empty and to the quoted elements
+          # otherwise, which is safe on both 3.2 and 5.x.
+          python3 scripts/report-ccache-capacity.py ${args[@]+"${args[@]}"} || true
 
       - name: Inspect build output
         if: always()
@@ -699,8 +697,30 @@ jobs:
           mkdir -p diagnostics
           cp -R ~/Library/Logs/DiagnosticReports diagnostics/ 2>/dev/null || true
           du -sh WebKit/WebKitBuild/*.build 2>/dev/null | sort -h | tail -10 || true
+          # This runs before Save ccache, not after, because Save needs the room. Run
+          # 45078008945 left 7.2 GiB free at the end of the build and held 28 GB in
+          # WebKit/WebKitBuild, of which *.build was about 22.9 GiB (the du above: 10G
+          # WebCore.build, 8.2G WebKit.build, 2.2G JavaScriptCore.build, and 1.9 GiB across the
+          # rest). At max_size 10G the cache grows 3.79 GiB further than the 6G run did, so
+          # without this the save would start with 7.2 - 3.79 = 3.4 GiB free and need about
+          # 9.4 GiB for the archive, a 6.0 GiB shortfall. actions/cache only warns when tar
+          # fails, so the step would stay green and the whole generation would be lost. After
+          # this rm the same run had 30 GiB free, which is 26.3 GiB once the larger cache is
+          # counted, leaving 16.9 GiB of headroom. Nothing Inspect scans lives here: its
+          # LinkFileList search is rooted at WebKitBuild/Release-iphoneos, while every
+          # LinkFileList xcodebuild writes sits under *.build/Release-iphoneos/*.build
+          # (build.log has 68 distinct paths, all under *.build).
           rm -rf WebKit/WebKitBuild/*.build 2>/dev/null || true
+          # Kept so the next run's log shows the headroom Save had, which is the number that
+          # decides whether a larger max_size is affordable.
           df -h /
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
 
       - name: Install packaging tools
         if: success()
