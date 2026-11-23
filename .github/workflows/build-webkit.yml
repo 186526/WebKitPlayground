@@ -259,6 +259,17 @@ jobs:
           # rather than stale. Safari-18.0 and 18.3.1 ship the file byte for byte identical, which
           # is why one patch covers both.
           #
+          # patches/ios16-xpc-service-bundle-identifier.patch rewrites
+          # PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*] in WebContentService.xcconfig,
+          # NetworkService.xcconfig and GPUService.xcconfig. That gate is not in every tag: the
+          # xcconfig at Safari-16.1, 16.4, 16.6, 17.0, 17.2, 17.3.1, 17.5 and 17.6 has no
+          # sdk=iphone* PRODUCT_BUNDLE_IDENTIFIER line at all, so those refs already name the
+          # services without the suffix and there is nothing to rewrite. Safari-17.4 has the gate
+          # but keys it on sdk=iphonesimulator*, which a device build never matches. Safari-18.0,
+          # 18.1, 18.1.1, 18.2, 18.3 and 18.3.1 all carry the sdk=iphone* line and all accept the
+          # patch. Because the shape differs per tag, the guard below reads the three files
+          # instead of comparing tag numbers.
+          #
           # WKWebView.mm needs no change for the same reason the annotation is enough on the Swift
           # side: Source/WebKit/UIProcess/API/Cocoa/WKWebView.mm:5071-5107 includes the hand-written
           # Source/WebKit/UIProcess/Cocoa/WKTextExtractionItem.h, which carries no availability
@@ -274,6 +285,7 @@ jobs:
           ref_needs_restricted_opener_domains=0
           ref_needs_extensionkit_sdk_exclusion=0
           ref_has_webkit_swift_text_extraction=0
+          ref_has_iphone_service_bundle_suffix=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -331,12 +343,23 @@ jobs:
               }' <<< "${ref_name}"; then
             ref_has_webkit_swift_text_extraction=1
           fi
+          # A ref whose three service configs still carry the .Service gate needs this patch; a
+          # ref that has no such gate already names the services the way iOS asks for them.
+          # Read from the files rather than from the tag, because the gate's presence is the fact
+          # that decides whether the build produces the wrong identifier.
+          for service in WebContentService NetworkService GPUService; do
+            if grep -qF 'PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*] = $(PRODUCT_NAME).Service;' \
+                "WebKit/Source/WebKit/Configurations/${service}.xcconfig" 2>/dev/null; then
+              ref_has_iphone_service_bundle_suffix=1
+            fi
+          done
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
           echo "RestrictedOpenerDomainsController present in ${WEBKIT_REF}: ${ref_needs_restricted_opener_domains}"
           echo "BaseExtension.xcconfig keys exclusion on sdk= in ${WEBKIT_REF}: ${ref_needs_extensionkit_sdk_exclusion}"
           echo "WebKitSwift text extraction present in ${WEBKIT_REF}: ${ref_has_webkit_swift_text_extraction}"
+          echo "iPhone service bundle identifiers carry the .Service suffix in ${WEBKIT_REF}: ${ref_has_iphone_service_bundle_suffix}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -377,6 +400,15 @@ jobs:
                   ;;
                 ios18-public-sdk-text-extraction-availability.patch)
                   if [ "$ref_has_webkit_swift_text_extraction" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
+                ios16-xpc-service-bundle-identifier.patch)
+                  # No .Service gate at this ref: the build already names the services without
+                  # the suffix (every 16.x and 17.x tag, and 17.4 where the gate keys on
+                  # iphonesimulator instead). Nothing to patch, so a skip is correct.
+                  if [ "$ref_has_iphone_service_bundle_suffix" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1
                   fi
@@ -738,6 +770,25 @@ jobs:
             --rootless \
             --output "$PWD/packages/webkit-rootless.deb"
           ls -lh packages/
+
+      - name: Assert the packaged XPC services carry the identifiers iOS asks for
+        if: success()
+        run: |
+          set -euo pipefail
+          # A package whose bundles are still named com.apple.WebKit.WebContent.Service is
+          # unusable on the device: Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
+          # asks for com.apple.WebKit.WebContent with no suffix, so our service is never selected
+          # and every fix underneath it stays invisible. Checking here fails the run instead of
+          # shipping a deb that only reveals the problem after it is installed.
+          python3 scripts/check-xpc-service-bundle-identifiers.py --deb "$PWD/packages/webkit-rootless.deb" || {
+            echo "This deb ships XPC services iOS never selects, so installing it replaces nothing."
+            echo "On a Safari-18.x ref that means patches/ios16-xpc-service-bundle-identifier.patch"
+            echo "did not reach the build: this run had apply_patch=${{ inputs.apply_patch }}."
+            exit 1
+          }
+          # The checker reads plists out of ar and tar, so the cases that pin both directions need
+          # no build artifact and no dpkg-deb; running them here keeps the checker itself honest.
+          python3 scripts/test-check-xpc-service-bundle-identifiers.py
 
       - name: Upload deb
         if: success()
