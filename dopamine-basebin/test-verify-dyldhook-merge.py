@@ -26,10 +26,14 @@ SCRIPT = Path(__file__).resolve().parent / "verify-dyldhook-merge.sh"
 OVERRIDABLE = "_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc"
 ALWAYS_OVERRIDABLE = "_MACHOMERGER_HOOK__ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc"
 DLOPEN_FROM = "_MACHOMERGER_HOOK__ZN5dyld44APIs11dlopen_fromEPKciPv"
+DLOPEN_TRAMPOLINE = "_MACHOMERGER_HOOKTRAMPOLINE__ZN5dyld44APIs11dlopen_fromEPKciPv"
 FCNTL = "_MACHOMERGER_HOOK___fcntl"
 
 LEGACY = [DLOPEN_FROM, FCNTL]
 OVERRIDE = [OVERRIDABLE, ALWAYS_OVERRIDABLE]
+# Upstream Dopamine compiles the dlopen_from hook out behind `#if IOS < 18`, so
+# an iOS 18+ dylib carries the trampoline pair and __fcntl but no hook.
+LEGACY_IOS18 = [DLOPEN_TRAMPOLINE, FCNTL]
 
 failures: list[str] = []
 
@@ -108,6 +112,7 @@ def main() -> int:
         nm.chmod(nm.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         patched = LEGACY + OVERRIDE
+        patched18 = LEGACY_IOS18 + OVERRIDE
 
         # --- single file: a merged gen/dyld that was built from the patched dyldhook
         good_dyld = root / "gen" / "dyld"
@@ -138,7 +143,7 @@ def main() -> int:
         patched_dir = root / "patched"
         write_fixture(patched_dir / "dyldhook_merge.arm64e.iOS15.dylib", LEGACY)
         write_fixture(patched_dir / "dyldhook_merge.arm64e.iOS16-17.dylib", patched)
-        write_fixture(patched_dir / "dyldhook_merge.arm64e.iOS18+.dylib", patched)
+        write_fixture(patched_dir / "dyldhook_merge.arm64e.iOS18+.dylib", patched18)
         rc, out = run_verify(bin_dir, patched_dir)
         check("patched build directory passes", rc == 0, out)
 
@@ -146,7 +151,7 @@ def main() -> int:
         stock_dir = root / "stock-build"
         write_fixture(stock_dir / "dyldhook_merge.arm64e.iOS15.dylib", LEGACY)
         write_fixture(stock_dir / "dyldhook_merge.arm64e.iOS16-17.dylib", LEGACY)
-        write_fixture(stock_dir / "dyldhook_merge.arm64e.iOS18+.dylib", LEGACY)
+        write_fixture(stock_dir / "dyldhook_merge.arm64e.iOS18+.dylib", LEGACY_IOS18)
         rc, out = run_verify(bin_dir, stock_dir)
         check("stock build directory fails", rc == 1, out)
         check(
@@ -166,10 +171,39 @@ def main() -> int:
         wrong15_dir = root / "wrong15"
         write_fixture(wrong15_dir / "dyldhook_merge.arm64e.iOS15.dylib", patched)
         write_fixture(wrong15_dir / "dyldhook_merge.arm64e.iOS16-17.dylib", patched)
-        write_fixture(wrong15_dir / "dyldhook_merge.arm64e.iOS18+.dylib", patched)
+        write_fixture(wrong15_dir / "dyldhook_merge.arm64e.iOS18+.dylib", patched18)
         rc, out = run_verify(bin_dir, wrong15_dir)
         check("hooks on the iOS15 target fail", rc == 1, out)
         check("iOS15 case explains why", "the iOS 15 dyld has no such function" in out, out)
+
+        # --- iOS 18+: the dlopen_from hook is compiled out upstream, and the
+        #     trampoline pair stands in its place.  Both directions matter: a
+        #     dylib that lost the trampoline is broken, and asserting the hook
+        #     there would reject what upstream ships.
+        real18_dir = root / "real18"
+        write_fixture(real18_dir / "dyldhook_merge.arm64e.iOS15.dylib", LEGACY)
+        write_fixture(real18_dir / "dyldhook_merge.arm64e.iOS16-17.dylib", patched)
+        write_fixture(real18_dir / "dyldhook_merge.arm64e.iOS18+.dylib", patched18)
+        rc, out = run_verify(bin_dir, real18_dir)
+        check("a build shaped like upstream tag 3.0.13 passes", rc == 0, out)
+        check("the iOS 18+ case explains why dlopen_from is absent", "upstream guards it with IOS < 18" in out, out)
+
+        no_tramp = list(OVERRIDE) + [FCNTL]
+        broken18_dir = root / "broken18"
+        write_fixture(broken18_dir / "dyldhook_merge.arm64e.iOS15.dylib", LEGACY)
+        write_fixture(broken18_dir / "dyldhook_merge.arm64e.iOS16-17.dylib", patched)
+        write_fixture(broken18_dir / "dyldhook_merge.arm64e.iOS18+.dylib", no_tramp)
+        rc, out = run_verify(bin_dir, broken18_dir)
+        check("an iOS 18+ dylib without the dlopen_from trampoline fails", rc == 1, out)
+        check("the missing trampoline is named", f"lost {DLOPEN_TRAMPOLINE}" in out, out)
+
+        hookless18 = list(OVERRIDE) + [DLOPEN_FROM, DLOPEN_TRAMPOLINE, FCNTL]
+        still_ok = root / "hookless18"
+        write_fixture(still_ok / "dyldhook_merge.arm64e.iOS15.dylib", LEGACY)
+        write_fixture(still_ok / "dyldhook_merge.arm64e.iOS16-17.dylib", patched)
+        write_fixture(still_ok / "dyldhook_merge.arm64e.iOS18+.dylib", hookless18)
+        rc, out = run_verify(bin_dir, still_ok)
+        check("an iOS 18+ dylib that also carries the hook still passes", rc == 0, out)
 
         # --- undefined symbols fail the self-contained check
         undef_dyld = root / "undef" / "dyld"
