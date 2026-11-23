@@ -224,15 +224,15 @@ dyld 的容忍路径可查：`JustInTimeLoader.cpp:460`（`dyld-1042.1`）把弱
 
 ## 六、gen/dyld 是怎么来的，补丁为什么足够
 
-`BaseBin/libjailbreak/src/basebin_gen.m` 的 `basebin_generate_internal`（`:99-169`）写清了生成流程：
+`BaseBin/libjailbreak/src/basebin_gen.m` 的 `basebin_generate_internal`（`:99-170`）写清了生成流程：
 
-- `:119` `dyldOrigPath = genPath/dyld.orig`
-- `:150` `carbonCopy(dyldOrigPath, dyldInflightPath)`，从原始 dyld 复制
+- `:117` `dyldOrigPath = genPath/dyld.orig`
+- `:149` `carbonCopy(dyldOrigPath, dyldInflightPath)`，从原始 dyld 复制
 - `:152` `apply_dyld_patch(dyldInflightPath, "DOPA"+version)`，把 `LC_UUID` 前缀改成 `DOPA` 加版本；本机 `gen/dyld` 的 UUID 实测为 `444F5041-332E-302E-3133-00A13F9FB6C3`，即 `DOPA3.0.13`
 - `:153` `merge_dyldhook(dyldInflightPath, dyldhookMergeDylibPath, dyldInflightPath)`，调 `MachOMerger` 把对应版本的 `dyldhook_merge.*.dylib` 合进去
 - `:154` `resign_file(dyldInflightPath, "com.apple.dyld", YES)`
 
-`:106` 的 `dyldhook_dylib_for_platform()` 按 CPU 子类型与 iOS 版本返回文件名；本机是 arm64e 加 iOS 16.1，取 `dyldhook_merge.arm64e.iOS16-17.dylib`。
+`:101` 的 `dyldhook_dylib_for_platform()` 按 CPU 子类型与 iOS 版本返回文件名；本机是 arm64e 加 iOS 16.1，取 `dyldhook_merge.arm64e.iOS16-17.dylib`。
 
 结论：`gen/dyld` = 原始 dyld + `dyldhook_merge.*.dylib`。补丁改的是 `dyldhook`，重建后合并进 `gen/dyld` 的就是带两个新 hook 的版本，不需要额外的部署逻辑。
 
@@ -265,13 +265,13 @@ ssh -t mobile@192.168.2.136 'sudo /var/jb/basebin/jbctl update basebin /var/mobi
 
 `jbctl update basebin` 不会立即替换 `gen/dyld`。它把 tar 暂存，然后按 `main.m:211-216` 触发 **用户空间重启**（`reboot3(RB2_USERREBOOT)`）；重启过程中 `launchdhook` 的 `update.m:223` 调 `basebin_generate(YES)` 重建 `gen/dyld`。这一步会重启用户空间，属于用户要单独确认的动作。
 
-重建时 `comingFromJBUpdate` 为真，所以 `basebin_gen.m:134-148` 那段「重建 `.fakelib`、重新备份 `dyld.orig`」被跳过：`dyld.orig` 保持不变，`.fakelib` 不动，只有 `gen/dyld` 被替换，旧的 `gen/dyld` 先被改名成 `gen/dyld.old`（`:158-163`）以保住 vnode。
+重建时 `comingFromJBUpdate` 为真，所以 `basebin_gen.m:130-147` 那段「重建 `.fakelib`、重新备份 `dyld.orig`」被跳过：`dyld.orig` 保持不变，`.fakelib` 不动，只有 `gen/dyld` 被替换，旧的 `gen/dyld` 先被改名成 `gen/dyld.old`（`:165`）以保住 vnode。
 
 ## 八、回滚
 
 回滚的锚点是两个原样保留的副本：
 
-- `gen/dyld.orig`：原始系统 dyld，更新流程不覆盖它（`basebin_gen.m:150` 只从它复制，重写它的代码在 `!comingFromJBUpdate` 分支内，`:130-148`）。
+- `gen/dyld.orig`：原始系统 dyld，更新流程不覆盖它（`basebin_gen.m:149` 只从它复制，写它的代码 `carbonCopy(dyldPath, dyldOrigPath)` 在 `:146`，位于 `!comingFromJBUpdate` 分支 `:130-147` 内）。
 - 一份未打补丁的 `basebin.tar`：设备上现成的一份在 Dopamine.app 包内，`/var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar`（6082560 字节，2026-11-03，对应 3.0.13）。更新前先把它拷出来备份。
 
 回滚就是拿旧 tar 再走一次同一个命令：
@@ -345,21 +345,31 @@ app 进程本身没有 `LC_DYLD_ENVIRONMENT`，所以对它们「候选行出现
 
 ### 安装后确认 `gen/dyld` 真的重建过
 
-`gen/dyld` 不在 `basebin.tar` 里。设备实测 `Dopamine.app/basebin.tar`（6082560 字节，2026-11-03）只有 31 个条目，`basebin/` 下是 `launchdhook.dylib`、`systemhook.dylib`、`jbctl`、`MachOMerger` 与六个 `dyldhook_merge.*.dylib`，**没有 `gen/` 目录**。`gen/dyld` 是 `jbctl update basebin` 触发用户空间重启时，由 `basebin_gen.m` 用 `gen/dyld.orig` 加对应的 `dyldhook_merge.*.dylib` 现场合成的（第六节）。
+`gen/dyld` 不在 `basebin.tar` 里。设备实测 `Dopamine.app/basebin.tar`（6082560 字节，2026-11-03）只有 31 个条目，**没有 `gen/` 目录**。`gen/dyld` 是 `jbctl update basebin` 触发用户空间重启时，由 `basebin_gen.m` 用 `gen/dyld.orig` 加对应的 `dyldhook_merge.*.dylib` 现场合成的（第六节）。
 
 所以「tar 装上了」不等于「hook 生效了」：如果重启没走完，`gen/dyld` 还是旧的那一份，表面看一切正常。三条只读命令可以判定（不需要 root）：
 
 ```sh
-stat -c %Y /var/jb/basebin/gen/dyld
-stat -c %Y /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
-python3 -c "print(open('/var/jb/basebin/gen/dyld','rb').read().count(b'_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc'))"
+python3 -c "import os;print(int(os.stat('/var/jb/basebin/gen/dyld').st_mtime))"
+python3 -c "import os;print(int(os.stat('/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib').st_mtime))"
+python3 - <<'EOF'
+d = open('/var/jb/basebin/gen/dyld', 'rb').read()
+for s in [b'_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc',
+          b'_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc',
+          b'_MACHOMERGER_HOOK___fcntl']:
+    print(d.count(s), s.decode())
+EOF
 ```
+
+三条都用 `python3`，不混用 `stat`。设备上的 `stat` 是 GNU coreutils（`/var/jb/usr/bin/stat`）：`stat -f %m` 是 BSD 写法，在这台设备上会把 `%m` 当成文件名并失败；`stat -c %Y` 可用，但那又要操作者记住哪台设备是哪种 `stat`。`python3` 在设备上已存在，这三条实测都能复现下面表格里的值。
+
+第三条必须数**带 `_MACHOMERGER_HOOK_` 前缀的完整符号**，不能数裸字符串 `isOverridablePath`。设备上裸字符串 `isOverridablePath` 的计数本来就是 `1`，它来自 dyld 自身的导出符号 `__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc`（在 `gen/dyld` 里偏移 764170，没有前缀），与 MachOMerger 无关。数裸字符串会在未安装的设备上直接报 `1`，把「没装」误判成「装好了」。
 
 判定：
 
 1. `gen/dyld` 的 mtime 必须**晚于** `dyldhook_merge.*.dylib`。反了说明 `gen/dyld` 是合并旧 dylib 得到的。
-2. 计数必须为 `1`。为 `0` 说明 `gen/dyld` 里没有 `isOverridablePath` 这个 hook，M39 没生效。
-3. `gen/dyld.orig` 的 mtime 应停在装机时间（本机为 2022-10-19 13:29），它由 `basebin_gen.m:150` 从原件复制，更新流程不覆盖它。
+2. 第三条命令输出必须是 `1 1 1`，按行对应 `isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 三个 hook。前两条是 M39 新加的，第三条是 Dopamine 原有的、不得丢失。未安装的基线是 `0 0 1`，前两位由 `0` 变 `1` 才是 M39 生效。
+3. `gen/dyld.orig` 的 mtime 应停在装机时间（本机为 2022-10-19 13:29），它由 `basebin_gen.m:149` 从原件复制，更新流程不覆盖它。
 
 本机当前实测（可作为「未安装 M39」的对照）：
 
@@ -368,13 +378,15 @@ python3 -c "print(open('/var/jb/basebin/gen/dyld','rb').read().count(b'_MACHOMER
 | `gen/dyld` mtime | 2026-11-18 10:08（1794967717） |
 | `dyldhook_merge.arm64e.iOS16-17.dylib` mtime | 2026-11-03 01:04（1793639078） |
 | `gen/dyld.orig` mtime | 2022-10-19 13:29（1666157389） |
-| `gen/dyld` 里 `...isOverridablePath...` hook 计数 | **0** |
-| `gen/dyld` 里 `...isAlwaysOverridablePath...` hook 计数 | **0** |
+| `_MACHOMERGER_HOOK_...isOverridablePath...` 完整符号 | **0** |
+| `_MACHOMERGER_HOOK_...isAlwaysOverridablePath...` 完整符号 | **0** |
+| `_MACHOMERGER_HOOK___fcntl` | **1** |
+| 裸字符串 `isOverridablePath`（**不是判据**） | 1，来自 dyld 自身导出符号 |
 | `gen/dyld` 里 `_MACHOMERGER_HOOK_` 符号 | 2 个：`dlopen_from` 与 `__fcntl` |
 
-mtime 判定通过（11-18 晚于 11-03），但计数是 `0`：这台设备装的是**未打 M39 补丁的原始 basebin**，`gen/dyld` 里只有 Dopamine 原带的两个 hook。M39 从未在这台设备上部署过。所以「mtime 新」只说明 `gen/dyld` 在最近一次更新里被重建过，不说明它是哪个 `dyldhook_merge` 合出来的；符号计数才是 hook 是否在场的直接证据。三者一起看才完整。
+mtime 判定通过（11-18 晚于 11-03），但两个新 hook 的计数都是 `0`：这台设备装的是**未打 M39 补丁的原始 basebin**，`gen/dyld` 里只有 Dopamine 原带的两个 hook（`dlopen_from` 与 `__fcntl`）。M39 从未在这台设备上部署过。所以「mtime 新」只说明 `gen/dyld` 在最近一次更新里被重建过，不说明它是哪个 `dyldhook_merge` 合出来的；带前缀的符号计数才是 hook 是否在场的直接证据。三者一起看才完整。
 
-`gen/dyld.orig` 是回滚锚点，不要拿 `gen/dyld` 自身当备份：更新时 `gen/dyld` 被改名成 `gen/dyld.old`（`basebin_gen.m:158-163`），只保留一代，再更新一次它就没了。
+`gen/dyld.orig` 是回滚锚点，不要拿 `gen/dyld` 自身当备份：更新时 `gen/dyld` 被改名成 `gen/dyld.old`（`basebin_gen.m:165`），只保留一代，再更新一次它就没了。
 
 ## 十、证据来源
 
@@ -383,7 +395,7 @@ mtime 判定通过（11-18 晚于 11-03），但计数是 `0`：这台设备装�
 | dyld 短路与两个判定 | `apple-oss-distributions/dyld` tag `dyld-1042.1`，`dyld/Loader.cpp:558/565/623`、`dyld/DyldProcessConfig.cpp:1342-1353/1872-1881/2017`、`dyld/PrebuiltLoader.cpp:644-655/1091`；主分支 tag `dyld-1378` 对应 `1793-1829/843/850/980/774/1313` |
 | iOS 15 判定归属 | `dyld-957`，`common/DyldSharedCache.h:207` |
 | 目标函数与调用点 | 设备 `gen/dyld.orig`，`llvm-nm` 与 `llvm-objdump -d` |
-| gen/dyld 构成与更新流程 | Dopamine `3.0.13`，`BaseBin/libjailbreak/src/basebin_gen.m:99-169`、`BaseBin/launchdhook/src/update.m:223`、`BaseBin/jbctl/src/main.m:157-216` |
+| gen/dyld 构成与更新流程 | Dopamine `3.0.13`，`BaseBin/libjailbreak/src/basebin_gen.m:99-170`、`BaseBin/launchdhook/src/update.m:223`、`BaseBin/jbctl/src/main.m:157-216` |
 | MachOMerger 符号规则 | Dopamine `3.0.13`，`BaseBin/MachOMerger/Sources/MachOMerger/main.swift:327-410` |
 | 现有 hook 清单 | 设备 `dyldhook_merge.arm64e.iOS16-17.dylib`，`llvm-nm -g` |
 | AMFI 标志被改写为 `0xff` | Dopamine `3.0.13`，`BaseBin/libjailbreak/src/basebin_gen.m:45-62`；设备 `gen/dyld` 与 `gen/dyld.orig` 的 `getAMFI` 反汇编 |
@@ -392,7 +404,7 @@ mtime 判定通过（11-18 晚于 11-03），但计数是 `0`：这台设备装�
 | 本机磁盘上不存在缓存镜像 | 设备 `ls` 逐个检查 `Foundation`/`UIKit`/`CoreFoundation`/`Security`/`WebCore`/`libSystem.B`/`libobjc.A`/`libc++.1`/`libsqlite3` 与 `.fakelib` 清单 |
 | 五个 hook 的参考实现 | `Lessica/Dopamine` 分支 `feat/dyld-framework-overrides`，`BaseBin/dyldhook/src/roothider.c:332-413`、`roothider.S:19-60` |
 | 路径软链与挂载 | 设备 `ls -l /usr/lib/dyld`、`mount`、`readlink /var/jb/basebin/.fakelib/dyld` |
-| `gen/dyld` 不由 `basebin.tar` 提供 | 设备 `tar -tf /var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar`，31 个条目，无 `gen/`；`gen/dyld` 由 `basebin_gen.m:150-154` 合成 |
+| `gen/dyld` 不由 `basebin.tar` 提供 | 设备 `tar -tf /var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar`，31 个条目，无 `gen/`；`gen/dyld` 由 `basebin_gen.m:149-154` 合成（149 复制、151 拼 UUID 前缀、152 `apply_dyld_patch`、153 `merge_dyldhook`、154 `resign_file`） |
 | 本机 `gen/dyld` 里没有 M39 的两个 hook | 设备 python3 读 `gen/dyld`，`_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` 计数 0、`...23isAlwaysOverridablePathEPKc` 计数 0、`_MACHOMERGER_HOOK_` 共 2 个（`dlopen_from`、`__fcntl`）；mtime 2026-11-18 10:08 vs dylib 2026-11-03 01:04 |
 | 五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 各 4 条 | 设备上 python3 解析 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices/*.xpc/*` 的 load command；`BaseXPCService.xcconfig:68,78` 提供前两条，本仓 `patches/ios18-public-sdk-xpc-main.patch:12` 提供后两条 |
 | `MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 为 0 条 | 设备上 python3 解析 `/Applications/MobileSafari.app/MobileSafari` 的 load command |
