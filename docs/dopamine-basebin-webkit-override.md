@@ -353,11 +353,13 @@ app 进程本身没有 `LC_DYLD_ENVIRONMENT`，所以对它们「候选行出现
 python3 -c "import os;print(int(os.stat('/var/jb/basebin/gen/dyld').st_mtime))"
 python3 -c "import os;print(int(os.stat('/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib').st_mtime))"
 python3 - <<'EOF'
+import re
 d = open('/var/jb/basebin/gen/dyld', 'rb').read()
-for s in [b'_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc',
-          b'_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc',
-          b'_MACHOMERGER_HOOK___fcntl']:
-    print(d.count(s), s.decode())
+want = ['isOverridablePathEPKc', 'isAlwaysOverridablePathEPKc', '_fcntl']
+found = set(re.findall(rb'_MACHOMERGER_HOOK_[A-Za-z0-9_]+', d))
+for w in want:
+    hits = [s for s in found if w in s.decode()]
+    print(len(hits), w, hits or 'MISSING')
 EOF
 ```
 
@@ -368,7 +370,7 @@ EOF
 判定：
 
 1. `gen/dyld` 的 mtime 必须**晚于** `dyldhook_merge.*.dylib`。反了说明 `gen/dyld` 是合并旧 dylib 得到的。
-2. 第三条命令输出必须是 `1 1 1`，按行对应 `isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 三个 hook。前两条是 M39 新加的，第三条是 Dopamine 原有的、不得丢失。未安装的基线是 `0 0 1`，前两位由 `0` 变 `1` 才是 M39 生效。
+2. 第三条命令输出必须以 `1 1 1` 开头，按行对应 `isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 三个 hook。前两条是 M39 新加的，第三条是 Dopamine 原有的、不得丢失。未安装的基线是 `0 0 1`，前两位由 `0` 变 `1` 才是 M39 生效。`isAlwaysOverridablePath` 是非 const 成员函数，符号前缀是 `_ZN5`；写成 `_ZNK5` 会数出 `0`，把装好的 basebin 误判成没装。
 3. `gen/dyld.orig` 的 mtime 应停在装机时间（本机为 2022-10-19 13:29），它由 `basebin_gen.m:149` 从原件复制，更新流程不覆盖它。
 
 本机当前实测（可作为「未安装 M39」的对照）：
@@ -405,7 +407,7 @@ mtime 判定通过（11-18 晚于 11-03），但两个新 hook 的计数都是 `
 | 五个 hook 的参考实现 | `Lessica/Dopamine` 分支 `feat/dyld-framework-overrides`，`BaseBin/dyldhook/src/roothider.c:332-413`、`roothider.S:19-60` |
 | 路径软链与挂载 | 设备 `ls -l /usr/lib/dyld`、`mount`、`readlink /var/jb/basebin/.fakelib/dyld` |
 | `gen/dyld` 不由 `basebin.tar` 提供 | 设备 `tar -tf /var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar`，31 个条目，无 `gen/`；`gen/dyld` 由 `basebin_gen.m:149-154` 合成（149 复制、151 拼 UUID 前缀、152 `apply_dyld_patch`、153 `merge_dyldhook`、154 `resign_file`） |
-| 本机 `gen/dyld` 里没有 M39 的两个 hook | 设备 python3 读 `gen/dyld`，`_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` 计数 0、`...23isAlwaysOverridablePathEPKc` 计数 0、`_MACHOMERGER_HOOK_` 共 2 个（`dlopen_from`、`__fcntl`）；mtime 2026-11-18 10:08 vs dylib 2026-11-03 01:04 |
+| 本机 `gen/dyld` 里没有 M39 的两个 hook | 设备 python3 读 `gen/dyld`，`_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` 计数 0、`_MACHOMERGER_HOOK__ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc` 计数 0（非 const 成员，前缀 `_ZN5`）、`_MACHOMERGER_HOOK_` 共 2 个（`dlopen_from`、`__fcntl`）；mtime 2026-11-18 10:08 vs dylib 2026-11-03 01:04 |
 | 五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 各 4 条 | 设备上 python3 解析 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices/*.xpc/*` 的 load command；`BaseXPCService.xcconfig:68,78` 提供前两条，本仓 `patches/ios18-public-sdk-xpc-main.patch:12` 提供后两条 |
 | `MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 为 0 条 | 设备上 python3 解析 `/Applications/MobileSafari.app/MobileSafari` 的 load command |
 | `.xpc` 的 `@executable_path/..` 两条是死的 | `dyld-1042.1` `DyldProcessConfig.cpp:2135-2141`；设备上以 `DYLD_PRINT_SEARCHING=1` 直接跑 `com.apple.WebKit.WebContent`，候选行落在 `.../WebContent.xpc/../systemhook.dylib`，`found:` 落在 `/var/jb/usr/lib/systemhook.dylib` |
@@ -533,7 +535,51 @@ dyld 侧的两处源码对应：`JustInTimeLoader.cpp:460` 设 `depOptions.canBe
 
 缺了它们不会崩溃，但会留下覆盖不完整的问题：新的 `WebCore` 是按自建那两份的符号表编译的，缓存里那两份如果缺符号，绑定结果就不一致。放进 `usr/lib/` 是为了让覆盖完整，不是为了「不放就加载失败」。
 
-当前设备上这两个文件在 `/var/jb/usr/lib/`（`libwebrtc.dylib` 16182352 字节，`libANGLE-shared.dylib` 6801440 字节），`/var/jb/Library/WebKitOverride` 整个目录还不存在。要让覆盖生效，得把这两个文件放进新目录，原位置不必保留。
+当前设备上这两个文件在 `/var/jb/usr/lib/`（`libwebrtc.dylib` 16182352 字节，`libANGLE-shared.dylib` 6801440 字节）。要让覆盖生效，得把这两个文件放进新目录，原位置不必保留。
+
+**布局一共 7 个文件，不是 8 个。** 5 个 framework 二进制加 2 条 dylib。`WebKit.framework/Frameworks/` 在设备上是空目录，`WebCore.framework/Frameworks/` 不存在，没有第 8 个文件需要摆。
+
+**本仓提供的脚本。** 三个脚本在 `scripts/`，都不含构建逻辑，只做目录与文件的增删查：
+
+| 脚本 | 一句用法 |
+| --- | --- |
+| `scripts/install-webkit-override.sh` | `sudo sh install-webkit-override.sh`，建目录、从 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib` 复制 7 个文件，逐个校验 arm64e |
+| `scripts/check-webkit-override.sh` | `sh check-webkit-override.sh`，只读，打印目录是否存在与 7 个文件各自的字节数、mtime、Mach-O 架构 |
+| `scripts/uninstall-webkit-override.sh` | `sudo sh uninstall-webkit-override.sh`，只删 `/var/jb/Library/WebKitOverride` 这一个目录 |
+
+安装脚本幂等：目标已存在且字节数与源相同时打印 `unchanged` 并跳过，所以重复执行不改写任何文件，也不会产生 `WebKitOverride/WebKitOverride` 这种嵌套（发现这种嵌套时脚本直接报错退出，不替你删）。它只复制，不移动、不删除源文件，也不触发用户空间重启。校验失败时打印是哪几个文件、为什么不合格，并以 1 退出。
+
+回滚就是删那一个目录：`uninstall-webkit-override.sh` 只 `rm -rf /var/jb/Library/WebKitOverride`，`/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib` 下的原文件一个不碰。目录不存在时它报 `already absent` 并以 0 退出。
+
+安装脚本需要 root（`/var/jb/Library` 是 `root:wheel 775`），检查脚本不需要：安装脚本把两层目录设成 755、7 个文件设成 644，所以 `mobile` 能读到。
+
+**装完怎么确认目录真的进了搜索路径。** `/var/jb/Library/WebKitOverride` 建成后，用一个必然加载别的库的进程直接看候选行：
+
+```sh
+DYLD_PRINT_SEARCHING=1 \
+DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride \
+DYLD_LIBRARY_PATH=/var/jb/Library/WebKitOverride/usr/lib \
+  /var/jb/usr/bin/ls /nonexistent-wko
+```
+
+设备实测输出里出现：
+
+```
+possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/usr/lib/systemhook.dylib"
+possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/usr/lib/libiosexec.1.dylib"
+```
+
+有候选行，说明目录确实被 dyld 拿去拼路径了。
+
+同一次输出里还有一条反证：`CoreFoundation.framework` 只有两行候选，没有 `WebKitOverride` 那一路：
+
+```
+possible path(original path on disk): "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+possible path(original path): "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+found: dylib-from-cache: (0x0008) "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+```
+
+这是 M39 未安装时的表现：`isOverridablePath` 返回假，`Loader.cpp:565` 把磁盘候选直接短路掉，所以 `DYLD_LIBRARY_PATH` 里有目录也不产生候选行。装上 M39 之后，同一位置应多出 `DYLD_FRAMEWORK/LIBRARY_PATH` 那两行。这条是「两半缺一不可」在真机上的直接证据，不是只靠源码推导。
 
 ### 十一·四 已存在的同名变量怎么处理
 
@@ -597,6 +643,8 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 **只上线 dyldhook 那一半。** `isOverridablePath` 返回真，但没有进程的环境里带这四个变量，`forEachPathVariant` 里两个 override 字段都是空，没有目录可拼。行为同样不变。
 
 **两半同时上线。** 目录存在且 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 与 `/var/jb/Library/WebKitOverride/usr/lib/libwebrtc.dylib` 都存在时，`Loader.cpp:712-725` 的 `possiblePathOverridesCache` 分支生效，加载磁盘那一份。
+
+真机对照（设备上目录已按十一·三建好、M39 尚未安装）：带 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 跑 `/var/jb/usr/bin/ls`，`libiosexec.1.dylib` 与 `systemhook.dylib` 出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，说明路径变量这一半在工作；同一进程的 `CoreFoundation.framework` 只有 `possible path(original path on disk)` 与 `possible path(original path)` 两条，`found: dylib-from-cache`，没有 `DYLD_FRAMEWORK/LIBRARY_PATH` 候选行，说明缓存项未被磁盘副本顶替——正是 `Loader.cpp:565` 短路的表现。两相对照，缺 M39 那一半时候选不产生、加载仍走缓存，与本节第一段的推导一致。
 
 两半的回滚手段不同：这一半可以运行时停用（十一·八），那一半要换回旧 `basebin.tar` 并触发一次用户空间重启（第八节）。
 
