@@ -330,6 +330,14 @@ jobs:
           # unavailable. The same directory's WKWebView+TextExtraction.swift is entirely inside
           # #if canImport(UIIntelligenceSupport), false against this SDK, so it emits no
           # -primary-file job and no diagnostic.
+          #
+          # patches/ios16-corecrypto-curve25519-inline.patch rewrites the
+          # HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE block in Source/WTF/wtf/PlatformHave.h.
+          # That block first appears in the Safari-17.4 tree: 16.6 and 17.2 have no such macro at
+          # all, so on those refs the patch cannot apply and a skip is correct rather than stale.
+          # From 17.4 on it is required, because a 16.1 build that takes the unpatched arm imports
+          # cccurve25519_make_pub and cccurve25519_make_key_pair, and WebCore then fails to dlopen
+          # on the device.
           ref_needs_ulock_flags_api=0
           ref_has_pal_swift=0
           ref_needs_networkcontext_property=0
@@ -337,6 +345,7 @@ jobs:
           ref_needs_extensionkit_sdk_exclusion=0
           ref_has_webkit_swift_text_extraction=0
           ref_has_iphone_service_bundle_suffix=0
+          ref_has_core_crypto_signatures_macro=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -404,6 +413,17 @@ jobs:
               ref_has_iphone_service_bundle_suffix=1
             fi
           done
+          # Safari-17.4 is the first tag whose PlatformHave.h defines
+          # HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE; 16.6 and 17.2 have no such block.
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2; minor = $3 }
+              END {
+                  if (major == "" || minor == "") exit 1
+                  exit !((major + 0) > 17 || ((major + 0) == 17 && (minor + 0) >= 4))
+              }' <<< "${ref_name}"; then
+            ref_has_core_crypto_signatures_macro=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
@@ -411,6 +431,7 @@ jobs:
           echo "BaseExtension.xcconfig keys exclusion on sdk= in ${WEBKIT_REF}: ${ref_needs_extensionkit_sdk_exclusion}"
           echo "WebKitSwift text extraction present in ${WEBKIT_REF}: ${ref_has_webkit_swift_text_extraction}"
           echo "iPhone service bundle identifiers carry the .Service suffix in ${WEBKIT_REF}: ${ref_has_iphone_service_bundle_suffix}"
+          echo "HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE present in ${WEBKIT_REF}: ${ref_has_core_crypto_signatures_macro}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -464,8 +485,25 @@ jobs:
                     exit 1
                   fi
                   ;;
+                ios16-corecrypto-curve25519-inline.patch)
+                  if [ "$ref_has_core_crypto_signatures_macro" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
                 ios18-public-sdk-*)
                   echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                  exit 1
+                  ;;
+                webkit_iOS_16.*)
+                  # These two are the tag-specific worktree dumps: they record a whole worktree
+                  # against one tag and match no other, so a skip is the designed outcome.
+                  ;;
+                *)
+                  # Anything else that stops applying is stale, not inapplicable. Namespacing this
+                  # way means a new patch family cannot reach the device untested because nobody
+                  # registered it above.
+                  echo "UNREGISTERED PATCH DOES NOT APPLY: $p"
                   exit 1
                   ;;
               esac
@@ -475,6 +513,53 @@ jobs:
             git -C WebKit apply -v "$PWD/$p"
             echo "APPLIED: $p"
           done
+
+      - name: Refuse a build that ships a WebCore which cannot dlopen
+        env:
+          APPLY_PATCH: ${{ inputs.apply_patch }}
+        run: |
+          set -euo pipefail
+          # patches/ios16-corecrypto-curve25519-inline.patch is only applied when apply_patch is
+          # true, and the packaged-deb assertion at the end of the job fails on any image that
+          # imports the iOS 17 corecrypto names. Left alone, an unpatched run that compiles is the
+          # worst outcome: it builds for about 5 hours, fails the assertion, and Upload deb is
+          # skipped too, so the run produces no package at all. This guard turns that into a few
+          # seconds by stating the requirement before the build starts.
+          #
+          # The deployment target is what makes the patch necessary. Above 17.0 PlatformHave.h
+          # selects the external symbols and iOS has them, so an unpatched build is correct. At
+          # 16.1 the header's macro must be off, and only the patch does that.
+          #
+          # The header is read rather than the ref name, because the Apply worktree patch step
+          # (which computes the per-ref flag) is skipped entirely when apply_patch is false, so no
+          # flag from it survives into this step. The macro is present from Safari-17.4 on and
+          # absent in 16.6 and 17.2, so those two refs pass through here untouched.
+          header=WebKit/Source/WTF/wtf/PlatformHave.h
+          if [ ! -f "$header" ]; then
+            echo "::error::${header} is missing, so the corecrypto check cannot decide"
+            exit 1
+          fi
+          if [ "$APPLY_PATCH" = "true" ]; then
+            echo "apply_patch is true, so the corecrypto patch is in place"
+            exit 0
+          fi
+          if grep -q '^#define HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE ' "$header"; then
+            # Only a target below 17.0 makes the patch necessary, so the guard tests it rather
+            # than assuming it. WK_BUILD_DEPLOYMENT_TARGET is the job-level literal the Build
+            # step passes as IPHONEOS_DEPLOYMENT_TARGET.
+            if awk -F. -v t="$WK_BUILD_DEPLOYMENT_TARGET" 'BEGIN {
+                if (t == "") exit 0
+                exit !((t + 0) < 17)
+            }'; then
+              echo "::error::apply_patch is false but ${header} defines HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE."
+              echo "::error::At deployment target ${WK_BUILD_DEPLOYMENT_TARGET} that selects the external cccurve25519_make_* symbols, which iOS 16.1 does not export, so WebCore would fail to dlopen with \"Symbol not found: _cccurve25519_make_key_pair\"."
+              echo "::error::Set apply_patch to true, or build at a deployment target of 17.0 or later."
+              exit 1
+            fi
+            echo "deployment target ${WK_BUILD_DEPLOYMENT_TARGET} needs no patch even though ${header} defines the macro"
+            exit 0
+          fi
+          echo "${header} has no HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE block, so this ref needs no patch"
 
       - name: Check the PAL Swift include paths expand at the shipped deployment target
         if: inputs.apply_patch == 'true'
@@ -512,6 +597,22 @@ jobs:
             --base-extension-xcconfig WebKit/Source/WebKit/Configurations/BaseExtension.xcconfig \
             --sdk "iphoneos$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo 18.5)" \
             --excluded-switch ""
+
+      - name: Check every corecrypto curve25519 symbol resolves at 16.1
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          # patches/ios16-corecrypto-curve25519-inline.patch is what keeps WebCore off the iOS 17
+          # corecrypto symbols. The device failed to dlopen WebCore with "Symbol not found:
+          # _cccurve25519_make_key_pair" because PlatformHave.h selected the external-symbol arm
+          # whenever PLATFORM(IOS_FAMILY) held, with no deployment-target test. The check evaluates
+          # that #if block under each platform and compiles a caller at 16.1, so a ref that rewrites
+          # the block, or a patch that silently stops applying, fails here instead of at a dlopen
+          # after 5 hours of building.
+          python3 scripts/check-corecrypto-curve25519-availability.py \
+            --platform-have WebKit/Source/WTF/wtf/PlatformHave.h \
+            --core-crypto-spi WebKit/Source/WebCore/PAL/pal/spi/cocoa/CoreCryptoSPI.h \
+            --deployment-target "$WK_BUILD_DEPLOYMENT_TARGET"
 
       - name: Check every WebKitSwift text-extraction type is gated for the types it references
         if: inputs.apply_patch == 'true'
@@ -842,6 +943,17 @@ jobs:
           # The checker reads plists out of ar and tar, so the cases that pin both directions need
           # no build artifact and no dpkg-deb; running them here keeps the checker itself honest.
           python3 scripts/test-check-xpc-service-bundle-identifiers.py
+
+      - name: Assert no iOS 17 corecrypto import in the packaged deb
+        if: success()
+        run: |
+          set -euo pipefail
+          # The check that matches the device failure: whatever the compiler and linker did, the
+          # payload must not import cccurve25519_make_priv, cccurve25519_make_pub,
+          # cccurve25519_make_key_pair or ccrng_generate, because iOS 16.1 exports none of them.
+          # Run against the deb rather than the build tree, because the deb is what reaches the
+          # device and its payload is what dyld reads.
+          python3 scripts/check-corecrypto-curve25519-imports.py --deb packages/webkit-rootless.deb
 
       - name: Upload deb
         if: success()
