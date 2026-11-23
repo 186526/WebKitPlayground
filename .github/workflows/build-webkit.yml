@@ -84,10 +84,13 @@ jobs:
           echo "CCACHE_BASEDIR=/Users/runner/work" >> "$GITHUB_ENV"
           echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
           echo "CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime,time_macros" >> "$GITHUB_ENV"
-          # One generation of this build does not fit in 6 GB. The 6 GB cache was 100.9%
-          # full after the build with Cleanups 19,811 (run 45078008945, ccache -s), i.e.
-          # ccache kept trimming entries the same build was about to ask for again, and the
-          # in-run hit rate stayed at 50.2% of cacheable calls on identical sources.
+          # One generation of this build does not fit in 6 GB. Run 45078008945 ended with the
+          # cache 100.9% full and raised Cleanups from 19,811 to 20,307 (ccache -s), so ccache
+          # trimmed 496 times during one build, dropping entries that build was about to ask for
+          # again. Only 50.2% of that build's cacheable calls hit (the Cleanups and Hits deltas
+          # over that run), and the two runs before it built the same WebKit commit
+          # 1b670a0c with an in-run hit rate of 53.1%, so the trimming rather than a source
+          # change is what caps the hit rate.
           # The full working set is an estimate, not a measurement: 33.7 GB of original data
           # compressed 5.57x into the 6.1 GB that survived the trimming, so holding all of it
           # needs 11-13 GB. No single cache entry can hold that, because @actions/cache
