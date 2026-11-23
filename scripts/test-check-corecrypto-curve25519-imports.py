@@ -115,9 +115,14 @@ def main() -> int:
     failed = 0
 
     def check(
-        name: str, want_exit: int, want_texts: list[str], result: subprocess.CompletedProcess[str]
+        name: str,
+        want_exit: int,
+        want_texts: list[str] | str,
+        result: subprocess.CompletedProcess[str],
     ) -> None:
         nonlocal passed, failed
+        if isinstance(want_texts, str):
+            want_texts = [want_texts]
         combined = result.stdout + result.stderr
         reason = ""
         if result.returncode != want_exit:
