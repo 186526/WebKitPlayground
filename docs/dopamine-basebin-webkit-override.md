@@ -272,6 +272,7 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 | `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 的读取与使用 | `dyld-1042.1`，`DyldProcessConfig.cpp:61/675/1410-1416/1576/1577/1868/1872-1885/1886-1899/2017/2051` |
 | `getFrameworkPartialPath` 对 WebCore 嵌套 install name 返回 `nullptr` | 按 `dyld-1042.1` `dyld/DyldProcessConfig.cpp:2017-2048` 逐字移植成 C 后实测（五位输入，见十一·二） |
 | 两个专用目录的必要性 | 设备 `/var/jb/usr/lib` 137 个 `.dylib` 与共享缓存 197 个 `/usr/lib/*.dylib` 叶子名求交集得 `liblzma.5.dylib`/`libmrc.dylib`；`/var/jb/Library/Frameworks` 清单 |
+| 那两个 dylib 是弱链接依赖 | 设备上用 python3 解析 `WebCore.framework/WebCore` 与 `WebKit.framework/WebKit` 的 load command（`LC_LOAD_WEAK_DYLIB` 计数与路径）；`dyld-1042.1` 的 `JustInTimeLoader.cpp:460`、`Loader.cpp:793-795` |
 | 打印调试开关 | `dyld-1042.1`，`DyldProcessConfig.cpp:674/771/776-783`；`Loader.cpp:568/715`；`PathOverrides::typeName` |
 | 本机磁盘上不存在缓存镜像 | 设备 `ls` 逐个检查 `Foundation`/`UIKit`/`CoreFoundation`/`Security`/`WebCore`/`libSystem.B`/`libobjc.A`/`libc++.1`/`libsqlite3` 与 `.fakelib` 清单 |
 | 五个 hook 的参考实现 | `Lessica/Dopamine` 分支 `feat/dyld-framework-overrides`，`BaseBin/dyldhook/src/roothider.c:332-413`、`roothider.S:19-60` |
@@ -335,7 +336,7 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 /usr/lib/libobjc.A.dylib                                                        -> (nullptr)
 ```
 
-前两行说明 `<名字>.framework/<同名叶子>` 这种形状由 framework 路径服务；第三、四行的结果是 `nullptr`，这两个 dylib 因此归 library 路径服务，而 library 路径只拼裸叶子名，`libwebrtc.dylib` 与 `libANGLE-shared.dylib` 必须直接放在 library 目录的最上层，不能放进 `WebCore.framework/Frameworks/` 子目录。把它们放在子目录里，framework 分支不认，library 分支又只看最上层，两条路都找不到。
+前两行说明 `<名字>.framework/<同名叶子>` 这种形状由 framework 路径服务；第三、四行的结果是 `nullptr`，这两个 dylib 因此归 library 路径服务，而 library 路径只拼裸叶子名，所以 `libwebrtc.dylib` 与 `libANGLE-shared.dylib` 要找到就得直接放在 library 目录的最上层，不能放进 `WebCore.framework/Frameworks/` 子目录：放在子目录里，framework 分支不认，library 分支又只看最上层，两条路都找不到。
 
 **两个目录都必须专用，因为搜索路径上的每个名字都会成为每个被 spawn 进程的候选。** 设备实测：
 
@@ -372,7 +373,18 @@ if ( strcmp(framework, &leaf[1]) == 0 ) {
 
 只有相等时才返回可拼到搜索目录后的相对路径。把 `WebKit.framework/WebKit` 平铺成 `/var/jb/Library/WebKitOverride/WebKit` 不会命中。
 
-`usr/lib/` 下面反过来：那两个 dylib 的 install name 是 `.../WebCore.framework/Frameworks/<leaf>`，`getFrameworkPartialPath` 对它返回 `nullptr`（依据与实测见十一·二），dyld 改走 library 分支，用 `getLibraryLeafName`（`dyld-1042.1` 的 `:2051`）取出 install name 最后一个 `/` 之后的部分，只把这部分拼到 `DYLD_LIBRARY_PATH` 的目录后。所以 `libwebrtc.dylib` 必须落在 `/var/jb/Library/WebKitOverride/usr/lib/libwebrtc.dylib`，`libANGLE-shared.dylib` 同理。放进 `WebKitOverride/WebCore.framework/Frameworks/` 则两条分支都不认：framework 分支要求 shape 匹配，library 分支只看 library 目录的最上层。
+`usr/lib/` 下面反过来：那两个 dylib 的 install name 是 `.../WebCore.framework/Frameworks/<leaf>`，`getFrameworkPartialPath` 对它返回 `nullptr`（依据与实测见十一·二），dyld 改走 library 分支，用 `getLibraryLeafName`（`dyld-1042.1` 的 `:2051`）取出 install name 最后一个 `/` 之后的部分，只把这部分拼到 `DYLD_LIBRARY_PATH` 的目录后。所以 `libwebrtc.dylib` 要落在 `/var/jb/Library/WebKitOverride/usr/lib/libwebrtc.dylib`，`libANGLE-shared.dylib` 同理。放进 `WebKitOverride/WebCore.framework/Frameworks/` 则两条分支都不认：framework 分支要求 shape 匹配，library 分支只看 library 目录的最上层。
+
+**这两个文件是弱链接依赖，缺失不会让加载中止。** 它们是 `WebCore` 与 `WebKit` 各自 load command 数组里的普通依赖项，只是标记为 weak，不是运行时 `dlopen` 打开的。设备上用 python3 解析 load command 得到：
+
+| 镜像 | `LC_LOAD_DYLIB` | `LC_LOAD_WEAK_DYLIB` | `LC_REEXPORT_DYLIB` | `LC_LAZY_LOAD_DYLIB` |
+| --- | --- | --- | --- | --- |
+| `WebCore.framework/WebCore` | 37 | 12（含 `libwebrtc.dylib`、`libANGLE-shared.dylib`） | 0 | 0 |
+| `WebKit.framework/WebKit` | 51 | 1（`libwebrtc.dylib`） | 1（`WebKitLegacy`） | 0 |
+
+dyld 侧的两处源码对应：`JustInTimeLoader.cpp:460` 设 `depOptions.canBeMissing = isWeak`，`Loader.cpp:793-795` 在镜像找不到且 `options.canBeMissing` 为真时执行 `diag.clearError()`。所以缺这两个文件时，`WebCore` 仍然加载成功。
+
+缺了它们不会崩溃，但会留下覆盖不完整的问题：新的 `WebCore` 是按自建那两份的符号表编译的，缓存里那两份如果缺符号，绑定结果就不一致。放进 `usr/lib/` 是为了让覆盖完整，不是为了「不放就加载失败」。
 
 当前设备上这两个文件在 `/var/jb/usr/lib/`（`libwebrtc.dylib` 16182352 字节，`libANGLE-shared.dylib` 6801440 字节），`/var/jb/Library/WebKitOverride` 整个目录还不存在。要让覆盖生效，得把这两个文件放进新目录，原位置不必保留。
 
