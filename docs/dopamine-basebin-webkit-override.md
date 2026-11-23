@@ -181,29 +181,39 @@ XPC 服务的启动链是 `launchd` 经 `xpcproxy` 转交。本机 Dopamine 3.0.
 
 本机对这条链路的验证程度如下：`ps` 的 13 个进程与可执行文件路径是实测；`xpcproxy` 只认 `__XPC_` 前缀这一条未在本机验证，`/usr/libexec/xpcproxy` 的只读抓取里没有 `__XPC_DYLD_` 字面量（`grep -a` 无命中，该二进制只链接 `libSystem.B.dylib` 与 `libobjc.A.dylib`），因此前缀的转发规则在 `libxpc` 内部，无法从手头这个二进制反推。这一段按待验证处理。
 
-所以完整的方案要三部分同时生效：本 mission 的两个 hook 让 dyld 愿意用磁盘副本；`DYLD_FRAMEWORK_PATH` 指向自建 framework 目录，让 dyld 有第二个候选；`__XPC_DYLD_FRAMEWORK_PATH` 让该变量进入 WebContent 进程。
+所以完整的方案要这几部分同时生效：本 mission 的两个 hook 让 dyld 愿意用磁盘副本；`DYLD_FRAMEWORK_PATH` 指向自建 framework 目录，`DYLD_LIBRARY_PATH` 指向 `usr/lib/` 那一层，让 dyld 有第二个候选；两个变量各带一份 `__XPC_` 前缀版本，让它们进入 WebContent 进程。
 
 ### 与 M40 的接口：专用目录与布局
 
-自建 framework 不放在 `/var/jb/Library/Frameworks`。那个目录是 Procursus 的框架安装位置，里面已有 `AltList`、`CydiaSubstrate`、`webpushd` 等与 WebKit 无关的东西，覆盖时容易连带影响别的包。M40 已定下专用目录 `/var/jb/Library/WebKitOverride`，布局 7 项：
+自建 framework 不放在 `/var/jb/Library/Frameworks`。那个目录是 Procursus 的框架安装位置，里面已有 `AltList`、`CydiaSubstrate`、`webpushd` 等与 WebKit 无关的东西，覆盖时容易连带影响别的包。M40 已定下专用目录 `/var/jb/Library/WebKitOverride`。
+
+目录分两层，各由一个环境变量指向：
 
 ```
-WebKit.framework/WebKit
-WebCore.framework/WebCore
-WebCore.framework/Frameworks/libwebrtc.dylib
-WebCore.framework/Frameworks/libANGLE-shared.dylib
-JavaScriptCore.framework/JavaScriptCore
-WebGPU.framework/WebGPU
-WebKitLegacy.framework/WebKitLegacy
+/var/jb/Library/WebKitOverride/            ← DYLD_FRAMEWORK_PATH
+    WebKit.framework/WebKit
+    WebCore.framework/WebCore
+    JavaScriptCore.framework/JavaScriptCore
+    WebGPU.framework/WebGPU
+    WebKitLegacy.framework/WebKitLegacy
+/var/jb/Library/WebKitOverride/usr/lib/    ← DYLD_LIBRARY_PATH
+    libwebrtc.dylib                        ← 裸文件名
+    libANGLE-shared.dylib                  ← 裸文件名
 ```
 
-布局里 5 个 framework 二进制的归约方式相同：`getFrameworkPartialPath` 把 `/System/Library/.../X.framework/X` 归约成 `X.framework/X`，拼上 `DYLD_FRAMEWORK_PATH` 的目录即得候选路径。
+上层 5 项是 framework 二进制，归约方式相同：`getFrameworkPartialPath` 把 `/System/Library/.../X.framework/X` 归约成 `X.framework/X`，拼上 `DYLD_FRAMEWORK_PATH` 的目录即得候选路径。
 
-两条 `WebCore.framework/Frameworks/` 下的 dylib 例外。它们的 install name 是绝对路径 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib` 与 `…/libANGLE-shared.dylib`，但 `getFrameworkPartialPath` 对它们返回空：该函数要求 `.framework/` 前那段目录名等于最后一段 leaf 名，而这里的 leaf 是 `libwebrtc.dylib`，对不上（函数注释 `dyld-1042.1` 的 `DyldProcessConfig.cpp:2007-2016` 明确写了 `…/foo.framework/Libraries/bar.dylib` 与 `…/foo.framework/bar` 都返回空）。归约为空时走 `DYLD_LIBRARY_PATH` 分支，只取 leaf 名拼目录（`:1888-1897`）。
+下层两条 dylib 的 install name 是绝对路径 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib` 与 `…/libANGLE-shared.dylib`，但 `getFrameworkPartialPath` 对它们返回空：该函数要求 `.framework/` 前那段目录名等于最后一段 leaf 名，而这里 leaf 是 `libwebrtc.dylib`、前一段是 `Frameworks`，对不上（`dyld-1042.1` 的 `DyldProcessConfig.cpp:2007-2016`，`dyld-1378` 的 `:2588-2598`；注释明确写了 `…/foo.framework/Libraries/bar.dylib` 与 `…/foo.framework/bar` 都返回空）。归约为空时走 `DYLD_LIBRARY_PATH` 分支，只取 leaf 名拼目录（`dyld-1042.1` 的 `:1888-1897`，`dyld-1378` 的 `:2395-2409`）。
 
-因此这两条 dylib 要生效，需要把 `/var/jb/Library/WebKitOverride/WebCore.framework/Frameworks` 加进 `DYLD_LIBRARY_PATH`，且目录下放的是裸文件名 `libwebrtc.dylib` 与 `libANGLE-shared.dylib`。少了这两条，WebCore 加载会因缺符号失败。
+所以磁盘上的摆放不需要照抄 install name 的目录形状。归约发生在 dyld 内部：它先从 install name 抽出叶子名，再拼环境变量里给的目录，`WebCore.framework/Frameworks/` 这一段不参与拼接。把加载命令里那整条绝对路径搬到磁盘上，并不能让候选命中：若把文件摆在顶层目录下的 `WebCore.framework/Frameworks/` 里、只把顶层目录 `/var/jb/Library/WebKitOverride` 给 `DYLD_LIBRARY_PATH`，拼出的候选是 `/var/jb/Library/WebKitOverride/libwebrtc.dylib`，找不到。要命中，给 `DYLD_LIBRARY_PATH` 的目录必须直接包含裸文件名。本文取 `WebKitOverride/usr/lib/`，把两个裸文件放在那一层。
 
-这两条 dylib 的 install name 与归约结论都未在真机上验证：设备 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/` 目录存在但为空（两个 dylib 只在共享缓存里，取不到二进制直接读 `LC_LOAD_DYLIB`），`/var/jb/Library/Frameworks/WebCore.framework/Frameworks/` 当前不存在。归约结论来自 `dyld-1042.1` 源码与实际运行的 Python 复现；install name 来自 M40 的接口约定。自建 WebCore 的 37 条 `LC_LOAD_DYLIB` 里没有这两条，但字符串表里有它们的绝对路径，说明 WebCore 在运行时用 `dlopen` 打开，与上述归约路径一致。
+`DYLD_LIBRARY_PATH` 也不能直接指 `/var/jb/usr/lib`。那个目录下有 137 个 `.dylib`，其中 `liblzma.5.dylib` 与 `libmrc.dylib` 与共享缓存里的镜像同名。指过去之后，所有经 `systemhook` 注入的进程在解析这两个名字时都会多出 `/var/jb/usr/lib/` 下的候选，两个 hook 又会解除短路，于是这些进程可能改用 Procursus 那份。M40 worker 实测的重叠记为 137 ∩ 197；本机只读核对到这两个文件名在 `/var/jb/usr/lib` 下确实存在，且 `/usr/lib` 下没有同名文件，重叠集合未复核。
+
+两条 dylib 走 library 分支还有一个前提容易漏：`Loader.cpp:719`（`dyld-1378`）的 `skipFallbacks` 会屏蔽 `DYLD_FALLBACK_LIBRARY_PATH` 那一路候选，但它不屏蔽 `_dylibPathOverridesEnv` 的循环。所以即使 load 路径是绝对路径，`DYLD_LIBRARY_PATH` 的候选仍然会被枚举。而 `Loader.cpp:850` 的短路要求 `!originalPathIsOverridableInDyldCache`，正是本 mission 的两个 hook 改掉的那一项。
+
+少了这两条 dylib，WebCore 加载会因缺符号失败。
+
+这两条 dylib 的 install name 与归约结论都未在真机上验证：设备 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/` 目录存在但为空（两个 dylib 只在共享缓存里，取不到二进制直接读 `LC_LOAD_DYLIB`）。归约结论来自 `dyld-1042.1` 与 `dyld-1378` 源码与按源码复写的 Python 复现；install name 来自 M40 的接口约定。自建 WebCore 的 37 条 `LC_LOAD_DYLIB` 里没有这两条，但字符串表里有它们的绝对路径，说明 WebCore 在运行时用 `dlopen` 打开，与上述归约路径一致。
 
 ## 六、gen/dyld 是怎么来的，补丁为什么足够
 
@@ -314,7 +324,7 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride
 
 若输出里出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/WebKit.framework/WebKit"`，说明候选路径进入了搜索；若随后出现 `found: dylib-from-disk-to-override-cache: "/var/jb/Library/WebKitOverride/WebKit.framework/WebKit"`，说明磁盘副本确实顶替了缓存项。没有本补丁的第二个 hook 时，候选路径会在 `Loader.cpp:565` 处被直接 `return` 掉，输出里根本不会出现这个候选。
 
-对 `libwebrtc.dylib` 与 `libANGLE-shared.dylib`，观察点是 `DYLD_LIBRARY_PATH=/var/jb/Library/WebKitOverride/WebCore.framework/Frameworks`，输出里出现的是 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/WebCore.framework/Frameworks/libwebrtc.dylib"`。要观察 WebContent 进程，这两个变量都要带 `__XPC_` 前缀。
+对 `libwebrtc.dylib` 与 `libANGLE-shared.dylib`，观察点是 `DYLD_LIBRARY_PATH=/var/jb/Library/WebKitOverride/usr/lib`，输出里出现的是 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/usr/lib/libwebrtc.dylib"`。要观察 WebContent 进程，这两个变量都要带 `__XPC_` 前缀。
 
 这两个字符串的来源是 `dyld/Loader.cpp:568` 与 `:715`，`typeName` 的返回值在 `dyld/DyldProcessConfig.cpp` 的 `PathOverrides::typeName` 里定义（`pathDirOverride` 对应 `DYLD_FRAMEWORK/LIBRARY_PATH`）。
 
@@ -342,4 +352,6 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride
 | WebContent 进程数与可执行文件 | 设备 `ps -Ao pid,ppid,comm`，筛 `com.apple.WebKit.WebContent` 得 13 条，`comm` 全为 `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent`，`ppid` 全为 1 |
 | `getFrameworkPartialPath` 的归约规则与例外 | `dyld-1042.1`，`DyldProcessConfig.cpp:2007-2016` 注释、`:2017` 实现、`:1872-1897` 两条分支 |
 | 自建 WebCore 的依赖与运行时 dylib | 设备 `/var/jb/Library/Frameworks/WebCore.framework/WebCore` 头部 8 MiB，37 条 `LC_LOAD_DYLIB` 中无 `libwebrtc`/`libANGLE`，字符串表含两者绝对路径 |
-| `/var/jb/Library/WebKitOverride` 布局 | M40 的接口约定（本文未在设备上建立该目录） |
+| `/var/jb/Library/WebKitOverride` 两层布局 | M40 的接口约定（本文未在设备上建立该目录） |
+| `libwebrtc`/`libANGLE` 走 library 分支的两个前提 | `dyld-1378`，`Loader.cpp:719` 的 `skipFallbacks` 只屏蔽 fallback 分支、`:850` 的短路要求 `!originalPathIsOverridableInDyldCache` |
+| `/var/jb/usr/lib` 与共享缓存同名 | M40 worker 实测 137 ∩ 197；本机只读核对 `liblzma.5.dylib`、`libmrc.dylib` 存在且 `/usr/lib` 下无同名文件 |
