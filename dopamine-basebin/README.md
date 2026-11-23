@@ -212,9 +212,18 @@ exit 127. `xcrun lipo -archs /usr/lib/dyld` prints the slices (`x86_64` and
 `arm64e`) when you need to confirm the second name. `/usr/lib/dyld` is a universal
 binary there, and `MachOMerger` reads a thin Mach-O: handed the fat file it aborts
 with `SwiftMachO.MachOError.FatNotMachO` and merges nothing, which the script
-reports as exit 3. Its arm64e slice is a genuine arm64e dyld, and it exports
+reports as exit 3. Its arm64e slice is a genuine arm64e dyld that defines
 `isOverridablePath`, `isAlwaysOverridablePath` and `__fcntl`, so the merge has
 real functions to attach the hooks to.
+
+Those three are local symbols in the host dyld, which `nm` marks `t` rather than
+`T`, so `llvm-nm -g` prints nothing for them even though they are in the file.
+A probe that counts them with `-g` therefore reports zero and concludes the dyld
+lacks them. Read the full symbol table instead: `llvm-nm /usr/lib/dyld` without
+`-g` lists all three, and `MachOMerger/Symbols.swift:51` reads the complete table
+through `localStart` and `localCount`, so the merger itself never had this
+problem. Dropping `-g` from the probe is the fix, and putting it back will make
+the step skip a merge that works.
 
 The assertion is that the merged output carries all four
 `_MACHOMERGER_HOOK_*` symbols: `isOverridablePath`, `isAlwaysOverridablePath`,
@@ -253,13 +262,15 @@ Artifacts:
 | `basebin-tar` | `basebin.tar`, its `.sha256`, the `.version` Dopamine wrote into it, and the Dopamine commit it was built from. |
 | `basebin-build-logs` | `basebin-build.log` (the whole `gmake` output), `nm/` with `llvm-nm -g` and `-u` for each of the six dylibs, every verifier's output, `systemhook-strings.txt`, and `theos-install.log`. Uploaded with `if: always()`, so it survives a failed build. |
 
-Download with `gh run download <run-id> -n basebin-tar`, or from the run page.
+Download with `gh api /repos/186526/WebKitPlayground/actions/artifacts/<artifact-id>/zip`
+(`gh run download` refuses these with "would result in path traversal"), or from
+the run page.
 
 ### Installing on the device
 
 `jbctl update basebin` rewrites `/var/jb/basebin` and restarts userspace, which
-drops every running app and re-springs the device. It is not something to run
-unattended, and this repository never runs it for you.
+drops every running app and re-springs the device. A human runs it; CI does not,
+and neither does any agent working in this repository.
 
 ```sh
 scp basebin.tar root@<device>:/var/mobile/Documents/basebin.tar
@@ -279,17 +290,41 @@ the tar is missing the dylib name for the device's architecture and iOS version;
 | [45224133796](https://github.com/186526/WebKitPlayground/actions/runs/45224133796) | gate failed | BaseBin compiled for the first time. The gate then rejected the iOS 18+ dylib for lacking the `dlopen_from` hook, which upstream compiles out on purpose. `verify-dyldhook-merge.sh` now asserts the trampoline there. |
 | [45225831431](https://github.com/186526/WebKitPlayground/actions/runs/45225831431) | success | Every step passed and `basebin.tar` shipped. The merged-dyld step reported exit 3 (`FatNotMachO`): `/usr/lib/dyld` is universal and `MachOMerger` reads a thin Mach-O. |
 | [45227991502](https://github.com/186526/WebKitPlayground/actions/runs/45227991502), [45230084681](https://github.com/186526/WebKitPlayground/actions/runs/45230084681) | cancelled | Queued, then cancelled by the concurrency group when the next push landed. No result of their own. |
+| [45234771514](https://github.com/186526/WebKitPlayground/actions/runs/45234771514) | merge step failed | The merged-dyld step called `llvm-lipo`, which a `macos-15` runner does not have, and stopped with exit 127. The step now slices the host dyld with `xcrun lipo`. |
+| [45235853001](https://github.com/186526/WebKitPlayground/actions/runs/45235853001) | merge step failed | The probe counted the hook targets with `llvm-nm -g` and printed `input dyld defines ...isOverridablePath: 0`, then failed the job. The symbols are local, so `-g` cannot see them; the probe now reads the full table. |
+| [45237030318](https://github.com/186526/WebKitPlayground/actions/runs/45237030318) | success | 17 of 17 steps passed. The merge really ran: the probe printed 1 for all three targets, `MachOMerger` merged `dyldhook_merge.arm64e.iOS16-17.dylib` into the host dyld's arm64e slice, and the output carried all four `_MACHOMERGER_HOOK_*` symbols. `SYSTEMHOOK_PATCH_APPLIED` was `1`, and the systemhook assertions printed 8 passes for each of the two slices. |
 
-The artifact from the latest successful run is `basebin-tar`, holding
-`basebin.tar`, `basebin.tar.sha256`, the `version` Dopamine wrote into the tar
-(`3.0.13`), and `dopamine-commit.txt`. Download it with
-`gh run download <run-id> -n basebin-tar`.
+The artifact from run `45237030318` is artifact `14849117614` (`basebin-tar`):
+
+| Field | Value |
+| --- | --- |
+| Size | 6144000 bytes |
+| SHA256 | `7fd379340780e245c86fd0afe15ee55173bbb22d8a623bd60e2e34aa644afbc6` |
+| Entries | 31, all under `basebin/`, none under `basebin/gen/` |
+| `basebin/.version` | `3.0.13` |
+| `dopamine-commit.txt` | `5b1d2c1 3.0.13` |
+| Build logs | artifact `14848269568` (`basebin-build-logs`) |
+
+Its contents are `basebin.tar`, `basebin.tar.sha256`, `version` and
+`dopamine-commit.txt`. Fetch it with
+`gh api /repos/186526/WebKitPlayground/actions/artifacts/14849117614/zip`; the
+`gh run download` shorthand fails on this artifact with "would result in path
+traversal".
 
 Verified on the downloaded tar, beyond what the workflow asserts: the six
 `dyldhook_merge.*.dylib` are present, `dyldhook_merge.arm64e.iOS16-17.dylib`
 defines `isOverridablePath`, `isAlwaysOverridablePath`, `dlopen_from` and
 `__fcntl`, `llvm-nm -u` is empty for every dylib, and the tar carries no
 `gen/dyld`.
+
+`systemhook.dylib` is the one library in the tar with undefined symbols: 131 in
+the arm64 slice, which is why the systemhook check prints
+`131 undefined symbol(s); systemhook/Makefile does not require none`. Those
+resolve at load time from `/usr/lib/libSystem.B.dylib`, which each slice lists as
+an `LC_LOAD_DYLIB`, so the count is expected rather than a defect.
+`dyldhook/Makefile` runs `nm -u` on its own output and fails the build on any
+undefined symbol; `systemhook/Makefile` has no such rule, so those symbols stay
+undefined on purpose. The two Makefiles differ in this, and only this, respect.
 
 `git apply --check` against a fresh clone of tag `3.0.13` passes for this patch.
 The hook bodies compile with `clang -target arm64e-apple-ios16.0 -DIOS=16` and
