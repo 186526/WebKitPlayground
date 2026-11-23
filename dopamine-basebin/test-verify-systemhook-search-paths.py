@@ -30,13 +30,18 @@ CPU_SUBTYPE_ARM64E = 2
 MH_EXECUTE_DYLIB = 6
 MH_DYLIB = 6
 
+FRAMEWORK_DIR = "/Library/WebKitOverride"
+LIBRARY_DIR = "/Library/WebKitOverride/usr/lib"
+
 REQUIRED = (
     "DYLD_FRAMEWORK_PATH",
     "__XPC_DYLD_FRAMEWORK_PATH",
+    "DYLD_LIBRARY_PATH",
+    "__XPC_DYLD_LIBRARY_PATH",
 )
 LEGACY = ("DYLD_INSERT_LIBRARIES",)
-# The patch must not start writing a library path; a dylib carrying this gained one.
-FORBIDDEN = "__XPC_DYLD_LIBRARY_PATH"
+# A patched dylib carries these directories; a stale one does not.
+VALUES = (FRAMEWORK_DIR, LIBRARY_DIR)
 
 failures: list[str] = []
 
@@ -147,13 +152,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="verify-systemhook-") as tmp:
         root = Path(tmp)
 
-        # --- the patched dylib passes and names every variable
+        # --- the patched dylib passes and names every variable with its directory
         patched = root / "patched" / "systemhook.dylib"
         patched.parent.mkdir(parents=True)
-        patched.write_bytes(build_macho(REQUIRED + LEGACY))
+        patched.write_bytes(build_macho(REQUIRED + LEGACY + VALUES))
         rc, out = run_verify(patched)
         check("patched dylib passes", rc == 0, out)
         check("patched dylib reports every variable", all(name in out for name in REQUIRED), out)
+        check("patched dylib reports both directories", all(value in out for value in VALUES), out)
 
         # --- the stock dylib must fail; this is the case a silent pass would hide
         stock = root / "stock" / "systemhook.dylib"
@@ -171,34 +177,35 @@ def main() -> int:
         # --- a patch that adds the paths but drops the insert write regresses Dopamine itself
         lost_insert = root / "lost" / "systemhook.dylib"
         lost_insert.parent.mkdir(parents=True)
-        lost_insert.write_bytes(build_macho(REQUIRED))
+        lost_insert.write_bytes(build_macho(REQUIRED + VALUES))
         rc, out = run_verify(lost_insert)
         check("losing DYLD_INSERT_LIBRARIES fails", rc == 1, out)
         check("lost DYLD_INSERT_LIBRARIES is named", "FAIL: arm64e: keeps DYLD_INSERT_LIBRARIES" in out, out)
 
-        # --- one variable short is still a failure, so a single dropped hunk is caught
-        partial = root / "partial" / "systemhook.dylib"
-        partial.parent.mkdir(parents=True)
-        partial.write_bytes(build_macho(REQUIRED[:-1] + LEGACY))
-        rc, out = run_verify(partial)
-        check("a missing __XPC_DYLD_FRAMEWORK_PATH fails", rc == 1, out)
-        check(
-            "the missing prefixed framework path is named",
-            "FAIL: arm64e: contains __XPC_DYLD_FRAMEWORK_PATH" in out,
-            out,
-        )
+        # --- one variable short is still a failure, so a single dropped hunk is caught.
+        # Each of the four is dropped in turn, which is the reverse of the pass case above.
+        for index, missing in enumerate(REQUIRED):
+            short = root / f"short-{index}" / "systemhook.dylib"
+            short.parent.mkdir(parents=True)
+            short.write_bytes(build_macho(tuple(v for v in REQUIRED if v != missing) + LEGACY + VALUES))
+            rc, out = run_verify(short)
+            check(f"a missing {missing} fails", rc == 1, out)
+            check(
+                f"the missing {missing} is named",
+                f"FAIL: arm64e: contains {missing}" in out,
+                out,
+            )
 
-        # --- a patch that also adds a library search path is the change that was rejected
-        with_library = root / "with-library" / "systemhook.dylib"
-        with_library.parent.mkdir(parents=True)
-        with_library.write_bytes(
-            build_macho(REQUIRED + LEGACY + ("DYLD_LIBRARY_PATH", FORBIDDEN))
-        )
-        rc, out = run_verify(with_library)
-        check("adding a library search path fails", rc == 1, out)
+        # --- variables present but pointing at the wrong directory must fail: the whole point of
+        # the dedicated paths is that /var/jb/usr/lib is never named.
+        wrong_dir = root / "wrong-dir" / "systemhook.dylib"
+        wrong_dir.parent.mkdir(parents=True)
+        wrong_dir.write_bytes(build_macho(REQUIRED + LEGACY + (FRAMEWORK_DIR, "/usr/lib")))
+        rc, out = run_verify(wrong_dir)
+        check("a library path pointing at the shared dir fails", rc == 1, out)
         check(
-            "the added library path is named",
-            f"FAIL: arm64e: does not add {FORBIDDEN}" in out,
+            "the wrong library path is named",
+            f"FAIL: arm64e: __XPC_DYLD_LIBRARY_PATH names {LIBRARY_DIR}" in out,
             out,
         )
 
@@ -206,7 +213,12 @@ def main() -> int:
         universal = root / "universal" / "systemhook.dylib"
         universal.parent.mkdir(parents=True)
         universal.write_bytes(
-            build_fat([build_macho(REQUIRED + LEGACY, "arm64e"), build_macho(REQUIRED + LEGACY, "arm64")])
+            build_fat(
+                [
+                    build_macho(REQUIRED + LEGACY + VALUES, "arm64e"),
+                    build_macho(REQUIRED + LEGACY + VALUES, "arm64"),
+                ]
+            )
         )
         rc, out = run_verify(universal)
         check("universal build with both slices patched passes", rc == 0, out)
@@ -216,7 +228,12 @@ def main() -> int:
         half = root / "half" / "systemhook.dylib"
         half.parent.mkdir(parents=True)
         half.write_bytes(
-            build_fat([build_macho(REQUIRED + LEGACY, "arm64e"), build_macho(LEGACY, "arm64")])
+            build_fat(
+                [
+                    build_macho(REQUIRED + LEGACY + VALUES, "arm64e"),
+                    build_macho(LEGACY, "arm64"),
+                ]
+            )
         )
         rc, out = run_verify(half)
         check("a universal build with one stale slice fails", rc == 1, out)

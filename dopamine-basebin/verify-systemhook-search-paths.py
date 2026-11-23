@@ -2,24 +2,31 @@
 """Assert that a built systemhook.dylib carries the jailbreak search-path variables.
 
 Dopamine 3.0.13's systemhook sets only DYLD_INSERT_LIBRARIES, so dyld is never told where a
-WebKit built outside the shared cache lives.  The patch in this directory adds two variables;
-this script proves they are in the produced dylib, that the one variable Dopamine already relied
-on is still there, and that the patch did not start writing DYLD_LIBRARY_PATH.  A search path is
-a directory dyld appends a leaf or framework name to, so the layout it expects is
+WebKit built outside the shared cache lives.  The patch in this directory adds four variables;
+this script proves each one is in the produced dylib with the right value, and that the variable
+Dopamine already relied on is still there.
 
-  /var/jb/Library/WebKitOverride/WebKit.framework/WebKit
-  /var/jb/Library/WebKitOverride/WebCore.framework/WebCore
-  /var/jb/Library/WebKitOverride/JavaScriptCore.framework/JavaScriptCore
-  /var/jb/Library/WebKitOverride/WebGPU.framework/WebGPU
-  /var/jb/Library/WebKitOverride/WebKitLegacy.framework/WebKitLegacy
+A search path is a directory that dyld appends a relative name to, and which name it appends
+depends on the install name.  The layout the patch expects is therefore two directories:
 
-libwebrtc.dylib and libANGLE-shared.dylib keep the install name the system WebCore links against,
-/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/<leaf>, and dyld resolves a
-non-framework leaf from DYLD_LIBRARY_PATH only by appending it to the directory, which cannot
-reach a nested path.  They ship as /var/jb/usr/lib/libwebrtc.dylib in the deb, and that location
-is not on any search path this patch sets, so a WebCore built against the system name loads the
-cached copies instead.  Leave them where the deb installs them; do not copy them under
-WebKitOverride expecting them to be found.
+  /var/jb/Library/WebKitOverride/            <- DYLD_FRAMEWORK_PATH
+      WebKit.framework/WebKit
+      WebCore.framework/WebCore
+      JavaScriptCore.framework/JavaScriptCore
+      WebGPU.framework/WebGPU
+      WebKitLegacy.framework/WebKitLegacy
+  /var/jb/Library/WebKitOverride/usr/lib/    <- DYLD_LIBRARY_PATH
+      libwebrtc.dylib
+      libANGLE-shared.dylib
+
+The second pair is a bare file name, not WebCore.framework/Frameworks/<leaf>.  Those two dylibs
+carry the install name /System/Library/PrivateFrameworks/WebCore.framework/Frameworks/<leaf>, and
+getFrameworkPartialPath returns NULL for it because the directory before .framework is
+"Frameworks", not the leaf name.  dyld then falls back to the library branch and appends only the
+leaf, so the file must sit at the top of the library directory.
+
+The values must not point at /var/jb/usr/lib: it shares liblzma.5.dylib and libmrc.dylib leaf
+names with the shared cache, and every process would treat those as candidates.
 
 The strings are read from the __cstring section of every architecture slice, by parsing the
 Mach-O here rather than shelling out, so the script runs anywhere python3 does.  The undefined
@@ -54,17 +61,24 @@ FAT_MAGIC_64 = b"\xca\xfe\xba\xbf"
 LC_SEGMENT = 0x1
 LC_SEGMENT_64 = 0x19
 
-# What the patch must have added, and the variable Dopamine already wrote.
+FRAMEWORK_DIR = "/Library/WebKitOverride"
+LIBRARY_DIR = "/Library/WebKitOverride/usr/lib"
+
+# The four variables the patch writes, each with the exact directory it must name.  The value is
+# stored as its suffix under the jailbreak root, because JBROOT_PATH prefixes it at run time.
 REQUIRED_STRINGS = (
     "DYLD_FRAMEWORK_PATH",
     "__XPC_DYLD_FRAMEWORK_PATH",
+    "DYLD_LIBRARY_PATH",
+    "__XPC_DYLD_LIBRARY_PATH",
 )
+EXPECTED_VALUES = {
+    "DYLD_FRAMEWORK_PATH": FRAMEWORK_DIR,
+    "__XPC_DYLD_FRAMEWORK_PATH": FRAMEWORK_DIR,
+    "DYLD_LIBRARY_PATH": LIBRARY_DIR,
+    "__XPC_DYLD_LIBRARY_PATH": LIBRARY_DIR,
+}
 PRESERVED_STRINGS = ("DYLD_INSERT_LIBRARIES",)
-# A library path was considered and rejected: it adds one directory to every process's dylib
-# search, and /var/jb/usr/lib shares the liblzma.5.dylib and libmrc.dylib leaf names with the
-# shared cache.  The __XPC_ spelling appears nowhere in the stock source, so finding it in the
-# built dylib is proof a library path was added.
-FORBIDDEN_STRINGS = ("__XPC_DYLD_LIBRARY_PATH",)
 
 
 def read_slices(data: bytes) -> list[bytes]:
@@ -194,12 +208,16 @@ def main(argv: list[str]) -> int:
             check(f"{arch}: has a __cstring section", False, "no __cstring section in this slice")
             continue
         check(f"{arch}: has a __cstring section", True)
+        # Exact NUL-delimited entries, not substrings: DYLD_FRAMEWORK_PATH is a suffix of
+        # __XPC_DYLD_FRAMEWORK_PATH, so a substring test would find the bare name in the
+        # prefixed one and miss a dropped variable.
+        entries = {chunk.decode("utf-8", "replace") for chunk in blobs.split(b"\0") if chunk}
         for wanted in REQUIRED_STRINGS:
-            check(f"{arch}: contains {wanted}", wanted.encode() in blobs)
+            check(f"{arch}: contains {wanted}", wanted in entries)
         for wanted in PRESERVED_STRINGS:
-            check(f"{arch}: keeps {wanted}", wanted.encode() in blobs)
-        for unwanted in FORBIDDEN_STRINGS:
-            check(f"{arch}: does not add {unwanted}", unwanted.encode() not in blobs)
+            check(f"{arch}: keeps {wanted}", wanted in entries)
+        for name, value in EXPECTED_VALUES.items():
+            check(f"{arch}: {name} names {value}", value in entries)
 
     symbols = undefined_symbols(args.binary)
     if symbols is None:
