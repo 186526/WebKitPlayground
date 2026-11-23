@@ -119,7 +119,7 @@ _MACHOMERGER_HOOK___fcntl
 ```
 /System/Library/Frameworks/WebKit.framework/WebKit                        -> WebKit.framework/WebKit
 /System/Library/PrivateFrameworks/WebCore.framework/WebCore               -> WebCore.framework/WebCore
-/System/Library/PrivateFrameworks/JavaScriptCore.framework/JavaScriptCore -> JavaScriptCore.framework/JavaScriptCore
+/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore        -> JavaScriptCore.framework/JavaScriptCore
 /System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy      -> WebKitLegacy.framework/WebKitLegacy
 /usr/lib/system/libsystem_kernel.dylib                                    -> (nullptr)
 ```
@@ -142,7 +142,7 @@ _MACHOMERGER_HOOK___fcntl
 
 两个 hook 解除的是「dyld 愿不愿意去磁盘找」。要找到，还得有一个目录被放进 framework 搜索路径。
 
-本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 的 `shouldInsertJBEnv` 为真的分支内，且都是 `DYLD_INSERT_LIBRARIES`（`:333` 与 `:358`）。全文没有 `DYLD_FRAMEWORK_PATH`，也没有 `DYLD_ROOT_PATH`。本机 `/var/jb/basebin/` 下的二进制 `grep -a -l DYLD_FRAMEWORK_PATH` 同样无命中。
+本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 内，且都是 `DYLD_INSERT_LIBRARIES`：`:333` 在 `shouldInsertJBEnv` 真分支内，`:358` 在其 else 分支内。全文没有 `DYLD_FRAMEWORK_PATH`，也没有 `DYLD_ROOT_PATH`。本机 `/var/jb/basebin/` 下的二进制 `grep -a -l DYLD_FRAMEWORK_PATH` 同样无命中。
 
 所以需要单独改的一处是：`spawn_exec_hook_common` 里 `shouldInsertJBEnv` 为真的分支（`common.c:325` 起的 `if (shouldInsertJBEnv) { ... }`），在那里对需要覆盖 WebKit 的进程追加 `DYLD_FRAMEWORK_PATH`，指向放自建 framework 的目录。
 
