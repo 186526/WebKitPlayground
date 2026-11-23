@@ -84,9 +84,20 @@ jobs:
           echo "CCACHE_BASEDIR=/Users/runner/work" >> "$GITHUB_ENV"
           echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
           echo "CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime,time_macros" >> "$GITHUB_ENV"
-          # GitHub keeps at most 10 GiB of caches per repository, so 6 GiB leaves room
-          # for one previous generation while staying under the quota.
-          echo "CCACHE_MAXSIZE=6G" >> "$GITHUB_ENV"
+          # One generation of this build does not fit in 6 GB. The 6 GB cache was 100.9%
+          # full after the build with Cleanups 19,811 (run 45078008945, ccache -s), i.e.
+          # ccache kept trimming entries the same build was about to ask for again, and the
+          # in-run hit rate stayed at 50.2% of cacheable calls on identical sources.
+          # The full working set is an estimate, not a measurement: 33.7 GB of original data
+          # compressed 5.57x into the 6.1 GB that survived the trimming, so holding all of it
+          # needs 11-13 GB. No single cache entry can hold that, because @actions/cache
+          # rejects an archive over 10 GiB (CacheFileSizeLimit in the toolkit constants, and
+          # "is over the 10GB limit, not saving cache" in cache.ts). A decimal 10G is
+          # 10,000,000,000 B, so it stays under that limit even at the 100.9% overshoot seen
+          # above, and it is the largest entry that always saves. The part of the working set
+          # that still does not fit is trimmed as before; the capacity report before the save
+          # measures how much trimming is left.
+          echo "CCACHE_MAXSIZE=10G" >> "$GITHUB_ENV"
 
       - name: Configure ccache
         run: |
@@ -95,7 +106,10 @@ jobs:
           ccache --set-config=hash_dir=false
           ccache --set-config=compiler_check=content
           ccache --set-config=sloppiness=include_file_mtime,include_file_ctime,time_macros
-          ccache --set-config=max_size=6G
+          # Same value as CCACHE_MAXSIZE above, which overrides the restored ccache.conf for
+          # every ccache invocation in this job. Writing it here too makes the saved cache
+          # carry the new limit instead of the 6G the restored one was written with.
+          ccache --set-config=max_size=10G
           ccache --set-config=base_dir=/Users/runner/work
           # ccache stores each entry with zstd; level 6 keeps most of level 19's saving
           # without spending build time on maximum compression.
@@ -474,6 +488,10 @@ jobs:
           ccache -s || true
           # Independent sampler: survives whatever kills the build shell.
           mkdir -p "$GITHUB_WORKSPACE/diagnostics"
+          # The capacity report before Save subtracts this snapshot's Cleanups from the
+          # post-build one, because that counter accumulates for the life of the cache
+          # directory and only the difference describes this build.
+          ccache --show-stats --verbose > "$GITHUB_WORKSPACE/diagnostics/ccache-before.txt" || true
           sampler="$GITHUB_WORKSPACE/diagnostics/samples.log"
           ( while true; do
               printf '%s ' "$(date -u +%FT%TZ)"
@@ -611,7 +629,29 @@ jobs:
       - name: Report ccache compression
         if: always()
         run: |
-          ccache --show-compression || true
+          # --show-compression walks every file in the cache, so it runs once here and the
+          # capacity step below reads this transcript instead of asking for it again.
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics"
+          ccache --show-compression 2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/ccache-compression.txt" || true
+
+      - name: Report ccache capacity
+        if: always()
+        run: |
+          set -uo pipefail
+          # One line, read-only, and the number to compare across builds. RESIDENT means this
+          # build trimmed nothing and ended below 98% of max_size; anything else means the
+          # working set still does not fit. in-run-hit is the share of this build's cacheable
+          # calls that the restored cache answered, which is the number that should rise once
+          # max_size stops forcing trims.
+          compression_report="$GITHUB_WORKSPACE/diagnostics/ccache-compression.txt"
+          baseline="$GITHUB_WORKSPACE/diagnostics/ccache-before.txt"
+          # Either file is missing only when an earlier step failed before writing it;
+          # without --baseline the script judges saturation alone, and without the
+          # transcript it runs ccache itself.
+          args=()
+          [ -f "$baseline" ] && args+=(--baseline "$baseline")
+          [ -f "$compression_report" ] && args+=(--compression "$compression_report")
+          python3 scripts/report-ccache-capacity.py "${args[@]}" || true
 
       - name: Save ccache
         if: always()
