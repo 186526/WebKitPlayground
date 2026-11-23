@@ -173,18 +173,26 @@ for name, path_source, _ in rows:
 print("\nTargets")
 print("  %-20s %12s  %-19s  %s" % ("file", "bytes", "mtime", "state"))
 counts = dict.fromkeys(FAILING_KINDS, 0)
+failures = 0
+other = 0
 for name, _, path_target in rows:
     size, stamp, state, kind = describe(path_target)
+    # Fail closed: only OK passes. A kind that is not registered in the
+    # counters still counts as a failure, so adding a state to describe()
+    # without registering it can never turn into a silent pass.
+    if kind != OK:
+        failures += 1
     if kind in counts:
         counts[kind] += 1
+    else:
+        other += 1
     print("  %-20s %12s  %-19s  %s" % (name, size, stamp, state))
 
-failures = sum(counts.values())
 print("")
 if failures:
     print(
         "Result: %d of %d unusable - %d missing, %d unreadable, "
-        "%d not Mach-O, %d not arm64e."
+        "%d not Mach-O, %d not arm64e, %d other."
         % (
             failures,
             len(rows),
@@ -192,6 +200,7 @@ if failures:
             counts[UNREADABLE],
             counts[NOT_MACHO],
             counts[WRONG_ARCH],
+            other,
         )
     )
     sys.exit(1)

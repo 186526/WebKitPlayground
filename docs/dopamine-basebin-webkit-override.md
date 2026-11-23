@@ -553,6 +553,8 @@ dyld 侧的两处源码对应：`JustInTimeLoader.cpp:460` 设 `depOptions.canBe
 
 安装脚本需要 root（`/var/jb/Library` 是 `root:wheel 775`），检查脚本不需要：安装脚本把两层目录设成 755、7 个文件设成 644，所以 `mobile` 能读到。
 
+`/var/mobile` 下的三个脚本是修前版本，**执行前必须按本仓 `scripts/` 重新拷一遍**。设备上 2026-11-24 02:25 那份的字节数是 `check-webkit-override.sh` 5594、`install-webkit-override.sh` 7734、`uninstall-webkit-override.sh` 1790；本仓当前版本是 6651、9635、1790。旧 `install` 的 `create_layout` 没有符号链接护栏，且会在 `JBROOT` 含空格时按词拆开路径、在 override 目录之外建出目录树，随后 `uninstall` 清不掉。识别旧版还可以看校验提示文字：旧版写 `eight target files`，当前版本写 `seven`。已按旧脚本建好的目录内容与当前版本相容（都是纯复制），不需要回滚重装，只换脚本即可。
+
 **装完怎么确认目录真的进了搜索路径。** `/var/jb/Library/WebKitOverride` 建成后，用一个必然加载别的库的进程直接看候选行：
 
 ```sh

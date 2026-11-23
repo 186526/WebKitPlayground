@@ -117,13 +117,23 @@ create_layout() {
     # remove; a symlinked <name>.framework would overwrite a file that is not
     # ours. Both passes run in this shell, not in a pipeline, so die() really
     # stops the script.
+    #
+    # IFS is newline-only for both loops: a JBROOT containing a space would
+    # otherwise split into two path fragments, create trees at each fragment
+    # outside the override root, and then fail every copy. It stays narrowed
+    # until the second loop ends, because restoring it in between would make
+    # ${FRAMEWORK_NAMES} collapse into a single name.
     directories=$(layout_directories)
+    saved_ifs=${IFS}
+    IFS='
+'
     for path_directory in ${directories}; do
         refuse_symlinked_directory "${path_directory}"
     done
     for path_directory in ${directories}; do
         mkdir -p "${path_directory}"
     done
+    IFS=${saved_ifs}
 }
 
 copy_from_source() {
