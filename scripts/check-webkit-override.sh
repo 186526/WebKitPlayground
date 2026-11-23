@@ -107,19 +107,32 @@ def arch_name(cputype, cpusubtype):
 
 OK = "ok"
 MISSING = "missing"
+UNREADABLE = "unreadable"
 NOT_MACHO = "not-macho"
 WRONG_ARCH = "wrong-arch"
-UNREADABLE = "unreadable"
 
-FAILING_KINDS = (MISSING, NOT_MACHO, WRONG_ARCH, UNREADABLE)
+# One ordered table: kind -> the label used in the result line. Both the set
+# describe() may return and the set the counters are keyed by come from here,
+# so the two cannot drift apart. OK is in the table so a healthy file is
+# counted like any other, and is skipped when the printed parts are built.
+# A kind that describe() returns without being listed here trips the assertion
+# below instead of quietly falling out of the totals.
+KIND_LABELS = (
+    (OK, "ok"),
+    (MISSING, "missing"),
+    (UNREADABLE, "unreadable"),
+    (NOT_MACHO, "not Mach-O"),
+    (WRONG_ARCH, "not arm64e"),
+)
+PRINTED_KINDS = tuple((kind, label) for kind, label in KIND_LABELS if kind != OK)
 
 
 def describe(path):
     """Return (size_text, mtime_text, state_text, kind).
 
-    kind is one of OK, MISSING, NOT_MACHO, WRONG_ARCH, UNREADABLE. The caller
-    counts by kind rather than by matching the state text, so a new failure
-    state cannot silently count as a pass again.
+    kind is one of the values in KIND_LABELS. The caller counts by kind rather
+    than by matching the state text, and verifies that every row landed in a
+    registered kind, so a new state cannot pass silently.
     """
     if not os.path.isfile(path):
         return ("-", "-", "missing", MISSING)
@@ -172,37 +185,39 @@ for name, path_source, _ in rows:
 
 print("\nTargets")
 print("  %-20s %12s  %-19s  %s" % ("file", "bytes", "mtime", "state"))
-counts = dict.fromkeys(FAILING_KINDS, 0)
-failures = 0
-other = 0
+counts = {kind: 0 for kind, _ in KIND_LABELS}
+unregistered = []
 for name, _, path_target in rows:
     size, stamp, state, kind = describe(path_target)
-    # Fail closed: only OK passes. A kind that is not registered in the
-    # counters still counts as a failure, so adding a state to describe()
-    # without registering it can never turn into a silent pass.
-    if kind != OK:
-        failures += 1
     if kind in counts:
         counts[kind] += 1
     else:
-        other += 1
+        unregistered.append((name, kind))
     print("  %-20s %12s  %-19s  %s" % (name, size, stamp, state))
 
-print("")
-if failures:
+# Every row must have landed in a registered kind. If describe() returns a kind
+# that KIND_LABELS does not list, the totals would silently lose that row, so
+# this fails instead of printing a result that does not add up.
+if unregistered:
+    print("")
+    for name, kind in unregistered:
+        print("Error: %s reported the unregistered kind %r" % (name, kind))
+    print("Error: add the kind to KIND_LABELS in this script before using it")
+    sys.exit(1)
+if sum(counts.values()) != len(rows):
+    print("")
     print(
-        "Result: %d of %d unusable - %d missing, %d unreadable, "
-        "%d not Mach-O, %d not arm64e, %d other."
-        % (
-            failures,
-            len(rows),
-            counts[MISSING],
-            counts[UNREADABLE],
-            counts[NOT_MACHO],
-            counts[WRONG_ARCH],
-            other,
-        )
+        "Error: the parts total %d but there are %d targets"
+        % (sum(counts.values()), len(rows))
     )
     sys.exit(1)
+
+failures = len(rows) - counts[OK]
+if failures:
+    parts = ", ".join("%d %s" % (counts[kind], label) for kind, label in PRINTED_KINDS)
+    print("")
+    print("Result: %d of %d unusable - %s." % (failures, len(rows), parts))
+    sys.exit(1)
+print("")
 print("Result: all %d files present, readable and arm64e." % len(rows))
 PYTHON
