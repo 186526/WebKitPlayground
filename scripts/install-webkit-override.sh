@@ -16,7 +16,7 @@
 # device and run it there:
 #   sudo sh /var/mobile/install-webkit-override.sh
 #
-# Safe to re-run: a target whose byte size already matches its source is left
+# Safe to re-run: a target whose bytes are identical to its source is left
 # alone, every path is absolute (so $HOME, ~ and a different working directory
 # cannot shift it), and nothing nests one WebKitOverride inside another.
 #
@@ -52,6 +52,16 @@ file_size() {
     wc -c < "$1" | tr -d '[:space:]'
 }
 
+# The mtime in one fixed format, so the two sides of a comparison read the same
+# way on every device. python3 is already required for the arm64e check, and it
+# avoids the GNU `stat -c` versus BSD `stat -f` split that has already bitten
+# this project on the device.
+file_mtime() {
+    "${PYTHON_BIN}" -c 'import os, sys, time
+sys.stdout.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(os.stat(sys.argv[1]).st_mtime))))
+' "$1"
+}
+
 find_python() {
     for candidate in /var/jb/usr/bin/python3 /usr/bin/python3; do
         if [ -x "${candidate}" ]; then
@@ -60,6 +70,23 @@ find_python() {
         fi
     done
     found=$(command -v python3 2>/dev/null || true)
+    if [ -n "${found}" ]; then
+        printf '%s\n' "${found}"
+        return 0
+    fi
+    return 1
+}
+
+# The same lookup order as find_python. root's PATH need not contain
+# /var/jb/usr/bin, so the device copy has to be named explicitly.
+find_cmp() {
+    for candidate in /var/jb/usr/bin/cmp /usr/bin/cmp; do
+        if [ -x "${candidate}" ]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    found=$(command -v cmp 2>/dev/null || true)
     if [ -n "${found}" ]; then
         printf '%s\n' "${found}"
         return 0
@@ -145,8 +172,15 @@ copy_from_source() {
     if [ -d "${path_target}" ]; then
         die "${path_target} is a directory; remove ${OVERRIDE_ROOT} and re-run"
     fi
-    if [ -f "${path_target}" ] && [ "$(file_size "${path_target}")" = "$(file_size "${path_source}")" ]; then
-        printf '  unchanged  %s (%s bytes)\n' "${path_target}" "$(file_size "${path_target}")"
+    # Content, not size: a rebuilt binary can land on exactly the same byte
+    # count as the copy already in place, and a size check would then keep the
+    # previous bytes while dyld goes on loading them.
+    if [ -f "${path_target}" ] && "${CMP_BIN}" -s "${path_source}" "${path_target}"; then
+        printf '  unchanged  %s (kept, same content as source; source mtime %s, copy mtime %s, %s bytes)\n' \
+            "${path_target}" \
+            "$(file_mtime "${path_source}")" \
+            "$(file_mtime "${path_target}")" \
+            "$(file_size "${path_target}")"
         return 0
     fi
     cp -p "${path_source}" "${path_target}"
@@ -259,12 +293,14 @@ PYTHON
 }
 
 PYTHON_BIN=$(find_python) || die "python3 not found; the arm64e check cannot run"
+CMP_BIN=$(find_cmp) || die "cmp not found; the copy step cannot tell an unchanged target from a stale one"
 
 printf 'WebKitOverride install\n'
 printf '  root        %s\n' "${OVERRIDE_ROOT}"
 printf '  frameworks  %s\n' "${SOURCE_FRAMEWORKS}"
 printf '  libraries   %s\n' "${SOURCE_LIBRARIES}"
 printf '  python      %s\n' "${PYTHON_BIN}"
+printf '  cmp         %s\n' "${CMP_BIN}"
 
 printf '\nChecking sources\n'
 preflight_sources

@@ -547,13 +547,32 @@ dyld 侧的两处源码对应：`JustInTimeLoader.cpp:460` 设 `depOptions.canBe
 | `scripts/check-webkit-override.sh` | `sh check-webkit-override.sh`，只读，打印目录是否存在与 7 个文件各自的字节数、mtime、Mach-O 架构 |
 | `scripts/uninstall-webkit-override.sh` | `sudo sh uninstall-webkit-override.sh`，只删 `/var/jb/Library/WebKitOverride` 这一个目录 |
 
-安装脚本幂等：目标已存在且字节数与源相同时打印 `unchanged` 并跳过，所以重复执行不改写任何文件，也不会产生 `WebKitOverride/WebKitOverride` 这种嵌套（发现这种嵌套时脚本直接报错退出，不替你删）。它只复制，不移动、不删除源文件，也不触发用户空间重启。校验失败时打印是哪几个文件、为什么不合格，并以 1 退出。
+安装脚本幂等，判定依据是文件内容而不是字节数：内容与源逐字节相同的目标打印 `unchanged` 并跳过，文件不存在、尺寸不同、内容不同三种情况一律重新复制。所以重复执行不改写任何文件，也不会产生 `WebKitOverride/WebKitOverride` 这种嵌套（发现这种嵌套时脚本直接报错退出，不替你删）。它只复制，不移动、不删除源文件，也不触发用户空间重启。校验失败时打印是哪几个文件、为什么不合格，并以 1 退出。
+
+复制那一段只有两种行，各以 `copied` 与 `unchanged` 开头。下面这两行的格式取自本机夹具的实际输出，路径缩短成设备上的形式：
+
+```
+  copied     /var/jb/Library/WebKitOverride/WebKit.framework/WebKit (50758752 bytes)
+  unchanged  /var/jb/Library/WebKitOverride/WebCore.framework/WebCore (kept, same content as source; source mtime 2026-11-24 03:51:47, copy mtime 2026-11-24 03:51:47, 93319152 bytes)
+```
+
+`copied` 行给出刚复制的字节数。`unchanged` 行写明 `kept`，并列出源与副本两个 mtime，看到这行就知道这份副本是沿用的、这次没有被重写：脚本没有写目标文件，目标的 inode 与 mtime 在重跑前后都一样。两个 mtime 相同时，副本就是这次之前从同一个文件复制来的，`cp -p` 保留了源的时间戳。副本 mtime 与源不同时，说明源文件在复制之后被重新写过（内容恰好一致），副本没有跟着刷新，这也是 `unchanged` 而不是 `copied` 的原因。
+
+**不能只比字节数。** 只比字节数时，源文件被同尺寸的新构建覆盖后，脚本仍打印 `unchanged`，`WebKitOverride` 里留着上一版的字节。这几种构建都容易落在相同字节数上：重新签名过的二进制、arm64 换成 arm64e 的 thin Mach-O、只改了加载命令的重新链接。后果是 dyld 继续搜索旧副本，而 `verify_layout` 只校验 arm64e，这种状态会被判成功。设备上现装的 7 个文件是 50758752、93319152、38192080、4652576、3188528、16182352、6801440 字节，新构建撞上同一个字节数并不罕见。
+
+**M49 runbook 第四阶段那句「重跑一次安装脚本再看」的依据就是这里。** `webkit-install-runbook.md` 要求 `dpkg -i` 之后重跑安装脚本，并在哈希核对出现 `DIFF` 时写「重跑一次安装脚本再看」。这句成立的前提是内容比对：`dpkg -i` 换上新的源文件后，即使新文件与旧副本字节数相同，脚本也会判定内容不同并重新复制，所以重跑一定让副本跟上源，不会再次打印 `unchanged`。内容本来就相同的时候脚本才打印 `unchanged`，那时哈希核对本来就是 `SAME`，不需要重跑。
+
+本机夹具实测（`JBROOT` 指向 scratch 目录，7 个源都是 4096 字节的 thin arm64e 桩）：首次安装 7 行 `copied`；内容不变重跑 7 行 `unchanged`，目标 inode 与 mtime 前后不变；把 `WebKit` 源换成同尺寸不同内容后重跑，只有它一行 `copied`、其余 6 行 `unchanged`，复核目标内容与源一致。把 `WebKit` 源换成设备上的 50758752 字节、只改中间一个字节，同样判为刷新。
+
+`cmp` 的路径和 `python3` 一样按顺序找：先 `/var/jb/usr/bin/cmp`，再 `/usr/bin/cmp`，最后 PATH。两处都不存在时脚本在写任何文件之前退出并报 `cmp not found`，不会退回「每次都复制」或「只比字节数」。启动摘要里会打印实际用到的 `cmp` 路径。
+
+脚本共 322 行，`dash -n scripts/install-webkit-override.sh` 通过（无输出，退出 0），没有 `[[`、`local`、`declare` 或数组赋值。
 
 回滚就是删那一个目录：`uninstall-webkit-override.sh` 只 `rm -rf /var/jb/Library/WebKitOverride`，`/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib` 下的原文件一个不碰。目录不存在时它报 `already absent` 并以 0 退出。
 
 安装脚本需要 root（`/var/jb/Library` 是 `root:wheel 775`），检查脚本不需要：安装脚本把两层目录设成 755、7 个文件设成 644，所以 `mobile` 能读到。
 
-`/var/mobile` 下的三个脚本是修前版本，**执行前必须按本仓 `scripts/` 重新拷一遍**。设备上 2026-11-24 02:25 那份的字节数是 `check-webkit-override.sh` 5594、`install-webkit-override.sh` 7734、`uninstall-webkit-override.sh` 1790；本仓当前版本是 7566、9635、1790。旧 `install` 的 `create_layout` 没有符号链接护栏，遇上符号链接目录会写穿到 override 之外；它逐个 `mkdir -p` 且目标都加了引号，所以路径含空格时不会拆分。识别旧版还可以看校验提示文字：旧版写 `eight target files`，当前版本写 `seven`。已按旧脚本建好的目录内容与当前版本相容（都是纯复制），不需要回滚重装，只换脚本即可。
+`/var/mobile` 下的三个脚本是修前版本，**执行前必须按本仓 `scripts/` 重新拷一遍**。设备上 2026-11-24 02:25 那份的字节数是 `check-webkit-override.sh` 5594、`install-webkit-override.sh` 7734、`uninstall-webkit-override.sh` 1790；本仓当前版本是 7566、11075、1790。旧 `install` 的 `create_layout` 没有符号链接护栏，遇上符号链接目录会写穿到 override 之外；它逐个 `mkdir -p` 且目标都加了引号，所以路径含空格时不会拆分。识别旧版还可以看校验提示文字：旧版写 `eight target files`，当前版本写 `seven`；只比字节数的那版 `unchanged` 行只有路径与字节数，当前版本的 `unchanged` 行带 `kept` 与两个 mtime。已按旧脚本建好的目录内容与当前版本相容（都是纯复制），不需要回滚重装，只换脚本即可。**只比字节数的旧版必须换掉**：新构建与旧副本同尺寸时它会打印 `unchanged`，把旧字节留在 `WebKitOverride` 里。
 
 `install-webkit-override.sh` 的历史里有一处与上面无关的独立缺陷：`82f0fc7` 把目录列表改成未加引号的 `${directories}` 循环，`JBROOT` 含空格时会按词拆开并在 override 之外建树；`55b0c51` 已修（IFS 收窄到单换行）。设备旧副本早于 `82f0fc7`，没有这个问题。
 
