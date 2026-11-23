@@ -157,16 +157,21 @@ jobs:
           set -euo pipefail
           cd Dopamine
 
-          # Every patch this checkout carries, sorted.  The two are
-          # 0001-dyldhook-allow-framework-override.patch and
-          # 0001-systemhook-set-search-paths.patch; a later patch needs no edit
-          # here.  Reading the directory instead of naming files also means a
-          # branch without one of them still builds, which is what let this
-          # workflow land before the systemhook patch merged.
+          # PATCHES is "all" by default and may also be a space-separated list of
+          # names under dopamine-basebin/.  The "all" branch reads the directory,
+          # so a branch carrying only some of the patches still builds; the list
+          # branch applies exactly the names asked for and git apply --check below
+          # fails on one that does not exist.
           patch_dir="$BASEDIR/dopamine-basebin"
           ls -l "$patch_dir" | tee "$LOGS/patch-source.txt"
-          files=$(cd "$patch_dir" && ls *.patch 2>/dev/null)
+          if [ "$PATCHES" = "all" ]; then
+            files=$(cd "$patch_dir" && ls *.patch 2>/dev/null)
+          else
+            files=$PATCHES
+          fi
           test -n "$files" || { echo "no patches under $patch_dir" >&2; exit 1; }
+          echo "PATCHES=$PATCHES" | tee "$LOGS/patch-request.txt"
+          echo "selected: $files" | tee -a "$LOGS/patch-request.txt"
 
           : > "$LOGS/applied-patches.txt"
           for name in $files; do

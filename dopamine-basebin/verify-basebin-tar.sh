@@ -94,16 +94,22 @@ fi
 
 # The hooks themselves, read from the shipped bytes.  verify-dyldhook-merge.sh
 # asserts both new hooks on the iOS 16-17 and iOS 18+ dylibs, their absence on
-# the iOS 15 dylib, both legacy hooks on all three, and an empty llvm-nm -u.
+# the iOS 15 dylib, both legacy hooks on all six, and an empty llvm-nm -u.  All
+# six names are copied, not just the arm64e three: devices older than A12 run
+# arm64, so an arm64 variant that lost a hook would ship uncaught otherwise.
 hook_dir="$work/hookcheck"
 mkdir -p "$hook_dir"
 for name in \
 	dyldhook_merge.arm64e.iOS15.dylib \
+	dyldhook_merge.arm64.iOS15.dylib \
 	dyldhook_merge.arm64e.iOS16-17.dylib \
-	dyldhook_merge.arm64e.iOS18+.dylib
+	dyldhook_merge.arm64.iOS16-17.dylib \
+	dyldhook_merge.arm64e.iOS18+.dylib \
+	dyldhook_merge.arm64.iOS18+.dylib
 do
 	[ -f "$work/basebin/$name" ] && cp "$work/basebin/$name" "$hook_dir/"
 done
+echo "hookcheck inputs: $(ls "$hook_dir" | wc -l | tr -d ' ') of 6 dylibs"
 
 if [ -f "$VERIFY_HOOKS" ]; then
 	if sh "$VERIFY_HOOKS" "$hook_dir"; then

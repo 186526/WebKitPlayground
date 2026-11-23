@@ -187,7 +187,10 @@ That script unpacks the tar and asserts the six names
 `dyldhook_dylib_for_platform()` can ask for (`dyldhook_merge.<arch>.<profile>.dylib`
 for arm64e and arm64, over iOS15, iOS16-17 and iOS18+), `basebin.tc`,
 `systemhook.dylib`, and the same hook assertions as above read from the shipped
-bytes. It also asserts that the tar carries no `gen/dyld`.
+bytes. It copies all six dylibs into a scratch directory and hands that
+directory to `verify-dyldhook-merge.sh`, so the arm64 variants are checked for
+their symbols too, and an arm64 dylib that lost a hook fails the gate. It also
+asserts that the tar carries no `gen/dyld`.
 
 `gen/dyld` is deliberately not in the tar. `libjailbreak/src/basebin_gen.m`
 builds it on the device: `jbctl update basebin` copies `/usr/lib/dyld`, patches
@@ -246,7 +249,13 @@ Inputs:
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `dopamine_ref` | `3.0.13` | Tag, branch or commit to clone. |
-| `patches` | `all` | `all` applies every `*.patch` in this directory, sorted. A space-separated list applies only those, and a name that does not exist fails the job. |
+| `patches` | `all` | `all` applies every `*.patch` in this directory. A space-separated list of file names applies exactly those, and a name under this directory that does not exist stops the step at `git apply --check` with a non-zero exit. |
+
+The two branches are separate in step 7: `all` reads the directory with
+`ls *.patch`, anything else is taken as the file list verbatim. Either way the
+step records what was asked for and what it selected in
+`$LOGS/patch-request.txt`, and the names it applied in
+`$LOGS/applied-patches.txt`.
 
 Because the default is `all`, a patch that has not merged yet is simply absent
 from the list instead of breaking the build. The systemhook assertions read the
@@ -254,6 +263,13 @@ list back: when no patch whose name contains `systemhook` was applied, the job
 prints a `SKIPPED` notice for `DYLD_FRAMEWORK_PATH` and
 `__XPC_DYLD_FRAMEWORK_PATH` and still checks `DYLD_INSERT_LIBRARIES`. It never
 passes that check silently.
+
+The single-patch branch is verified by local rehearsal, not by a CI run: the
+step's `run:` block was extracted from the workflow with `yaml.safe_load` and
+executed against a throwaway git repository holding two stand-in patches. Under
+both `bash` and `dash`, `PATCHES=all` applied both files, a single name applied
+only that file, and a name that does not exist exited 128 from `git apply
+--check` and applied nothing. The green CI run exercised the `all` branch only.
 
 Artifacts:
 
@@ -346,6 +362,9 @@ python3 /path/to/WebKitPlayground/dopamine-basebin/test-verify-basebin-artifacts
 
 The first drives `verify-dyldhook-merge.sh` with a fake `llvm-nm`. The second
 does the same for `verify-basebin-tar.sh` and `verify-merged-dyld.sh`, including
-the cases where each must refuse: a tar missing one of the six dylibs, a dylib
-that lost a hook, a baked-in `gen/dyld`, a merge whose output lost `dlopen_from`,
-and a merger that cannot run at all.
+the cases where each must refuse: a tar missing one of the six dylibs, either
+architecture's dylib losing a hook, hooks appearing on either iOS 15 dylib, a
+baked-in `gen/dyld`, a merge whose output lost `dlopen_from`, and a merger that
+cannot run at all. The arm64 cases are what keep
+`verify-basebin-tar.sh` copying all six names: with only the arm64e three
+copied, an arm64 dylib that lost a hook passed the gate.

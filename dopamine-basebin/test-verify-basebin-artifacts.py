@@ -42,14 +42,10 @@ PATCHED_18 = [DLOPEN_TRAMPOLINE, FCNTL] + [OVERRIDABLE, ALWAYS_OVERRIDABLE]
 ARM64E_15 = "dyldhook_merge.arm64e.iOS15.dylib"
 ARM64E_16 = "dyldhook_merge.arm64e.iOS16-17.dylib"
 ARM64E_18 = "dyldhook_merge.arm64e.iOS18+.dylib"
-ALL_SIX = [
-    ARM64E_15,
-    "dyldhook_merge.arm64.iOS15.dylib",
-    ARM64E_16,
-    "dyldhook_merge.arm64.iOS16-17.dylib",
-    ARM64E_18,
-    "dyldhook_merge.arm64.iOS18+.dylib",
-]
+ARM64_15 = "dyldhook_merge.arm64.iOS15.dylib"
+ARM64_16 = "dyldhook_merge.arm64.iOS16-17.dylib"
+ARM64_18 = "dyldhook_merge.arm64.iOS18+.dylib"
+ALL_SIX = [ARM64E_15, ARM64_15, ARM64E_16, ARM64_16, ARM64E_18, ARM64_18]
 
 failures: list[str] = []
 
@@ -131,11 +127,11 @@ def run(script: Path, args: list[str], bin_dir: Path) -> tuple[int, str]:
 def healthy_dylibs() -> dict[str, list[str]]:
     return {
         ARM64E_15: LEGACY,
-        "dyldhook_merge.arm64.iOS15.dylib": LEGACY,
+        ARM64_15: LEGACY,
         ARM64E_16: PATCHED,
-        "dyldhook_merge.arm64.iOS16-17.dylib": PATCHED,
+        ARM64_16: PATCHED,
         ARM64E_18: PATCHED_18,
-        "dyldhook_merge.arm64.iOS18+.dylib": PATCHED_18,
+        ARM64_18: PATCHED_18,
     }
 
 
@@ -152,7 +148,9 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
         check(f"tar: omitting {name} fails", rc == 1, out)
         check(f"tar: omitting {name} names the file", f"missing basebin/{name}" in out, out)
 
-    for name in (ARM64E_16, ARM64E_18):
+    # Both architectures lose a hook: an arm64 variant that regressed would
+    # otherwise ship uncaught, because devices older than A12 run arm64.
+    for name in (ARM64E_16, ARM64E_18, ARM64_16, ARM64_18):
         dylibs = healthy_dylibs()
         dylibs[name] = LEGACY
         lost = build_tar(root / f"lost-hook-{name}", dylibs)
@@ -162,9 +160,10 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
 
     extra_hooks = healthy_dylibs()
     extra_hooks[ARM64E_15] = PATCHED
+    extra_hooks[ARM64_15] = PATCHED
     wrong15 = build_tar(root / "wrong15", extra_hooks)
     rc, out = run(TAR_SCRIPT, [str(wrong15)], bin_dir)
-    check("tar: hooks on the iOS 15 dylib fail", rc == 1, out)
+    check("tar: hooks on either iOS 15 dylib fail", rc == 1, out)
 
     undef = healthy_dylibs()
     baked = build_tar(root / "with-gen", healthy_dylibs(), extra={"gen/dyld": "sym:x\n"})
