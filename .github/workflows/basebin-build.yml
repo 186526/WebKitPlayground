@@ -49,10 +49,6 @@ jobs:
       # failing gmake is the only thing worth debugging and it leaves the job
       # otherwise empty.
       LOGS: ${{ github.workspace }}/diagnostics
-      # llvm-nm is not part of Xcode's default PATH, and both verifiers call it
-      # by that name.  A shim points the name at the SDK's nm, which reads
-      # arm64e Mach-O and accepts the same -g and -u flags.
-      SHIM: ${{ runner.temp }}/bin
 
     steps:
       - name: Checkout
@@ -83,10 +79,16 @@ jobs:
           brew install make ldid libarchive gnu-sed openssl@3
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
-          mkdir -p "$SHIM"
-          ln -sf "$(xcrun -f nm)" "$SHIM/llvm-nm"
-          echo "$SHIM" >> "$GITHUB_PATH"
-          "$SHIM/llvm-nm" --version 2>&1 | head -3 | tee "$LOGS/nm-version.txt" || true
+          # llvm-nm is not part of Xcode's default PATH, and both verifiers call
+          # it by that name.  A shim points the name at the SDK's nm, which reads
+          # arm64e Mach-O and accepts the same -g and -u flags.  The directory is
+          # built here rather than in env: because runner.* is not available to a
+          # workflow-level env block.
+          shim="$RUNNER_TEMP/bin"
+          mkdir -p "$shim"
+          ln -sf "$(xcrun -f nm)" "$shim/llvm-nm"
+          echo "$shim" >> "$GITHUB_PATH"
+          "$shim/llvm-nm" --version 2>&1 | head -3 | tee "$LOGS/nm-version.txt" || true
           ldid -v 2>&1 | head -1 || true
 
       - name: Install theos with the iPhoneOS 16.5 SDK
