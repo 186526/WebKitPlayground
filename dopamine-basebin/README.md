@@ -233,7 +233,8 @@ Inputs:
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `dopamine_ref` | `3.0.13` | Tag, branch or commit to clone. |
-| `patches` | `all` | `all` applies every `*.patch` in this directory, sorted. A space-separated list applies only those, and a name that does not exist fails the job. |
+| `patches` | `all` | `all` applies every `*.patch` in the patch source, sorted. A space-separated list applies only those, and a name that does not exist fails the job. |
+| `patch_ref` | empty | Ref in this repository to take `dopamine-basebin/` from. Empty means this checkout. Set it to a branch that carries a patch which has not merged yet, so its build is proven before the merge. |
 
 Because the default is `all`, a patch that has not merged yet is simply absent
 from the list instead of breaking the build. The systemhook assertions read the
@@ -267,13 +268,35 @@ does not carry one. If the update refuses with "Failed to locate dyldhook.dylib"
 the tar is missing the dylib name for the device's architecture and iOS version;
 `verify-basebin-tar.sh` is the check that catches that before the device does.
 
-## What has and has not been built
+## Builds that have actually run
 
-`git apply --check` against a fresh clone of tag `3.0.13` passes for this patch,
-and the commit recorded the run that proved it. The hook bodies compile with
-`clang -target arm64e-apple-ios16.0 -DIOS=16` and leave `llvm-nm -u` empty;
-`main.S` assembles with the new block for `IOS=16` and `IOS=18` and omits it for
-`IOS=15`.
+| Run | Result | What it established |
+| --- | --- | --- |
+| [45221890249](https://github.com/186526/WebKitPlayground/actions/runs/45221890249) | build failed | `gmake -C BaseBin` stopped at `BaseBin/dopamine/src/main.m:80` with "expected value in expression" because `BUILD_STANDALONE` was empty. Step 6 now passes `BUILD_STANDALONE=0`. |
+| [45224133796](https://github.com/186526/WebKitPlayground/actions/runs/45224133796) | gate failed | BaseBin compiled for the first time. The gate then rejected the iOS 18+ dylib for lacking the `dlopen_from` hook, which upstream compiles out on purpose. `verify-dyldhook-merge.sh` now asserts the trampoline there. |
+| [45225831431](https://github.com/186526/WebKitPlayground/actions/runs/45225831431) | success | Every step passed and `basebin.tar` shipped. The merged-dyld step reported exit 3 (`FatNotMachO`): `/usr/lib/dyld` is universal and `MachOMerger` reads a thin Mach-O. |
+| [45227991502](https://github.com/186526/WebKitPlayground/actions/runs/45227991502) | superseded | Added the `llvm-lipo -thin arm64e` slice so the merged-dyld step merges a real arm64e dyld instead of skipping. Superseded before it started by the `patch_ref` run below. |
+
+The artifact from the latest successful run is `basebin-tar`, holding
+`basebin.tar`, `basebin.tar.sha256`, the `version` Dopamine wrote into the tar
+(`3.0.13`), and `dopamine-commit.txt`. Download it with
+`gh run download <run-id> -n basebin-tar`.
+
+Verified on the downloaded tar, beyond what the workflow asserts: the six
+`dyldhook_merge.*.dylib` are present, `dyldhook_merge.arm64e.iOS16-17.dylib`
+defines `isOverridablePath`, `isAlwaysOverridablePath`, `dlopen_from` and
+`__fcntl`, `llvm-nm -u` is empty for every dylib, and the tar carries no
+`gen/dyld`.
+
+`git apply --check` against a fresh clone of tag `3.0.13` passes for this patch.
+The hook bodies compile with `clang -target arm64e-apple-ios16.0 -DIOS=16` and
+leave `llvm-nm -u` empty; `main.S` assembles with the new block for `IOS=16` and
+`IOS=18` and omits it for `IOS=15`.
+
+Not established by any of these runs: whether the patched dyld makes a WebKit
+installed at `/var/jb/Library/WebKitOverride` load instead of the shared-cache
+copy. That needs the tar installed on a device and a process started under the
+new dyld, which no CI job can do.
 
 The verifier scripts' own cases are covered by two regression suites, which run
 anywhere with `python3`:

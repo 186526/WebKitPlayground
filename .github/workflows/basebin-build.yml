@@ -11,6 +11,10 @@ on:
         description: 'Space-separated patch names under dopamine-basebin/, or "all" for every *.patch there'
         required: true
         default: 'all'
+      patch_ref:
+        description: 'Git ref in this repository to take dopamine-basebin/ patches from (empty = this checkout)'
+        required: false
+        default: ''
   # A push trigger alongside dispatch: GitHub only offers workflow_dispatch for a
   # workflow that already exists on the default branch, so before this file lands
   # there the dispatch button does not exist.  The push trigger also re-runs the
@@ -39,6 +43,7 @@ jobs:
       # mean the same thing as the dispatch defaults.
       DOPAMINE_REF: ${{ inputs.dopamine_ref || '3.0.13' }}
       PATCHES: ${{ inputs.patches || 'all' }}
+      PATCH_REF: ${{ inputs.patch_ref || '' }}
       # BaseBin/dyldhook/Makefile links with -Xlinker -add_split_seg_info, which
       # only Xcode's ld64 accepts, and every other subproject looks up its
       # iPhoneOS SDK through xcrun.  The job therefore relies on the image's
@@ -157,13 +162,25 @@ jobs:
           set -euo pipefail
           cd Dopamine
 
-          # `all` means every patch this checkout carries, sorted, so the job
-          # keeps working when a later patch lands without touching this file.
-          # It also tolerates an absent patch, which is what lets this branch
-          # build before the systemhook patch has merged.
+          # Where the patch files come from.  An empty patch_ref means this
+          # checkout; a ref lets a build exercise a patch that is still on its own
+          # branch, which is how the systemhook patch gets built before it merges.
+          patch_dir="$BASEDIR/dopamine-basebin"
+          if [ -n "$PATCH_REF" ]; then
+            git clone --quiet --filter=blob:none --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/patchsrc"
+            git -C "$RUNNER_TEMP/patchsrc" fetch --quiet --depth 1 origin "$PATCH_REF"
+            git -C "$RUNNER_TEMP/patchsrc" checkout --quiet FETCH_HEAD -- dopamine-basebin
+            patch_dir="$RUNNER_TEMP/patchsrc/dopamine-basebin"
+            echo "patches taken from $PATCH_REF"
+          fi
+          ls -l "$patch_dir" | tee "$LOGS/patch-source.txt"
+
+          # `all` means every patch in the source directory, sorted, so a later
+          # patch needs no workflow edit.  It also tolerates an absent patch,
+          # which is what lets a build run before a patch has merged.
           requested="$PATCHES"
           if [ "$requested" = "all" ]; then
-            files=$(cd "$BASEDIR" && ls dopamine-basebin/*.patch 2>/dev/null | sed 's|^dopamine-basebin/||')
+            files=$(cd "$patch_dir" && ls *.patch 2>/dev/null)
           else
             files=$requested
           fi
@@ -172,16 +189,16 @@ jobs:
           : > "$LOGS/applied-patches.txt"
           applied=''
           for name in $files; do
-            patch="$BASEDIR/dopamine-basebin/$name"
+            patch="$patch_dir/$name"
             if [ ! -f "$patch" ]; then
               # A missing patch named explicitly is an operator error: the job
               # was asked to apply something that is not there.  `all` cannot hit
               # this because its list comes from ls.
               if [ "$requested" = "all" ]; then
-                echo "::warning::patch $name is not in the checkout; skipping"
+                echo "::warning::patch $name is not in $patch_dir; skipping"
                 continue
               fi
-              echo "patch $name does not exist under dopamine-basebin/" >&2
+              echo "patch $name does not exist under $patch_dir" >&2
               exit 1
             fi
             echo "== $name"
@@ -201,7 +218,7 @@ jobs:
             echo "SYSTEMHOOK_PATCH_APPLIED=1" >> "$GITHUB_ENV"
           else
             echo "SYSTEMHOOK_PATCH_APPLIED=0" >> "$GITHUB_ENV"
-            echo "::notice::No systemhook patch applied; the DYLD_FRAMEWORK_PATH assertions will be skipped."
+            echo "::notice::No systemhook patch applied; the DYLD_FRAMEWORK_PATH assertions will be skipped. The tar will not set the search paths the WebKit override needs."
           fi
 
       - name: Build BaseBin
