@@ -145,6 +145,57 @@ jobs:
           du -sh .git
           df -h /
 
+      - name: Refuse a build that would ship XPC services iOS never selects
+        env:
+          APPLY_PATCH: ${{ inputs.apply_patch }}
+        run: |
+          set -euo pipefail
+          # patches/ios16-xpc-service-bundle-identifier.patch is only applied when apply_patch is
+          # true, and the packaged-deb assertion at the end of the job fails on any bundle whose
+          # CFBundleIdentifier still carries the .Service suffix. Left alone, an unpatched run is
+          # the worst outcome: it compiles for about 5 hours, fails that assertion, and Upload deb
+          # is skipped too, so the run produces no package. This guard turns that into a few
+          # seconds by stating the requirement once the sources exist and before the build starts.
+          #
+          # The clone above is unavoidable: the decision is made by reading the three xcconfigs,
+          # and they do not exist until it finishes. What this still saves is the build.
+          #
+          # The files are read rather than the ref name. The .Service gate is not in every tag:
+          # 16.1, 16.4, 16.6, 17.0, 17.2, 17.3.1, 17.5 and 17.6 have no sdk=iphone* identifier
+          # line at all, and 17.4 keys it on sdk=iphonesimulator*. Those refs already name the
+          # services the way iOS asks for them, so apply_patch=false is correct there and this
+          # guard passes them through. Reading the files is what keeps a re-tagged or unusual ref
+          # correct, and it is the same test the Apply worktree patch step uses.
+          configurations=WebKit/Source/WebKit/Configurations
+          if [ ! -d "$configurations" ]; then
+            echo "::error::${configurations} is missing, so the XPC service identifier check cannot decide"
+            exit 1
+          fi
+          if [ "$APPLY_PATCH" = "true" ]; then
+            echo "apply_patch is true, so the XPC service identifier patch is in place"
+            exit 0
+          fi
+          gated=""
+          for service in WebContentService NetworkService GPUService; do
+            xcconfig="${configurations}/${service}.xcconfig"
+            if [ ! -f "$xcconfig" ]; then
+              echo "::error::${xcconfig} is missing, so the XPC service identifier check cannot decide"
+              exit 1
+            fi
+            if grep -qF 'PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*] = $(PRODUCT_NAME).Service;' "$xcconfig"; then
+              gated="${gated} ${xcconfig}"
+            fi
+          done
+          if [ -n "$gated" ]; then
+            for xcconfig in $gated; do
+              echo "::error::apply_patch is false but ${xcconfig} still sets PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*] = \$(PRODUCT_NAME).Service."
+            done
+            echo "::error::An 18.x SDK at a 16.1 deployment target takes that line, so the package would register its services as com.apple.WebKit.WebContent.Service and friends. Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:190-212 asks for com.apple.WebKit.WebContent with no suffix, so the system would never select them and the build would be wasted."
+            echo "::error::Set apply_patch to true."
+            exit 1
+          fi
+          echo "${configurations} has no sdk=iphone* .Service gate at this ref, so this ref needs no patch"
+
       - name: Link the additions SDK the deployment target derives
         run: |
           set -euo pipefail
