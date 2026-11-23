@@ -3,16 +3,22 @@
 
 ccache enforces max_size lazily while compiling: once the cache grows past the limit it trims
 whole level-2 directories, so a working set that does not fit loses entries the same build is
-about to ask for again. Two read-only reports expose that. `ccache --show-stats --verbose` prints Cache
-size against max_size plus a cumulative Cleanups counter, and `ccache --show-compression` prints
-the Compression ratio. Cleanups accumulates over the life of the cache directory, so only the
-difference between the pre-build and post-build snapshots describes one build; pass the pre-build
-snapshot as --baseline.
+about to ask for again. Two read-only reports expose that. `ccache --show-stats --verbose` prints
+Cache size against max_size plus a cumulative Cleanups counter, and `ccache --show-compression`
+prints the Compression ratio. Cleanups accumulates over the life of the cache directory, so only
+the difference between the pre-build and post-build snapshots describes one build; pass the
+pre-build snapshot as --baseline.
 
 The verdict is RESIDENT when this build trimmed nothing and the cache ended below 98% of max_size,
 and NOT-RESIDENT otherwise. The in-run hit rate is printed beside it because that is the number to
 compare across builds, but it does not decide the verdict: it also falls when the sources change.
 Without --baseline the counter cannot be attributed to one build, so only saturation decides.
+
+Each hit is one cacheable call, so the build cannot answer more calls than it made. A Hits delta
+larger than the Cacheable calls delta means the two snapshots are not one cache directory, and the
+script exits non-zero rather than print a rate above 100%. A Hits count that went backwards means
+the directory was reset between the snapshots; the rate is then unprintable, and the rest of the
+line still describes the current cache.
 
 The script reads only. Its arguments are files; when one is omitted the matching ccache reporting
 command is run, which writes nothing either.
@@ -156,11 +162,30 @@ def capacity_line(
         cleanups_delta = after.cleanups - before.cleanups
 
     in_run_hit_percent = None
+    in_run_hit_note = "n/a, no baseline"
     if before is not None:
+        in_run_hit_note = "n/a, no cacheable calls this build"
         cacheable_delta = after.cacheable_calls - before.cacheable_calls
         hit_delta = after.hits - before.hits
         if cacheable_delta > 0:
-            in_run_hit_percent = 100.0 * hit_delta / cacheable_delta
+            # Each hit is one cacheable call, so this build cannot answer more calls than it
+            # made. A larger delta means the two snapshots do not describe one cache directory
+            # (a hand-edited file, or a counter reset between them), and a rate above 100% would
+            # read as an improvement that cannot exist, so it is refused rather than printed.
+            if hit_delta > cacheable_delta:
+                raise SystemExit(
+                    f"inconsistent stats: this build's Hits delta is {hit_delta} over a Cacheable "
+                    f"calls delta of {cacheable_delta} "
+                    f"({100.0 * hit_delta / cacheable_delta:.1f}%), which cannot be one build. "
+                    f"Check that --stats and --baseline describe the same cache directory."
+                )
+            # The counters only grow, so a lower Hits count means the cache directory was reset
+            # between the snapshots. The rate is then unknown, but the size and compression
+            # figures below still describe the current cache, so they are printed.
+            if hit_delta < 0:
+                in_run_hit_note = "n/a, hits went backwards"
+            else:
+                in_run_hit_percent = 100.0 * hit_delta / cacheable_delta
 
     saturated = after.percent_full >= RESIDENT_PERCENT
     resident = not saturated and (cleanups_delta is None or cleanups_delta == 0)
@@ -180,7 +205,7 @@ def capacity_line(
         fields.append(f"savings={format_number(compression.savings_percent)}%")
     fields.append(
         "in-run-hit="
-        + (f"{format_number(in_run_hit_percent)}%" if in_run_hit_percent is not None else "n/a, no baseline")
+        + (f"{format_number(in_run_hit_percent)}%" if in_run_hit_percent is not None else in_run_hit_note)
     )
     return " | ".join(fields)
 
