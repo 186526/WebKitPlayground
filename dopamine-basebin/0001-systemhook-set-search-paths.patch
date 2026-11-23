@@ -1,0 +1,155 @@
+diff --git a/BaseBin/systemhook/src/common/common.c b/BaseBin/systemhook/src/common/common.c
+index d9cb86f..61c7a22 100644
+--- a/BaseBin/systemhook/src/common/common.c
++++ b/BaseBin/systemhook/src/common/common.c
+@@ -145,10 +145,76 @@ static kSpawnConfig spawn_config_for_executable(const char* path, char *const ar
+ 	return (kSpawnConfigInject | kSpawnConfigTrust);
+ }
+ 
++// True when envp carries name with exactly this value. A spawned process passes its environment
++// down, so a child of an already overridden parent matches here and keeps its envp untouched
++// instead of rebuilding the buffer and appending another copy on every generation.
++// Both values are non-NULL at every call site: the caller clears the enabled flag when JBROOT_PATH
++// returned NULL, and nothing below runs then, so NULL never reaches strcmp or envbuf_setenv.
++static bool envbuf_variable_matches(const char *envp[], const char *name, const char *wanted)
++{
++	const char *existingValue = envbuf_getenv(envp, name);
++	return existingValue && !strcmp(existingValue, wanted);
++}
++
++// The search paths this hook hands to spawned processes, and what is already in place.
++#define JB_SEARCH_PATH_COUNT 4
++
++typedef struct {
++	const char *name;
++	const char *value;
++} jbSearchPathVariable;
++
++typedef struct {
++	bool enabled;
++	bool present[JB_SEARCH_PATH_COUNT];
++	bool allPresent;
++	bool anyPresent;
++} jbSearchPathState;
++
++// Records which variables already hold the value this hook would write. With the switch off
++// nothing is compared, and both aggregates keep the values that leave the fast paths and both
++// branches behaving exactly as the unpatched code did.
++static jbSearchPathState jbSearchPathStateFor(const char *envp[], bool enabled, const jbSearchPathVariable variables[JB_SEARCH_PATH_COUNT])
++{
++	jbSearchPathState state = { .enabled = enabled, .present = { false }, .allPresent = true, .anyPresent = false };
++	if (!enabled) return state;
++	for (int i = 0; i < JB_SEARCH_PATH_COUNT; i++) {
++		state.present[i] = envbuf_variable_matches(envp, variables[i].name, variables[i].value);
++		if (state.present[i]) {
++			state.anyPresent = true;
++		}
++		else {
++			state.allPresent = false;
++		}
++	}
++	return state;
++}
++
++// Writes the variables that are not already in place. With the switch off nothing is written.
++static void jbSearchPathSet(char **envpp[], const jbSearchPathVariable variables[JB_SEARCH_PATH_COUNT], const jbSearchPathState *state)
++{
++	if (!state->enabled) return;
++	for (int i = 0; i < JB_SEARCH_PATH_COUNT; i++) {
++		if (!state->present[i]) envbuf_setenv(envpp, variables[i].name, variables[i].value);
++	}
++}
++
++// Removes only the values this hook would have written, so a third party that set the same
++// variable for its own purposes keeps it. With the switch off nothing is removed.
++static void jbSearchPathUnset(char **envpp[], const jbSearchPathVariable variables[JB_SEARCH_PATH_COUNT], const jbSearchPathState *state)
++{
++	if (!state->enabled) return;
++	for (int i = 0; i < JB_SEARCH_PATH_COUNT; i++) {
++		if (state->present[i]) envbuf_unsetenv(envpp, variables[i].name);
++	}
++}
++
+ // 1. Ensure the binary about to be spawned and all of it's dependencies are trust cached
+ // 2. Insert "DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib" into all binaries spawned
+ // 3. Increase Jetsam limit to more sane value (Multipler defined as JETSAM_MULTIPLIER)
+ // 4. Fix spawning as root via persona entitlement on iOS 17.6+
++// 5. Point dyld's framework and library search paths at the jailbreak root, so a WebKit built
++//    outside the shared cache can be reached from /var/jb/Library/WebKitOverride
+ 
+ static int spawn_exec_hook_common(bool isExec,
+ 						   const char *path,
+@@ -193,6 +259,41 @@ static int spawn_exec_hook_common(bool isExec,
+ 		});
+ 	}
+ 
++	// Two directories, both dedicated to this override. Every name in a search path becomes a
++	// candidate for every spawned process, and the shared directories hold other packages' files:
++	// /var/jb/Library/Frameworks carries AltList and CydiaSubstrate, while /var/jb/usr/lib shares
++	// liblzma.5.dylib and libmrc.dylib with the shared cache.
++	// JBROOT_PATH goes through get_jbroot(), which this dylib answers from the check-in that
++	// initializer() performs before it installs the spawn hooks, so both paths are usable here.
++	const char *jbFrameworkPath = JBROOT_PATH("/Library/WebKitOverride");
++	const char *jbLibraryPath = JBROOT_PATH("/Library/WebKitOverride/usr/lib");
++
++	// The framework directory takes WebKit.framework/WebKit and friends. The library directory
++	// takes bare file names: dyld reduces an install name such as
++	// /System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib to its leaf
++	// and appends only that leaf here, because getFrameworkPartialPath returns NULL for it.
++	const jbSearchPathVariable searchPathVariables[JB_SEARCH_PATH_COUNT] = {
++		{ "DYLD_FRAMEWORK_PATH",       jbFrameworkPath },
++		{ "__XPC_DYLD_FRAMEWORK_PATH", jbFrameworkPath },
++		{ "DYLD_LIBRARY_PATH",         jbLibraryPath },
++		{ "__XPC_DYLD_LIBRARY_PATH",   jbLibraryPath },
++	};
++
++	// A DisableJBFrameworkPath boolean in /var/jb/basebin/config.plist turns this off without a
++	// rebuild. A NULL from JBROOT_PATH turns it off as well, and is decided here rather than at each
++	// use: envbuf_setenv reads its value, so a NULL must never reach the helpers below. With the key
++	// absent, or the file unreadable, the search paths stay on.
++	bool enableSearchPath = jbFrameworkPath != NULL && jbLibraryPath != NULL;
++	if (enableSearchPath) {
++		xpc_object_t disableSearchPath = jbuserconfig_get_value("DisableJBFrameworkPath");
++		if (disableSearchPath) {
++			if (xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL && xpc_bool_get_value(disableSearchPath)) {
++				enableSearchPath = false;
++			}
++		}
++	}
++	jbSearchPathState searchPathState = jbSearchPathStateFor((const char **)envp, enableSearchPath, searchPathVariables);
++
+ 	int JBEnvAlreadyInsertedCount = (int)systemHookAlreadyInserted;
+ 
+ 	// Check if we can find at least one reason to not insert jailbreak related environment variables
+@@ -313,7 +414,8 @@ static int spawn_exec_hook_common(bool isExec,
+ 
+ 	pid_t childPid = -1;
+ 
+-	if ((shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1) || (!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable)) {
++	if ((shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 1 && searchPathState.allPresent) ||
++		(!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable && !searchPathState.anyPresent)) {
+ 		// we're already good, just call orig
+ 		r = orig(&childPid, envp);
+ 	}
+@@ -332,6 +434,10 @@ static int spawn_exec_hook_common(bool isExec,
+ 				}
+ 				envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert);
+ 			}
++
++			// Both spellings are set: where an XPC service's __XPC_ copy is forwarded from is
++			// not verified, and either one being honoured covers the override.
++			jbSearchPathSet(&envc, searchPathVariables, &searchPathState);
+ 		}
+ 		else {
+ 			if (systemHookAlreadyInserted && existingLibraryInserts) {
+@@ -360,6 +466,10 @@ static int spawn_exec_hook_common(bool isExec,
+ 					free(newLibraryInsert);
+ 				}
+ 			}
++			// Only drop the value this hook would have written, so a third party that set the
++			// same variable for its own purposes keeps it. With the switch off nothing is touched,
++			// so the environment passes through as the unpatched code left it.
++			jbSearchPathUnset(&envc, searchPathVariables, &searchPathState);
+ 			envbuf_unsetenv(&envc, "_SafeMode");
+ 			envbuf_unsetenv(&envc, "_MSSafeMode");
+ 		}
