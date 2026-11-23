@@ -30,10 +30,14 @@ H = "_MACHOMERGER_HOOK_"
 OVERRIDABLE = H + "_ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc"
 ALWAYS_OVERRIDABLE = H + "_ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc"
 DLOPEN_FROM = H + "_ZN5dyld44APIs11dlopen_fromEPKciPv"
+DLOPEN_TRAMPOLINE = "_MACHOMERGER_HOOKTRAMPOLINE__ZN5dyld44APIs11dlopen_fromEPKciPv"
 FCNTL = H + "__fcntl"
 
 LEGACY = [DLOPEN_FROM, FCNTL]
 PATCHED = LEGACY + [OVERRIDABLE, ALWAYS_OVERRIDABLE]
+# Upstream guards the dlopen_from hook with `#if IOS < 18` in fakelib_redirect.c,
+# so the iOS 18+ dylib carries the trampoline pair and __fcntl but no hook.
+PATCHED_18 = [DLOPEN_TRAMPOLINE, FCNTL] + [OVERRIDABLE, ALWAYS_OVERRIDABLE]
 
 ARM64E_15 = "dyldhook_merge.arm64e.iOS15.dylib"
 ARM64E_16 = "dyldhook_merge.arm64e.iOS16-17.dylib"
@@ -130,8 +134,8 @@ def healthy_dylibs() -> dict[str, list[str]]:
         "dyldhook_merge.arm64.iOS15.dylib": LEGACY,
         ARM64E_16: PATCHED,
         "dyldhook_merge.arm64.iOS16-17.dylib": PATCHED,
-        ARM64E_18: PATCHED,
-        "dyldhook_merge.arm64.iOS18+.dylib": PATCHED,
+        ARM64E_18: PATCHED_18,
+        "dyldhook_merge.arm64.iOS18+.dylib": PATCHED_18,
     }
 
 
