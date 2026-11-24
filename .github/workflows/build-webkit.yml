@@ -8,7 +8,7 @@ on:
         required: true
         default: 'releases/Apple/Safari-18.3.1-iOS-18.3.2'
       apply_patch:
-        description: 'Apply the worktree patch (only known-good for 16.1-16.5 tags)'
+        description: 'Apply the worktree patches (required for the 18.3 ref; 16.x tags need their own worktree dumps)'
         required: true
         default: 'false'
       xcode:
@@ -629,9 +629,10 @@ jobs:
                   # Safari-18.2-iOS-18.2 has every source file the patch modifies byte-identical to
                   # 18.3.1, and its project-file hunk applies with an offset, so its git apply --check
                   # succeeds and the loop applies the patch without ever entering this case, taking
-                  # 18.3.1's tables on a 18.2 enumeration. The probe above is keyed to 18.3 alone, so
-                  # that run is not stopped and gets no warning; 18.2 is not a target this patch was
-                  # generated against.
+                  # 18.3.1's tables on a 18.2 enumeration. The gate decided by
+                  # "Decide whether the ref needs the message number translation" is keyed to 18.3
+                  # alone, so that run is not stopped and gets no warning; 18.2 is not a target this
+                  # patch was generated against.
                   if grep -qF 'translateOutgoingMessageName' \
                       "WebKit/Source/WebKit/Platform/IPC/Encoder.cpp" 2>/dev/null; then
                     echo "already carries the message number translation: $p"
@@ -737,8 +738,9 @@ jobs:
           # here would be a second place to keep in step with the one in that decision step.
           #
           # apply_patch=false on any other ref is the designed outcome and passes: the 16.x tags,
-          # 17.x, 18.0 and 18.1 do not take this patch, and 18.2 needs the compile failure its own
-          # README paragraph describes rather than this stop.
+          # 17.x, 18.0 and 18.1 reject this patch, and 18.2 is not a generation these tables were
+          # generated for. Within that set 18.2 is the one tree that accepts it, and apply_patch=true
+          # there is what fails at compile time in Build, as its own README paragraph describes.
           if [ -z "${REF_NEEDS_MESSAGE_NAME_TRANSLATION:-}" ]; then
             echo "::error::REF_NEEDS_MESSAGE_NAME_TRANSLATION is unset, so the message number translation check cannot decide. The decision step above must run before this one."
             exit 1
