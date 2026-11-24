@@ -1,5 +1,23 @@
 # 现装 deb 里 iOS 17 及以上 API 的 ObjC 消息审计
 
+## 本文与已修代码的对应关系
+
+本节由落盘时追加，正文是 M55 调查报告的原文，未改一字。正文判决为 must-fix 的两条已经各自落成一个源码补丁：
+
+| 正文字条 | 补丁文件 | 提交 |
+| --- | --- | --- |
+| `traitCollectionByModifyingTraits:` | `patches/ios16-local-current-trait-collection-guard.patch` | M54，内层 `71b7b11` |
+| `setProxyConfigurations:` | `patches/ios16-network-session-proxy-configurations-guard.patch` | M56，内层 `f9742e6` |
+
+proxy 那条采用的是正文「must-fix 一」的「修法」里第三条：`NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration` 在函数入口用 `respondsToSelector:NSSelectorFromString(@"setProxyConfigurations:")` 早返回。
+
+两处都只是源码层修复。设备上现装的产物仍是修复前的二进制，二进制复验要等下一次构建装到设备之后进行。届时的判据是下面两条命令都从 2 变成 0：
+
+```sh
+grep -ac traitCollectionByModifyingTraits WebCore.framework/WebCore
+grep -ac setProxyConfigurations WebKit.framework/WebKit
+```
+
 这份文档回答一个问题：除已修的 `-[UITraitCollection traitCollectionByModifyingTraits:]` 之外，`webkit-rootless.deb` 这批产物在 iPadOS 16.1 上还有没有别的地方会因为 objc 消息转发而 abort。
 
 答案是**有，一处**：`NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration` 里对 `NSURLSessionConfiguration` 发送 `setProxyConfigurations:`。这一处已在本机设备上复现到 `unrecognized selector` → `NSInvalidArgumentException` → 终止，崩溃机制与 trait 那条完全相同。它在 Networking XPC service 里执行，所以即使 trait 修好，Safari 仍会在联网阶段终止。
