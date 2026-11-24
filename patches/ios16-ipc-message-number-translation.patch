@@ -7156,7 +7156,7 @@ index 088ff202d0..eca67725c4 100644
      decoder->setImportanceAssertion(ImportanceAssertion { header });
  #endif
 diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp
-index 30487740bb..678afac432 100644
+index 30487740bb..fde6a153ae 100644
 --- a/Source/WebKit/Shared/AuxiliaryProcess.cpp
 +++ b/Source/WebKit/Shared/AuxiliaryProcess.cpp
 @@ -29,6 +29,7 @@
@@ -7193,14 +7193,14 @@ index 30487740bb..678afac432 100644
 +    // through unchanged fails visibly at the protocol layer if the assumption is
 +    // wrong, while rewriting numbers on a same-generation connection would corrupt
 +    // messages that were already correct and fail less legibly.
-+    if (auto version = uiProcessSDKVersionFromBootstrap(); version && *version < DYLD_IOS_VERSION_18_0)
++    if (auto version = IPC::uiProcessSDKVersionFromBootstrap(); version && *version < DYLD_IOS_VERSION_18_0)
 +        m_connection->setShouldTranslateMessageNames(true);
 +#endif
      initializeConnection(m_connection.get());
      m_connection->open(*this);
  }
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
-index 0c1c42281f..a3c36da3f9 100644
+index 0c1c42281f..f5a37301c1 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
 @@ -26,8 +26,10 @@
@@ -7231,7 +7231,7 @@ index 0c1c42281f..a3c36da3f9 100644
 +#if IOS_16_MESSAGE_NUMBER_TRANSLATION
 +    std::optional<uint32_t> uiProcessSDKVersion;
 +    delegate.getUIProcessSDKVersion(uiProcessSDKVersion);
-+    setUIProcessSDKVersionFromBootstrap(uiProcessSDKVersion);
++    IPC::setUIProcessSDKVersionFromBootstrap(uiProcessSDKVersion);
 +#endif
 +
      WebCore::ProcessIdentifier processIdentifier;
