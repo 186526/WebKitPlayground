@@ -110,7 +110,7 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 
 这一条包含两层要求，第二层比第一层更容易被漏掉。
 
-**第一层：同一次构建产出。** 打包脚本的必需项保证 `WebKit`、`WebCore`、`JavaScriptCore`、`WebKitLegacy` 一起进包，缺一个就 `exit 1`（`:241-246`）。要注意「同代」指同一次构建产出，不是「同版本号」：设备上曾经出现 `/var/jb` 是 `620.2.4-20261123233945` 的旧字节、而新包已经装上的组合，那时版本号一致但字节不同代。`install-webkit-override.sh` 里只有 `copy_from_source`（`:189-211`，`cmp -s` 在 `:201`）做内容比较，而它只被 `LIBRARY_NAMES` 里那两个 dylib 用到；五个 framework 走 `copy_framework_tree`（`:213-233`），那是 `mkdir -p` 加 `cp -a`，无条件覆盖，不与副本比对。所以框架这一侧的字节是否真的换了，脚本不回答；脚本头 `:38-40` 的「重跑安全」只对那两个 dylib 成立。`cp -a` 只做覆盖，不删除目标里源已不存在的文件，所以重建后重跑覆盖脚本前要先 `rm -rf` 覆盖目录，否则被重新打包时剔除的资源会留在副本里继续生效。
+**第一层：同一次构建产出。** 打包脚本的必需项保证 `WebKit`、`WebCore`、`JavaScriptCore`、`WebKitLegacy` 一起进包，缺一个就 `exit 1`（`:241-246`）。要注意「同代」指同一次构建产出，不是「同版本号」：设备上曾经出现 `/var/jb` 是 `620.2.4-20261123233945` 的旧字节、而新包已经装上的组合，那时版本号一致但字节不同代。`install-webkit-override.sh` 里只有 `copy_from_source` 做内容比较（它用 `"${CMP_BIN}" -s` 比对源与目标，`CMP_BIN` 由 `find_cmp` 在 `/var/jb/usr/bin/cmp` 或 `/usr/bin/cmp` 里选），而它只被 `LIBRARY_NAMES` 里那两个 dylib 用到；五个 framework 走 `copy_framework_tree`，那是 `mkdir -p` 加 `cp -a "${path_source}/."`，无条件覆盖，不与副本比对。所以框架这一侧的字节是否真的换了，脚本不回答；脚本头「Safe to re-run」那一段说的重跑安全只对那两个 dylib 成立。`cp -a` 只做覆盖，不删除目标里源已不存在的文件，所以重建后重跑覆盖脚本前要先 `rm -rf` 覆盖目录，否则被重新打包时剔除的资源会留在副本里继续生效。
 
 **第二层：UI 进程与每一个 helper 同时是新一代。** 这一层没有任何脚本保证，而它正是已确证崩溃的直接成因：两端不同代时，一侧的 `Encoder` 与另一侧的 `Decoder` 对同一个结构体给出不同布局，在 `initializeWebProcess` 处崩。22:39 那批的覆盖目录内容**没有归档**，不能断言它放了什么、缺了什么；能确定的只有崩溃栈顶落在系统 16.1 的 `WebKit` 里，因此**解码侧是 16.1**。编码侧无法从记录推出——那批没有 UI 进程的 `image list`，helper 的 `WebKit` 路径也没有记录（见 1.1 节）。定案要在同一次实验里对 UI 进程跑第 4 步、对 helper 跑第 3b 步。反过来说，UI 落后于 helper 同样会在另一条消息上失败。所以「装上新 deb」不等于满足这条，还要证明 UI 进程也加载了新字节——第四节第 4 步就是为这一层设的。
 
@@ -587,7 +587,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 
 - 运行编号 `45436063686`，工作流 `build-webkit.yml`，`workflow_dispatch` 触发，`headBranch` 为 `main`。
 - `headSha` 为 `5b5099e85230c03054014e019660df167c7f40d1`，即提交 `5b5099e Close the three 16.1-versus-18.3 XPC gaps the entry-point audit found`。
-- **不含翻译补丁。** 内层 `main` 的 `patches/` 目录里没有 `ios16-ipc-message-number-translation.patch`；那份补丁只存在于 `feat/t3-register-the-translation-patch-in-the` 分支。
+- **该 `headSha` 不含翻译补丁。** `5b5099e` 的 `patches/` 目录里没有 `ios16-ipc-message-number-translation.patch`（该提交的 `patches/` 下共 24 个补丁，命中 0）。这份补丁后来由 `feat/t2-ipc-message-number-tables-and-patch` 与 `feat/t3-register-the-translation-patch-in-the` 等分支各自引入；本分支的集成提交已把它带进内层，但 `45436063686` 基于 `5b5099e`，产物不受影响。携带的是 t2 那一版（blob `94ba226`），不是 t3 那一版（`cb738c38`）。
 - 按该 `headSha` 的 `patches/` 清单判断，产物是纯 18.3 的 WebKit/WebCore/JavaScriptCore/WebKitLegacy，不含翻译层。
 - **该运行已结束，结论是 `cancelled`，没有产物。** 2026-11-25 复查：`gh run view 45436063686 --json status,conclusion` 返回 `status: completed`、`conclusion: cancelled`，由 @186526 取消，构建跑了 2h25m19s 后终止；`gh run view 45436063686` 的 ARTIFACTS 只有 `build-diagnostics`，没有 deb，也没有 WebKit 产物。所以在拿到产物之前，「五件套齐全」只是期望值，不是已核对的事实。引用前先确认 `conclusion` 变成 `success`，再按 5.2 节的分组核对实际缺件情况。
 - **另有一次运行在飞。** `45462772613`，同样 `build-webkit.yml`、`workflow_dispatch`，`headBranch` 为 `main`，`headSha` 为 `501c8bd485988ea5d313e9be1a63760023d6e605`（`501c8bd Land the M63 XPC endpoint audit that never reached a committable branch`），2026-11-24T18:44:31Z 触发；写作时 `status: in_progress`。本文不预测它的结果。**5.4 节的全部结论仍按「假设装上了这个 deb」推导**，与哪一次运行产出该 deb 无关。
