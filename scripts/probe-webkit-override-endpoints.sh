@@ -118,6 +118,12 @@ HELPER_STALE_SYSTEM=0
 HELPER_STALE_OTHER=0
 HELPER_KILLED=0
 BASELINE_HELPERS_RECORDED=0
+# Steps whose "before" CrashReporter listing failed. A step in this list is
+# INVALID for a reason the crash gate has to name as such: the report that
+# appeared during it cannot be told from one already on the device, which is a
+# different fact from "a report could not be read".
+BASELINE_MISSING_STEPS=''
+BASELINE_MISSING_SEPARATOR=''
 # The override prunes WebKit.framework/XPCServices (install-webkit-override.sh
 # :235-251), so every helper's executable lives under the system .xpc bundle and
 # comm alone can never say which WebKit framework it loaded. The framework path
@@ -381,19 +387,31 @@ EOF
 
 STEP_NUMBER=0
 STEP_TITLE=''
+# Set by step_begin and read by step_end. 1 means this step's "before" listing
+# succeeded and can serve as a baseline; 0 means there is nothing to diff
+# against, and the "after" list on its own cannot separate the reports that
+# appeared during the step from the ones that were already on the device.
+CRASH_BASELINE_ESTABLISHED=0
 
 step_begin() {
     STEP_NUMBER=$1
     STEP_TITLE=$2
     emit ""
     emit "===== step ${STEP_NUMBER}: ${STEP_TITLE} ====="
-    local count
-    if count=$(crash_snapshot "${WORK_DIR}/crashes-${STEP_NUMBER}-before"); then
+    local count count_file="${WORK_DIR}/crashes-${STEP_NUMBER}-before.count"
+    CRASH_BASELINE_ESTABLISHED=0
+    # The count travels through a file rather than $(...): command substitution
+    # runs crash_snapshot in a subshell, which discards the REMOTE_RC it sets and
+    # reports a failed listing as exit 0. Reading it back here keeps both the
+    # count and the real status.
+    if crash_snapshot "${WORK_DIR}/crashes-${STEP_NUMBER}-before" >"${count_file}"; then
+        read -r count <"${count_file}"
+        CRASH_BASELINE_ESTABLISHED=1
         emit "  crash reports before this step: ${count}"
     else
-        emit "  crash reports before this step: unavailable (exit ${REMOTE_RC})"
-        : >"${WORK_DIR}/crashes-${STEP_NUMBER}-before"
+        emit "  crash reports before this step: unavailable (exit ${REMOTE_RC}), so this step has no baseline and a report appearing during it cannot be told from one already on the device."
     fi
+    rm -f "${count_file}"
 }
 
 record_step() {
@@ -409,14 +427,34 @@ record_step() {
 #   no         every new report was read and none of them invalidates the step
 #   crash      a DYLD or PAC_EXCEPTION report appeared during the step
 #   unreadable the crash exclusion could not be established: a report's body could
-#              not be read, or the CrashReporter listing failed
+#              not be read, the "after" listing failed, or the "before" listing
+#              failed and the step therefore had no baseline
+#
+# "unreadable" covers a missing baseline as well as an unreadable file, so the
+# three-value contract both readers rely on is unchanged. A step in that state
+# is still INVALID for a distinct reason, and the log says which one.
 step_end() {
-    local count new_count invalid=no parsed=clean parsed_rc=0
+    local count new_count invalid=no parsed=clean parsed_rc=0 detail=''
     local new_file="${WORK_DIR}/crashes-${STEP_NUMBER}-new"
-    if count=$(crash_snapshot "${WORK_DIR}/crashes-${STEP_NUMBER}-after"); then
-        new_count=$(crash_new_list "${WORK_DIR}/crashes-${STEP_NUMBER}-before" \
-            "${WORK_DIR}/crashes-${STEP_NUMBER}-after" "${new_file}")
-        emit "  crash reports after this step: ${count}; new: ${new_count}"
+    local count_file="${WORK_DIR}/crashes-${STEP_NUMBER}-after.count"
+    # Read directly, not through $(...), so REMOTE_RC below is this listing's own
+    # status and the log never pairs a failure with a stale exit code.
+    if crash_snapshot "${WORK_DIR}/crashes-${STEP_NUMBER}-after" >"${count_file}"; then
+        read -r count <"${count_file}"
+        if [ "${CRASH_BASELINE_ESTABLISHED}" -eq 1 ]; then
+            new_count=$(crash_new_list "${WORK_DIR}/crashes-${STEP_NUMBER}-before" \
+                "${WORK_DIR}/crashes-${STEP_NUMBER}-after" "${new_file}")
+            emit "  crash reports after this step: ${count}; new: ${new_count}"
+        else
+            # comm would read the absent "before" file as an empty one, and every
+            # report already on the device would come out as new. A step with no
+            # baseline establishes nothing about what appeared during it, so no
+            # diff is taken and nothing on the device is called new.
+            new_count=unavailable
+            parsed=no_baseline
+            : >"${new_file}"
+            emit "  crash reports after this step: ${count}, but this step's before-listing failed, so there is no baseline: none of these ${count} report(s) can be called new or pre-existing."
+        fi
     else
         # Without the "after" list there is no diff, so the step cannot show that
         # no DYLD or PAC_EXCEPTION report appeared. That is the same state as an
@@ -426,6 +464,7 @@ step_end() {
         : >"${new_file}"
         emit "  crash reports after this step: unavailable (exit ${REMOTE_RC}), so this step's crash exclusion is not established."
     fi
+    rm -f "${count_file}"
     if [ -s "${new_file}" ]; then
         describe_new_reports "${new_file}"
         parsed_rc=$?
@@ -437,14 +476,23 @@ step_end() {
     fi
     case ${parsed} in
         crash) invalid=crash ;;
-        unreadable) invalid=unreadable ;;
+        unreadable)
+            invalid=unreadable
+            detail="a new report could not be read, or the CrashReporter listing failed"
+            ;;
+        no_baseline)
+            invalid=unreadable
+            detail="this step's before-listing failed, so there was no baseline to diff against and a report appearing during it cannot be told from one already on the device"
+            BASELINE_MISSING_STEPS="${BASELINE_MISSING_STEPS}${BASELINE_MISSING_SEPARATOR}${STEP_NUMBER}"
+            BASELINE_MISSING_SEPARATOR=','
+            ;;
     esac
     case ${invalid} in
         crash)
             emit "  step ${STEP_NUMBER} is INVALID: a DYLD or PAC_EXCEPTION crash appeared during this step, so its reading cannot be attributed to how launchd resolved the path."
             ;;
         unreadable)
-            emit "  step ${STEP_NUMBER} is INVALID: its crash exclusion is not established (a new report could not be read, or the CrashReporter listing failed), so a DYLD or PAC_EXCEPTION crash cannot be ruled out."
+            emit "  step ${STEP_NUMBER} is INVALID: its crash exclusion is not established (${detail}), so a DYLD or PAC_EXCEPTION crash cannot be ruled out."
             ;;
     esac
     record_step "${STEP_NUMBER}" "${STEP_TITLE}" "${new_count}" "${invalid}"
@@ -1099,6 +1147,22 @@ webkit_service_count() {
     printf '%s' $((SVC_WEBCONTENT + SVC_GPU + SVC_NETWORKING + SVC_CAPTIVEPORTAL))
 }
 
+# Answers 0 or 1: did one of the reading steps lose its baseline? A reading step
+# with no before-listing is INVALID for a reason the crash gate must not describe
+# as a crash, and the reason it prints has to say which failure it was. The list
+# holds only the steps whose before-listing failed, so the two facts cannot
+# drift apart.
+baseline_missing_in_reading_window() {
+    local step
+    [ -n "${BASELINE_MISSING_STEPS}" ] || return 1
+    for step in ${BASELINE_MISSING_STEPS//,/ }; do
+        case ${step} in
+            3|4|5) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Which /var/jb framework the new helpers loaded. The executable path cannot
 # answer this (the override prunes XPCServices, so every helper runs from the
 # system .xpc), so this counts the lldb framework paths only.
@@ -1145,7 +1209,14 @@ decide_verdict() {
             ;;
         unestablished)
             VERDICT=UNKNOWN
-            PROBE_REASON=crash_exclusion_not_established_in_reading_window
+            # Same state, same exit, same "unestablished" branch: only the reason
+            # differs, so a reader can tell a baseline that never existed from a
+            # report whose body could not be read.
+            if baseline_missing_in_reading_window; then
+                PROBE_REASON=crash_baseline_missing_in_reading_window
+            else
+                PROBE_REASON=crash_exclusion_not_established_in_reading_window
+            fi
             return
             ;;
     esac
@@ -1230,7 +1301,7 @@ step_summary() {
     emit "  WebKit framework loaded by the new helpers: override=${HELPER_FRAMEWORK_OVERRIDE}, /var/jb Frameworks=${HELPER_FRAMEWORK_JB}, system=${HELPER_FRAMEWORK_SYSTEM}, unknown=${HELPER_FRAMEWORK_UNKNOWN}"
     emit "  of the helpers that loaded a /var/jb framework: started from the override .xpc=${HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC}, started by the system stub and handed the framework=${HELPER_JB_FRAMEWORK_THROUGH_STUB}"
     emit "  uninstall exit: ${UNINSTALL_RC}; override directory after: ${OVERRIDE_PRESENT_AFTER}"
-    emit "  steps invalidated by a DYLD or PAC_EXCEPTION report: ${invalid}"
+    emit "  steps that could not rule out a crash (a DYLD or PAC_EXCEPTION report appeared, or the exclusion could not be established): ${invalid}"
 
     emit ""
     emit 'Comparison. build-state.md:402 is this configuration: "再加只含 WebKit 二进制的'

@@ -66,6 +66,15 @@ def next_call_count(kind):
 
 if command.startswith("find ") and "CrashReporter" in command:
     crash_dir = os.path.join(state, "crash")
+    # Reports the device already had before the run, written once so the case's
+    # baseline listing sees them. Their bodies come from the same fixtures.
+    for name, fixture in (scenario.get("crash_initial") or {}).items():
+        target = os.path.join(crash_dir, name)
+        if not os.path.exists(target):
+            with open(os.path.join(os.path.dirname(state), fixture)) as handle:
+                body = handle.read()
+            with open(target, "w") as handle:
+                handle.write(body)
     crash_calls = next_call_count("find")
     # A report can appear between the "before" and "after" listing of one step,
     # which is the shape that makes a step's exclusion depend on reading it.
@@ -80,6 +89,14 @@ if command.startswith("find ") and "CrashReporter" in command:
                 handle.write(body)
     fail_from = (scenario.get("find_timing") or {}).get("fail_from_call")
     if fail_from and crash_calls >= fail_from:
+        reply("find: /var/mobile/Library/Logs/CrashReporter: Operation not permitted",
+              1, stderr=True)
+    # One named listing fails while the ones around it succeed. Needed to fail a
+    # step's "before" listing while its "after" listing still works, which is the
+    # only shape that produces a step with no baseline and a diff that must not be
+    # taken.
+    fail_calls = (scenario.get("find_timing") or {}).get("fail_calls") or []
+    if crash_calls in fail_calls:
         reply("find: /var/mobile/Library/Logs/CrashReporter: Operation not permitted",
               1, stderr=True)
     for name in sorted(os.listdir(crash_dir)):

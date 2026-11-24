@@ -224,6 +224,23 @@ new_case a-jb-copy "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8303, \"
 run_probe
 expect_contains 'a-jb-copy reason' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=all_four_services_present_and_a_helper_loaded_the_var_jb_frameworks_copy'
 
+printf '\n== p2 a state that qualifies for A is still refused when a reading step has no baseline\n'
+# The same four-services-plus-override-framework state as a-stub, which reads A,
+# run with step 3's before-listing failing. Step 3 is a reading step, so a run
+# whose baseline is missing there must not reach A: the report that would appear
+# during it cannot be told from one already on the device. The verdict has to
+# stay UNKNOWN, and the reason must name the baseline, not a crash.
+new_case a-but-no-baseline "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8301, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"crash_initial\": {\"MobileSafari-2026-11-24.ips\": \"fixture-dyld.ips\"}, \"find_timing\": {\"fail_calls\": [6]}}"
+run_probe
+expect_status 'a-but-no-baseline exit' "${CASE_STATUS}" 4
+expect_not_contains 'a-but-no-baseline never says A' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=A'
+expect_contains 'a-but-no-baseline verdict is UNKNOWN' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=UNKNOWN'
+expect_contains 'a-but-no-baseline reason names the baseline' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=crash_baseline_missing_in_reading_window'
+expect_contains 'a-but-no-baseline step 3 marked INVALID' "${CASE_DIR}/log/probe.log" 'step 3 is INVALID'
+expect_contains 'a-but-no-baseline listed in the summary' "${CASE_DIR}/log/probe.log" 'PROBE_INVALID_STEPS=3'
+expect_contains 'a-but-no-baseline says the before-listing failed' "${CASE_DIR}/log/probe.log" "this step's before-listing failed, so there was no baseline"
+expect_not_contains 'a-but-no-baseline does not diff against an empty file' "${CASE_DIR}/log/probe.log" 'crash reports after this step: 1; new: 1'
+
 # --- p2: one line with two occurrences of a service ------------------------
 
 printf '\n== one services line holding a name twice counts twice\n'
@@ -286,7 +303,8 @@ expect_contains 'unreadable-report reason' "${CASE_DIR}/log/probe.log" 'PROBE_RE
 expect_contains 'unreadable-report step marked INVALID' "${CASE_DIR}/log/probe.log" 'step 3 is INVALID'
 expect_contains 'unreadable-report invalid steps list it' "${CASE_DIR}/log/probe.log" 'PROBE_INVALID_STEPS=3'
 expect_contains 'unreadable-report names the unreadable file' "${CASE_DIR}/log/probe.log" 'unreadable'
-expect_not_contains 'unreadable-report never claims no crash' "${CASE_DIR}/log/probe.log" 'steps invalidated by a DYLD or PAC_EXCEPTION report: none'
+expect_contains 'unreadable-report summary counts it' "${CASE_DIR}/log/probe.log" 'steps that could not rule out a crash (a DYLD or PAC_EXCEPTION report appeared, or the exclusion could not be established): 3'
+expect_not_contains 'unreadable-report never claims none' "${CASE_DIR}/log/probe.log" 'exclusion could not be established): none'
 
 printf '\n== p1 a crash listing that fails during a reading step is not a clean B\n'
 # The "after" listing of step 3 fails, so no diff exists for that step. That is
@@ -299,6 +317,38 @@ expect_contains 'snapshot-fails reason' "${CASE_DIR}/log/probe.log" 'PROBE_REASO
 expect_contains 'snapshot-fails step marked INVALID' "${CASE_DIR}/log/probe.log" 'step 3 is INVALID'
 expect_contains 'snapshot-fails invalid steps list it' "${CASE_DIR}/log/probe.log" 'PROBE_INVALID_STEPS=3'
 expect_contains 'snapshot-fails says the listing failed' "${CASE_DIR}/log/probe.log" 'crash reports after this step: unavailable'
+
+printf '\n== p2 a step whose before-listing failed has no baseline, so nothing is called new\n'
+# Call numbering: 1 is the baseline taken in main, 6 is step 3's before-listing,
+# 7 its after-listing. Only call 6 fails, so step 3 has an "after" list and no
+# baseline. A DYLD report is already on the device before the run, so a diff
+# against an empty baseline (the old behaviour) would report it as new and mark
+# the step as a crash that never happened. The step must instead say it has no
+# baseline, and the reason must name the baseline rather than a crash.
+new_case missing-baseline "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8600), \"crash_initial\": {\"MobileSafari-2026-11-24.ips\": \"fixture-dyld.ips\"}, \"find_timing\": {\"fail_calls\": [6]}}"
+run_probe
+expect_status 'missing-baseline exit' "${CASE_STATUS}" 4
+expect_contains 'missing-baseline not A or B' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=UNKNOWN'
+expect_contains 'missing-baseline reason names the baseline' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=crash_baseline_missing_in_reading_window'
+expect_not_contains 'missing-baseline never claims a crash appeared' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=dyld_or_pac_crash_in_reading_window'
+expect_contains 'missing-baseline step marked INVALID' "${CASE_DIR}/log/probe.log" 'step 3 is INVALID'
+expect_contains 'missing-baseline invalid steps list it' "${CASE_DIR}/log/probe.log" 'PROBE_INVALID_STEPS=3'
+expect_contains 'missing-baseline says the before-listing failed' "${CASE_DIR}/log/probe.log" 'crash reports before this step: unavailable (exit 1)'
+expect_contains 'missing-baseline names the absent baseline' "${CASE_DIR}/log/probe.log" 'no baseline'
+expect_not_contains 'missing-baseline does not diff against an empty file' "${CASE_DIR}/log/probe.log" 'crash reports after this step: 1; new: 1'
+expect_not_contains 'missing-baseline does not call the old report new' "${CASE_DIR}/log/probe.log" 'step 3 is INVALID: a DYLD or PAC_EXCEPTION crash appeared during this step'
+
+printf '\n== p2 a failed before-listing now reports its real exit status\n'
+# The old construct ran crash_snapshot inside $(...), so REMOTE_RC was discarded
+# and the failure path printed "unavailable (exit 0)". The status has to be the
+# listing's own.
+expect_not_contains 'missing-baseline never reports a failed listing as exit 0' "${CASE_DIR}/log/probe.log" 'crash reports before this step: unavailable (exit 0)'
+
+printf '\n== p2 an after-listing that fails also reports its real exit status\n'
+new_case snapshot-fails-status "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8600), \"find_timing\": {\"fail_from_call\": 7}}"
+run_probe
+expect_contains 'snapshot-fails-status real status' "${CASE_DIR}/log/probe.log" 'crash reports after this step: unavailable (exit 1)'
+expect_not_contains 'snapshot-fails-status not exit 0' "${CASE_DIR}/log/probe.log" 'crash reports after this step: unavailable (exit 0)'
 
 printf '\n== p1 a readable DYLD report in step 3 still reports the crash reason\n'
 new_case dyld-report "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8600), \"crash_timing\": {\"after_call\": 6, \"files\": {\"MobileSafari-2026-11-25.ips\": \"fixture-dyld.ips\"}}}"

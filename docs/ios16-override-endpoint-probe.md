@@ -86,6 +86,7 @@ A 与 `build-state.md:402` 矛盾，说明那次读数（以及依赖它的「(B
 | `safari_not_running` | 三次拉起都没得到 MobileSafari pid | 看第 3 步的每次尝试与输出；确认 `uiopen --path` 是否可用 |
 | `dyld_or_pac_crash_in_reading_window` | 第 3、4、5 步新增了 DYLD 或 PAC_EXCEPTION 报告 | 归因是进程没起来，对 (A)/(B) 不作数；先解决缺符号或 ABI 问题 |
 | `crash_exclusion_not_established_in_reading_window` | 第 3、4、5 步里有一份新报告读不出正文，或 CrashReporter 列表取不到，所以「没有 DYLD/PAC 崩溃」这一条无法建立 | 与上一条同为拒绝结论，但原因不同：没有证据说明发生过崩溃。看那几步的 `INVALID` 行与 `unreadable` 消息；报告可能还在写入，重跑一次通常就好了 |
+| `crash_baseline_missing_in_reading_window` | 第 3、4、5 步里某一步的 before 列表取不到，该步没有基线，期间的报告分不出是新出现的还是原本就有的 | 同为避免误判崩溃：after 列表单独不能证明任何报告是新出现的。看那几步的 `crash reports before this step: unavailable` 行；确认 ssh 与 CrashReporter 目录权限后重跑 |
 | `services_section_empty` | `launchctl print` 的 services 段为空或不存在 | 域状态本身异常，先重启再测 |
 | `no_new_helper_after_launch` | 本轮没有产生任何新 helper | 与路径规则无关；看第 4 步端点是否也全无、第 3 步是否只起了 UI 进程 |
 | `four_services_present_but_no_helper_framework_path_read` | 四个服务在，但一个 framework 路径都没读到 | 无法区分「覆盖真的生效」与「覆盖只生效了一半」；A 拒绝降级到只凭端点数 |
@@ -98,7 +99,9 @@ A 与 `build-state.md:402` 矛盾，说明那次读数（以及依赖它的「(B
 
 `dyld_or_pac_crash_in_reading_window` 与 `crash_exclusion_not_established_in_reading_window` 也是同一类拆分。B 的定义里有一条「读窗口内没有 DYLD 或 PAC_EXCEPTION 崩溃」，而这条只有在读窗口里每一步的崩溃排除都成立时才算数。两种情况都让它不成立：真出现了那种崩溃，或者根本没读出来。前者是证据，后者是没有证据，`PROBE_REASON` 因此分开命名。
 
-步骤表的第 4 列记的就是这件事，取值只有三个：`no`、`crash`、`unreadable`。`crash` 表示该步新增了一份 `termination.namespace` 为 `DYLD` 或 `PAC_EXCEPTION` 的报告；`unreadable` 表示该步的崩溃排除没建立起来 —— 有一份新报告读不出正文，或者 CrashReporter 列表取不到。`PROBE_INVALID_STEPS` 列出 `crash` 与 `unreadable` 两种，读窗口的判断也两者都算，只有 `no` 是干净值。读不出正文的报告也算不干净，理由是 CrashReporter 在崩溃后几秒内可能仍在写文件，而 `find` 正好会抓到这种写了一半的 `.ips`；把它当成「没有崩溃」正是这个探针要避免的错误。
+步骤表的第 4 列记的就是这件事，取值只有三个：`no`、`crash`、`unreadable`。`crash` 表示该步新增了一份 `termination.namespace` 为 `DYLD` 或 `PAC_EXCEPTION` 的报告；`unreadable` 表示该步的崩溃排除没建立起来 —— 有一份新报告读不出正文，CrashReporter 列表取不到，或者该步的 before 列表取不到因而没有基线可差分。`PROBE_INVALID_STEPS` 列出 `crash` 与 `unreadable` 两种，读窗口的判断也两者都算，只有 `no` 是干净值。读不出正文的报告也算不干净，理由是 CrashReporter 在崩溃后几秒内可能仍在写文件，而 `find` 正好会抓到这种写了一半的 `.ips`；把它当成「没有崩溃」正是这个探针要避免的错误。before 列表取不到时不做差分，因为拿空文件当基线会把设备上原有的报告全算成新出现的。
+
+`crash_baseline_missing_in_reading_window` 与 `crash_exclusion_not_established_in_reading_window` 是对同一个 `unreadable` 状态的进一步区分：前者没有基线，后者有基线但有一份新报告读不出正文。两者都不改三态取值与退出码，只让 `PROBE_REASON` 说清是哪一种。
 
 一份报告读不出时，脚本仍把已读出的那些行打印出来，并且「确实出现了 DYLD 报告」优先于「后面还有一份读不出」：两类失败都让该步不可用，但只有前者说明崩溃真的发生过。
 
@@ -118,7 +121,7 @@ M63 的实测与 `AGENTS.md` 记过设备缺哪些工具：没有 `plutil`、`st
 
 ## 六、局限
 
-- **脚本从未在真机上跑过。** 设备在本轮编写期间不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：21 个场景、75 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形域缺失中止，以及崩溃排除的三条路径（读不出正文、列表失败、读窗口外的报告只记不拦），每条断言检查退出码或日志里的关键行。
+- **脚本从未在真机上跑过。** 设备在本轮编写期间不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：24 个场景、97 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形域缺失中止，以及崩溃排除的五条路径（读不出正文、after 列表失败、before 列表失败因而没有基线、读窗口外的报告只记不拦、读窗口内缺基线时连 A 也不给），每条断言检查退出码或日志里的关键行。
 - `bash -n` 通过。`shellcheck` 在本机不可用（`which shellcheck` 无输出），**没有跑**，所以本节不声称它通过。
 - 因此下列事实只有 `AGENTS.md` 的间接依据，没有实测：`ps -Ao pid,ppid,comm` 在 iPadOS 16.1 上是否接受 ppid 列；`sudo lldb` 附着 helper 是否被允许；`image list -o -f` 的实际行格式（脚本按「路径是行末字段、可含空格」解析）。
 - 一个 helper 也可能在 lldb 附着前就退出。此时 framework 路径读不到，A 与 B 都不可达，脚本会给出对应的 `..._no_helper_framework_path_read` 而不是猜。
