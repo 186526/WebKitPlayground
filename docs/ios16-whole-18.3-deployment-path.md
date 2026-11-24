@@ -24,7 +24,7 @@
 
 ### 1.1 跨进程混装两代必然在 `initializeWebProcess` 处 PAC 崩溃
 
-`../../build-state.md:486` 记录的约束是：系统 16.1 的 `WebKit` 配上自建的 `WebCore`，WebContent 在收到第一条 IPC 之后以 `PAC_EXCEPTION` 崩溃。这条约束在两组日期不同的观测里各出现一次，两次的覆盖目录内容都没有归档，关系见本节末尾。
+`../../build-state.md:486` 记录的约束是：系统 16.1 的 `WebKit` 配上自建的 `WebCore`，WebContent 在收到第一条 IPC 之后以 `PAC_EXCEPTION` 崩溃。这条约束在两组日期不同的观测里各出现一次：21:47 那批的配置记在 `../../build-state.md:343-352`（覆盖目录里只有 `WebCore` + `JavaScriptCore`），22:39 那批的配置没有归档。两批都没有 helper 的 `WebKit` 路径记录，所以方向仍未定，关系见本节末尾。
 
 **崩的是跨进程的 IPC 载荷，不是进程内的两代共存。** 崩溃主体是 WebContent helper，栈顶落在接收侧，所以解码端是 helper。`WebProcessCreationParameters` 由 UI 进程编码、由 helper 解码，结构体的字段顺序与 `Vector`/`HashMap`/`String` 的内部布局由 WTF 决定；两端不同代时，解出的指针过不了 arm64e 的 PAC。栈顶 `WebKit::WebProcess::initializeWebProcess(WebProcessCreationParameters&&)` 正是解码后的第一步。
 
@@ -35,7 +35,7 @@
 
 写成一句：编码端为 X、解码端为 Y，依据是 helper 的 `WebKit` 路径为 Z。Z 从未被记录——`../../build-state.md:348` 只存了崩溃签名，没有 helper 的镜像路径；那批 25 份 `.ips` 没有归档，设备当前离线也无法再解析。所以这一项按**未测**记，定案方法是在 21:47 同配置下对存活的 helper 跑 `lldb image list -o -f`（第四节第 3b 步）。在这个读数到手之前，不把任何一端的方向当结论。
 
-**22:39 与 21:47 的关系是「同源假设」，不是「同一现象的两次观察」。** 两批崩溃的栈顶与 `exception` 字段一致，机制上应当同源；但两批的覆盖目录内容都没有归档，不能断言它们在同一配置下取得。22:39 这批还有一处未解矛盾：`../../build-state.md:399-405` 的表里有一套配置记 spawn 0、端点 0，而崩溃报告显示 helper 进程确实存在；22:39 的实测条件与那张表的哪一行对应，现有记录没有定论。因此 22:39 这批只能作为「同源假设的旁证」，不能作为独立证据。
+**22:39 与 21:47 的关系是「同源假设」，不是「同一现象的两次观察」。** 两批崩溃的栈顶与 `exception` 字段一致，机制上应当同源；但 22:39 那批的覆盖目录内容没有归档，无法核对它是否与 21:47 同配置，所以不能断言两批是同一现象的两次观察。21:47 那批的配置记在 `../../build-state.md:343-352`，22:39 那批的没有对应记录；两批都没有 helper 的 `WebKit` 路径记录。22:39 这批还有一处未解矛盾：`../../build-state.md:399-405` 的表里有一套配置记 spawn 0、端点 0，而崩溃报告显示 helper 进程确实存在；22:39 的实测条件与那张表的哪一行对应，现有记录没有定论。因此 22:39 这批只能作为「同源假设的旁证」，不能作为独立证据。
 
 **这个区分决定「已排除」的范围。** 两代在同一个进程内共存有正例：覆盖目录里只放 `WebCore` + `JavaScriptCore` 时 helper 能启动并稳定（`../../build-state.md:399`），UI 进程里系统 `WebKit` 与 18.3 `WebCore` 共存并没有立刻崩。所以「同进程必崩」不成立。真正必须同代的是**跨进程 IPC 的两端**：UI 进程与每一个 helper 的 `Encoder`/`Decoder`。
 
@@ -159,6 +159,8 @@ M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 
 | `/var/jb/Library/WebKitOverride` | `install-webkit-override.sh` 从上一行复制来的第二份五件套，`XPCServices` 被 `prune_xpc_services` 删除 | basebin 的 `systemhook` 注入 `DYLD_FRAMEWORK_PATH` 与 `__XPC_DYLD_FRAMEWORK_PATH`，值来自 `dopamine-basebin/0001-systemhook-set-search-paths.patch:92` 的 `JBROOT_PATH("/Library/WebKitOverride")` | **不存在**。`ls` 返回 `No such file or directory` |
 | `/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride` | 与上一行是同一个目录。`/var/jb` 是指向 `procursus` 的符号链接 | 同上。区别只在字符串形态：basebin 用 preboot 的真实路径，注入记录与崩溃报告里两种情况都会出现 | **同一目录**。`launchctl print pid/69370` 的 `environment` 段落曾读到 `DYLD_FRAMEWORK_PATH => .../procursus/Library/WebKitOverride` |
 | `/var/jb/usr/lib` | `libwebrtc.dylib`、`libANGLE-shared.dylib`（`install-webkit-override.sh` 的 `LIBRARY_NAMES`，本分支 `:56`，对齐改动后 `:80`） | 与 framework 目录配套的 `DYLD_LIBRARY_PATH` | 与 framework 同进退 |
+
+**本文提到「basebin 注入的目录」时指第 4 行那个目录，它的实际字符串形态是第 5 行的 preboot 形态，不是 `/var/jb/...`。** 全文为了可读性沿用 `/var/jb/Library/WebKitOverride` 这个短写法指代目录本身；凡是拿它去和日志、`image list`、`found:` 的实际输出做字符串比较的地方，都比不中，判据应改用「路径含不含 `WebKitOverride`」。第四节第 3d-1 步的预期、第 3d-2 步的判读、以及 `image list` 判读表三处都按这条写。
 
 ### 3.1 两个路径值当前不一致
 
@@ -414,7 +416,7 @@ grep 'possible path(DYLD_FRAMEWORK/LIBRARY_PATH)' "$L" | grep -E 'WebKit\.framew
 grep 'found:' "$L" | grep -E 'WebKit\.framework/WebKit"|WebCore\.framework/WebCore"'
 ```
 
-**预期：** 两串候选**并存**——桩自己的 `LC_DYLD_ENVIRONMENT` 给出 `/var/jb/Library/Frameworks`，basebin 的 `systemhook` 注入的纯名 `DYLD_FRAMEWORK_PATH` 给出 `/var/jb/Library/WebKitOverride`。`systemhook` 挂在 spawn 上，`/var/jb` 下被 shell 直接执行的二进制同样在钩子范围内，所以这一串出现是正常结果，不是异常。**判据是 `found:` 的落点，不是哪一串出现。**
+**预期：** 两串候选**并存**，但两串的字符串形态不同——桩自己的 `LC_DYLD_ENVIRONMENT` 给出字面量 `/var/jb/Library/Frameworks`；basebin 的 `systemhook` 注入的纯名 `DYLD_FRAMEWORK_PATH` 给出**解析后的 preboot 绝对路径**，形如 `/private/preboot/<uuid>/.../procursus/Library/WebKitOverride`，**不是** `/var/jb/Library/WebKitOverride`。`../../webkit-install-runbook.md:769-773` 记的 2026-11-24 05:58Z 实测输出就是这个形态，该段写明「前缀是 preboot 真实路径而不是 `/var/jb`，这是正常的」，因为 `systemhook` 交付的是解析后的绝对路径，没有保留 `/var/jb` 这层软链。`systemhook` 挂在 spawn 上，`/var/jb` 下被 shell 直接执行的二进制同样在钩子范围内，所以这一串出现是正常结果，不是异常。**判据是 `found:` 的落点，不是哪一串出现。**
 
 ```sh
 grep 'found:' "$L" | grep -E 'WebKit\.framework/WebKit"'
@@ -430,7 +432,13 @@ grep 'possible path(DYLD_FRAMEWORK/LIBRARY_PATH)' "$L" | grep 'WebKit\.framework
 grep 'found:' "$L" | grep 'WebKit\.framework/WebKit"'
 ```
 
-**判读：** 两串顺序与 `found:` 落点合起来给出结论。若 `found:` 落在 `/var/jb/Library/WebKitOverride` 那串，环境变量优先，与 `docs/dopamine-basebin-webkit-override.md:706` 记的 app 进程结论一致；落在 `/var/jb/Library/Frameworks` 那串，则 `.xpc` 的 `LC_DYLD_ENVIRONMENT` 在这一步上压过环境变量。
+**判读：按「路径里含不含 `WebKitOverride`」分包，不要按 `/var/jb` 字面匹配。** 环境变量那一串打印的是 preboot 绝对路径（`/private/preboot/<uuid>/.../procursus/Library/WebKitOverride`），内嵌那一串才是 `/var/jb/Library/Frameworks` 字面量；拿 `/var/jb/Library/WebKitOverride` 去比 `found:` 会永远比不中，从而把结论读反。
+
+- `found:` 的路径**含 `WebKitOverride`** → 环境变量优先，与 `docs/dopamine-basebin-webkit-override.md:706` 记的 app 进程结论一致；
+- `found:` 的路径**含 `/Library/Frameworks/`** 且不含 `WebKitOverride` → `.xpc` 的 `LC_DYLD_ENVIRONMENT` 在这一步上压过环境变量；
+- 路径含 `Cryptexes/OS/System/Library` 或 `/System/Library/Frameworks` → 两串都没被采用，落回系统 16.1。
+
+`symlink` 到 `procursus` 是 `/var/jb` 指向的目录，两种前缀指向的是同一个覆盖目录，所以「含 `WebKitOverride`」这一条对两种写法都成立，这正是它比字面匹配可靠的原因。
 
 **只有一种情况需要另做一次实验：3d-1 的日志里只出现一串候选。** 那说明 `systemhook` 没有注入（或注入的值被判为「已存在」而跳过），此时的优先级问题没有数据。手工注入的办法是把变量设成一个**不含目标 framework 的目录**（例如 `/tmp`），这样 `systemhook` 认为它已存在、不再覆盖，dyld 只在 `/tmp` 里找不到目标、落回内嵌路径：
 
@@ -443,7 +451,7 @@ timeout 20 DYLD_PRINT_SEARCHING=1 DYLD_PRINT_TO_FILE="$L2" \
 grep 'found:' "$L2" | grep 'WebKit\.framework/WebKit"'
 ```
 
-**这里有一个我没有核实的点**：`dopamine-basebin/0001-systemhook-set-search-paths.patch:43` 的 `envbuf_variable_matches` 比的是「名字 **与值**」都相等才算已存在（同补丁 `:14-18`：`existingValue && !strcmp(existingValue, wanted)`）。所以设成 `/tmp` 时，值与补丁想要的 `/var/jb/Library/WebKitOverride` 不同，会被判为「不存在」并被覆盖回去——那样这一次实验仍是同一来源的两次写入，测不出优先级。`envbuf_setenv` 在值已存在时是覆盖还是保留，本仓库没有可直接读到的实现（该函数来自 `libenvbuf`，不在本仓库内），所以这一分支**未验证**。设备回网时应先跑一次 3d-1 看是否已经两串并存；已是两串时不必进入这一支。这一分支若确实受上述比较语义限制，替代办法只有改 basebin 让注入的值可配置，那超出本文范围。**本节全部待设备回网后执行。**
+**这里有一个我没有核实的点**：`dopamine-basebin/0001-systemhook-set-search-paths.patch:43` 的 `envbuf_variable_matches` 比的是「名字 **与值**」都相等才算已存在（同补丁 `:14-18`：`existingValue && !strcmp(existingValue, wanted)`）。所以设成 `/tmp` 时，值与补丁要写的那个值不同（该值是 `JBROOT_PATH("/Library/WebKitOverride")` 的解析结果，实际字符串是 preboot 形态，见第 3d-1 步），按 `strcmp` 必然判为「不存在」并被覆盖回去——那样这一次实验仍是同一来源的两次写入，测不出优先级。`envbuf_setenv` 在值已存在时是覆盖还是保留，本仓库没有可直接读到的实现（该函数来自 `libenvbuf`，不在本仓库内），所以这一分支**未验证**。设备回网时应先跑一次 3d-1 看是否已经两串并存；已是两串时不必进入这一支。这一分支若确实受上述比较语义限制，替代办法只有改 basebin 让注入的值可配置，那超出本文范围。**本节全部待设备回网后执行。**
 
 **3d-3. 转交本身：只能让 launchd 拉起，用加载结果反推。** `uiopen` 把请求交给 launchd 与 SpringBoard，环境来自 launchd 的 spawn 上下文而不是跑 `uiopen` 的那个 shell，所以哪怕在 shell 里 `export DYLD_PRINT_SEARCHING=1` 也进不去 helper。`uiopen` 在这里只用来让 UI 进程去 spawn helper，取数用的是第 3b 步的 `image list`：
 
@@ -461,9 +469,11 @@ ps -Ao pid,comm | grep -E 'WebKit\.WebContent' | grep -v grep
 
 | helper 实际加载的 `WebKit` 路径 | 含义 | 下一步 |
 | --- | --- | --- |
-| `/var/jb/Library/WebKitOverride/...` | `__XPC_DYLD_FRAMEWORK_PATH` 的转交生效 | helper 用的是 basebin 注入的目录；接着要证明该目录里的三件套同代（第三节），并用 3d-2 的结论核对优先级 |
-| `/var/jb/Library/Frameworks/...` | 只有 `.xpc` 自己的 `LC_DYLD_ENVIRONMENT` 生效，转交没到 | helper 用的是 deb 安装目录；「系统桩 + basebin 注入」这条链在 helper 上不成立，`prune_xpc_services` 的理由只对 `.xpc` 自身成立 |
-| `/System/Library/Frameworks/...` | 两者都不生效 | helper 加载 16.1，跨进程 PAC 崩溃是必然结果；此时任何端点读数都不能归因于 18.3 |
+| 路径**含 `WebKitOverride`**（形态是 `/private/preboot/<uuid>/.../procursus/Library/WebKitOverride/...`，不是 `/var/jb` 字面） | `__XPC_DYLD_FRAMEWORK_PATH` 的转交生效 | helper 用的是 basebin 注入的目录；接着要证明该目录里的三件套同代（第三节），并用 3d-2 的结论核对优先级 |
+| 路径**含 `/Library/Frameworks/`** 且不含 `WebKitOverride`（形态 `.../procursus/Library/Frameworks/...` 或 `/var/jb/Library/Frameworks/...`） | 只有 `.xpc` 自己的 `LC_DYLD_ENVIRONMENT` 生效，转交没到 | helper 用的是 deb 安装目录；「系统桩 + basebin 注入」这条链在 helper 上不成立，`prune_xpc_services` 的理由只对 `.xpc` 自身成立 |
+| 路径含 `/System/Library/Frameworks/`（含 `Cryptexes/OS` 前缀那一支） | 两者都不生效 | helper 加载 16.1，跨进程 PAC 崩溃是必然结果；此时任何端点读数都不能归因于 18.3 |
+
+**这张表不能按 `/var/jb` 字面匹配。** `lldb image list -o -f` 打印的是 dyld 记录的路径，经环境变量加载的镜像沿用的是变量里的字符串，那是 preboot 形态（第 3.1 节第 2 行的说明与 `:160`）；只有 `.xpc` 内嵌的 `LC_DYLD_ENVIRONMENT` 才给出 `/var/jb/Library/Frameworks` 字面量。用 `grep '/var/jb/Library/WebKitOverride'` 筛会漏掉转交生效的那一整个分支。
 
 **3d-3 的读法限制要写明。** helper 自己的 stderr 落在系统日志里，而这台设备没有可用的 `log` 命令（`docs/device-install-plan.md:24`：`log` 没有可执行文件，`command -v log` 命中 zsh 内建），所以拿不到 launched helper 的候选行，只能拿加载结果。因此 3d-3 判「哪一种来源最终胜出」，判不了「哪一个中间候选被跳过」。要拿后一半，得改 basebin 把 `DYLD_PRINT_TO_FILE` 也设进 spawn 环境，那超出本文范围。
 
