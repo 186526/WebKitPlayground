@@ -746,7 +746,7 @@ jobs:
             exit 1
           fi
           if [ "$REF_NEEDS_MESSAGE_NAME_TRANSLATION" != 1 ]; then
-            echo "${WEBKIT_REF} does not take the message number translation, so apply_patch=${APPLY_PATCH} is correct here"
+            echo "${WEBKIT_REF} does not need the message number translation, so apply_patch=${APPLY_PATCH} is accepted here"
             exit 0
           fi
           if [ "$APPLY_PATCH" = "true" ]; then
