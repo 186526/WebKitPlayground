@@ -212,7 +212,7 @@ grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/uninstall-webkit-override.sh | sed 's/.*=
 
 **2. UI 进程与 helper 是否同代。** 对两者各取一次 `lldb -b -o "image list -o -f"`，比对 `WebKit.framework/WebKit` 的完整路径。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），只用 `image list`。
 
-**3. `__XPC_` 转交是否存在。** 这条不由本方案改变，但决定 helper 的候选列表里有没有进程环境那一条。判据：对一个 helper 进程，若候选行里出现两次覆盖目录（一次来自环境、一次来自加载命令），则转交成立；只出现一次，则只来自加载命令。两种结果下本方案都让覆盖目录排在内嵌列表的第一位（它前面只有上游 `@executable_path/..` 那一条落空项），所以转交成立与否都解析到覆盖目录。
+**3. `__XPC_` 转交是否存在。** 这条不由本方案改变，但决定 helper 的候选列表里有没有进程环境那一条。判据不能在本 mission 的五个 framework 或那两个 dylib 上看：这些镜像覆盖目录里都有，dyld 在第一条命中处就置 `stop = true`（`Loader.cpp:737-740`），而进程环境那条先枚举（`DyldProcessConfig.cpp:1876-1877`），所以转交成立时第一条来自环境的覆盖目录候选即命中并停下，转交不成立时只有加载命令那条命中并停下，两种情形覆盖目录都只打印一次，不可观测。要在**覆盖目录里没有的镜像**上数，例如 `/usr/lib/systemhook.dylib`（覆盖目录只有 `libwebrtc.dylib` 与 `libANGLE-shared.dylib`，见 `install-webkit-override.sh:80`）：转交成立时候选为 `<override>/usr/lib/systemhook.dylib`（来自环境，落空）→ `<override>/usr/lib/systemhook.dylib`（来自加载命令，落空）→ `/var/jb/usr/lib/systemhook.dylib`（命中），覆盖目录出现两次；转交不成立时只出现一次。两种结果下本方案都让覆盖目录排在内嵌列表的第一位（它前面只有上游 `@executable_path/..` 那一条落空项），所以转交成立与否都解析到覆盖目录。
 
 ---
 
