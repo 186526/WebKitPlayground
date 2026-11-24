@@ -71,6 +71,7 @@ WRITE = "proxyConfigurations"
 NOT_NEEDED = 3
 ASSIGNMENT = re.compile(r"\bconfiguration\s*\.\s*proxyConfigurations\s*=")
 RETURN = re.compile(r"\breturn\s*;")
+DIRECTORIVE = re.compile(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b")
 
 # The runtime capability tests the guard may use. Both name the setter selector, the name the
 # receiver either implements or does not.
@@ -93,8 +94,9 @@ class Guard:
     """One runtime capability test, and which offsets it actually protects.
 
     `start`/`end` bound the guard's own statement. `else_start`/`else_end` bound an else arm when the
-    guard has one; a write there is on the side where the API is absent, so it is never protected,
-    which is why the arm is recorded rather than folded into the extent.
+    guard has one. Which side of the test an arm runs on depends on the condition's polarity, so the
+    arm is recorded separately instead of being folded into the extent: for a negated test the else
+    arm is the side where the setter exists.
     """
 
     kind: str
@@ -128,15 +130,25 @@ class Guard:
     def protects(self, offset: int) -> bool:
         """Whether a write at `offset` runs only where the setter exists.
 
-        An early return protects what follows it. A wrapping block protects what is inside it. Its
-        else arm is the other case either way, because a write there runs precisely where the
-        capability test came out false.
+        An early return protects what follows it and a wrapping block protects what is inside it, so
+        both are the same question: is this the arm where the test came out true. The condition's
+        polarity decides which arm that is. `![configuration respondsToSelector:…]` makes the else
+        arm the side where the setter exists, and a write there is as safe as one inside the block
+        of the un-negated spelling, so the polarity has to be applied rather than assuming the else
+        arm is always the unsafe one.
         """
-        if self.in_else_arm(offset):
-            return False
+        in_else = self.in_else_arm(offset)
         if self.leaves:
+            # An early return leaves the arm it is written in; what follows is the other arm.
+            if in_else:
+                return self.negated
             return offset >= self.end
-        return self.start <= offset < self.end
+        if in_else:
+            return self.negated
+        if not self.start <= offset < self.end:
+            return False
+        # The block itself is the side where the test came out true.
+        return not self.negated
 
 
 @dataclass
@@ -154,37 +166,93 @@ class Analysis:
         return len(self.covered) < len(self.writes)
 
 
-def strip_comments(lines: list[str]) -> str:
-    """Return the file with // and /* */ comments blanked, newlines kept so offsets stay usable.
+def scan_literal(text: str, index: int) -> int | None:
+    """Return the offset just past the literal at `index`, or None when it never closes.
 
-    The patch explains the missing selector in prose above the guard and quotes the crash message
-    that names it, so reading the raw text would report the explanation as a guard or a write.
+    A C string or character literal cannot contain a raw newline, and a backslash continues one, so
+    reaching a line end (or the end of input) without the closing quote means the literal is broken
+    and the rest of the file cannot be read as code. Returning None is what lets strip_comments fail
+    loudly instead of running to the end of the input and reporting a file with no such function.
+    """
+    quote = text[index]
+    cursor = index + 1
+    while cursor < len(text):
+        character = text[cursor]
+        if character == "\\":
+            # Covers the escaped quote and the backslash-newline continuation.
+            cursor += 2
+            continue
+        if character == quote:
+            return cursor + 1
+        if character == "\n":
+            return None
+        cursor += 1
+    return None
+
+
+def is_digit_separator(text: str, index: int) -> bool:
+    """Whether the `'` at `index` is a C++14 digit separator such as `1'000'000`."""
+    if index == 0 or index + 1 >= len(text):
+        return False
+    hexadecimal = "0123456789abcdefABCDEF"
+    return text[index - 1] in hexadecimal and text[index + 1] in hexadecimal
+
+
+def strip_comments(text: str) -> str:
+    """Return the file with // and /* */ comments removed, newlines and order kept.
+
+    Two things have to be read before a `/*` or `//` is taken as comment syntax: string and character
+    literals, whose contents are not comment syntax at all, and the `://` of a URL. A literal that
+    opens a block comment would otherwise swallow the rest of the file, which reads as a file with no
+    such function and turns every later check into a pass. That is the direction that must never
+    happen, so an unterminated literal raises instead of running to the end of the input.
+
+    Literal contents are kept exactly as written, because the guard spells the selector inside a
+    literal (`NSSelectorFromString(@"setProxyConfigurations:")`) and dropping it would leave nothing
+    for the check to match. Only comment syntax is removed. Lines are preserved one for one, so every
+    offset and line number computed later still refers to the real file.
     """
     output: list[str] = []
+    index = 0
+    end = len(text)
     in_block = False
-    for line in lines:
-        kept: list[str] = []
-        index = 0
-        while index < len(line):
-            if in_block:
-                end = line.find("*/", index)
-                if end < 0:
-                    index = len(line)
-                    break
+    while index < end:
+        character = text[index]
+        if in_block:
+            if text.startswith("*/", index):
                 in_block = False
-                index = end + 2
-                continue
-            if line.startswith("/*", index):
-                in_block = True
                 index += 2
                 continue
-            # `//` inside a URL such as rdar:// is not a comment.
-            if line.startswith("//", index) and not (index > 0 and line[index - 1] == ":"):
-                break
-            kept.append(line[index])
+            if character == "\n":
+                output.append("\n")
             index += 1
-        output.append("".join(kept))
-    return "\n".join(output)
+            continue
+        if character in "\"'" and not (character == "'" and is_digit_separator(text, index)):
+            finish = scan_literal(text, index)
+            if finish is None:
+                raise ValueError(
+                    f"unterminated {character} literal on line "
+                    f"{text.count(chr(10), 0, index) + 1}, so the file cannot be read to its end"
+                )
+            output.append(text[index:finish])
+            index = finish
+            continue
+        if text.startswith("/*", index):
+            in_block = True
+            index += 2
+            continue
+        # `//` inside a URL such as rdar:// is not a comment.
+        if text.startswith("//", index) and not (index > 0 and text[index - 1] == ":"):
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            index = newline
+            continue
+        output.append(character)
+        index += 1
+    if in_block:
+        raise ValueError("unterminated /* comment, so the file cannot be read to its end")
+    return "".join(output)
 
 
 def skip_space(text: str, index: int) -> int:
@@ -297,8 +365,15 @@ def find_body(text: str) -> tuple[int, int] | None:
     """Return the offsets of the method body's braces, or None when the method is absent.
 
     A call site reads the same up to the argument list, so the definition is the occurrence whose
-    argument list is followed by a brace.
+    argument list is followed by a brace. The brace is matched with the preprocessor-aware matcher,
+    because an arm of a conditional may open the brace that a later line closes: a plain scan would
+    run past the real end of the function.
+
+    A definition whose body cannot be bounded raises rather than returning None. Returning None would
+    report "no such function" for a file that does have one, which every caller reads as nothing to
+    guard, and that is the one wrong direction: the device would still abort.
     """
+    found: tuple[int, int] | None = None
     for match in re.finditer(rf"\b{FUNCTION}\s*\(", text):
         try:
             closing = match_pair(text, match.end() - 1, "(", ")")
@@ -306,8 +381,8 @@ def find_body(text: str) -> tuple[int, int] | None:
             continue
         after = skip_space(text, closing + 1)
         if after < len(text) and text[after] == "{":
-            return after, match_pair(text, after, "{", "}") + 1
-    return None
+            found = (after, match_brace_conditional(text, after) + 1)
+    return found
 
 
 def nested_guards(text: str, start: int, end: int) -> list[Guard]:
@@ -324,42 +399,125 @@ def line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
+def match_brace_conditional(text: str, index: int) -> int:
+    """Return the offset of the `}` that closes the body opening at `index`.
+
+    Preprocessor conditionals are read the way the preprocessor reads them: exactly one arm is
+    compiled. Each arm is measured for the brackets it contributes relative to the state at the
+    `#if`, and the arms have to agree, so `#if A / if (a) { / #else / if (b) { / #endif ... }`
+    closes at the same brace either way. An arm that contributes a different shape means the
+    function's structure depends on a macro this check cannot evaluate, and that raises rather than
+    picking one arm's answer.
+    """
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack: list[str] = []
+    conditionals: list[Conditional] = []
+    body_end = _matching_body_end(text, index, stack, conditionals, pairs)
+    return body_end - 1
+
+
+def _matching_body_end(
+    text: str, index: int, stack: list[str], conditionals: list[Conditional], pairs: dict[str, str]
+) -> int:
+    cursor = index
+    line_start = False
+    while cursor < len(text):
+        character = text[cursor]
+        if line_start and character in " \t":
+            cursor += 1
+            continue
+        if line_start and character == "#":
+            newline = text.find("\n", cursor)
+            line_end = len(text) if newline < 0 else newline
+            keyword = directive_keyword(text[cursor:line_end])
+            if keyword in ("if", "ifdef", "ifndef"):
+                conditionals.append(Conditional(cursor, list(stack), []))
+            elif keyword in ("elif", "else"):
+                if not conditionals:
+                    raise ValueError(
+                        f"#{keyword} with no open #if at line {line_of(text, cursor)}"
+                    )
+                _close_arm(text, conditionals, stack)
+            elif keyword == "endif":
+                if not conditionals:
+                    raise ValueError(f"#endif with no open #if at line {line_of(text, cursor)}")
+                stack.extend(_close_arm(text, conditionals, stack))
+                conditionals.pop()
+            cursor = line_end
+            line_start = False
+            continue
+        line_start = character == "\n"
+        if character in "\"'":
+            cursor = skip_literal(text, cursor)
+            continue
+        if character in "([{":
+            stack.append(character)
+            line_start = False
+            cursor += 1
+            continue
+        if character in ")]}":
+            if not stack or stack[-1] != pairs[character]:
+                raise ValueError(
+                    f"unbalanced '{character}' at line {line_of(text, cursor)}"
+                )
+            stack.pop()
+            if not stack:
+                return cursor + 1
+        cursor += 1
+    raise ValueError("unbalanced {}: the body never closes")
+
+
+def _close_arm(text: str, conditionals: list[Conditional], stack: list[str]) -> list[str]:
+    """Record one arm's bracket contribution and reset the stack to the state the `#if` saw."""
+    conditional = conditionals[-1]
+    contribution = list(stack[len(conditional.saved):])
+    if conditional.arm and contribution != conditional.arm:
+        raise ValueError(
+            f"the arms of the #if at line {line_of(text, conditional.start)} contribute different "
+            f"brackets ({''.join(conditional.arm) or 'none'} vs "
+            f"{''.join(contribution) or 'none'}), so the body's structure depends on a macro this "
+            f"check cannot evaluate"
+        )
+    conditional.arm = contribution
+    del stack[len(conditional.saved):]
+    return contribution
+
+
+@dataclass
+class Conditional:
+    """One open preprocessor conditional, with the bracket state each arm started from."""
+
+    start: int
+    saved: list[str]
+    arm: list[str]
+
+
+def directive_keyword(line: str) -> str | None:
+    match = DIRECTORIVE.match(line)
+    return match.group(1) if match else None
+
+
 def validate_brackets(text: str, start: int, end: int) -> None:
     """Raise when a bracket inside the function body is unclosed or closed out of order.
 
     `skip_statement` walks to the end of its range when it never finds the statement's terminator,
     and then reports the guard as extending over everything that follows. Without this pass a body
     whose array literal or block is truncated would read as fully guarded and pass, which is the one
-    wrong direction that matters: the device would still abort. The body's own braces are included
-    in the range, so an unclosed function also fails here.
-    """
-    pairs = {")": "(", "]": "[", "}": "{"}
-    stack: list[str] = []
-    cursor = start
-    while cursor < end:
-        character = text[cursor]
-        if character in "\"'":
-            cursor = skip_literal(text, cursor)
-            continue
-        if character in "([{":
-            stack.append(character)
-        elif character in ")]}":
-            if not stack or stack[-1] != pairs[character]:
-                raise ValueError(
-                    f"unbalanced '{character}' at line {line_of(text, cursor)} inside the body of "
-                    f"{FUNCTION}"
-                )
-            stack.pop()
-        cursor += 1
-    if stack:
-        raise ValueError(
-            f"unclosed '{stack[-1]}' inside the body of {FUNCTION}, so the function's structure "
-            f"cannot be read"
-        )
+    wrong direction that matters: the device would still abort.
 
+    The body's extent is already conditional-aware (find_body refuses a body it cannot bound), so
+    this pass re-runs the same matcher over the exact body and adds the function-specific wording.
+    It catches what a truncated literal does to the inside of the body even when the braces still
+    balance.
+    """
+    try:
+        match_brace_conditional(text, start)
+    except ValueError as error:
+        raise ValueError(f"{error} inside the body of {FUNCTION}") from error
+    del end
 
 def analyse(path: Path) -> Analysis:
-    text = strip_comments(path.read_text(encoding="utf-8").splitlines())
+    text = strip_comments(path.read_text(encoding="utf-8"))
     found = find_body(text)
     if found is None:
         return Analysis(None, [], None, None, [], [])
@@ -431,7 +589,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", required=True, type=Path,
                         help="NetworkSessionCocoa.mm, patched, in the build tree")
     parser.add_argument("--needs-guard", action="store_true",
-                        help="exit 0 when the file needs the patch, 1 when a skip is correct")
+                        help="answer whether the file needs the patch: exit 0 when it does, 3 when "
+                             "a skip is correct, 1 when the file cannot be read")
     args = parser.parse_args(argv)
 
     if not args.source.is_file():

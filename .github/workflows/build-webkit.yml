@@ -437,11 +437,15 @@ jobs:
           fi
           # -[NSURLSessionConfiguration setProxyConfigurations:] arrived in iOS 17, and the writes in
           # applyProxyConfigurationToSessionConfiguration are gated on HAVE(NW_PROXY_CONFIG), which
-          # PlatformHave.h keys on the SDK version rather than the deployment target. The function
-          # first appears in tag Safari-17.4; 16.6 and 17.0 have no such function, and a ref whose
-          # writes already sit behind a runtime guard needs nothing, so both of those skip. The flag
-          # comes from the checker's --needs-guard mode rather than a grep for the property name,
-          # so a ref that already guards its writes is not reported as needing the patch.
+          # PlatformHave.h keys on the SDK version rather than the deployment target. The function is
+          # already there, and already unguarded, in tag Safari-17-iOS-17.0: that file is 2371 lines,
+          # #if HAVE(NW_PROXY_CONFIG) opens at 2199, the function defines at 2270, the two writes are
+          # at 2277 and 2279, and #endif closes at 2281. Safari-17.2 and 17.3.1 are the same, and the
+          # checker answers exit 0 on all three. So every 17.x ref needs this patch rather than
+          # skipping it; only a ref that has no such function at all (the 16.x tags) or one that
+          # already guards its writes has nothing to fix. The flag comes from the checker's
+          # --needs-guard mode rather than a grep for the property name, so a ref that already
+          # guards its writes is not reported as needing the patch.
           if [ -f WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm ] && \
               python3 scripts/check-network-session-proxy-configurations.py --needs-guard \
                 --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm; then
@@ -532,8 +536,10 @@ jobs:
                   # proxyConfigurations without a runtime guard needs this patch: the sends compile
                   # at a 16.1 deployment target and the Network process of
                   # com.apple.WebKit.Networking aborts with "unrecognized selector sent to
-                  # instance". A ref with no such function (before Safari-17.4) or one that already
-                  # guards both writes has nothing to fix, so skipping is correct there.
+                  # instance". That includes every 17.x ref from Safari-17-iOS-17.0 on, which
+                  # already had the function and both unguarded writes. Only a ref with no such
+                  # function (the 16.x tags) or one that already guards both writes has nothing to
+                  # fix, so skipping is correct there.
                   if [ "$ref_writes_proxy_configurations" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1

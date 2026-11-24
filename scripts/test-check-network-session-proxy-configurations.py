@@ -97,6 +97,62 @@ UPSTREAM_BODY = """\
         configuration.proxyConfigurations = @[ ];
 """
 
+# P2-2: a string literal containing /* used to open a block comment and swallow the rest of the
+# file, which read as "no such function" and turned both modes into a pass. The reviewer's repro.
+LITERAL_BLOCK_COMMENT = """\
+static NSString *kSeparator = @"a/*b";
+void NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration(NSURLSessionConfiguration *configuration)
+{
+    if (!m_nwProxyConfigs.isEmpty()) {
+        configuration.proxyConfigurations = x;
+    } else
+        configuration.proxyConfigurations = @[ ];
+}
+"""
+
+# P3-1: a // inside a literal, and a single-armed #if whose arms each open the brace.
+LITERAL_LINE_COMMENT = """\
+void NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration(NSURLSessionConfiguration *configuration)
+{
+    static NSString *kSeparator = @"a // b";
+    if (!m_nwProxyConfigs.isEmpty()) {
+        configuration.proxyConfigurations = x;
+    } else
+        configuration.proxyConfigurations = @[ ];
+}
+"""
+
+ONE_ARMED_IF = """\
+void NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration(NSURLSessionConfiguration *configuration)
+{
+    if (![configuration respondsToSelector:NSSelectorFromString(@"setProxyConfigurations:")])
+        return;
+#if WTF_PLATFORM_MAC
+    if (macPath) {
+#else
+    if (iosPath) {
+#endif
+        configuration.proxyConfigurations = x;
+    }
+}
+"""
+
+# P3-3: the negated spelling puts the safe arm in the else, so a write there is protected.
+NEGATED_ELSE = """\
+void NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration(NSURLSessionConfiguration *configuration)
+{
+    if (![configuration respondsToSelector:NSSelectorFromString(@"setProxyConfigurations:")]) {
+        m_nwProxyConfigs.clear();
+    } else {
+        if (!m_nwProxyConfigs.isEmpty()) {
+            RetainPtr nwProxyConfigurations = adoptNS([[NSMutableArray alloc] initWithCapacity:m_nwProxyConfigs.size()]);
+            configuration.proxyConfigurations = nwProxyConfigurations.get();
+        } else
+            configuration.proxyConfigurations = @[ ];
+    }
+}
+"""
+
 NO_FUNCTION = """\
 void NetworkSessionCocoa::clearProxyConfigData()
 {
@@ -296,6 +352,62 @@ def main() -> int:
 """, """        configuration.proxyConfigurations = @[ ];
 """), 1,
          ("cannot be parsed", "neither answer is known"), "--needs-guard")
+
+    # P2-2: both modes have to read this file rather than skip it. The literal's /* must not open a
+    # comment that swallows the function, because skipping is a pass and the device would still abort.
+    case("a /* inside a string literal does not hide the function (check mode)",
+         LITERAL_BLOCK_COMMENT, 1,
+         ("writes proxyConfigurations at lines 5, 7 with no runtime guard",
+          "unrecognized selector sent to instance"))
+    case("a /* inside a string literal still needs the patch (needs-guard mode)",
+         LITERAL_BLOCK_COMMENT, 0, "NEEDS GUARD:", "--needs-guard")
+
+    # P3-1: both are legal C++ and must be read as code, not as a parse failure.
+    case("a // inside a string literal does not hide the writes",
+         LITERAL_LINE_COMMENT, 1,
+         "writes proxyConfigurations at lines 5, 7 with no runtime guard")
+    case("a single-armed #if whose arms each open the brace is well formed",
+         ONE_ARMED_IF, 0, ("runtime guard respondsToSelector:", "Result: PASS"))
+
+    # P3-3: with the negated spelling the else arm is the side where the setter exists.
+    case("a write in the else arm of a negated guard is protected",
+         NEGATED_ELSE, 0, ("runtime guard respondsToSelector:", "Result: PASS"))
+    # The same shape un-negated keeps the else arm on the unsafe side: there the test came out false,
+    # which is exactly the device that lacks the setter, so both writes must still be reported.
+    case("a write in the else arm of an un-negated guard is not protected",
+         NEGATED_ELSE.replace(
+             "if (![configuration respondsToSelector:NSSelectorFromString(@\"setProxyConfigurations:\")]) {",
+             "if ([configuration respondsToSelector:NSSelectorFromString(@\"setProxyConfigurations:\")]) {"),
+         1, ("behind it: nothing", "is not behind the runtime guard"))
+    # And the mirror: the block of an un-negated guard is the side where the setter exists, so the
+    # same writes inside the block are protected. Without this case the polarity rule could be
+    # satisfied by rejecting every else arm and every block, which would pass the case above.
+    case("a write in the block of an un-negated guard is protected",
+         NEGATED_ELSE.replace(
+             "if (![configuration respondsToSelector:NSSelectorFromString(@\"setProxyConfigurations:\")]) {",
+             "if ([configuration respondsToSelector:NSSelectorFromString(@\"setProxyConfigurations:\")]) {")
+                    .replace("""    } else {
+        if (!m_nwProxyConfigs.isEmpty()) {""", """        if (!m_nwProxyConfigs.isEmpty()) {""")
+                    .replace("""        } else
+            configuration.proxyConfigurations = @[ ];
+    }
+}""", """        } else
+            configuration.proxyConfigurations = @[ ];
+    }
+}"""), 0, ("runtime guard respondsToSelector:", "Result: PASS"))
+
+    # The help text has to describe the codes the tool actually returns (P3-2).
+    with tempfile.TemporaryDirectory() as directory:
+        help_result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True,
+        )
+    if "3 when a skip is correct" not in help_result.stdout:
+        failures.append(
+            "--help does not name the skip code 3, so it describes codes the tool no longer returns"
+            f"\n{help_result.stdout}"
+        )
+    else:
+        print("PASS --help names the skip code 3")
 
     case_missing_file()
 
