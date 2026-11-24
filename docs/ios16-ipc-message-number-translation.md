@@ -16,7 +16,7 @@
 
 `IPCUtilities.cpp` 不能作为落点：它的全部内容在 `#if ENABLE(IPC_TESTING_API)` 里，该宏在 Release 构建（`NDEBUG` 已定义、无 ASAN）为 0，文件编出来是空的，放进去的表会被整段编掉（第 4.3 节）。
 
-**D.** 唯一的跨版本 `IPC::Connection` 是 `Source/WebKit/Shared/AuxiliaryProcess.cpp:108` 创建的 `m_connection`：三个 helper（WebContent、GPU、Networking）都继承 `AuxiliaryProcess` 并共用这一行，所以这一行对三者语义一致，都是「我到 UI 进程的连接」。标志在那里置真，不在 `Connection::createClientConnection` 工厂内部置真，因为该工厂有 7 个调用点，其余 6 个两端都是 18.3。翻译落点是 `Connection::sendMessageImpl`（发方向）与 `Connection::receiveSourceEventHandler`（收方向，必须在 `:545` 的 `InitializeConnection` 比较之前）。GPU 与 Networking 之间、WebContent 与 Networking 之间的连接用同一个工厂但走别的调用点，标志保持假，字节不动。
+**D.** 唯一的跨版本 `IPC::Connection` 是 `Source/WebKit/Shared/AuxiliaryProcess.cpp:108` 创建的 `m_connection`：三个 helper（WebContent、GPU、Networking）都继承 `AuxiliaryProcess` 并共用这一行，所以这一行对三者语义一致，都是「我到 UI 进程的连接」。标志在那里判定并置位，不在 `Connection::createClientConnection` 工厂内部置真，因为该工厂有 7 个调用点，其余 6 个两端都是 18.3。判据是对端 UI 进程的 SDK 版本（bootstrap 字典的 `client-sdk-version`），不是本进程的 `processType`（第 5.3 节）。翻译落点是 `Connection::sendMessageImpl`（发方向）与 `Connection::receiveSourceEventHandler`（收方向，必须在 `:545` 的 `InitializeConnection` 比较之前）。GPU 与 Networking 之间、WebContent 与 Networking 之间的连接用同一个工厂但走别的调用点，标志保持假，字节不动。
 
 还有一个必须先说清的前提：**编号只在 helper 到 UI 进程这一条连接上跨版本，其余连接两端同为 18.3。** 无条件翻译会把这些连接的自洽编号翻成对方不认的值，等于自己破坏自己，所以 D 不是可选优化，是正确性要求。
 
@@ -242,8 +242,8 @@ basename includes from another dir, NOT registered: 3
 
 逐个列出，避免后来者重复排查：
 
-- `Source/WebKit/Sources.txt`：只给 `WebKit` target 的非 Platform 源文件用，`Platform/IPC/` 不在这里。
-- `Source/WebKit/SourcesCocoa.txt`：同理，只列 `.mm` 与 Cocoa 专有文件。
+- `Source/WebKit/Sources.txt`：给 `WebKit` target 的主体源文件用。它含 `Platform/IPC/DaemonCoders.cpp`（`:216`），但不含 `Encoder.cpp`、`Decoder.cpp`、`Connection.cpp`，所以新增翻译源文件与它无关。第 2.1 节第一步列过这条命令与输出。
+- `Source/WebKit/SourcesCocoa.txt`（Platform 目录下那份）：列 10 个 `.mm` 与 7 个 `.cpp`（`Platform/cf/ModuleCF.cpp`、`Platform/IPC/cocoa/MachMessage.cpp`、`Platform/IPC/darwin/IPCEventDarwin.cpp`、`Platform/IPC/darwin/IPCSemaphoreDarwin.cpp`、`Platform/mac/MachUtilities.cpp`、`Platform/unix/EnvironmentUtilities.cpp`、以及派生源 `MessageNames.cpp`）。它同样不含 `Encoder.cpp`、`Decoder.cpp`、`Connection.cpp`，与新增翻译源文件无关。
 - `Source/WebKit/CMakeLists.txt`：`:128`、`:130` 的 `WebKit_UNIFIED_SOURCE_LIST_FILES` 已含 `"Sources.txt"` 与 `"Platform/Sources.txt"`，是同一批清单的 cmake 视图，加行即同步生效。Xcode 构建不读它。
 - `UnifiedSources-output.xcfilelist`：列聚合产物名，不列单个源文件。
 - `Configurations/WebKitPlatform.xcconfig` / `Configurations/WebKit.xcconfig`：与源文件清单无关。
@@ -320,7 +320,7 @@ Source/WebKit/NetworkProcess/NetworkProcess.cpp:377:    AuxiliaryProcess::initia
 
 基类实现是空函数（`AuxiliaryProcess.cpp:129-131`），没有别的地方在 `:108` 之后给这条连接加标记。
 
-**三个 helper 全部跨版本，不是只有 WebContent。** 部署方式决定了这一点：`scripts/install-webkit-override.sh` 的 `prune_xpc_services`（`:235-251`）删除覆盖目录里的 `XPCServices`，于是 WebContent、GPU、Networking 三个 helper 都由系统自带的 16.1 `.xpc` 桩启动，再由 `DYLD_FRAMEWORK_PATH` 加载覆盖目录里的 18.3 framework。三个 helper 的对端都是未打补丁的 16.1 UI 进程，三条连接都需要翻译。所以标志在 `:108` 之后无条件置真，不按进程类型分支。
+**三个 helper 全部跨版本，不是只有 WebContent。** 部署方式决定了这一点：`scripts/install-webkit-override.sh` 的 `prune_xpc_services`（`:235-251`）删除覆盖目录里的 `XPCServices`，于是 WebContent、GPU、Networking 三个 helper 都由系统自带的 16.1 `.xpc` 桩启动，再由 `DYLD_FRAMEWORK_PATH` 加载覆盖目录里的 18.3 framework。三个 helper 的对端都是未打补丁的 16.1 UI 进程，三条连接都需要翻译。所以判据落在 `:108` 这一行的连接上，对三条连接一视同仁，不按进程类型分支（第 5.3 节把「要不要翻译」的判据写成对端 SDK 版本，仍然与 `processType` 无关）。
 
 ### 5.2 为什么不能放在 createClientConnection 内部
 
@@ -350,28 +350,43 @@ Source/WebKit/GPUProcess/GPUConnectionToWebProcess.cpp:280
 
 ### 5.3 实现方式
 
-给 `IPC::Connection` 加一个私有 `bool` 成员和一个 setter：
+本节描述的是内层 `feat/t2-ipc-message-number-tables-and-patch` 分支上 `patches/ios16-ipc-message-number-translation.patch` 已经实现的方案，不是另一个备选设计。接口名与判定条件都照该补丁写。
+
+给 `IPC::Connection` 加一个私有 `bool` 成员和一个带参 setter：
 
 ```cpp
-// Connection.h，与 m_isServer 同区域（:583 附近）
-void setTranslatesLegacyMessageNumbers() { m_translatesLegacyMessageNumbers = true; }
-bool translatesLegacyMessageNumbers() const { return m_translatesLegacyMessageNumbers; }
+// Connection.h，m_isServer 同区域
+void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }
 ...
-bool m_translatesLegacyMessageNumbers { false };
+bool m_shouldTranslateMessageNames { false };
 ```
 
-在 `AuxiliaryProcess.cpp:108` 之后、`:110` 的 `open` 之前调用：
+在 `AuxiliaryProcess.cpp:108` 之后、`:110` 的 `open` 之前判定并置位：
 
 ```cpp
 m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
-m_connection->setTranslatesLegacyMessageNumbers();
+#if IOS_16_MESSAGE_NUMBER_TRANSLATION
+    if (auto version = IPC::uiProcessSDKVersionFromBootstrap(); version && *version < DYLD_IOS_VERSION_18_0)
+        m_connection->setShouldTranslateMessageNames(true);
+#endif
 initializeConnection(m_connection.get());
 m_connection->open(*this);
 ```
 
 放在 `open` 之前是必须的：`open` 会走 `platformOpen`，在 client 分支里立刻构造并发出 `InitializeConnection`（`ConnectionCocoa.mm:186-192`）。如果标志在 `open` 之后才置真，第一条消息就已经带着未翻译的编号出去了。
 
-为什么选 setter 而不是给工厂加默认参数：`createClientConnection(Identifier)` 是 public 静态工厂（`Connection.h:300`），加默认参数会让另外 6 个调用点静默获得新能力，读代码看不出差别。setter 在调用点显式，且不影响已有 7 个调用点的签名。
+**为什么用运行期版本门，而不是无条件置真。** 编译期有一个 `IOS_16_MESSAGE_NUMBER_TRANSLATION` 开关（`MessageNumberTranslation.h` 里按 `__IPHONE_OS_VERSION_MIN_REQUIRED < 180000` 定义），它决定表要不要编进产物；它不决定任何一条连接是否翻译。真正决定的是对端的版本：UI 进程在 bootstrap 字典的 `client-sdk-version` 键里写下自己的 SDK 版本（`ProcessLauncherCocoa.mm` 写入，`XPCServiceInitializerDelegate::getUIProcessSDKVersion` 读出），helper 在进程启动时读一次存进静态量（`setUIProcessSDKVersionFromBootstrap` / `uiProcessSDKVersionFromBootstrap`），随后 `:108` 之后比较。
+
+用它可以区分两种在编译期看起来完全一样的情况：
+
+- 16.1 的 iOS 16 Safari 配 18.3 helper。对端版本低于 18.0，需要翻译，置真。
+- 16.1 helper 配 16.1 UI。两者编号一致，翻译只会把正确编号改错，因此不置真。
+
+无条件置真在这两种情况下没有区别，因为本项目的部署形态是前者；但把「要不要翻译」绑在「本二进制能不能翻译」上会让第二种形态静默出错，也就是说，这个门的成本是一条比较，收益是让判据从「我的构建目标」变成「对端的实际版本」。对端没写版本时按不翻译处理：放行原始编号错了会在协议层立刻暴露，而改动一条本来就正确的连接会得到更难定位的静默错位。
+
+这也解释了为什么这个判据不能按 `processType` 分支：三条 helper 到 UI 进程的连接全部跨版本，`processType` 对三者都不同，但对「要不要翻译」这个问题的答案相同。判据落在对端版本上，三条连接自然一致，不需要列举进程类型。
+
+为什么不把判据放进 `createClientConnection` 工厂：该工厂有 7 个调用点（第 5.2 节），其中 6 个两端同为 18.3。工厂内部无法知道对端是谁，置真会让那 6 条也被翻译，互相破坏。
 
 为什么不把标志并进 `Identifier`：`Identifier` 同时用于 server 侧（`createServerConnection`），并且 `Connection::identifier()`（`ConnectionCocoa.mm:583-586`）按 `m_isServer` 从两个端口里挑一个来构造它，加字段会改变结构体宽度与比较语义。
 
@@ -391,7 +406,31 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
 
 为什么必须重写缓冲区而不是改 `Encoder` 成员：`Encoder::encodeHeader`（`Encoder.cpp:162-167`）在构造函数（`:67-72`）里就把三项写进缓冲区，之后再改 `m_messageName` 成员不影响已写入的字节。这一点是硬约束。
 
-因此更稳妥的做法是在 `Encoder` 上加一个 `void setEncodedMessageName(MessageName)`，由它按 `alignof` 推导偏移并重写缓冲区，而不是在 `Connection` 里手写 `+2`。理由见第 5.5 节。
+因此实际做法是在 `Encoder` 上加一个 `void setMessageName(MessageName)`，由它按 `alignof` 推导偏移并重写缓冲区，而不是在 `Connection` 里手写 `+2`：
+
+```cpp
+// Encoder.cpp
+void Encoder::setMessageName(MessageName name)
+{
+    // encodeHeader() 先写了 flags 字节，grow() 随后把名字对齐到 alignof(MessageName)，
+    // 所以对 uint16_t 名字位于第 2、3 字节，第 1 字节是补齐。
+    size_t messageNameOffset = roundUpToAlignment(sizeof(defaultMessageFlags), alignof(MessageName));
+    auto bytes = asBytes(std::span { &name, 1 });
+    ASSERT(messageNameOffset + bytes.size() <= m_bufferSize);
+    memcpySpan(m_capacityBuffer.subspan(messageNameOffset, bytes.size()), bytes);
+}
+```
+
+它只改缓冲区，不改 `m_messageName` 成员。成员必须保留本构建枚举赋的值，因为 `receiverName()` 用它索引本构建的 `messageDescriptions` 表；对端真正读到的只是缓冲区。理由见第 5.6 节。
+
+`Connection` 侧调用点（补丁里的实际代码）：
+
+```cpp
+#if IOS_16_MESSAGE_NUMBER_TRANSLATION
+    if (m_shouldTranslateMessageNames)
+        encoder->setMessageName(translateOutgoingMessageName(encoder->messageName()));
+#endif
+```
 
 关于 `:618` 的 `WrappedAsyncMessageForTesting` 分支：该分支把原 encoder 整体包进一条新的同步消息（`wrapForTesting`，`Encoder.cpp:126-139`，用 `*this << original->span()` 把原字节作为一块 span 拷进去），再递归调 `sendSyncMessage` 发出去。翻译放在这个分支**之前**，则被包裹的那条内层消息的编号在包裹前已翻译，外层 `WrappedAsyncMessageForTesting` 的编号由随后递归进入 `sendMessageImpl` 的那次调用翻译，两层都正确。放在之后则漏掉内层。所以顺序是：先翻译，再判断是否包裹。
 
@@ -413,14 +452,25 @@ $ grep -n 'createMessageDecoder(header\|messageName() == MessageName::Initialize
 
 `Decoder` 由自由函数 `createMessageDecoder(mach_msg_header_t*, size_t)`（`ConnectionCocoa.mm:379`）构造，该函数拿不到 `Connection`，三个返回点（`:397` 简单消息、`:445` OOL、`:460` 带附件）都是 `Decoder::create(...)`。所以「在 Decoder 构造函数里无条件翻译」是错误实现，会把 GPU 与 Networking 连接的消息一起翻。
 
-`Decoder::messageName()` 是 `const`（`Decoder.h:89`），`m_messageName` 私有（`Decoder.h:181`），需要新增一个能改名的入口，例如：
+`Decoder::messageName()` 是 `const`（`Decoder.h:89`），`m_messageName` 私有（`Decoder.h:181`），补丁新增了一个能改名的入口：
 
 ```cpp
 // Decoder.h，public 区
 void setMessageName(MessageName name) { m_messageName = name; }
 ```
 
-`Decoder.cpp:89-92` 是读入 `m_messageName` 的位置，可以在这里保留原值不动，由 `receiveSourceEventHandler` 按标志决定是否覆盖。这样「解码器原样反映线上的字节，翻译是连接层的决定」这个职责划分是清楚的。
+这里与 `Encoder::setMessageName` 不同：`Decoder` 必须真的改成员，因为下游全部按 `decoder.messageName()` 派发，它必须持有本构建枚举的值。
+
+`Decoder.cpp:89-92` 是读入 `m_messageName` 的位置，保留原值不动，由 `receiveSourceEventHandler` 按标志决定是否覆盖。补丁里的调用点：
+
+```cpp
+#if IOS_16_MESSAGE_NUMBER_TRANSLATION
+    if (m_shouldTranslateMessageNames)
+        decoder->setMessageName(translateIncomingMessageName(decoder->messageName()));
+#endif
+```
+
+这样「解码器原样反映线上的字节，翻译是连接层的决定」这个职责划分是清楚的。
 
 ### 5.6 编号布局与为什么不能写死偏移
 
@@ -466,7 +516,31 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 编号对齐之后，消息才会被派发到正确的 `MessageReceiver`，然后才轮到载荷层：那一步要解参数，参数类型是 16.1 与 18.3 各自编译出来的结构体布局。两层都通过，一条消息才算真正被处理。
 
-### 6.2 编号层通过后立刻暴露的载荷层问题
+### 6.2 载荷层差距的量化
+
+编号层只解决消息路由：它决定一条消息落到哪个 `MessageReceiver`。载荷层是另一件事，决定这条消息的参数能不能按对端的布局解出来。两版的参数签名差距是成规模的，不是个别例外。
+
+按 receiver 聚合全树比对 16.1 与 18.3 的消息，结果是：仅 16.1 有 340 条、仅 18.3 有 777 条、同名但参数签名实质变化 574 条。也就是说，即便编号翻译让每一条消息都落到正确的接收者，绝大多数消息的参数仍按另一套结构体布局编码。
+
+按接收者拆开看几个主要通道：
+
+| 接收者 | 16.1 消息数 | 18.3 消息数 | 共同 | 仅 16.1 | 仅 18.3 | 签名变化（其中实质） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `WebPage` | 402 | 492 | 370 | 32 | 122 | 79（76） |
+| `WebPageProxy` | 343 | 306 | 261 | 82 | 45 | 61（52） |
+| `DrawingArea` | 11 | 13 | — | 3 | 5 | 4 |
+| `EventDispatcher` | 7 | 6 | — | 2 | 1 | 2（1） |
+
+`WebPage` 与 `WebPageProxy` 是主文档通道，两条合计仅 16.1 有 114 条、仅 18.3 有 167 条、签名变化 140 条（实质 128）。这两条通道上的消息几乎覆盖页面加载与渲染的全部往返，载荷层不解决它们，页面就没有内容。
+
+两个具体的形态差异，说明这类差距不是「字段加减」可以吸收的：
+
+- **`RemoteLayerTreeDrawingAreaProxy` 的 `CommitLayerTree`。** 16.1 的参数是 `(RemoteLayerTreeTransaction, RemoteScrollingCoordinatorTransaction)` 两个单值；18.3 变成 `(Vector<pair<...>>, HashMap<RemoteImageBufferSetIdentifier, unique_ptr<BufferSetBackendHandle>>)`。参数个数、容器类型、元素类型三者同时变化，无法用兼容读取或忽略字段处理。
+- **`LayerChange` 位掩码。** 37 个同名项里只有 `UserInteractionEnabledChanged` 一个位号相同；`BoundsChanged` 在 16.1 是 bit 4、18.3 是 bit 8，`AnimationsChanged` 在 16.1 是 bit 34、18.3 是 bit 5。位掩码错位不会解码失败，会静默地让对端以为另一组属性变了。
+
+边界因此可以说成一句完整的话：**编号层只解决消息路由；载荷层的这些差距单靠编号翻译不能解决，因此编号层不足以让页面渲染。** 本文只设计编号层，第 7 节把载荷层留作未验证项。
+
+### 6.3 编号层通过后立刻暴露的第一个载荷层问题
 
 编号对齐保证了「消息被送到正确的接收者」，但 16.1 的接收者会按 16.1 的序列化格式读参数。两版之间的参数类型不兼容处会导致解码失败、字段错位或值被误读。这些属于载荷层，本文不处理，但要指出一个已经量化的点：
 
@@ -499,7 +573,7 @@ flips 19
 
 这个结果是编号层单独无法解决的：即使编号对齐，这 18 条消息仍会因为同步性质误判而被判非法并发回 `didReceiveInvalidMessage`。处理方式是载荷层的一部分（在编号表里为这类消息单独标注同步性质，或干脆不翻译这几条并在发送侧降级），本文不展开。
 
-### 6.3 范围内不需要转换的那一类
+### 6.4 范围内不需要转换的那一类
 
 helper 之间的连接（WebContent 到 GPU、WebContent 到 Networking）两端都是 18.3，编号自洽，标志为假，字节原样传输（第 5.2 节）。这条边界是编号层与载荷层共同的前提：只有 helper→UI 这条连接同时需要两层，其余连接两层都不需要。
 
@@ -539,7 +613,7 @@ AuxiliaryProcess_MainThreadPing                                          4
 
 **字节偏移未实测。** 第 5.6 节的偏移表由 `alignof` 与 `grow` 补齐规则推导。核对方法：在设备上让 helper 发一条已知消息，把消息体前 16 字节 dump 出来，确认第 0 字节是 flags、第 1 字节为 0、第 2–3 字节等于翻译后的消息号、第 8–15 字节是 `destinationID`。
 
-**19 条同步性质翻转里 `WebPageProxy_ShowPDFContextMenu` 在 iOS 上不成立这一判断**依据是它的 `#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 守卫（第 6.2 节），没有在真实 iOS 构建上核对这份枚举被剔除后的确切编号。
+**19 条同步性质翻转里 `WebPageProxy_ShowPDFContextMenu` 在 iOS 上不成立这一判断**依据是它的 `#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 守卫（第 6.3 节），没有在真实 iOS 构建上核对这份枚举被剔除后的确切编号。
 
 ## 取证环境
 
@@ -578,6 +652,6 @@ phase('8DC2EF560486A6940098B216 /* Frameworks */ = {')# WebKit Frameworks
 
 头文件登记统计用同一份 pbxproj 加 `git show HEAD:<path>` 读每个被编译源文件的 `#include "X.h"`，按「同目录是否存在」「是否出现在 `PBXFileReference`」分类，结果见第 3.2 节。
 
-16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的枚举体里还有四个非消息名条目：`FirstSynchronous`（占 3838，故 0–4085 里唯一的空洞是 3838）、`LastAsynchronous = FirstSynchronous - 1`、`Count = 4087`、`Last = Count - 1`。本文第 5 节与第 6、7 节的全部计数都取自这两份文件。
+16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4086，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4086，唯一的空洞是 `FirstSynchronous` 占用的 3838。枚举体里还有四个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4087`、`Last = Count - 1`（4086）。`Count = 4087` 与「最大编号 4086」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 5 节与第 6、7 节的全部计数都取自这两份文件。
 
 **口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3140 个消息名」「2807 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3141 条、4087 条（18.3 侧把 `Last` 计入）、同名 2808 条。两套口径的差值恰好是这一个别名，`only16`/`only18` 与其余结论完全一致。tower 早先给的 3141 / 4087 / 2808 就是含别名的口径，本文统一用排除别名的口径，因为映射表里不会给别名单独建项。
