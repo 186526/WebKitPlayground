@@ -1,0 +1,35 @@
+diff --git a/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm b/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
+--- a/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
++++ b/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
+@@ -2304,6 +2304,31 @@ void NetworkSessionCocoa::setProxyConfigData(const Vector<std::pair<Vector<uint8
+ 
+ void NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration(NSURLSessionConfiguration *configuration)
+ {
++    // -[NSURLSessionConfiguration setProxyConfigurations:] arrived with the Network framework proxy
++    // support in iOS 17 and macOS 14. HAVE(NW_PROXY_CONFIG) cannot gate the send, because
++    // Source/WTF/wtf/PlatformHave.h keys that macro on __IPHONE_OS_VERSION_MAX_ALLOWED, the SDK this
++    // tree is built with, and that SDK is 18.x whatever IPHONEOS_DEPLOYMENT_TARGET says. The send
++    // therefore compiles, no header declares the property so the compiler emits nothing worse than a
++    // warning, and the message reaches an instance whose class does not implement it: the 16.1
++    // device aborts in the Network process of com.apple.WebKit.Networking with
++    //
++    //   -[NSURLSessionConfiguration setProxyConfigurations:]: unrecognized selector sent to instance
++    //
++    // respondsToSelector: tests that exact fact, whether the receiver's class implements the
++    // setter, so it is chosen over `if (@available(iOS 17.0, *))`: this function is also compiled
++    // for macOS, where the same property arrived in 14.0, and an iOS-only @available would need a
++    // second spelling there; and this file already answers a missing API that way, for
++    // -[NSURLSessionTask _TLSNegotiatedProtocolVersion] further down. NSSelectorFromString avoids
++    // depending on a declaration that a 16.x SDK does not carry.
++    //
++    // This is a runtime capability test, not a deployment-target test. On iOS 17 and macOS 14 and
++    // above the selector exists, respondsToSelector: is true, and the assignments below run exactly
++    // as upstream wrote them. The early return sits at the entry of the function rather than around
++    // either assignment, so both the non-empty and the empty branch are behind it and a later
++    // writer added to this body cannot escape it.
++    if (![configuration respondsToSelector:NSSelectorFromString(@"setProxyConfigurations:")])
++        return;
++
+     if (!m_nwProxyConfigs.isEmpty()) {
+         RetainPtr nwProxyConfigurations = adoptNS([[NSMutableArray alloc] initWithCapacity:m_nwProxyConfigs.size()]);
+         for (auto& proxyConfig : m_nwProxyConfigs)

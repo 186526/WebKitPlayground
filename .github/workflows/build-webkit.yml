@@ -347,6 +347,7 @@ jobs:
           ref_has_iphone_service_bundle_suffix=0
           ref_has_core_crypto_signatures_macro=0
           ref_sends_ios17_trait_api=0
+          ref_writes_proxy_configurations=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -434,6 +435,18 @@ jobs:
               "WebKit/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm" 2>/dev/null; then
             ref_sends_ios17_trait_api=1
           fi
+          # -[NSURLSessionConfiguration setProxyConfigurations:] arrived in iOS 17, and the writes in
+          # applyProxyConfigurationToSessionConfiguration are gated on HAVE(NW_PROXY_CONFIG), which
+          # PlatformHave.h keys on the SDK version rather than the deployment target. The function
+          # first appears in tag Safari-17.4; 16.6 and 17.0 have no such function, and a ref whose
+          # writes already sit behind a runtime guard needs nothing, so both of those skip. The flag
+          # comes from the checker's --needs-guard mode rather than a grep for the property name,
+          # so a ref that already guards its writes is not reported as needing the patch.
+          if [ -f WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm ] && \
+              python3 scripts/check-network-session-proxy-configurations.py --needs-guard \
+                --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm; then
+            ref_writes_proxy_configurations=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
@@ -443,6 +456,7 @@ jobs:
           echo "iPhone service bundle identifiers carry the .Service suffix in ${WEBKIT_REF}: ${ref_has_iphone_service_bundle_suffix}"
           echo "HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE present in ${WEBKIT_REF}: ${ref_has_core_crypto_signatures_macro}"
           echo "traitCollectionByModifyingTraits sent in ${WEBKIT_REF}: ${ref_sends_ios17_trait_api}"
+          echo "unguarded proxyConfigurations write in ${WEBKIT_REF}: ${ref_writes_proxy_configurations}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -509,6 +523,18 @@ jobs:
                   # builds the collection with the class methods (upstream before 278011@main) has
                   # no iOS 17 send to guard, so skipping is correct there.
                   if [ "$ref_sends_ios17_trait_api" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
+                ios16-network-session-proxy-configurations-guard.patch)
+                  # A ref whose applyProxyConfigurationToSessionConfiguration still writes
+                  # proxyConfigurations without a runtime guard needs this patch: the sends compile
+                  # at a 16.1 deployment target and the Network process of
+                  # com.apple.WebKit.Networking aborts with "unrecognized selector sent to
+                  # instance". A ref with no such function (before Safari-17.4) or one that already
+                  # guards both writes has nothing to fix, so skipping is correct there.
+                  if [ "$ref_writes_proxy_configurations" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1
                   fi
@@ -682,6 +708,32 @@ jobs:
           # selector prints SKIP, which is the refs before 278011@main.
           python3 scripts/check-local-current-trait-collection.py \
             --source WebKit/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm
+
+      - name: Check the iOS 17 proxy configuration write is behind a runtime guard
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          # patches/ios16-network-session-proxy-configurations-guard.patch is what keeps
+          # applyProxyConfigurationToSessionConfiguration off
+          # -[NSURLSessionConfiguration setProxyConfigurations:], which arrived in iOS 17. The
+          # writes are inside #if HAVE(NW_PROXY_CONFIG), but PlatformHave.h keys that macro on
+          # __IPHONE_OS_VERSION_MAX_ALLOWED, so a 16.1 deployment target against an 18.x SDK
+          # compiles both of them. The device then aborts in the Network process of
+          # com.apple.WebKit.Networking:
+          #
+          #   -[NSURLSessionConfiguration setProxyConfigurations:]: unrecognized selector sent to
+          #   instance
+          #   NSInvalidArgumentException
+          #   (M55 reproduced this on the device; SessionWrapper::initialize calls the function for
+          #   every NSURLSession the process creates, so the first session is enough)
+          #
+          # The script parses the function body and requires one runtime guard at its entry, with
+          # both the non-empty and the empty branch's write behind it. A guard around one branch
+          # leaves the other send reachable, and that send alone aborts the process, so the check
+          # fails on that shape. A ref with no such function prints SKIP, which is every tag before
+          # Safari-17.4.
+          python3 scripts/check-network-session-proxy-configurations.py \
+            --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
 
       - name: Configure embedded development
         run: sudo WebKit/Tools/Scripts/configure-xcode-for-embedded-development || true
@@ -1001,6 +1053,20 @@ jobs:
           # Run against the deb rather than the build tree, because the deb is what reaches the
           # device and its payload is what dyld reads.
           python3 scripts/check-corecrypto-curve25519-imports.py --deb packages/webkit-rootless.deb
+
+      - name: Assert the iOS 17 proxy configuration guard reached the build tree
+        if: success()
+        run: |
+          set -euo pipefail
+          # The real criterion is the source-level guard, not anything in the binary: the packaged
+          # WebKit.framework/WebKit keeps the _objc_msgSend$setProxyConfigurations: stub because the
+          # iOS 17 arm still needs it, so its presence proves nothing either way, and no
+          # disassembly can show whether a caller is reachable on iOS 16. Re-run the checker against
+          # the same build tree the deb was packaged from, so a run whose source was reverted after
+          # the earlier check cannot ship. The checker's own cases run here too, without artifacts.
+          python3 scripts/check-network-session-proxy-configurations.py \
+            --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
+          python3 scripts/test-check-network-session-proxy-configurations.py
 
       - name: Upload deb
         if: success()
