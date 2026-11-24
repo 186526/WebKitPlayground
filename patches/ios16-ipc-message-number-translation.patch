@@ -7991,7 +7991,7 @@ index 088ff202d01..b287d15c4de 100644
      decoder->setImportanceAssertion(ImportanceAssertion { header });
  #endif
 diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp
-index 30487740bbe..fde6a153ae1 100644
+index 30487740bbe..272823c42e6 100644
 --- a/Source/WebKit/Shared/AuxiliaryProcess.cpp
 +++ b/Source/WebKit/Shared/AuxiliaryProcess.cpp
 @@ -29,6 +29,7 @@
@@ -8002,15 +8002,18 @@ index 30487740bbe..fde6a153ae1 100644
  #include "Logging.h"
  #include "SandboxInitializationParameters.h"
  #include "WebPageProxyIdentifier.h"
-@@ -36,6 +37,7 @@
- #include <pal/SessionID.h>
- #include <wtf/LogInitialization.h>
+@@ -38,6 +39,10 @@
  #include <wtf/SetForScope.h>
-+#include <wtf/spi/darwin/dyldSPI.h>
  #include <wtf/WTFProcess.h>
  
++#if IOS_16_MESSAGE_NUMBER_TRANSLATION
++#include <wtf/spi/darwin/dyldSPI.h>
++#endif
++
  #if !OS(WINDOWS)
-@@ -106,6 +108,23 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
+ #include <unistd.h>
+ #endif
+@@ -106,6 +111,23 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
      WebPageProxyIdentifier::enableGenerationProtection();
  
      m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
