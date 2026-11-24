@@ -8630,10 +8630,10 @@ index 5503dfc842d..a3af9421b6d 100644
      void reserve(size_t);
 diff --git a/Source/WebKit/Platform/IPC/MessageNumberTranslation.h b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
 new file mode 100644
-index 00000000000..6c0a038edaf
+index 00000000000..5140e60b4c5
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,108 @@
 +/*
 + * Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 + *
@@ -8718,6 +8718,15 @@ index 00000000000..6c0a038edaf
 +// drops, the ones whose sender is waiting for a reply from the ones whose sender
 +// is not.
 +extern const uint16_t firstSynchronousOldMessageNumber;
++
++// One 16.1 message this build cannot map is worth naming, because dropping it
++// looks alarming and is not: 16.1's `Terminate` (number 2449) has a receiver-side
++// handler that calls CRASH(), but neither tree ever constructs it. Grepping the
++// 16.1 tree for `MessageName::Terminate` finds the receive-side comparison in
++// Connection.cpp and nothing that sends it, and 18.3 deleted the enumerator
++// along with that handler. A UI process that needs an auxiliary process gone
++// closes the connection or calls Connection::kill(), so no sender exists to be
++// answered.
 +
 +// The SDK version the UI process put in the bootstrap dictionary, or nullopt
 +// when it did not send one. Decided at process start, before any message can be
