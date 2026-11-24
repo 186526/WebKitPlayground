@@ -389,6 +389,47 @@ run_probe
 expect_status 'install-fails exit' "${CASE_STATUS}" 4
 expect_contains 'install-fails skipped step 3' "${CASE_DIR}/log/probe.log" 'skipped: the install did not succeed'
 
+printf '\n== p2 the baseline reason needs a successful after-listing on that same step\n'
+# Both shapes put a truncated report on the device during step 4, so the run has
+# one step with no baseline and one step with a report that cannot be read. The
+# only difference is whether step 3's own after-listing (call 7) succeeded.
+#
+#   baseline-and-unreadable  call 6 fails, call 7 works  -> step 3 has no
+#       baseline but does have an "after" list, so it enters BASELINE_MISSING_STEPS
+#       and the reason names the baseline. Step 4 is unreadable too; the baseline
+#       reason wins, which is the priority this documents.
+#   baseline-and-after-fail  calls 6 and 7 both fail -> step 3 has neither, so it
+#       walks the "after-listing failed" branch and never enters
+#       BASELINE_MISSING_STEPS. No step qualifies for the baseline reason, so the
+#       run reports the weaker one.
+#
+# Without the conjunction in the doc, the second shape would read as a
+# contradiction of it: the before-listing did fail on a reading step, yet the
+# baseline reason is absent.
+
+printf '\n== p2 a failed before-listing plus a readable after names the baseline, even with another step unreadable\n'
+new_case baseline-and-unreadable "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8600), \"crash_timing\": {\"after_call\": 8, \"files\": {\"MobileSafari-2026-11-25.ips\": \"fixture-truncated.ips\"}}, \"find_timing\": {\"fail_calls\": [6]}}"
+run_probe
+expect_status 'baseline-and-unreadable exit' "${CASE_STATUS}" 4
+expect_contains 'baseline-and-unreadable not A or B' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=UNKNOWN'
+expect_contains 'baseline-and-unreadable reason names the baseline' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=crash_baseline_missing_in_reading_window'
+expect_contains 'baseline-and-unreadable step 3 INVALID' "${CASE_DIR}/log/probe.log" 'step 3 is INVALID'
+expect_contains 'baseline-and-unreadable step 4 INVALID' "${CASE_DIR}/log/probe.log" 'step 4 is INVALID'
+expect_contains 'baseline-and-unreadable both steps listed' "${CASE_DIR}/log/probe.log" 'PROBE_INVALID_STEPS=3,4'
+expect_contains 'baseline-and-unreadable step 3 says no baseline' "${CASE_DIR}/log/probe.log" "step 3 is INVALID: its crash exclusion is not established (this step's before-listing failed"
+expect_contains 'baseline-and-unreadable step 4 says unreadable' "${CASE_DIR}/log/probe.log" 'step 4 is INVALID: its crash exclusion is not established (a new report could not be read'
+
+printf '\n== p2 without that step'"'"'s own after-listing the baseline reason cannot appear\n'
+new_case baseline-and-after-fail "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8600), \"crash_timing\": {\"after_call\": 6, \"files\": {\"MobileSafari-2026-11-25.ips\": \"fixture-truncated.ips\"}}, \"find_timing\": {\"fail_calls\": [6, 7]}}"
+run_probe
+expect_status 'baseline-and-after-fail exit' "${CASE_STATUS}" 4
+expect_contains 'baseline-and-after-fail not A or B' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=UNKNOWN'
+expect_contains 'baseline-and-after-fail reason is the weaker one' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=crash_exclusion_not_established_in_reading_window'
+expect_not_contains 'baseline-and-after-fail never names the baseline' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=crash_baseline_missing_in_reading_window'
+expect_contains 'baseline-and-after-fail step 3 INVALID' "${CASE_DIR}/log/probe.log" 'step 3 is INVALID'
+expect_contains 'baseline-and-after-fail says the after-listing failed' "${CASE_DIR}/log/probe.log" 'crash reports after this step: unavailable'
+expect_not_contains 'baseline-and-after-fail never claims a baseline it did not get' "${CASE_DIR}/log/probe.log" "no baseline: none of these"
+
 printf '\n== regression: preexisting override refuses to install\n'
 new_case preexisting "{\"override_initial\": \"present\", \"services\": ${SERVICES}, \"helpers\": []}"
 run_probe
