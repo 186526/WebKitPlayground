@@ -52,17 +52,34 @@
 
 ### 1.2 编号翻译层不足以让页面渲染
 
-M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-survey-summary.md`）逐帧追踪了两条渲染关键消息，三条阻断彼此独立：
+M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-survey-summary.md`）逐帧追踪了两条渲染关键消息，三条阻断彼此独立。
 
-**一、`DrawingArea_DidUpdate` 在 18.3 被改名，编号 38 撞上另一个接收者。** 16.1 在 `Source/WebKit/UIProcess/RemoteLayerTree/RemoteLayerTreeDrawingAreaProxy.mm:459` 发这条消息，无参数，16.1 枚举值 38。18.3 没有这条消息（改名为 `DisplayDidRefresh`），编号 38 落在 `GPUConnectionToWebProcess` 组里；M64 对前 60 个条目所有不肯定的守卫做了 2^9 = 512 种组合全遍历，`MessageName(38)` 的接收者在全部组合下都是 `GPUConnectionToWebProcess`，按 18.3 头文件自身平台宏求值时是 `GPUConnectionToWebProcess_CreateGPU`（`Source/WebKit/GPUProcess/GPUConnectionToWebProcess.messages.in:32`），参数是「WebGPU 标识符、渲染后端标识符、流服务器连接句柄」。翻译表共 2807 个 `case`，其中没有 `case 38`，走 `default: return name` 原样透传。
+**本节所有 18.3 编号都取 iOS 生效枚举，不是含全部 `#if` 分支的全量枚举。** 18.3 的生成器在 `generate_message_names_header` 里按 `itertools.groupby(message_enumerators, lambda e: (e.condition(), e.synchronous()))` 输出枚举体，每条带编译条件的消息都被写成 `#if` / `#endif`（`Source/WebKit/Scripts/webkit/messages.py:1518-1528`），生成的 `MessageNames.h` 里有 703 个 `#if`，于是同一个名字在不同宏取值下编号不同，两个口径的总数与关键编号都不同：
+
+| 口径 | 条目数 | 编号 38 | 编号 27 |
+| --- | --- | --- | --- |
+| 全量枚举（保留全部 `#if` 分支） | 4091 | `DrawingArea_UpdateGeometry` | `DrawingArea_AcceleratedAnimationDidEnd`（`DrawingArea_DisplayDidRefresh` 是 33） |
+| iOS 生效，公共 SDK 取值 | 3786 | `GPUConnectionToWebProcess_CreateGraphicsContextGL` | `DrawingArea_DisplayDidRefresh` |
+| iOS 生效，加 `TOUCH_EVENTS`/`IOS_TOUCH_EVENTS`/`GPU_PROCESS`/`MODEL_PROCESS` | 3790 | `GPUConnectionToWebProcess_CreateGPU` | `DrawingArea_DisplayDidRefresh` |
+| 上一行再加 `EXTENSION_CAPABILITIES` 等六条 iOS 特性宏 | 3802 | `GPUConnectionToWebProcess_CreateGPU` | `DrawingArea_DisplayDidRefresh` |
+
+取 iOS 口径的理由是设备上的二进制按 iOS 的宏取值编译。**按全量枚举复算会得到 38 = `DrawingArea_UpdateGeometry`**，从而误以为下文的「38 撞上 GPU 组」不成立；两次求值都成立，只是口径不同。38 号的名称只在 3786 与 3790 之间变化，起作用的是 `EventDispatcher_TouchEvent`：它排在 33 号位，插入后 37 号起的条目整体后移一位，`CreateGPU` 由 37 升到 38，原来的 38 号 `CreateGraphicsContextGL` 被推到 39，于是 38 号换成同组的另一条。3790 与 3802 相差 12 条，全部排在 38 之后（最小位次 51 的 `GPUConnectionToWebProcess_SetMediaEnvironment`），所以 38 不变。3790 那一档的 4 条条目在第二、三行两种取法下成员不同（`USE(APPLE_INTERNAL_SDK)` 给 `NetworkConnectionToWebProcess_LogOnBehalfOfWebContent`，显式开关给 `WebProcessProxy_CreateModelProcessConnection`），但两行的 38 与 27 完全相同，所以表里只列条目数与这两个编号。
+
+**求值方法。** 每一行都用同一份 18.3 枚举体，先用 `clang++ -E -P -x c++ -DBUILDING_IOS__ -D__APPLE__ -U__linux__ -Ulinux` 预处理（外加该行自己那组 `-D` 开关），再编译一个打印 `(int)MessageName::X` 的小程序读数；条目数取编译器给出的 `MN::Count`，编号一律取编译值而不是按行数数下标——`FirstSynchronous`、`LastAsynchronous` 这类非消息条目也占位，按行数会差一。`-U__linux__` 必须带：宿主机的 `__linux__` 让 `OS(LINUX)` 为真，`AuxiliaryProcess_DidReceiveMemoryPressureEvent` 留在枚举里，38 之后的编号整体后移一位。
+
+**各行的开关。** 第一行不加任何开关，只把枚举体里的 `#if` 行删掉。第二行加 `-DUSE_APPLE_INTERNAL_SDK=1`。第三行加 `-DENABLE_TOUCH_EVENTS=1 -DENABLE_IOS_TOUCH_EVENTS=1 -DENABLE_GPU_PROCESS=1 -DENABLE_MODEL_PROCESS=1`；`ENABLE(TOUCH_EVENTS)` 必须一起给，源码 `Source/WTF/wtf/PlatformEnable.h:950` 有 `#error` 检查这两者的依赖。第四行在第三行基础上再加 `-DENABLE_EXTENSION_CAPABILITIES=1 -DENABLE_AV1=1 -DUSE_EXTENSIONKIT=1 -DENABLE_NETWORK_ISSUE_REPORTING=1 -DENABLE_ACCESSIBILITY_ANIMATION_CONTROL=1 -DENABLE_ADVANCED_PRIVACY_PROTECTIONS=1` 六条。**第四行不要再加 `-DUSE_APPLE_INTERNAL_SDK=1`**：加上它会让条目数变成 3803（多出 `NetworkConnectionToWebProcess_LogOnBehalfOfWebContent`），与表里的 3802 不符；两者对 38 与 27 的读数相同。
+
+16.1 那一侧不存在这个问题：它的 `MessageNames.h` 里 `#if` 出现 0 次，平坦下标就是编译值，`DrawingArea_DidUpdate` = 38，`Last` = 3139。
+
+**一、`DrawingArea_DidUpdate` 在 18.3 被改名，编号 38 撞上另一个接收者。** 16.1 在 `Source/WebKit/UIProcess/RemoteLayerTree/RemoteLayerTreeDrawingAreaProxy.mm:459` 发这条消息，无参数，16.1 枚举值 38。18.3 没有这条消息（改名为 `DisplayDidRefresh`），编号 38 落在 `GPUConnectionToWebProcess` 组里；M64 对前 60 个条目所有不肯定的守卫做了 2^9 = 512 种组合全遍历，`MessageName(38)` 的接收者在全部组合下都是 `GPUConnectionToWebProcess`。**38 落在这个组里的哪一条随 iOS 宏取值移动**（口径见本节开头的表）：公共 SDK 取值下是 `GPUConnectionToWebProcess_CreateGraphicsContextGL`（3786 条），补上那几条 iOS 特性宏后是 `CreateGPU`（3790 与 3802 条），全量枚举下 38 根本不在此组而是 `DrawingArea_UpdateGeometry`。两条候选的参数形状都与 16.1 那条无参数消息不同，因此无论落在哪一条，16.1 发来的字节都会被按另一组字段解码：`CreateGPU` 收「WebGPU 标识符、渲染后端标识符、流服务器连接句柄」三个参数，`CreateGraphicsContextGL` 收「WebGL 标识符、`GraphicsContextGLAttributes`、渲染后端标识符、流服务器连接句柄」四个参数（`Source/WebKit/GPUProcess/GPUConnectionToWebProcess.messages.in:29` 与 `:32`）。翻译表共 2807 个 `case`，其中没有 `case 38`，走 `default: return name` 原样透传。
 
 **二、消息被静默丢弃，不崩溃，因此更难发现。** `Connection::processIncomingMessage` 的 `isValidMessage` 只查「接收者名 + destinationID 这个键是否为空或删除值」，不查载荷也不查接收者是否注册。消息随后落到 `WebProcess::didReceiveMessage` 的 `LOG_ERROR`（`Source/WebKit/WebProcess/WebProcess.cpp:1002`）。`AuxiliaryProcess::didReceiveInvalidMessage` 的 `CRASH()` 只在「接收者已注册、解码失败」时触发，本例走不到那里。
 
-**后果是渲染循环卡死而非进程死亡。** 18.3 的 `m_waitingForBackingStoreSwap` 在 `RemoteLayerTreeDrawingArea.mm:389` 置真，只由 `displayDidRefresh()` 清掉，而那条在 18.3 是编号 27，16.1 的 UI 进程从不发这个编号。于是 `scheduleRenderingUpdate` 在 `:326-329` 每次提前返回，第一帧之后不再产生新的 layer tree。进程全程存活、没有崩溃报告，页面停在首帧或全白。
+**后果是渲染循环卡死而非进程死亡。** 18.3 的 `m_waitingForBackingStoreSwap` 在 `RemoteLayerTreeDrawingArea.mm:389` 置真，只由 `displayDidRefresh()` 清掉，而那条在 18.3 是编号 27（iOS 口径，三套 iOS 取值都是 27；全量枚举下是 33），16.1 的 UI 进程从不发这个编号。于是 `scheduleRenderingUpdate` 在 `:326-329` 每次提前返回，第一帧之后不再产生新的 layer tree。进程全程存活、没有崩溃报告，页面停在首帧或全白。
 
 **三、`CommitLayerTree` 的载荷形状变了，不是同一个字段的两种写法。** 16.1 签名是「一个交易 + 一个滚动协调交易」两个参数；18.3 是「交易对的 `Vector` + 按 buffer set 标识符索引的句柄 `HashMap`」。16.1 把像素句柄内联编进交易（`RemoteLayerBackingStore.mm:117` 起），18.3 抽成消息级独立编码（`RemoteLayerTreeDrawingArea.mm:407` 与 `:509` 两次写入）。16.1 的字节里不存在「一张按 buffer set 标识符索引的句柄表」这个字段，也没有可用于反推的标识符，所以这条消息的跨版本翻译在载荷层不可表达。
 
-**四、`LayerProperties` 的位掩码全盘错位。** 两版 `enum LayerChange` 各 41 项，37 个同名项里只有 `UserInteractionEnabledChanged` 一个位号相同，其余 36 个全部不同（例如 `BoundsChanged` 16.1 是 bit 4、18.3 是 bit 8）。该字段决定后续载荷的字段顺序，位号一错整条载荷被当成另一组字段解码。
+**四、`LayerProperties` 的位掩码全盘错位。** 该枚举按源码项数（不剔除 `#if` 分支，与上一段的编号口径不同，因为比的是位号本身）在 16.1 是 `RemoteLayerTreeTransaction.h:61` 的 41 项，在 18.3 是 `LayerProperties.h:53` 的 46 项（位号 0 到 45 连续，其中 6 项位号经 `LayerChangeIndex` 给出）；两侧同名 40 项，其中 37 项在两侧都无条件编译，这 37 项里只有 `UserInteractionEnabledChanged` 一个位号相同（两侧同为 bit 37），其余 36 项全部不同（例如 `BoundsChanged` 16.1 是 bit 4、18.3 是 bit 8，`AnimationsChanged` 16.1 是 bit 34、18.3 是 bit 5）。仅 16.1 有 `EdgeAntialiasingMaskChanged`，仅 18.3 有 6 项（`AntialiasesEdgesChanged`、`VideoGravityChanged`、`BackdropRootChanged`、`BackdropRootIsOpaqueChanged`、`ScrollingNodeIDChanged`、`VisibleRectChanged`）。该字段决定后续载荷的字段顺序，位号一错整条载荷被当成另一组字段解码。
 
 **结构性理由：16.1 那一侧是系统二进制，无法打补丁。** 所有适配只能做在 18.3 一侧，16.1 的发送侧载荷无法修正。M64 对此判决为不可达，本条不重开。
 
@@ -619,7 +636,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 7. **UI 进程到底加载了哪几个镜像。** `usedImages` 不能回答这个问题，必须用 `lldb image list`；`vmSummary` 只能给出区段总量、不带路径。这是第一条第二层能否成立的关键，第四节第 4 步。
 8. **`_CodeSignature` 目录缺失的影响。** 系统那份有、`/var/jb` 那份没有。`../../build-state.md:338` 排除的「代码签名因复制失效」比的是二进制内嵌的 `LC_CODE_SIGNATURE` 偏移与大小（两边同为 49536 / 21856），不是这个目录。
 9. **`/var/jb` 的 `WebContent.Development.xpc` 多出来的影响。** 系统的 `XPCServices` 有 4 个，`/var/jb` 有 5 个。`ProcessLauncherCocoa.mm:196` 按「是否为非合法注入代码」在 `.Development` 与裸名之间取一，多出来的这一份在什么条件下被选中没有实测。
-10. **编号 38 的确切枚举名。** M64 的 512 种守卫组合全遍历确定接收者是 `GPUConnectionToWebProcess`（见 M64 第 8 节），具体到 `CreateGPU` 依赖若干宏取假。要在真机上定案，需要读真实 iOS 构建产物里的 `MessageNames.h`。
+10. **编号 38 的确切枚举名。** M64 的 512 种守卫组合全遍历确定接收者是 `GPUConnectionToWebProcess`（见 M64 第 8 节）。具体名字取决于 iOS 编译时各宏的取值：1.2 节的三套 iOS 求值给出 `CreateGraphicsContextGL`（3786 条）或 `CreateGPU`（3790、3802 条），差别只由 `EventDispatcher_TouchEvent` 一条是否排在 38 之前决定。要在真机上定案，需要读真实 iOS 构建产物里的 `MessageNames.h`。这一条不影响结论：两条候选的参数形状都与 16.1 的无参数消息不同（三个参数与四个参数），16.1 的字节无论落在哪一条都会被按另一组字段解码。
 
 ---
 
