@@ -437,7 +437,7 @@ grep 'found:' "$L" | grep 'WebKit\.framework/WebKit"'
 1. 含 `/System/Library/Frameworks/` 或含 `/Cryptexes/OS/System/Library/` → **两串都没被采用**，落回系统 16.1。这一条必须排在最前：系统路径 `/System/Library/Frameworks/WebKit.framework/WebKit` 也含 `/Library/Frameworks/`，若先判第三条，失败情形会被误读成「内嵌路径胜出」。
 2. 含 `WebKitOverride` → **环境变量优先**，与 `docs/dopamine-basebin-webkit-override.md:706` 记的 app 进程结论一致；
 3. 含 `/Library/Frameworks/` → **`.xpc` 的 `LC_DYLD_ENVIRONMENT` 在这一步上压过环境变量**；
-4. 以上都不含 → 不属于这五种形态，按未分类记，不要硬套结论。
+4. 以上都不含 → 不属于上面三种形态，按未分类记，不要硬套结论。这三种形态对应第三节路径清单表的第 1 至第 4 行；第 5 行是 `DYLD_LIBRARY_PATH` 下的库目录，`WebKit.framework/WebKit` 不会落在那里。
 
 `/var/jb` 是指向 `procursus` 的符号链接，两种前缀指向同一个覆盖目录，所以「含 `WebKitOverride`」这一条对两种写法都成立，这正是它比字面匹配可靠的原因。
 
@@ -476,7 +476,7 @@ ps -Ao pid,comm | grep -E 'WebKit\.WebContent' | grep -v grep
 
 **按自上而下顺序读，第一条命中即停。系统那一行必须排在最前**：`/System/Library/Frameworks/WebKit.framework/WebKit` 也含 `/Library/Frameworks/`，若把内嵌那一行排在前面，失败情形会被误判成「转交生效」或「内嵌生效」。
 
-**这张表不能按 `/var/jb` 字面匹配。** `lldb image list -o -f` 打印的是 dyld 记录的路径，经环境变量加载的镜像沿用的是变量里的字符串，那是 preboot 形态（第 3.1 节「两个路径值当前不一致」列出的两个值是同一个目录的两种写法，见第三节路径清单表）；只有 `.xpc` 内嵌的 `LC_DYLD_ENVIRONMENT` 才给出 `/var/jb/Library/Frameworks` 字面量。用 `grep '/var/jb/Library/WebKitOverride'` 筛会漏掉转交生效的那一整个分支。
+**这张表不能按 `/var/jb` 字面匹配。** `lldb image list -o -f` 打印的是 dyld 记录的路径，经环境变量加载的镜像沿用的是变量里的字符串，那是 preboot 形态（第 3.1 节说明的是两个不同的目录，这里是同一个覆盖目录的两种写法，见第三节路径清单表第 3、4 行）；只有 `.xpc` 内嵌的 `LC_DYLD_ENVIRONMENT` 才给出 `/var/jb/Library/Frameworks` 字面量。用 `grep '/var/jb/Library/WebKitOverride'` 筛会漏掉转交生效的那一整个分支。
 
 **3d-3 的读法限制要写明。** helper 自己的 stderr 落在系统日志里，而这台设备没有可用的 `log` 命令（`docs/device-install-plan.md:24`：`log` 没有可执行文件，`command -v log` 命中 zsh 内建），所以拿不到 launched helper 的候选行，只能拿加载结果。因此 3d-3 判「哪一种来源最终胜出」，判不了「哪一个中间候选被跳过」。要拿后一半，得改 basebin 把 `DYLD_PRINT_TO_FILE` 也设进 spawn 环境，那超出本文范围。
 
