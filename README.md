@@ -83,7 +83,8 @@ stale patch cannot pass silently, but its guard is keyed to 18.3 alone: a 18.2 r
 a stop or a warning. The cross-generation combination this covers is 18.3 helpers under a 16.1 UI
 process; the patch has not been tried on any other pair.
 
-The message numbering difference itself is measured in `docs/ios16-ipc-layer-audit.md`.
+The message numbering difference and the translation layer that closes it are designed in
+`docs/ios16-ipc-message-number-translation.md`.
 
 ## How to use
 
