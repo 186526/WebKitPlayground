@@ -346,6 +346,7 @@ jobs:
           ref_has_webkit_swift_text_extraction=0
           ref_has_iphone_service_bundle_suffix=0
           ref_has_core_crypto_signatures_macro=0
+          ref_sends_ios17_trait_api=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -424,6 +425,15 @@ jobs:
               }' <<< "${ref_name}"; then
             ref_has_core_crypto_signatures_macro=1
           fi
+          # 278011@main replaced the constructor's class-method merge with
+          # -[UITraitCollection traitCollectionByModifyingTraits:], which is iOS 17 API. A ref that
+          # still builds the collection with the class methods has no iOS 17 send to guard, so this
+          # patch cannot apply there and the skip is correct. Read from the file rather than from a
+          # tag: the send's presence is the fact that decides whether a 16.1 build aborts.
+          if grep -qF 'traitCollectionByModifyingTraits' \
+              "WebKit/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm" 2>/dev/null; then
+            ref_sends_ios17_trait_api=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
@@ -432,6 +442,7 @@ jobs:
           echo "WebKitSwift text extraction present in ${WEBKIT_REF}: ${ref_has_webkit_swift_text_extraction}"
           echo "iPhone service bundle identifiers carry the .Service suffix in ${WEBKIT_REF}: ${ref_has_iphone_service_bundle_suffix}"
           echo "HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE present in ${WEBKIT_REF}: ${ref_has_core_crypto_signatures_macro}"
+          echo "traitCollectionByModifyingTraits sent in ${WEBKIT_REF}: ${ref_sends_ios17_trait_api}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -487,6 +498,17 @@ jobs:
                   ;;
                 ios16-corecrypto-curve25519-inline.patch)
                   if [ "$ref_has_core_crypto_signatures_macro" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
+                ios16-local-current-trait-collection-guard.patch)
+                  # A ref that still sends -traitCollectionByModifyingTraits from
+                  # LocalCurrentTraitCollection.mm needs this guard, and the message has to say so
+                  # rather than leaving the run to abort on the device five hours later. A ref that
+                  # builds the collection with the class methods (upstream before 278011@main) has
+                  # no iOS 17 send to guard, so skipping is correct there.
+                  if [ "$ref_sends_ios17_trait_api" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1
                   fi
@@ -635,6 +657,31 @@ jobs:
           # ship no WebKitSwift/TextExtraction directory and print SKIP.
           python3 scripts/check-text-extraction-availability.py \
             --swift WebKit/Source/WebKit/WebKitSwift/TextExtraction/WKTextExtractionItem.swift
+
+      - name: Check the iOS 17 trait API is unreachable from the 16.1 build
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          # patches/ios16-local-current-trait-collection-guard.patch is what keeps the constructor of
+          # LocalCurrentTraitCollection off -[UITraitCollection traitCollectionByModifyingTraits:],
+          # which is iOS 17 API. The device aborted inside prewarmProcess because that selector is
+          # not implemented on iOS 16:
+          #
+          #   EXC_CRASH (SIGABRT)
+          #   WebProcessPool::prewarmProcess → platformInitializeWebProcess →
+          #   RenderThemeIOS::cssValueToSystemColorMap → LocalCurrentTraitCollection(bool, bool) →
+          #   -[NSObject doesNotRecognizeSelector:] → abort()
+          #   (MobileSafari-2026-11-24-084506.ips; WebCore 0xc62250 sends the selector)
+          #
+          # The script replays the file's #if structure through clang's preprocessor once per
+          # platform and deployment target, so it can tell which arm a 16.1 build compiles rather
+          # than trusting the guard's spelling. It fails when the iOS 17 selector or UIMutableTraits
+          # survives into the 16.1 arm, when the fallback stops calling any of the three iOS 12/13
+          # class methods, when the arm is also taken at 17.0, or when tvOS and watchOS would take
+          # the fallback whose level trait UIKit marks unavailable there. A ref that never sends the
+          # selector prints SKIP, which is the refs before 278011@main.
+          python3 scripts/check-local-current-trait-collection.py \
+            --source WebKit/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm
 
       - name: Configure embedded development
         run: sudo WebKit/Tools/Scripts/configure-xcode-for-embedded-development || true

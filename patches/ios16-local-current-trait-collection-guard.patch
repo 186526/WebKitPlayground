@@ -1,0 +1,45 @@
+diff --git a/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm b/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm
+index 3e6f509..7090140 100644
+--- a/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm
++++ b/Source/WebCore/platform/ios/LocalCurrentTraitCollection.mm
+@@ -53,10 +53,40 @@ LocalCurrentTraitCollection::LocalCurrentTraitCollection(bool useDarkAppearance,
+     // to return a useful set of traits in cases where it has not been explicitly set. Ideally, this
+     // method should also take in a base, full-specified trait collection from the view hierarchy, to be
+     // used when building the new trait collection.
++    //
++    // -[UITraitCollection traitCollectionByModifyingTraits:] and the UIMutableTraits protocol it
++    // takes arrived in iOS 17. A 16.x SDK does not declare either name, and the UITraitCollection
++    // that -currentTraitCollection returns on iOS 16 does not implement the selector, so the send
++    // below raises doesNotRecognizeSelector: inside the web process and aborts it. That is the
++    // crash at WebProcessPool::prewarmProcess → platformInitializeWebProcess →
++    // RenderThemeIOS::cssValueToSystemColorMap → LocalCurrentTraitCollection(bool, bool) →
++    // doesNotRecognizeSelector: on a 16.1 device.
++    //
++    // Below iOS 17 this constructor therefore merges the same two traits with the three class
++    // methods that predate them: +traitCollectionWithTraitsFromCollections: (iOS 8) applied to
++    // +traitCollectionWithUserInterfaceStyle: (iOS 12) and +traitCollectionWithUserInterfaceLevel:
++    // (iOS 13). 7305395509b2bb wrote the constructor this way before 278011@main adopted the block
++    // form, so this is the upstream spelling rather than a new one.
++    //
++    // No diagnostic pragma is needed around the deprecated +traitCollectionWithTraitsFromCollections:.
++    // clang keys -Wdeprecated-declarations to the deployment target, and this arm is compiled only
++    // below 17.0; a mock header carrying the same availability attribute compiles warning-free at
++    // 16.1 with -Wall -Wextra and warns only at 17.0.
++    //
++    // PLATFORM(IOS) and PLATFORM(MACCATALYST) are spelled out because __IPHONE_OS_VERSION_MIN_REQUIRED
++    // is not iOS-only: AvailabilityInternal.h defines it as 90000 on tvOS and watchOS for
++    // compatibility, and +traitCollectionWithUserInterfaceLevel: is API_UNAVAILABLE on both. Those
++    // two platforms, and VISION, keep the upstream arm unchanged.
++#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED < 170000 && (PLATFORM(IOS) || PLATFORM(MACCATALYST))
++    auto userInterfaceStyleTrait = [PAL::getUITraitCollectionClass() traitCollectionWithUserInterfaceStyle:useDarkAppearance ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight];
++    auto userInterfaceLevelTrait = [PAL::getUITraitCollectionClass() traitCollectionWithUserInterfaceLevel:useElevatedUserInterfaceLevel ? UIUserInterfaceLevelElevated : UIUserInterfaceLevelBase];
++    RetainPtr<UITraitCollection> combinedTraits = [PAL::getUITraitCollectionClass() traitCollectionWithTraitsFromCollections:@[ m_savedTraitCollection.get(), userInterfaceStyleTrait, userInterfaceLevelTrait ]];
++#else
+     RetainPtr combinedTraits = [m_savedTraitCollection traitCollectionByModifyingTraits:^(id<UIMutableTraits> traits) {
+         traits.userInterfaceStyle = useDarkAppearance ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+         traits.userInterfaceLevel = useElevatedUserInterfaceLevel ? UIUserInterfaceLevelElevated : UIUserInterfaceLevelBase;
+     }];
++#endif
+ 
+     [PAL::getUITraitCollectionClass() setCurrentTraitCollection:traitCollectionWithAdjustedIdiomForSystemColors(combinedTraits.get())];
+ }
