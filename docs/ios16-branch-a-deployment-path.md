@@ -196,7 +196,7 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 
 同时这也意味着 `scripts/probe-webkit-override-endpoints.sh` 测的配置（它调用安装脚本，因而是剪枝版，脚本 `:1106` 自述「prunes XPCServices」）对应的是 `build-state.md:402` 那一行，**不是** (A)/(B) 判据真正要问的配置。它的 `PROBE_VERDICT=A` 分支要求「至少一个新 helper 加载 `/var/jb` 的 framework」，而在剪枝配置下每个 helper 都由系统桩起动、不带 `LC_DYLD_ENVIRONMENT`，那条分支接近不可达。
 
-**前置条件**：`/var/jb/Library/Frameworks` 下五个 framework 与 `/var/jb/usr/lib` 下两个 dylib 齐全（安装脚本的 `preflight_sources` 会先查，缺一个就拒绝写，`:116-137`）。
+**前置条件**：`/var/jb/Library/Frameworks` 下五个 framework 与 `/var/jb/usr/lib` 下两个 dylib 齐全（安装脚本的 `preflight_sources` 会先查，缺一个就拒绝写，M69 之后在 `:140-161`）。
 
 **改动**：跑安装脚本，然后补回 `XPCServices`。补回的内容必须是 18.3 自产的，不是系统 16.1 的：
 
