@@ -546,7 +546,7 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 编号对齐保证了「消息被送到正确的接收者」，但 16.1 的接收者会按 16.1 的序列化格式读参数。两版之间的参数类型不兼容处会导致解码失败、字段错位或值被误读。这些属于载荷层，本文不处理，但要指出一个已经量化的点：
 
-**同步/异步分区位置在两版不同，并且有 19 条同名消息的性质在两版之间翻转。** 16.1 的判定是 `return name >= MessageName::GPUConnectionToWebProcess_EnsureAudioSession;`（`Names16_correct.h:3369-3372`），阈值 2899；18.3 用 `FirstSynchronous`（`Names18_correct.h:5785-5788`），阈值 3838。把两张表对齐后逐条比较：
+**同步/异步分区位置在两版不同，并且有 19 条同名消息的性质在两版之间翻转。** 16.1 的判定是 `return name >= MessageName::GPUConnectionToWebProcess_EnsureAudioSession;`（`Names16_correct.h:3369-3372`），阈值 2899；18.3 用 `FirstSynchronous`（`Names18_correct.h:5785-5788`），阈值 3838（该文件的平坦下标；iOS 编译值小于此，见第 7 节）。把两张表对齐后逐条比较：
 
 ```
 flips 19
@@ -656,6 +656,6 @@ phase('8DC2EF560486A6940098B216 /* Frameworks */ = {')# WebKit Frameworks
 
 头文件登记统计用同一份 pbxproj 加 `git show HEAD:<path>` 读每个被编译源文件的 `#include "X.h"`，按「同目录是否存在」「是否出现在 `PBXFileReference`」分类，结果见第 3.2 节。
 
-16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4085。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，因此 0–4085 连续无空洞。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（值 4086，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4086` 与「最大编号 4085」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 5 节与第 6、7 节的全部计数都取自这两份文件。
+16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4085。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，因此 0–4085 连续无空洞。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（值 4086，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4086` 与「最大编号 4085」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 7 节的枚举计数与第 6.3 节的 19 条翻转取自这两份文件；第 6.2 节的计数来源见 `:620`，第 5 节的调用点数取自源码检索。
 
 **口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3140 个消息名」「2807 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3141 条、4087 条（18.3 侧把 `Last` 计入）、同名 2808 条。两套口径的差值恰好是这一个别名，`only16`/`only18` 与其余结论完全一致。tower 早先给的 3141 / 4087 / 2808 就是含别名的口径，本文统一用排除别名的口径，因为映射表里不会给别名单独建项。
