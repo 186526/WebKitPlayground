@@ -4,7 +4,7 @@
 
 改动范围限于文档。本文不改脚本、不改补丁。
 
-本文引用的 `build-state.md` 与 `AGENTS.md` 只存在于外层仓库根目录，内层 `WebKitPlayground` 里没有这两个文件。本文件在内层 `docs/`，所以这两个文件的相对路径写作 `../../build-state.md` 与 `../../AGENTS.md`，读者要按外层仓库去找，在内层仓库里按这个路径找不到。
+本文引用的 `build-state.md` 只存在于外层仓库根目录，内层 `WebKitPlayground` 里没有这个文件。`AGENTS.md` 的情况不同：**内层仓库根目录另有一份同名的 `AGENTS.md`（99 行，内容讲 `Tools/Scripts/build-webkit` 的提权要求与构建日志误报）**，它与本文引用的那份不是同一个文件，本文的 `../../AGENTS.md:NNN` 指外层仓库根目录那份，行号只在那份里成立，在内层那份 99 行的文件里查不到。本文件在内层 `docs/`，所以这两个文件的相对路径写作 `../../build-state.md` 与 `../../AGENTS.md`，读者要按外层仓库去找；`ls AGENTS.md` 在内层会命中一份文件，那是上面说的另一份，不是本文引用的。
 
 `build-state.md` 会随其它分支继续加长，所以本文对它的引用一律写成「外层仓库 `build-state.md` 的〈小节标题〉一节」加一句在该节里逐字出现的原文，行号不作定位手段。核对方式是拿那句原文在 `build-state.md` 里 `grep -c`，命中数必须为 1。源码引用按内层仓库相对路径。
 
@@ -32,7 +32,7 @@
 
 **21:47 那批的编码端与解码端各是谁，取决于 helper 那份 `WebKit` 来自哪个目录，而这一点没有读数。** 那批的覆盖目录里只有 `WebCore` + `JavaScriptCore`，没有 `WebKit` 二进制（外层仓库 `build-state.md` 的「混合配置下 WebContent 崩溃」一节，原文「21:47:28–35 之间崩溃 25 次」）。两端的代际因此分两步定：
 
-- **解码端（helper）。** `WebKit` 由系统桩拉起时来自 `/System/Library/Frameworks`（16.1），由带 `LC_DYLD_ENVIRONMENT` 的 `.xpc` 拉起时来自 `/var/jb/Library/Frameworks`（18.3），见 2.3 节。
+- **解码端（helper）。** `WebKit` 由系统桩拉起时来自 `/System/Library/Frameworks`（16.1）；由带 `LC_DYLD_ENVIRONMENT` 的 `.xpc` 拉起时，`DYLD_FRAMEWORK_PATH` 第一项是覆盖目录 `/var/jb/Library/WebKitOverride`、后备项是 `/var/jb/Library/Frameworks`（18.3），覆盖目录不存在时落到后备项，见 2.3 节。
 - **编码端（UI 进程）。** 覆盖目录里没有 `WebKit` 二进制，所以 UI 进程的 `WebKit` 默认来自系统 16.1；若 18.3 的 `WebKit` 经 tweak 的 `dlopen` 进入宿主（外层仓库 `build-state.md` 的「注入路径的真实面貌」一节，原文「path = /var/jb/Library/Frameworks/WebKit.framework/WebKit」，该节记的是 `com.websafe.idevice` 把这份二进制带进宿主），编码端就是 18.3。
 
 写成一句：编码端为 X、解码端为 Y，依据是 helper 的 `WebKit` 路径为 Z。Z 从未被记录——外层仓库 `build-state.md` 的「混合配置下 WebContent 崩溃」一节只存了崩溃签名（原文「21:47:28–35 之间崩溃 25 次」），没有 helper 的镜像路径；那批 25 份 `.ips` 没有归档，设备当前离线也无法再解析。所以这一项按**未测**记，定案方法是在 21:47 同配置下对存活的 helper 跑 `lldb image list -o -f`（第四节第 3b 步）。在这个读数到手之前，不把任何一端的方向当结论。
@@ -50,7 +50,7 @@
 
 崩溃栈顶帧所在的镜像是系统 16.1 的 `WebKit`。`usedImages` 只收录被栈帧引用的镜像（M65 的 worker 实测：下标集合与 `threads[*].frames[*].imageIndex` 完全相等），所以这句不能证明 helper 只加载了系统镜像；判定 helper 实际加载了哪些镜像要用 `vmSummary` 的区段总量或 `lldb image list -o -f`。
 
-`vmSummary` 在这两批上给出的是支持性证据，强度有限。M65 的 worker 记下的读数（二手引用，本文作者没有独立复核）：`__TEXT` 总量 22:39 是 438.3M、482 个区域，21:47 是 440.0M、482 个区域；`ReadOnly portion of Libraries` 795.2M 对 805.0M。**22:39 反而略小。** 这不能支持「helper 里加载了 18.3 的 93MB `WebCore`」这个说法（`WebCore` 的 18.3 二进制是 93318960 或 93318736 字节，前者见外层仓库 `build-state.md` 的「出包后的安装步骤」一节，原文「两处二进制 `WebCore` 93318960 字节、`WebKit` 50758752 字节」；后者见同文件「本次产物的核对结果」一节的表行「| `WebCore` 体积 |」），因此与跨进程假设相容——18.3 只在 UI 进程里，helper 里没有。强度有限有两个理由：区段统计可能把同名镜像合并，只剩一个总数；21:47 与 22:39 的差值也可能来自别的镜像或别的加载顺序。要定案仍然只能靠对存活 helper 跑 `lldb image list -o -f`。
+`vmSummary` 在这两批上给出的是支持性证据，强度有限。M65 的 worker 记下的读数（二手引用，本文作者没有独立复核）：`__TEXT` 总量 22:39 是 438.3M、482 个区域，21:47 是 440.0M、482 个区域；`ReadOnly portion of Libraries` 795.2M 对 805.0M。**22:39 反而略小。** 这不能支持「helper 里加载了 18.3 的 93MB `WebCore`」这个说法（`WebCore` 的 18.3 二进制是 93318960 或 93318736 字节，前者见外层仓库 `build-state.md` 的「设备上没有 `strings`，也没有这一组诊断与启动工具」一节，原文「两处二进制 `WebCore` 93318960 字节、`WebKit` 50758752 字节」；后者见同文件「本次产物的核对结果」一节的表行「| `WebCore` 体积 |」），因此与跨进程假设相容——18.3 只在 UI 进程里，helper 里没有。强度有限有两个理由：区段统计可能把同名镜像合并，只剩一个总数；21:47 与 22:39 的差值也可能来自别的镜像或别的加载顺序。要定案仍然只能靠对存活 helper 跑 `lldb image list -o -f`。
 
 ### 1.2 编号翻译层不足以让页面渲染
 
@@ -101,7 +101,7 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 
 | # | 必要条件 | 仓库侧状态 | 设备侧状态 |
 | --- | --- | --- | --- |
-| 一 | 三个 framework 同代，且 UI 进程与每一个 helper 同代 | 已满足一半。`scripts/package-webkit-device-deb.sh:198-204` 的 `required_items` 把 `WebKit.framework`、`WebCore.framework`、`WebKitLegacy.framework`、`JavaScriptCore.framework` 列为必需，缺一个就 `exit 1`；但「UI 与 helper 同时换」不由任何脚本保证 | 已满足一半。`/var/jb/Library/Frameworks` 下五个 framework 来自同一次构建（`WebKit` 50758784 字节、2026-11-24 18:06、`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；外层仓库 `build-state.md` 的「出包后的安装步骤」一节早前记的 50758752 是 07:39 的上一版，原文「两处二进制 `WebCore` 93318960 字节、`WebKit` 50758752 字节」）；但 UI 与 helper 从未同时换成 18.3，这正是 PAC 崩溃的成因；方向只能从 22:39 那批推定，且那批的覆盖目录内容与 helper 的 `WebKit` 路径都没有记录（见 1.1 节） |
+| 一 | 三个 framework 同代，且 UI 进程与每一个 helper 同代 | 已满足一半。`scripts/package-webkit-device-deb.sh:198-204` 的 `required_items` 把 `WebKit.framework`、`WebCore.framework`、`WebKitLegacy.framework`、`JavaScriptCore.framework` 列为必需，缺一个就 `exit 1`；但「UI 与 helper 同时换」不由任何脚本保证 | 已满足一半。`/var/jb/Library/Frameworks` 下五个 framework 来自同一次构建（`WebKit` 50758784 字节、2026-11-24 18:06、`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；外层仓库 `build-state.md` 的「设备上没有 `strings`，也没有这一组诊断与启动工具」一节早前记的 50758752 是 07:39 的上一版，原文「两处二进制 `WebCore` 93318960 字节、`WebKit` 50758752 字节」）；但 UI 与 helper 从未同时换成 18.3，这正是 PAC 崩溃的成因；方向只能从 22:39 那批推定，且那批的覆盖目录内容与 helper 的 `WebKit` 路径都没有记录（见 1.1 节） |
 | 二 | 三个 framework 的路径唯一，不同时存在系统副本与 `/var/jb` 副本 | **未满足**。`install-webkit-override.sh` 的 `OVERRIDE_ROOT` 把第二份复制到 `/var/jb/Library/WebKitOverride`，与 `/var/jb/Library/Frameworks` 同时可被 dyld 选中 | **未满足**。系统的 `/System/Library/Frameworks` 与 `/var/jb/Library/Frameworks` 两份都在；`/var/jb/Library/WebKitOverride` 当前不存在 |
 | 三 | helper 拿到覆盖路径。途径只有两条：它自己的 `LC_DYLD_ENVIRONMENT`，或 `__XPC_DYLD_FRAMEWORK_PATH` 的转交 | `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 给那五个 `.xpc` 写入了内嵌路径，第一项是 `WK_ROOTLESS_FRAMEWORKS_ROOT`（= `/var/jb/Library/WebKitOverride`），后备项是 `/var/jb/Library/Frameworks`；系统桩零条。basebin 四个变量都设了（`0001-systemhook-set-search-paths.patch:100-103`），但 `__XPC_` 版本的转交行为无实现可查 | **未测**。不仅「是否转交」未测，「转交与内嵌谁优先」也未测：两者第一项现在同为 `/var/jb/Library/WebKitOverride`，但内嵌那串还有 `/var/jb/Library/Frameworks` 作后备，最终命中哪一项没有读数。全部 16 份 `.ips` 中 `usedImages` 含 `/var/jb` 家族 `WebKit`/`WebCore`/`JavaScriptCore` 的为 **0** 份，但 `usedImages` 只收录栈帧引用到的镜像，这个 0 既不证明没加载也不给出路径。判据是第 3b 步的 `lldb image list` 与第 3d 步的 `DYLD_PRINT_SEARCHING` |
 | 四 | launchd 能从该目录为 UI 进程解析出四个服务名 | 无代码可改，这是 launchd 的行为 | **未测**。从未取得一次不含 `DYLD`/`PAC_EXCEPTION` 崩溃的读数；且第 0 步的 `gui/501` 图形域自 M65 起未恢复，任何新读数都还取不到 |
@@ -152,7 +152,7 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 设备上存在两种桩：
 
 - 系统桩没有任何 `LC_DYLD_ENVIRONMENT` 记录，它加载哪份 `WebKit` 只能靠 `__XPC_DYLD_FRAMEWORK_PATH` 转交进来——转交未验证，不成立时只命中 `/System/Library/Frameworks` 的 16.1；
-- `/var/jb` 的桩自带 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`，它加载哪份 `WebKit` 由自己的 load command 决定，与 basebin 注入无关。
+- `/var/jb` 的桩自带 `DYLD_FRAMEWORK_PATH`，第一项是 `/var/jb/Library/WebKitOverride`、后备项是 `/var/jb/Library/Frameworks`。对齐之前出的那一版 deb 只有后备项一个值，所以设备上现在装着的字节打印出来是 `/var/jb/Library/Frameworks`。它加载哪份 `WebKit` 由自己的 load command 决定，与 basebin 注入无关。
 
 **所以「helper 加载的是哪份」取决于 launchd 选中了哪一种桩、系统桩能否继承环境、以及两个来源谁优先，三点都没有实测。** 已有的 `.ips` 里没有任何一份出现 `/var/jb` 家族的 framework，但这是阴性读数，不能据此断定 helper 没加载过：`usedImages` 只收录栈帧引用到的镜像，它给出的是「栈顶帧落在哪个镜像」，不是镜像清单。定案方法在第四节：第 3d 步用 `DYLD_PRINT_SEARCHING=1` 一次分开三种来源，第 3b 步对存活 helper 跑 `image list`，第 3c 步看 `procPath` 区分桩来源。
 
@@ -378,8 +378,8 @@ PY
 
 这段脚本只处理 thin 的 64 位小端 Mach-O。若输出 `not a thin little-endian 64-bit Mach-O`，说明该文件是 fat 二进制，要先按 `FAT_MAGIC`（小端 `0xcafebabe`）读出切片表、取 `cputype` 为 `0x0100000C`（arm64）或带 arm64e 子类型的那个切片偏移，再从该偏移当作文件开头重新执行上面的逻辑。2026-11-25 实测的四个 `.xpc` 二进制都是 thin，直接返回结果。
 
-**预期（今天实测的结果）：** `jb/Networking` 返回四条，其中含 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=/var/jb/usr/lib`，另有两条 `@executable_path/..`；`sys/Networking` 返回空列表。
-**不成立时：** 若 `/var/jb` 的桩里没有 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`，说明这一版 deb 的 patch 没生效，第 3b 步不可能通过。
+**预期（对齐之前的产物，2026-11-25 实测）：** `jb/Networking` 返回四条，其中含 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=/var/jb/usr/lib`，另有两条 `@executable_path/..`；`sys/Networking` 返回空列表。这一版 deb 出在覆盖目录对齐之前，所以该项只有一个值。按 `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 重新出包后，`DYLD_FRAMEWORK_PATH` 应以 `$(WK_ROOTLESS_FRAMEWORKS_ROOT)`（= `/var/jb/Library/WebKitOverride`）为第一项、`/var/jb/Library/Frameworks` 降为后备项。
+**不成立时：** 若 `/var/jb` 的桩里没有任何 `DYLD_FRAMEWORK_PATH` 记录，说明这一版 deb 的 patch 没生效，第 3b 步不可能通过。这条判据针对对齐之前的产物：对齐之后重新出包，判据换成「第一项是 `/var/jb/Library/WebKitOverride`、后备项是 `/var/jb/Library/Frameworks`」，第一项仍是 `/var/jb/Library/Frameworks` 才说明这版 deb 不是按当前补丁出的。
 
 **3b. 看运行时证据，helper 实际加载了哪一份。**
 
@@ -621,7 +621,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 - 第一条第一层：清单里的 framework 来自同一次构建，满足。
 - 第一条第二层：**不满足，除非另外证明 UI 进程也加载了同一份**。deb 只保证 `/var/jb` 下的字节是新的一代；UI 进程加载哪一份由 basebin 注入与注入 tweak 决定（外层仓库 `build-state.md` 的「注入路径的真实面貌」一节，原文「`path = /var/jb/Library/Frameworks/WebKit.framework/WebKit`」：真正把 18.3 带进 UI 进程的是 `com.websafe.idevice` 的 `dlopen`，不是 `DYLD_FRAMEWORK_PATH`）。
 - 第二条：装了 deb 之后，`/var/jb/Library/Frameworks` 里是 18.3，`/System/Library/Frameworks` 里仍是 16.1。系统那份无法删除（它在共享缓存里，且删除会破坏整机），所以「路径唯一」只能靠 dyld 的搜索路径让所有解析都命中 `/var/jb`，不能靠消除系统副本。deb 本身不改变这一点。
-- 第三条：`.xpc` 里的路径写死为 `/var/jb/Library/Frameworks`，deb 装出的目录正是这个，所以**如果 helper 由这些 `.xpc` 拉起，路径是对齐的**。这一步从未被证明发生过：没有任何一份 `.ips` 的 `usedImages` 含该路径下的 framework。另外，`/var/jb/Library/Frameworks` 那五个 `.xpc`（系统那份是四个，多出 `WebContent.Development`，见第六节未验证项 9）与系统桩都可以被选中，选哪一种、以及 basebin 注入的 `__XPC_DYLD_FRAMEWORK_PATH`（指向覆盖目录，注入后的字符串是 preboot 形态，见第三节路径清单表）是否压过内嵌路径，都未测（2.3 节）。
+- 第三条：`.xpc` 里的 `DYLD_FRAMEWORK_PATH` 第一项是覆盖目录 `/var/jb/Library/WebKitOverride`、`/var/jb/Library/Frameworks` 只是后备项（`patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES`）。覆盖目录当前不存在（第三节路径清单表），所以第一项解析不到，dyld 落到后备项，也就是 deb 装出的 `/var/jb/Library/Frameworks`，所以**如果 helper 由这些 `.xpc` 拉起，路径是对齐的**。这一步从未被证明发生过：没有任何一份 `.ips` 的 `usedImages` 含该路径下的 framework。另外，`/var/jb/Library/Frameworks` 那五个 `.xpc`（系统那份是四个，多出 `WebContent.Development`，见第六节未验证项 9）与系统桩都可以被选中，选哪一种、以及 basebin 注入的 `__XPC_DYLD_FRAMEWORK_PATH`（指向覆盖目录，注入后的字符串是 preboot 形态，见第三节路径清单表）是否压过内嵌路径，都未测（2.3 节）。
 - 第四条：launchd 的行为，deb 不影响。
 
 **所以装上这个 deb 之后最可能得到的状态是：** helper 由系统桩拉起、加载 16.1（第三条不成立），UI 进程经注入 tweak 加载 `/var/jb` 或覆盖目录的 18.3，于是命中已确证的那条：解码侧是 16.1 已由 22:39 的栈顶帧确定，编码侧若为 18.3 即命中该失败模式（编码侧无记录，见 1.1 节），在 `initializeWebProcess` 处 `PAC_EXCEPTION`。这正是外层仓库 `build-state.md` 的「两条已经量出来的硬约束」一节第 2 条（原文「WebContent 在收到第一条 IPC 后崩溃」）描述的崩溃。若 `__XPC_` 的转交不成立，helper 走系统 16.1 就是必然结果而不是可能；这一步的判据是第四节第 3d 步。
