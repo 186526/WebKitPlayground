@@ -736,8 +736,9 @@ jobs:
           # The script parses the function body and requires one runtime guard at its entry, with
           # both the non-empty and the empty branch's write behind it. A guard around one branch
           # leaves the other send reachable, and that send alone aborts the process, so the check
-          # fails on that shape. A ref with no such function prints SKIP, which is every tag before
-          # Safari-17.4.
+          # fails on that shape. The function is already there, and already unguarded, in tag
+          # Safari-17-iOS-17.0, so every 17.x ref needs this patch rather than printing SKIP; only a
+          # 16.x tag, which has no such function at all, prints SKIP here.
           python3 scripts/check-network-session-proxy-configurations.py \
             --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
 
