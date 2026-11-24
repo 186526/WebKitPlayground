@@ -127,7 +127,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | 5 | `InitializerFunction` 参数个数 16.1 为 3、18.3 为 2 | `XPCServiceEntryPoint.h` | 入口签名加默认第三参数 | helper 能走到 `initializeAuxiliaryProcess`，不因函数指针调用而崩 | 已覆盖，同一补丁 |
 | 6 | `getClientSDKAlignedBehaviors` 只认位图，16.1 只发版本号 | `XPCServiceEntryPoint.mm` | 位图缺失时回退解析 `client-sdk-version` | 行为位图非全零（需在 helper 内打点） | 已覆盖，同一补丁 |
 | 7 | `xpc_main` 在公开 iOS SDK 上不可用 | `XPCServiceMain.mm` | 用 `xpc_connection_create(nullptr,nullptr)` 复现 `xpc_main` 的接线 | helper 能被拉起并回 `process-finished-launching` | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
-| 8 | helper 需要知道去哪找 18.3 的 framework | `BaseXPCService.xcconfig` | `-Wl,-dyld_env,...` 写进 `.xpc` | `otool -l` 里 `.xpc` 有 `LC_DYLD_ENVIRONMENT`；`lldb image list` 里 helper 的 `WebKit` 路径为 `/var/jb` | 已覆盖，但路径与 install 脚本不一致，见第七节发现 |
+| 8 | helper 需要知道去哪找 18.3 的 framework | `BaseXPCService.xcconfig` | `-Wl,-dyld_env,...` 写进 `.xpc` | `otool -l` 里 `.xpc` 有 `LC_DYLD_ENVIRONMENT`；`lldb image list` 里 helper 的 `WebKit` 路径为 `/var/jb` | 已覆盖；路径已与 install 脚本对齐，设备侧未验证，见第七节 |
 | 9 | **launchd 是否为索引外的 `XPCServices` 现扫** | 无（判定项） | 不改代码 | 第四节的判据命令 | **未知，未测** |
 | 10 | `ios18-public-sdk-xpc-main.patch` 里的 `/var/jb/Library/Frameworks` 与 install 脚本的 `/var/jb/Library/WebKitOverride` 不一致 | `patches/ios18-public-sdk-xpc-main.patch`、`scripts/install-webkit-override.sh`、`scripts/check-webkit-override.sh`、`scripts/uninstall-webkit-override.sh` | 各处改成同一个字面量 `/var/jb/Library/WebKitOverride`：补丁第 16 行的 `WK_ROOTLESS_FRAMEWORKS_ROOT` 供第 22 行两条 `-dyld_env` 引用，`install-webkit-override.sh:66`、`check-webkit-override.sh:27`、`uninstall-webkit-override.sh:32` 各写一次同一字面量；两条搜索列表改为覆盖目录在前、deb 目录作后备 | 先 `grep` 四处字面量必须相等（命令与输出见 `docs/ios16-override-path-alignment.md` 第五节）；设备回网后对 UI 与 helper 各取一次 `image list`，两者 `WebKit` 必须同目录，且必须同为 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`，这就是「第一个解析成功的候选」的等价读数。读这个 helper 必须是 launchd 拉起的那一个（就是取 `image list` 的同一个进程），不能靠直接执行 `.xpc`：直接执行绕过 `xpcproxy`，读数由启动它的 shell 是否经 systemhook 派生决定，两个方向都会错（见 `docs/ios16-override-path-alignment.md` 第六节第 3 项）。要交叉验证 helper 的进程环境列表里有没有覆盖目录，读同一个 helper 的 `launchctl print pid/<pid>` 的 `environment` 段落：出现 `DYLD_FRAMEWORK_PATH => <overlay>` 说明这个列表带着覆盖目录（这是 dyld 先枚举环境列表、本判据要的那个前提），整段没有这四个变量说明这个列表为空。这个读数**不**能判定「`__XPC_` 转交成立」：`systemhook` 在 `launchd → xpcproxy → service` 链上直接写裸名（`dopamine-basebin/0001-systemhook-set-search-paths.patch:99-104` 同时设两种拼写），附录 A 那个 Safari 读数正是这种来源，所以「`__XPC_` 转交是否存在」仍是未验证项（见 `docs/ios16-override-path-alignment.md` 第六节第 3 项）。不要等 deb 那一行的候选出现：dyld 命中即 `stop`，后面那行不会被打印。若进程环境那条列表为空，`DYLD_PRINT_SEARCHING` 下第一行打印的会是上游 `BaseXPCService.xcconfig:70-71`（路径级数由 `:79`→`:81`→`:85`）写进去的 `@executable_path/..` 落空项（CI run `45331147658` 的 `otool -l` 里六个 `.xpc` 都有）；进程环境列表带着覆盖目录时内嵌列表不被枚举，这一行不出现。两种情形它都不算判据 | **已修**；机制、后备项的用途与未验证项见 `docs/ios16-override-path-alignment.md` |
 
@@ -151,26 +151,26 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 覆盖了第 3、4、5、6 行。**未覆盖**第 2 行（那是另一个补丁的事）、第 8 行（`.xpc` 的加载命令）、第 9、10 行。
 
-### `patches/ios18-public-sdk-xpc-main.patch`（76 行，4 个 hunk）
+### `patches/ios18-public-sdk-xpc-main.patch`（87 行，4 个 hunk）
 
 | hunk 位置 | 内容 | 对应上表 |
 | --- | --- | --- |
-| `BaseXPCService.xcconfig @@ -59,7 +59,10` | 新增 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=/var/jb/usr/lib`（该 patch 第 12 行） | 第 8 行 |
-| `XPCServiceMain.mm @@ -135,9 +135,9` | 收到 `XPC_ERROR_CONNECTION_INVALID` 时直接 `exitProcess`，不再走 `performBlock:` | 支撑第 7 行 |
-| `XPCServiceMain.mm @@ -205,10 +205,7` | 入口函数指针找不到时直接退出 | 支撑第 7 行 |
-| `XPCServiceMain.mm @@ -271,8 +268,32` | 非 macOS 平台用 `xpc_connection_create(nullptr,nullptr)` + `dispatch_main()` 复现 `xpc_main` | 第 7 行 |
+| `BaseXPCService.xcconfig @@ -59,7 +59,20` | 第 16 行 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride`；第 22 行 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib` | 第 8 行 |
+| `XPCServiceMain.mm @@ -135,9 +135,9`（第 30 行） | 收到 `XPC_ERROR_CONNECTION_INVALID` 时直接 `exitProcess`，不再走 `performBlock:` | 支撑第 7 行 |
+| `XPCServiceMain.mm @@ -205,10 +205,7`（第 43 行） | 入口函数指针找不到时直接退出 | 支撑第 7 行 |
+| `XPCServiceMain.mm @@ -271,8 +268,32`（第 55 行） | 非 macOS 平台用 `xpc_connection_create(nullptr,nullptr)` + `dispatch_main()` 复现 `xpc_main` | 第 7 行 |
 
-覆盖了第 7 行与第 8 行。第 8 行的路径值有第七节记录的问题。
+覆盖了第 7 行与第 8 行。第 8 行的路径值曾是第七节记录的不一致，现已对齐。
 
 **两个补丁都没有触及第 9 行。** 这一行不是代码问题，是 launchd 的行为问题，只能靠设备实测判定。
 
 ---
 
-## 七、与本文相关的两处不一致
+## 七、与本文相关的一处旧不一致与一处未处理的冲突
 
-这两条已作为 finding 提交，本文只记录事实，不在此修。
+第二条已作为 finding 提交，本文只记录事实，不在此修；第一条已由 M69 在源码侧修掉，设备侧验证仍未做。
 
-**路径不一致。** `ios18-public-sdk-xpc-main.patch` 第 12 行给每个 `.xpc` 链接期写死 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`，而 `install-webkit-override.sh:50-52` 把 framework 复制到 `/var/jb/Library/WebKitOverride`。两个目录都装着 18.3，来源不同（deb 安装件与复制件）。helper 若由 `.xpc` 内嵌命令拉起会加载前者，UI 进程经 `DYLD_FRAMEWORK_PATH` 环境变量加载后者。两侧同一次构建时字节一致则无害，只重装一侧就会出现版本不一致，而 iOS 上没有版本检查（`WebKitBundleVersion` 的比对在 `XPCServiceMain.mm:107-123` 的 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 内，iOS 编译掉）。
+**路径不一致（已修，设备未验证）。** `ios18-public-sdk-xpc-main.patch` 原先第 12 行给每个 `.xpc` 链接期写死 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`，而 `install-webkit-override.sh` 把 framework 复制到 `/var/jb/Library/WebKitOverride`。M69 之后补丁写成两处搜索列表都以覆盖目录开头：`:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride`，`:22` 的 `DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib`；`install-webkit-override.sh:66` 与 `check-webkit-override.sh:27` 各写一次同一字面量，所以三处的目录名可以 `grep` 比对。覆盖目录存在时 helper 与 UI 都首先解析到它，`/var/jb/Library/Frameworks` 只作后备。**剩下的是设备侧验证，不是源码缺口**：补丁改后必须重建并重新打包才会进 `.xpc` 的 `LC_DYLD_ENVIRONMENT`，而这一步还没做；`iOS` 上没有版本检查（`WebKitBundleVersion` 的比对在 `XPCServiceMain.mm:107-123` 的 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 内，iOS 编译掉），所以两侧字节是否同代只能靠 `shasum` 与 `image list` 直接比，不能靠版本号推断。
 
 **`build-state.md` 内部有一处未处理的冲突。** 第二轮记录覆盖目录带 `XPCServices` 时 GPU 有过三次 `Successfully spawned` 且有崩溃报告 `procPath` 指向覆盖目录（第 267 行）；第三轮的 A/B 表（第 309-315 行）却记录同一配置 spawn 为 0；第四轮判定第三轮的错因是设备没有 `pkill`、测的都是旧进程（第 371-390 行）。一个没重启的旧进程不会产生新的 `.ips`，所以第二轮那次崩溃不可能由这个错因造成，两份记录不能同时成立。这直接影响第四节 (A)/(B) 的判定，已作为 finding 提交。
 
@@ -184,7 +184,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 **2. 端点归零时进程是否还活着。** 与第 1 条同时取：`ps ax | grep -c Chrome` 与 `ls -t .../CrashReporter/*.ips | head`。若端点归零且进程存活且无 `DYLD` 崩溃，则归零与 dyld 无关，(B) 成立；若端点归零同时有 `DYLD` 记录，本次读数对 (A)/(B) 不作数。`build-state.md` 第四轮的修正表没有记录这一项，所以那张表的每一次「0」都无法区分这两种成因。
 
-**3. UI 进程与 helper 是否加载同一份 18.3。** 用 `lldb -b -o "process attach --pid <UI_PID>" -o "image list -o -f"` 与对 helper 的同一条命令，比对 `WebKit.framework/WebKit` 的完整路径前缀。若两者分别是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/Frameworks`，即第七节所述不一致。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），只用 `image list`。
+**3. UI 进程与 helper 是否加载同一份 18.3。** 用 `lldb -b -o "process attach --pid <UI_PID>" -o "image list -o -f"` 与对 helper 的同一条命令，比对 `WebKit.framework/WebKit` 的完整路径前缀。M69 之后两处搜索列表都以 `/var/jb/Library/WebKitOverride` 开头，所以**预期两侧前缀相同**；若两者分别是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/Frameworks`，说明 helper 的首项没命中、落到了后备项，即第七节所述情形又出现，此时要查覆盖目录是否缺该镜像，而不是查补丁写了什么。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），只用 `image list`。
 
 **4. helper 起来之后的第一条 IPC 是否成功。** 端点存在只说明 launchd 解析成功，不说明 UI 与 helper 能通信。预期失败点是 `WebKitPlayground/docs/ios16-ipc-layer-audit.md` 记录的消息编号差异。验证方式：`launchctl print pid/<helper_pid>` 存在后，观察 helper 存活时长与是否有 `PAC_EXCEPTION` 崩溃报告；`build-state.md:344-355` 记录过混合配置下 WebContent 在收到第一条 IPC 后以 `PAC_EXCEPTION, code 1` 崩溃，那是 16.1 UI 配 18.3 `WebCore` 的签名，全套 18.3 是否仍出现需要实测。
 

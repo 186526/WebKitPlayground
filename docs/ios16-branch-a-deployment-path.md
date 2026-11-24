@@ -141,7 +141,7 @@ exception: EXC_BREAKPOINT (SIGTRAP/BPT trap: 5)
 
 设备上可用的工具限于：`open`、`uiopen`、`killall`、`sbreload`、`python3`、`launchctl`、`ps`、`plutil`，均在 `/var/jb/usr/bin/`。另有 `lldb`、`rabin2`、`r2`、`shasum`、`clang` 可用（`AGENTS.md:35` 的「设备」一节列举）。**没有** `lsof`、`vmmap`、`otool`、`strings`、`pgrep`、`pkill`、`lsappinfo`、`notifyutil`、`/usr/bin/log`（**已确证**，`AGENTS.md:35` 与 `:93`，以及 `docs/ios16-override-endpoint-probe.md` 第五节）。
 
-本文所有 `.xpc` 与 framework 路径都在 `/var/jb/Library/` 下；`.xpc` 内的 `DYLD_FRAMEWORK_PATH` 见 `patches/ios18-public-sdk-xpc-main.patch:12`。
+本文所有 `.xpc` 与 framework 路径都在 `/var/jb/Library/` 下；`.xpc` 内的 `DYLD_FRAMEWORK_PATH` 见 `patches/ios18-public-sdk-xpc-main.patch:22`，该行的首项由同一补丁 `:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride` 给出。
 
 ### 第 0 步：确认图形域存在
 
@@ -188,13 +188,15 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 
 **这一步是 (A) 路线与 (B) 路线的第一个不共用点，也是既有探针不能直接复用的原因。**
 
-`scripts/install-webkit-override.sh:235-251` 的 `prune_xpc_services` 会删掉 `WebKit.framework/XPCServices`，脚本 `:19-28` 的注释说明了理由：留着会让 launchd 去启动复制件而不是系统桩，而系统桩是「四条指令的尾调用」，`DYLD_FRAMEWORK_PATH` 已经把 `WKXPCServiceMain` 指向被覆盖的 `WebKit`。
+`scripts/install-webkit-override.sh` 的 `prune_xpc_services`（M69 之后在 `:259-278`）会删掉 `WebKit.framework/XPCServices`。**这个动作本身是已确证的**：读脚本即可核对，它只做 `rm -rf "${OVERRIDE_ROOT}/WebKit.framework/XPCServices"`（`:270-277`）。
 
-**那个理由的前提正是 (B)。** 若 (A) 成立，launchd 会现扫覆盖目录的 `XPCServices`，剪掉它们等于自己拿掉了 (A) 唯一需要的输入。所以 (A) 路线的覆盖目录必须**带** `XPCServices`。
+**但脚本原先给出的理由不是事实。** 旧注释写「留着会让 launchd 去启动复制件而不是系统桩」，把 launchd 会经 `DYLD_FRAMEWORK_PATH` 解析到覆盖目录的桩当成既成事实。M69 的注释把这条前提标为 **UNVERIFIED**（`scripts/install-webkit-override.sh:260-269`，其中 `:262-263` 是「is an unverified premise」那句）：launchd、libxpc、xpcproxy 三处都没有定位到把 `DYLD_*` 以 `__XPC_` 前缀转交给 XPC 服务的实现，所以「launchd 会启动复制件」既不能证实也不能证伪。**本文不再把这条前提当作理由使用。** 剪枝能立住的只有更窄的一条（`:264-269`）：覆盖目录里的桩本身就是同一 bundle 的第二份拷贝，部分重装后无法证明两份字节相同；而桩只是一条尾调用进 `WKXPCServiceMain`，最终跑哪份代码由 dyld 解析到的 `WebKit.framework` 决定，与桩来自哪一份无关。
+
+**对 (A) 路线的结论不变，且不依赖那条前提。** 剪枝确实删掉了覆盖目录里的 `XPCServices`，而 (A) 路线要问的正是「launchd 会不会从覆盖目录的 `XPCServices` 解析服务」，被剪掉的目录不可能成为这个问题的输入。所以 (A) 路线的覆盖目录必须**带** `XPCServices`；这只用到「剪枝删除了目录」这个已确证的动作，不需要 launchd 的行为成立。
 
 同时这也意味着 `scripts/probe-webkit-override-endpoints.sh` 测的配置（它调用安装脚本，因而是剪枝版，脚本 `:1106` 自述「prunes XPCServices」）对应的是 `build-state.md:402` 那一行，**不是** (A)/(B) 判据真正要问的配置。它的 `PROBE_VERDICT=A` 分支要求「至少一个新 helper 加载 `/var/jb` 的 framework」，而在剪枝配置下每个 helper 都由系统桩起动、不带 `LC_DYLD_ENVIRONMENT`，那条分支接近不可达。
 
-**前置条件**：`/var/jb/Library/Frameworks` 下五个 framework 与 `/var/jb/usr/lib` 下两个 dylib 齐全（安装脚本的 `preflight_sources` 会先查，缺一个就拒绝写，`:116-137`）。
+**前置条件**：`/var/jb/Library/Frameworks` 下五个 framework 与 `/var/jb/usr/lib` 下两个 dylib 齐全（安装脚本的 `preflight_sources` 会先查，缺一个就拒绝写，M69 之后在 `:140-161`）。
 
 **改动**：跑安装脚本，然后补回 `XPCServices`。补回的内容必须是 18.3 自产的，不是系统 16.1 的：
 
@@ -225,18 +227,20 @@ print(d.get("CFBundleIdentifier"))' \
 
 **这是 (A) 路线的第二个不共用点，且它决定第三节的「路径唯一性」能否满足。**
 
-两处路径当前不一致（M63 审计 `:173`，**已确证**，两个值都有行号）：
+两处路径在 M69 之前不一致（M63 审计 `:173`，**已确证**，两个值都有行号）。M69 已把 `.xpc` 一侧对齐到覆盖目录：
 
 | 位置 | 值 | 出处 |
 | --- | --- | --- |
-| `.xpc` 的链接期 `LC_DYLD_ENVIRONMENT` | `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`、`DYLD_LIBRARY_PATH=/var/jb/usr/lib` | `patches/ios18-public-sdk-xpc-main.patch:12` |
+| `.xpc` 的链接期 `LC_DYLD_ENVIRONMENT` | `DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride:/var/jb/Library/Frameworks`、`DYLD_LIBRARY_PATH=/var/jb/Library/WebKitOverride/usr/lib:/var/jb/usr/lib` | `patches/ios18-public-sdk-xpc-main.patch:22`，首项由 `:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT` 给出 |
 | UI 进程经 basebin 注入的 `DYLD_FRAMEWORK_PATH` | `.../procursus/Library/WebKitOverride`（即 `/var/jb/Library/WebKitOverride`） | `dopamine-basebin/0001-systemhook-set-search-paths.patch:92-93`，`JBROOT_PATH("/Library/WebKitOverride")` |
+
+两条搜索列表都以覆盖目录开头，所以覆盖目录存在时两端解析到同一份；`/var/jb/Library/Frameworks` 退为后备项，只有覆盖目录缺该镜像时才会被走到（补丁 `:19-21` 的注释说明了后备项的用途）。**M69 之前 `.xpc` 一侧写的是 `/var/jb/Library/Frameworks`，与 UI 不同目录**，那是本步要消除的状态；现在的状态是已对齐，但**尚未在设备上验证**（需重建打包后按下面的失败判据核对）。
 
 `/var/jb` 是指向 `procursus` 的符号链接，所以后两行是同一个目录的两种字符串形态（M66 文档 3.2 节，**已确证**）。
 
-**改动**：二选一，并只保留一个目录作为 18.3 的唯一来源。
+**改动**：只保留一个目录作为 18.3 的唯一来源，二选一。
 
-- **推荐**：改 `patches/ios18-public-sdk-xpc-main.patch:12`，把内嵌值改为 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/WebKitOverride/usr/lib`，让 UI 与 helper 都命中覆盖目录，`/var/jb/Library/Frameworks` 退回为纯粹的上游安装位置。这正是 M69 正在做的对齐方向。改后必须**重建并重新打包**，因为 `LC_DYLD_ENVIRONMENT` 是链接期常量，只能重新链接才能改（`docs/dopamine-basebin-webkit-override.md:316`，**已确证**）。
+- **推荐（M69 已落地）**：`patches/ios18-public-sdk-xpc-main.patch:16` 定义唯一字面量 `/var/jb/Library/WebKitOverride`，`:22` 的两条 `-dyld_env` 以它为首项，`/var/jb/Library/Frameworks` 作后备。这让 UI 与 helper 都首先命中覆盖目录，`/var/jb/Library/Frameworks` 退回为纯粹的上游安装位置。**改后必须重建并重新打包**，因为 `LC_DYLD_ENVIRONMENT` 是链接期常量，只能重新链接才能改（`docs/dopamine-basebin-webkit-override.md:316`，**已确证**）。补丁改了但构建没重跑时，设备上的 `.xpc` 仍是旧值，见下面的失败判据。
 - **备选**：删掉覆盖目录，让 UI 与 helper 都走 `/var/jb/Library/Frameworks`。这条路被 basebin 的设计明确排除：那个目录带 `AltList.framework` 与 `CydiaSubstrate.framework`，把它们变成每个被 spawn 进程的候选是 `dopamine-basebin/0001-systemhook-set-search-paths.patch:86-89` 注释里写明要避免的事（**已确证**）。仅在推荐方案不可行时使用。
 
 **失败判据**：
@@ -394,7 +398,7 @@ sleep 3
 
 | 步 | (A) 路线 | (B) 路线 |
 | --- | --- | --- |
-| 覆盖目录内容 | **带** `XPCServices`（第 2 步） | **不带** `XPCServices`，靠系统桩（`install-webkit-override.sh:235-251` 的设计前提） |
+| 覆盖目录内容 | **带** `XPCServices`（第 2 步） | **不带** `XPCServices`，靠系统桩（`install-webkit-override.sh:259-278` 的剪枝结果；脚本原先给的理由已标为 UNVERIFIED，见第 2 步） |
 | helper 由谁起动 | 覆盖目录自己的 `.xpc`，其内嵌路径指向覆盖目录 | 系统桩，无 `LC_DYLD_ENVIRONMENT`，只能靠 `__XPC_DYLD_FRAMEWORK_PATH` 转交（转交行为未验证，M66 文档 2.3 节，**假设**） |
 | UI 的 `WebKit` 来源 | 覆盖目录 18.3 | 系统 16.1（放 18.3 二进制就归零，`build-state.md:407`） |
 | 两端代际 | 同代，按构造成立 | 必然跨代 |
@@ -455,7 +459,7 @@ sleep 3
 
 **会，而且退化的判据与已知的崩溃签名完全一致。**
 
-退化路径：launchd 从覆盖目录的 `XPCServices` 解析出四个服务（(A) 成立）→ helper 由该 `.xpc` 起动 → 该 `.xpc` 的内嵌 `DYLD_FRAMEWORK_PATH` 指向 `/var/jb/Library/Frameworks`（`patches/ios18-public-sdk-xpc-main.patch:12` 的现值）→ 而 UI 进程经 basebin 注入指向 `/var/jb/Library/WebKitOverride`。若这两个目录的字节不同代（只重装了一侧就会出现，`iOS` 上没有版本检查：`WebKitBundleVersion` 的比对在 `XPCServiceMain.mm:107-123` 的 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 内，iOS 编译掉——M63 审计 `:173`，**已确证**），两端就变成跨代。
+退化路径：launchd 从覆盖目录的 `XPCServices` 解析出四个服务（(A) 成立）→ helper 由该 `.xpc` 起动 → 该 `.xpc` 的内嵌 `DYLD_FRAMEWORK_PATH` 首项是 `/var/jb/Library/WebKitOverride`、后备项是 `/var/jb/Library/Frameworks`（`patches/ios18-public-sdk-xpc-main.patch:22` 的现值，首项由 `:16` 给出）→ 而 UI 进程经 basebin 注入只指向 `/var/jb/Library/WebKitOverride`。首项命中时两端同目录；**退化发生在首项不命中时**：覆盖目录缺该镜像，helper 落到后备的 `/var/jb/Library/Frameworks`，而 UI 进程没有后备项，于是两端分叉。若这两个目录的字节不同代（只重装了一侧就会出现，`iOS` 上没有版本检查：`WebKitBundleVersion` 的比对在 `XPCServiceMain.mm:107-123` 的 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 内，iOS 编译掉——M63 审计 `:173`，**已确证**），两端就变成跨代。
 
 **那时的判据**（三条，都可在设备上取）：
 
