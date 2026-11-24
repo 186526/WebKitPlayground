@@ -160,7 +160,7 @@ M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 
 | `/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride` | 与上一行是同一个目录。`/var/jb` 是指向 `procursus` 的符号链接 | 同上。区别只在字符串形态：basebin 用 preboot 的真实路径，注入记录与崩溃报告里两种情况都会出现 | **同一目录**。`launchctl print pid/69370` 的 `environment` 段落曾读到 `DYLD_FRAMEWORK_PATH => .../procursus/Library/WebKitOverride` |
 | `/var/jb/usr/lib` | `libwebrtc.dylib`、`libANGLE-shared.dylib`（`install-webkit-override.sh` 的 `LIBRARY_NAMES`，本分支 `:56`，对齐改动后 `:80`） | 与 framework 目录配套的 `DYLD_LIBRARY_PATH` | 与 framework 同进退 |
 
-**本文提到「basebin 注入的目录」时指第 4 行那个目录，它的实际字符串形态是第 5 行的 preboot 形态，不是 `/var/jb/...`。** 全文为了可读性沿用 `/var/jb/Library/WebKitOverride` 这个短写法指代目录本身；凡是拿它去和日志、`image list`、`found:` 的实际输出做字符串比较的地方，都比不中，判据应改用「路径含不含 `WebKitOverride`」。第四节第 3d-1 步的预期、第 3d-2 步的判读、以及 `image list` 判读表三处都按这条写。
+**本文提到「basebin 注入的目录」时指上表「`/var/jb/Library/WebKitOverride`」那一行，它的实际字符串形态是下一行「`/private/preboot/<uuid>/.../procursus/Library/WebKitOverride`」。** 两者是同一个目录，全文为了可读性沿用 `/var/jb/Library/WebKitOverride` 这个短写法；凡是拿它去和日志、`image list`、`found:` 的实际输出做字符串比较的地方，都比不中，判据应改用「路径含不含 `WebKitOverride`」。第四节第 3d-1 步的预期、第 3d-2 步的判读、以及 `image list` 判读表三处都按这条写。
 
 ### 3.1 两个路径值当前不一致
 
