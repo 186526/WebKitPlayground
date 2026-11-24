@@ -78,11 +78,25 @@ still applies with a line offset. **A 18.2 tree therefore accepts the patch too.
 18.3.1's numbering tables against 18.2's enumeration. The tables resolve against that enumeration,
 but a `case` in the same translation unit that names a message 18.2 does not carry is an undeclared
 enumerator there, so the compiler rejects it. The 16.x, 17.x, 18.0 and 18.1 tags reject the patch
-and keep building without it. The `Apply worktree patch` step in
-`.github/workflows/build-webkit.yml` stops the run when the patch stops applying to a 18.3 ref, so a
-stale patch cannot pass silently, but its guard is keyed to 18.3 alone: a 18.2 run is applied without
-a stop or a warning. The cross-generation combination this covers is 18.3 helpers under a 16.1 UI
-process; the patch has not been tried on any other pair.
+and keep building without it.
+
+`.github/workflows/build-webkit.yml` covers whether the patch reached the build with two checks. One
+is inside `Apply worktree patch` and only runs when `apply_patch` is `true`: it stops the run when the
+patch stops applying to a ref the gate names, and fails when the patch applies but
+`translateOutgoingMessageName` is absent from `Source/WebKit/Platform/IPC/Encoder.cpp`. The other is
+`Refuse a build that ships 18.3 without the message number translation`, which carries no
+`apply_patch` condition and runs on every dispatch. Both read the same ref gate, computed once by
+`Decide whether the ref needs the message number translation`, so the two cannot disagree about which
+refs need the patch. That gate names 18.3 alone, so a 18.2 run is applied with no stop and no warning;
+the compile failure in the paragraph above is what catches that combination.
+
+The second check is what makes `apply_patch=false` fail instead of skip on a 18.3 ref. Without it an
+unpatched 18.3 run stays green, builds for about five hours, and uploads a deb with no translation
+layer; under a 16.1 UI process that deb starts its helpers and leaves the page blank. So on a 18.3 ref
+`apply_patch=false` is an error, not a no-op. On every other ref `apply_patch=false` still passes:
+those refs do not take the patch, and the 18.2 combination above fails at compile time in `Build`
+rather than at this check. The cross-generation combination this covers is 18.3 helpers under a 16.1
+UI process; the patch has not been tried on any other pair.
 
 The message numbering difference and the translation layer that closes it are designed in
 `docs/ios16-ipc-message-number-translation.md`.
