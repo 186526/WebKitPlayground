@@ -99,6 +99,8 @@ OVERRIDE_INSTALLED=0
 UNINSTALL_CONFIRMED=0
 
 GUI_LINES=0
+GUI_RC=0
+GUI_OUTPUT=''
 OVERRIDE_PRESENT_BEFORE=unknown
 INSTALL_RC=not-run
 OVERRIDE_PRESENT_AFTER=unknown
@@ -138,6 +140,15 @@ HELPER_FRAMEWORK_OVERRIDE=0
 HELPER_FRAMEWORK_JB=0
 HELPER_FRAMEWORK_SYSTEM=0
 HELPER_FRAMEWORK_UNKNOWN=0
+# A fires when a new helper loaded a /var/jb framework, but two mechanisms can
+# produce that and only one of them is launchd resolving a path it had not
+# indexed. If the helper's own executable (comm) is under the override tree,
+# launchd started the override's .xpc; if it is the system stub, launchd started
+# the indexed stub and the dyld environment handed the override framework over.
+# The install script prunes XPCServices, so in this configuration the first
+# mechanism cannot occur and A can only mean the second.
+HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC=0
+HELPER_JB_FRAMEWORK_THROUGH_STUB=0
 VERDICT=UNKNOWN
 PROBE_REASON=not-decided
 
@@ -185,8 +196,14 @@ emit() {
 # Device calls
 # ---------------------------------------------------------------------------
 
+# ssh reads its local stdin and throws it away when the remote command does not
+# want it, so a call inside a `while read` loop would eat the rest of the list.
+# `-n` closes that path. The two sudo modes cannot both take it: the password one
+# feeds the password through stdin, and `-n` would discard the password before
+# sudo ever saw it, so that path keeps the pipe and is instead protected by the
+# loops reading their list from a file descriptor of their own.
 remote() {
-    REMOTE_OUTPUT=$(ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" "$1" 2>&1)
+    REMOTE_OUTPUT=$(ssh -n "${SSH_OPTIONS[@]}" "${SSH_TARGET}" "$1" 2>&1)
     REMOTE_RC=$?
 }
 
@@ -194,7 +211,7 @@ remote() {
 # is never part of a command line on either host and never reaches the log.
 remote_sudo() {
     if [ "${SUDO_MODE}" = passwordless ]; then
-        REMOTE_OUTPUT=$(ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" "sudo -n $1" 2>&1)
+        REMOTE_OUTPUT=$(ssh -n "${SSH_OPTIONS[@]}" "${SSH_TARGET}" "sudo -n $1" 2>&1)
     else
         REMOTE_OUTPUT=$(printf '%s\n' "${DEVICE_SUDO_PASSWORD}" \
             | ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" "sudo -S -p '' $1" 2>&1)
@@ -408,33 +425,41 @@ skip_step() {
 # Step 1: preconditions
 # ---------------------------------------------------------------------------
 
-strip_space() {
-    printf '%s' "$1" | tr -d '[:space:]'
-}
-
 # Counted on the host rather than with the device's wc, so the reading is the
 # line count of what launchctl actually printed and no further device program is
-# needed. launchctl print exits 113 when the domain does not exist, and prints
-# nothing at all when it is empty.
-read_gui_domain_lines() {
+# needed. The exit status matters as much as the count: when the domain is gone,
+# launchctl prints `Could not find domain for gui/501` to stderr and exits
+# nonzero, and `remote` merges stderr into the output, so a count taken alone
+# would read that one-line refusal as a healthy domain. Both facts are therefore
+# written to GUI_RC and GUI_LINES directly: a caller that captured the count
+# through `$(...)` would get the count in a subshell and lose the status.
+read_gui_domain_facts() {
     remote 'launchctl print gui/501'
+    GUI_RC=${REMOTE_RC}
     if [ "${REMOTE_RC}" -eq 255 ]; then
         die "ssh to ${SSH_TARGET} failed (exit 255): ${REMOTE_OUTPUT}"
     fi
-    local lines=0
+    GUI_OUTPUT=${REMOTE_OUTPUT}
+    GUI_LINES=0
     if [ -n "${REMOTE_OUTPUT}" ]; then
-        lines=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -c '' || true)
+        GUI_LINES=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -c '' || true)
     fi
-    case ${lines} in
-        ''|*[!0-9]*) lines=0 ;;
+    case ${GUI_LINES} in
+        ''|*[!0-9]*) GUI_LINES=0 ;;
     esac
-    printf '%s' "${lines}"
+}
+
+gui_domain_usable() {
+    [ "${GUI_RC}" -eq 0 ] && [ "${GUI_LINES}" -gt 0 ]
 }
 
 abort_gui_domain_missing() {
     emit ""
     emit '需要先重启设备，图形域缺失'
-    emit 'launchctl print gui/501 is empty, so no GUI process can start and every endpoint reading would be meaningless. Reboot the device, then run this script again. sbreload and launchctl kickstart system/com.apple.runningboardd were both observed failing to restore the domain, so a reboot is the only known fix.'
+    emit "launchctl print gui/501 exited ${GUI_RC} and printed ${GUI_LINES} line(s), so the graphics domain is not there and no GUI process can start. Every endpoint reading after this point would be meaningless. Reboot the device, then run this script again. sbreload and launchctl kickstart system/com.apple.runningboardd were both observed failing to restore the domain, so a reboot is the only known fix."
+    if [ "${GUI_RC}" -ne 0 ]; then
+        emit "  the command's output, which is where launchd explains the refusal: ${GUI_OUTPUT}"
+    fi
     emit 'PROBE_VERDICT=ABORTED'
     emit 'PROBE_REASON=gui_domain_missing_reboot_required'
     exit 3
@@ -442,11 +467,10 @@ abort_gui_domain_missing() {
 
 step_preconditions() {
     step_begin 1 'record the preconditions'
-    GUI_LINES=$(read_gui_domain_lines)
-    emit "  launchctl print gui/501: ${GUI_LINES} lines"
-    if [ "${GUI_LINES}" -le 0 ]; then
-        abort_gui_domain_missing
-    fi
+    # The gate already ran in main, before any device write; this only reports the
+    # same reading, so the log keeps the fact without asking launchd twice.
+    emit "  launchctl print gui/501: exit=${GUI_RC}, ${GUI_LINES} line(s)"
+    gui_domain_usable || abort_gui_domain_missing
 
     run 'override directory before' "[ -d ${OVERRIDE_ROOT} ] && echo present || echo absent"
     OVERRIDE_PRESENT_BEFORE=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^(present|absent)$' | tail -n 1)
@@ -527,7 +551,6 @@ EOF
 ${REMOTE_OUTPUT}
 EOF
     fi
-    PS_HAS_PPID=${want_ppid}
     return 0
 }
 
@@ -572,12 +595,13 @@ safari_pid_in() {
 # would mix stale helpers into the reading. ppid 1 is the filter that keeps the
 # cleanup to launchd-spawned processes; a helper whose parent is a live app is
 # that app's, and killing it would be a change this experiment did not ask for.
-# One kill -9 per pid, because the device has no pkill.
+# One kill -9 per pid, because the device has no pkill. The list arrives on fd 3
+# so that the ssh call inside the loop cannot consume it.
 kill_stale_helpers() {
     local pid ppid path
     HELPER_KILLED=0
     [ -s "${WORK_DIR}/ps-before.txt" ] || return 0
-    while read -r pid ppid path; do
+    while read -r pid ppid path <&3; do
         case ${path} in
             *'.xpc/com.apple.WebKit.'*) ;;
             *) continue ;;
@@ -592,7 +616,7 @@ kill_stale_helpers() {
             0|1) HELPER_KILLED=$((HELPER_KILLED + 1)) ;;
             *) emit "    Error: kill -9 ${pid} exited ${REMOTE_RC}" ;;
         esac
-    done <"${WORK_DIR}/ps-before.txt"
+    done 3<"${WORK_DIR}/ps-before.txt"
     emit "  stale helpers signalled: ${HELPER_KILLED}"
 }
 
@@ -683,19 +707,21 @@ count_service() {
     awk -v name="$2" '
         BEGIN { length_of_name = length(name) }
         {
-            line = $0
-            offset = index(line, name)
-            while (offset > 0) {
-                before = substr(line, offset - 1, 1)
-                after = substr(line, offset + length_of_name, 1)
+            # skip is the number of characters already consumed, so offset stays
+            # an absolute position in the line and several occurrences on one
+            # line are all counted. The character before offset 1 is the start of
+            # the line, which is a boundary: substr($0, 0, 1) would return the
+            # first character instead, so a name at the head of a line would
+            # never count.
+            skip = 0
+            while ((position = index(substr($0, skip + 1), name)) > 0) {
+                offset = skip + position
+                before = (offset > 1) ? substr($0, offset - 1, 1) : ""
+                after = substr($0, offset + length_of_name, 1)
                 if (before !~ /[A-Za-z0-9_.-]/ && after !~ /[A-Za-z0-9_.-]/) {
                     count += 1
                 }
-                rest = substr(line, offset + length_of_name)
-                offset = index(rest, name)
-                if (offset > 0) {
-                    offset = offset + length_of_name - 1
-                }
+                skip = offset + length_of_name - 1
             }
         }
         END { print count + 0 }
@@ -810,11 +836,22 @@ classify_helper_path() {
 # actually loaded is a separate fact and only lldb's image list reports it. The
 # attach needs root, and the ObjC expression parser on this device cannot install
 # its checkers, so `image list -o -f` is the whole vocabulary used here.
+#
+# Two same-named WebKit images in one process is normal here (outer AGENTS.md,
+# 设备 section): the system copy and the override copy both stay loaded. So every
+# WebKit.framework/WebKit line is collected and classified, not just the first
+# one. A helper counts as override-backed when any of its paths is, and the log
+# carries all of them, because picking one by line order would let lldb's
+# ordering decide the verdict.
+#
+# The pid list arrives on fd 3 rather than stdin: a command run inside the loop
+# must not be able to consume the list, and keeping the list off stdin makes that
+# true no matter which accessor the body grows later.
 record_helper_framework_paths() {
     [ "${HELPER_NEW_TOTAL}" -ge 1 ] || return 0
     HELPER_FRAMEWORK_PATHS_RECORDED=0
-    local pid
-    while read -r pid; do
+    local pid exec_path
+    while read -r pid exec_path <&3; do
         [ -n "${pid}" ] || continue
         remote_sudo "lldb -b -o 'process attach --pid ${pid}' -o 'image list -o -f' -o detach -o quit 2>/dev/null"
         emit ""
@@ -825,41 +862,61 @@ record_helper_framework_paths() {
             HELPER_FRAMEWORK_UNKNOWN=$((HELPER_FRAMEWORK_UNKNOWN + 1))
             continue
         fi
-        local framework_path
         # Each line of image list is "<head> 0x<addr> <path>" or "[ n] <uuid>
         # 0x<addr> <path>"; the path is always the last field, and may itself
         # contain spaces.
-        framework_path=$(awk '
+        local framework_paths
+        framework_paths="${WORK_DIR}/lldb-${pid}-paths.txt"
+        awk '
             /WebKit\.framework\/WebKit$/ {
                 path = ""
                 for (field = 1; field <= NF; field += 1) {
                     if ($field ~ /WebKit\.framework\/WebKit$/) { path = substr($0, index($0, $field)) }
                 }
-                if (path != "") { print path; exit }
+                if (path != "" && !seen[path]++) { print path }
             }
-        ' "${WORK_DIR}/lldb-${pid}.txt" | head -n 1)
-        if [ -z "${framework_path}" ]; then
+        ' "${WORK_DIR}/lldb-${pid}.txt" >"${framework_paths}"
+        if [ ! -s "${framework_paths}" ]; then
             emit "    no WebKit.framework/WebKit line in the image list; the framework this helper loaded stays unknown."
             emit "$(grep -E 'WebKit|error|warning' "${WORK_DIR}/lldb-${pid}.txt" | head -n 10)"
             HELPER_FRAMEWORK_UNKNOWN=$((HELPER_FRAMEWORK_UNKNOWN + 1))
             continue
         fi
         HELPER_FRAMEWORK_PATHS_RECORDED=1
-        local framework_kind
-        framework_kind=$(classify_helper_path "${framework_path}")
-        case ${framework_kind} in
-            override) HELPER_FRAMEWORK_OVERRIDE=$((HELPER_FRAMEWORK_OVERRIDE + 1)) ;;
-            jb_frameworks) HELPER_FRAMEWORK_JB=$((HELPER_FRAMEWORK_JB + 1)) ;;
-            system) HELPER_FRAMEWORK_SYSTEM=$((HELPER_FRAMEWORK_SYSTEM + 1)) ;;
-            *)
-                HELPER_FRAMEWORK_UNKNOWN=$((HELPER_FRAMEWORK_UNKNOWN + 1))
-                framework_kind=other
-                ;;
-        esac
-        emit "    ${framework_kind}  ${framework_path}"
-    done <<EOF
-$(awk '{ print $1 }' "${WORK_DIR}/helpers-new.txt")
-EOF
+        local framework_path framework_kind helper_kinds='' jb_framework_seen=no
+        while read -r framework_path <&4; do
+            framework_kind=$(classify_helper_path "${framework_path}")
+            case ${framework_kind} in
+                override)
+                    HELPER_FRAMEWORK_OVERRIDE=$((HELPER_FRAMEWORK_OVERRIDE + 1))
+                    jb_framework_seen=yes
+                    ;;
+                jb_frameworks)
+                    HELPER_FRAMEWORK_JB=$((HELPER_FRAMEWORK_JB + 1))
+                    jb_framework_seen=yes
+                    ;;
+                system) HELPER_FRAMEWORK_SYSTEM=$((HELPER_FRAMEWORK_SYSTEM + 1)) ;;
+                *)
+                    HELPER_FRAMEWORK_UNKNOWN=$((HELPER_FRAMEWORK_UNKNOWN + 1))
+                    framework_kind=other
+                    ;;
+            esac
+            emit "    ${framework_kind}  ${framework_path}"
+            helper_kinds="${helper_kinds} ${framework_kind}"
+        done 4<"${framework_paths}"
+        # Which mechanism put a /var/jb framework in this helper. The helper's own
+        # executable decides it: under the override tree means launchd started the
+        # override's .xpc bundle, under /System means launchd started the indexed
+        # stub and the dyld environment handed the framework over. Both load a
+        # /var/jb framework, and only the first answers M63's question.
+        if [ "${jb_framework_seen}" = yes ]; then
+            case $(classify_helper_path "${exec_path}") in
+                override) HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC=$((HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC + 1)) ;;
+                *) HELPER_JB_FRAMEWORK_THROUGH_STUB=$((HELPER_JB_FRAMEWORK_THROUGH_STUB + 1)) ;;
+            esac
+        fi
+        emit "    helper ${pid} classified by the above:${helper_kinds:- unknown}"
+    done 3<"${WORK_DIR}/helpers-new-pids.txt"
 }
 
 # Tally counts the helpers this launch produced. The baseline pid list from
@@ -879,10 +936,13 @@ step_tally_helpers() {
     cp "${WORK_DIR}/processes.txt" "${WORK_DIR}/ps-helpers.txt"
     awk '$3 ~ /\.xpc\/com\.apple\.WebKit\./ { print $1, $2, $3 }' "${WORK_DIR}/ps-helpers.txt" \
         >"${WORK_DIR}/helpers.txt"
-    : >"${WORK_DIR}/helpers-new.txt"
+    # The pid and the executable path together: the pid drives the lldb attach,
+    # and the path, which is where launchd started the helper from, is what
+    # separates the two mechanisms A can describe.
+    : >"${WORK_DIR}/helpers-new-pids.txt"
 
     local pid ppid path kind in_baseline
-    while read -r pid ppid path; do
+    while read -r pid ppid path <&3; do
         [ -n "${path:-}" ] || continue
         kind=$(classify_helper_path "${path}")
         # Stale is decided by pid membership in the step 1 baseline. A stale
@@ -896,7 +956,7 @@ step_tally_helpers() {
             continue
         fi
         HELPER_NEW_TOTAL=$((HELPER_NEW_TOTAL + 1))
-        printf '%s %s\n' "${pid}" "${path}" >>"${WORK_DIR}/helpers-new.txt"
+        printf '%s %s\n' "${pid}" "${path}" >>"${WORK_DIR}/helpers-new-pids.txt"
         case ${kind} in
             override) HELPER_NEW_OVERRIDE=$((HELPER_NEW_OVERRIDE + 1)) ;;
             jb_frameworks) HELPER_NEW_JB_FRAMEWORKS=$((HELPER_NEW_JB_FRAMEWORKS + 1)) ;;
@@ -904,7 +964,7 @@ step_tally_helpers() {
             *) HELPER_NEW_OTHER=$((HELPER_NEW_OTHER + 1)) ;;
         esac
         emit "    new  ${kind}  pid=${pid} ppid=${ppid}  ${path}"
-    done <"${WORK_DIR}/helpers.txt"
+    done 3<"${WORK_DIR}/helpers.txt"
 
     if [ "${BASELINE_HELPERS_RECORDED}" -eq 0 ]; then
         emit '  Warning: there was no baseline, so every helper alive now is treated as stale and none as new. The helper half of the verdict is therefore unusable.'
@@ -987,10 +1047,6 @@ webkit_service_count() {
     printf '%s' $((SVC_WEBCONTENT + SVC_GPU + SVC_NETWORKING + SVC_CAPTIVEPORTAL))
 }
 
-new_var_jb_helper_count() {
-    printf '%s' $((HELPER_NEW_OVERRIDE + HELPER_NEW_JB_FRAMEWORKS))
-}
-
 # Which /var/jb framework the new helpers loaded. The executable path cannot
 # answer this (the override prunes XPCServices, so every helper runs from the
 # system .xpc), so this counts the lldb framework paths only.
@@ -1002,7 +1058,8 @@ new_helper_framework_jb_count() {
 #   A  all four WebKit services are in the Safari section, and at least one new
 #      helper loaded a WebKit.framework from a /var/jb path
 #   B  at most two of the four remain, no DYLD or PAC_EXCEPTION report appeared
-#      in the reading steps, and no new helper loaded a /var/jb framework
+#      in the reading steps, and every new helper whose framework was read loaded
+#      the system copy
 #   UNKNOWN  everything else
 #
 # The helper reasons are separate on purpose. No new helper means the launch did
@@ -1015,6 +1072,12 @@ new_helper_framework_jb_count() {
 # took effect in the helper. When no framework path could be read, A is not
 # reachable, because "four services are present" alone is also what a run with a
 # partially broken override produces.
+#
+# B needs the same evidence as A, for the mirror reason: "no new helper loaded a
+# /var/jb framework" cannot be concluded from a run where no helper's framework
+# was read. Without the guard, a run whose lldb attaches all failed declares B on
+# zero evidence -- and a run that would have shown /var/jb frameworks reads as
+# clean B, which is the experiment's answer inverted rather than merely missing.
 decide_verdict() {
     local webkit_count=$1
     if [ -z "${SAFARI_PID}" ]; then
@@ -1046,14 +1109,23 @@ decide_verdict() {
                 PROBE_REASON=four_services_present_but_no_helper_framework_path_read
             elif [ "${jb_frameworks}" -ge 1 ]; then
                 VERDICT=A
-                PROBE_REASON=all_four_services_present_and_a_new_helper_loaded_a_var_jb_framework
+                if [ "${HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC}" -ge 1 ]; then
+                    PROBE_REASON=all_four_services_present_and_a_helper_started_from_the_override_xpc_loaded_a_var_jb_framework
+                elif [ "${HELPER_FRAMEWORK_OVERRIDE}" -ge 1 ]; then
+                    PROBE_REASON=all_four_services_present_and_a_helper_started_by_the_system_stub_loaded_the_override_framework
+                else
+                    PROBE_REASON=all_four_services_present_and_a_helper_loaded_the_var_jb_frameworks_copy
+                fi
             else
                 VERDICT=UNKNOWN
                 PROBE_REASON=four_services_but_every_new_helper_loaded_the_system_framework
             fi
             ;;
         0|1|2)
-            if [ "${jb_frameworks}" -eq 0 ]; then
+            if [ "${HELPER_FRAMEWORK_PATHS_RECORDED}" -eq 0 ]; then
+                VERDICT=UNKNOWN
+                PROBE_REASON=services_gone_but_no_helper_framework_path_read
+            elif [ "${jb_frameworks}" -eq 0 ]; then
                 VERDICT=B
                 PROBE_REASON=services_gone_or_at_most_two_and_no_new_helper_loaded_a_var_jb_framework
             else
@@ -1088,7 +1160,7 @@ step_summary() {
 
     emit ""
     emit 'Facts:'
-    emit "  gui/501 lines at step 1: ${GUI_LINES}"
+    emit "  gui/501 at step 1: exit=${GUI_RC}, ${GUI_LINES} line(s)"
     emit "  override directory before: ${OVERRIDE_PRESENT_BEFORE}; install exit: ${INSTALL_RC}"
     emit "  Safari pid: ${SAFARI_PID:-none}; launch: ${SAFARI_LAUNCH_MODE}"
     emit "  WebKit services present: ${webkit_count} of 4 (WebContent=${SVC_WEBCONTENT}, GPU=${SVC_GPU}, Networking=${SVC_NETWORKING}, CaptivePortal=${SVC_CAPTIVEPORTAL})"
@@ -1097,6 +1169,7 @@ step_summary() {
     emit "  stale helpers from before the run, excluded from the verdict: override=${HELPER_STALE_OVERRIDE}, /var/jb Frameworks=${HELPER_STALE_JB_FRAMEWORKS}, system=${HELPER_STALE_SYSTEM}, other=${HELPER_STALE_OTHER}, total=${HELPER_STALE_TOTAL}"
     emit "  stale helpers signalled with kill -9 in step 3: ${HELPER_KILLED}"
     emit "  WebKit framework loaded by the new helpers: override=${HELPER_FRAMEWORK_OVERRIDE}, /var/jb Frameworks=${HELPER_FRAMEWORK_JB}, system=${HELPER_FRAMEWORK_SYSTEM}, unknown=${HELPER_FRAMEWORK_UNKNOWN}"
+    emit "  of the helpers that loaded a /var/jb framework: started from the override .xpc=${HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC}, started by the system stub and handed the framework=${HELPER_JB_FRAMEWORK_THROUGH_STUB}"
     emit "  uninstall exit: ${UNINSTALL_RC}; override directory after: ${OVERRIDE_PRESENT_AFTER}"
     emit "  steps invalidated by a DYLD or PAC_EXCEPTION report: ${invalid}"
 
@@ -1106,15 +1179,38 @@ step_summary() {
     emit 'prunes XPCServices, so the override it installs carries the Info.plist and the binary'
     emit 'and nothing else. A reading of 0 endpoints here is therefore a reproduction of a known'
     emit 'result, and only a divergence from that row is new information.'
+    emit ''
+    emit 'What A can and cannot mean here. With XPCServices pruned, launchd has no override'
+    emit '.xpc bundle to resolve, so A cannot come from launchd scanning the override tree.'
+    emit 'The only route left is the system stub plus the dyld framework handover: launchd'
+    emit 'starts the indexed /System stub, and the dyld environment the UI process carries'
+    emit 'loads the override WebKit into it. PROBE_REASON names which of the two happened for'
+    emit 'this run, and the two counters above say how many helpers each. Separating them'
+    emit 'definitively needs an unpruned run, i.e. an override that still carries'
+    emit 'XPCServices; docs/ios16-branch-a-deployment-path.md section 第 2 步 describes it.'
+    emit 'Existing partial (A) evidence for the unpruned configuration is at'
+    emit 'build-state.md:264-278, where launchd launched GPU from the override .xpc.'
 
     emit ""
     emit 'Verdict. M63 docs/ios16-all-18.3-xpc-endpoint-audit.md section 4 (情形的判据) and section 8 item 1:'
     case ${VERDICT} in
         A)
-            emit '  A: launchd resolved all four WebKit services out of a directory it had not indexed, and a new helper loaded a /var/jb WebKit framework. That contradicts build-state.md:402 (same configuration, endpoints 0), so that reading was affected by a variable it did not record and has to be redone. The whole-18.3 route stays open; what remains is the helper-to-UI protocol and ABI work.'
+            emit '  A: all four WebKit services are in the Safari section and a new helper loaded a'
+            emit '  /var/jb WebKit framework. That contradicts build-state.md:402 (same configuration,'
+            emit '  endpoints 0), so that reading was affected by a variable it did not record and has'
+            emit '  to be redone. It does not by itself show that launchd resolved an unindexed path:'
+            emit '  see the paragraph above. The whole-18.3 route stays open; what remains is the'
+            emit '  helper-to-UI protocol and ABI work.'
             ;;
         B)
-            emit '  B: launchd resolved nothing outside its index. This agrees with build-state.md:402 (endpoints 0, spawn 0, 265 lookup failures): under this configuration the endpoints going to zero is a known result, and this run is a reproduction that adds a CrashReporter diff and the helper framework paths rather than a new attribution. Replacing the UI process on 16.1 cannot work, because the UI process has no code to register those names itself (section 4, 若 (B) 成立); work moves to the 16.1 UI plus 18.3 helper translation route.'
+            emit '  B: every new helper whose framework was read loaded the system copy, and at most'
+            emit '  two of the four services remain. This agrees with build-state.md:402 (endpoints 0,'
+            emit '  spawn 0, 265 lookup failures): under this configuration the endpoints going to zero'
+            emit '  is a known result, and this run is a reproduction that adds a CrashReporter diff'
+            emit '  and the helper framework paths rather than a new attribution. Replacing the UI'
+            emit '  process on 16.1 cannot work, because the UI process has no code to register those'
+            emit '  names itself (section 4, 若 (B) 成立); work moves to the 16.1 UI plus 18.3 helper'
+            emit '  translation route.'
             ;;
         *)
             emit '  UNKNOWN: this run does not answer (A) or (B). The PROBE_REASON line names the condition that blocked it.'
@@ -1138,6 +1234,8 @@ step_summary() {
     emit "PROBE_NEW_HELPER_FRAMEWORK_SYSTEM=${HELPER_FRAMEWORK_SYSTEM}"
     emit "PROBE_NEW_HELPER_FRAMEWORK_UNKNOWN=${HELPER_FRAMEWORK_UNKNOWN}"
     emit "PROBE_HELPER_FRAMEWORK_PATHS_RECORDED=${HELPER_FRAMEWORK_PATHS_RECORDED}"
+    emit "PROBE_JB_FRAMEWORK_FROM_OVERRIDE_XPC=${HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC}"
+    emit "PROBE_JB_FRAMEWORK_THROUGH_STUB=${HELPER_JB_FRAMEWORK_THROUGH_STUB}"
     emit "PROBE_STALE_HELPERS=${HELPER_STALE_TOTAL}"
     emit "PROBE_STALE_HELPERS_KILLED=${HELPER_KILLED}"
     emit "PROBE_SAFARI_PID=${SAFARI_PID:-none}"
@@ -1244,14 +1342,13 @@ main() {
     trap cleanup EXIT INT TERM
 
     # The graphics-domain check is the first device action, before anything is
-    # written anywhere. An empty gui/501 means no app can start, so every
-    # reading would be meaningless; the only known fix is a reboot.
-    local gui_lines
-    gui_lines=$(read_gui_domain_lines)
-    printf 'Precondition: launchctl print gui/501 is %s lines.\n' "${gui_lines}" >>"${LOG_FILE}"
-    if [ "${gui_lines}" -le 0 ]; then
-        abort_gui_domain_missing
-    fi
+    # written anywhere. An empty gui/501, or one launchctl refuses to describe,
+    # means no app can start, so every reading would be meaningless; the only
+    # known fix is a reboot.
+    read_gui_domain_facts
+    printf 'Precondition: launchctl print gui/501 exited %s and printed %s line(s).\n' \
+        "${GUI_RC}" "${GUI_LINES}" >>"${LOG_FILE}"
+    gui_domain_usable || abort_gui_domain_missing
 
     probe_sudo
     remote "test -f ${INSTALL_SCRIPT} && test -f ${UNINSTALL_SCRIPT} && echo scripts-present"
