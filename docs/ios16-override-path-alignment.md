@@ -76,6 +76,14 @@ for (const char* list : { list1, list2 }) {
 
 `dyld/Loader.cpp` 的 `getLoader` 对每个候选做一次磁盘查找，覆盖目录与原始路径都在同一条候选链上。测中时执行 `result = ldr; stop = true;`：对已加载的同路径镜像在 `:574`，对这次新加载的命中在 `:737-740`。两处都表示第一条命中的候选即终止搜索，不再尝试后面的候选。原始路径（例如 `/System/Library/Frameworks/WebKit.framework/WebKit`）排在搜索目录之后，所以只要搜索目录里存在同名镜像，磁盘副本就顶替原始路径。
 
+### 打印出来的候选里，本仓的目录不是第一条
+
+`.xpc` 的 `DYLD_FRAMEWORK_PATH` 不只有本仓写的那一条。上游 `Source/WebKit/Configurations/BaseXPCService.xcconfig:68` 与 `:70-71` 都产出 `DYLD_FRAMEWORK_PATH=@executable_path/$(WK_PATH_FROM_SERVICE_EXECUTABLE_TO_FRAMEWORKS)`，同文件 `:78` 决定那个变量取几级相对路径。这一点有构建产物可查，不必只靠 xcconfig 推理：CI run `45331147658`（Xcode 16.4，改动前的成功构建）的 `otool -l` 步骤对 `com.apple.WebKit.GPU`、`.Model`、`.Networking`、`.WebContent.CaptivePortal`、`.WebContent.Development`、`.WebContent` 六个 `.xpc` 各输出同样四条加载命令，首两条就是 `DYLD_FRAMEWORK_PATH=@executable_path/..` 与 `DYLD_LIBRARY_PATH=@executable_path/..`。本仓补丁 `patches/ios18-public-sdk-xpc-main.patch:9` 的 `OTHER_LDFLAGS` 把 `$(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS)` 排在 `$(WK_ROOTLESS_FRAMEWORKS_LDFLAGS_...)` 之前，所以这一条先被写进 `LC_DYLD_ENVIRONMENT`。dyld 按加载命令顺序读 `LC_DYLD_ENVIRONMENT`（`dyld-1042.1` 的 `DyldProcessConfig.cpp:1424-1428` 的 `forDyldEnv`），展开 `@executable_path/`（`:1627-1652`），再用 `setString`（`:1598-1611`）以 `:` 追加，于是 framework 列表是 `@executable_path/..`、覆盖目录、`/var/jb/Library/Frameworks` 三段。
+
+`@executable_path` 是 `.xpc` 自己的主可执行文件路径，`..` 退回它所在的 `XPCServices/` 目录，那里只有 `.xpc` 包，没有 `WebKit.framework`。所以这一条候选**每次都打印，每次都落空**，dyld 按 `Loader.cpp:688-689` 跳到下一条。设备上的读数正是这个顺序：`docs/dopamine-basebin-webkit-override.md:683` 记录四条加载命令的先后，`:699-701` 记录候选行首先打印 `.../WebContent.xpc/../WebKit.framework/WebKit`。
+
+因此判断覆盖是否生效，看的是**第一个解析成功的候选**落在哪，不是第一行打印是什么。
+
 ### 这套机制在本机上是否算已验证
 
 `dyld-1042.1` 是 Apple 公开发布的版本，设备上是 `1041.5`，上游没有发布 `1041.5` 这个 tag，1042.1 是最接近的公开版本。上面引用的六个位置在 `dyld-1378` 里结构未变（`DyldProcessConfig.cpp:1891`、`:1914`、`:2105`、`:2208`、`:2385`、`:2400`，`Loader.cpp:875`）。所以机制层面有公开源码出处，可以当结论使用。
@@ -106,7 +114,7 @@ WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride;
 WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib;
 ```
 
-覆盖目录在首位，并且第二节已确认「第一命中的候选胜出」，所以只要覆盖目录里存在这五个 framework，拿到覆盖目录的进程对每个 framework 都只会解析到那一份。`install-webkit-override.sh` 的 `preflight_sources` 在缺少任何一个 framework 时直接退出，所以「覆盖目录存在」与「五个 framework 齐全」是同一件事。哪些进程拿得到覆盖目录，见下面这条结论的限定。
+覆盖目录在本仓写的那条列表里排首位（整条列表在打印顺序里排第二，前一条是上游落空的 `@executable_path/..`，见第二节末），并且第二节已确认「第一命中的候选胜出」，所以只要覆盖目录里存在这五个 framework，拿到覆盖目录的进程对每个 framework 都只会解析到那一份。`install-webkit-override.sh` 的 `preflight_sources` 在缺少任何一个 framework 时直接退出，所以「覆盖目录存在」与「五个 framework 齐全」是同一件事。哪些进程拿得到覆盖目录，见下面这条结论的限定。
 
 后备项不是妥协，它保留两个覆盖目录**故意不含**的文件：`/var/jb/usr/lib/systemhook.dylib`（basebin 注入进程的库，`docs/dopamine-basebin-webkit-override.md:342` 记录设备实测里它的 `found:` 就落在这一条）与 `CydiaSubstrate`、`AltList` 这类别的包的 framework。它们不与共享缓存重名，dyld 的 `isOverridablePath` 不会把它们当成替换项，所以后备项不会把系统库换掉。
 
@@ -144,7 +152,7 @@ WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOT
 
 ### 若 `__XPC_` 转交不成立会发生什么
 
-第二节已说明，转交不成立时 helper 的搜索目录只来自 `.xpc` 内嵌列表。本方案把覆盖目录放在该列表首位，所以**这份改动的效力不依赖转交行为**，这正是选择「改内嵌路径」而不是「让脚本把文件写进 `/var/jb/Library/Frameworks`」的原因：后者要求 helper 的搜索目录先被改成覆盖目录，而那个改变只能来自 `__XPC_` 转交，等于把整个覆盖放在一个未验证的前提上。
+第二节已说明，转交不成立时 helper 的搜索目录只来自 `.xpc` 内嵌列表。本方案把覆盖目录放在该列表首位（它前面只有上游 `@executable_path/..` 那条落空项），所以**这份改动的效力不依赖转交行为**，这正是选择「改内嵌路径」而不是「让脚本把文件写进 `/var/jb/Library/Frameworks`」的原因：后者要求 helper 的搜索目录先被改成覆盖目录，而那个改变只能来自 `__XPC_` 转交，等于把整个覆盖放在一个未验证的前提上。
 
 改写进 `/var/jb/Library/Frameworks` 这个方案还有第二个问题：那是 Procursus 的框架安装目录，里面已有 `AltList`、`CydiaSubstrate`、`webpushd`，直接覆盖会改动别的包的文件，`uninstall-webkit-override.sh` 也无法只删自己写的那一份。所以不采用。
 
@@ -181,11 +189,11 @@ grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/install-webkit-override.sh | sed 's/.*=//
 
 设备回网后按序执行，本文不把这些写成已验证。
 
-**1. helper 是否读到了覆盖目录。** 对 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1` 后直接运行，看 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行落在哪个目录。预期：出现 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 作为第一条候选，`found:` 落在同一路径。若候选行里只有 `/var/jb/Library/Frameworks/...`，说明 `LC_DYLD_ENVIRONMENT` 里的覆盖目录那条没有生效，需要回报。
+**1. helper 是否读到了覆盖目录。** 对 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1` 后直接运行，看 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行与随后的 `found:` 行。判据是**第一个解析成功的候选**，不是第一行打印：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 必须出现在 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 之前，并且 `found:` 落在覆盖目录那一条。第一行打印的会是 `.../com.apple.WebKit.WebContent.xpc/../WebKit.framework/WebKit`，这是上游 `BaseXPCService.xcconfig:68`、`:70-71`（路径由 `:78` 决定）写进去的 `@executable_path/..`，CI run `45331147658` 的 `otool -l` 输出里六个 `.xpc` 都有这一条。它落在 `.../XPCServices/` 下必然不存在、必然被跳过，它的出现不代表失败，它的缺席也不代表成功（见第二节末）。真正的失败有两种：候选行里根本没有覆盖目录那一条，或者 `found:` 落在 `/var/jb/Library/Frameworks/WebKit.framework/WebKit`。
 
 **2. UI 进程与 helper 是否同代。** 对两者各取一次 `lldb -b -o "image list -o -f"`，比对 `WebKit.framework/WebKit` 的完整路径。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），只用 `image list`。
 
-**3. `__XPC_` 转交是否存在。** 这条不由本方案改变，但决定 helper 的候选列表里有没有进程环境那一条。判据：对一个 helper 进程，若候选行里出现两次覆盖目录（一次来自环境、一次来自加载命令），则转交成立；只出现一次，则只来自加载命令。两种结果下本方案都让覆盖目录排在首位。
+**3. `__XPC_` 转交是否存在。** 这条不由本方案改变，但决定 helper 的候选列表里有没有进程环境那一条。判据：对一个 helper 进程，若候选行里出现两次覆盖目录（一次来自环境、一次来自加载命令），则转交成立；只出现一次，则只来自加载命令。两种结果下本方案都让覆盖目录排在内嵌列表的第一位（它前面只有上游 `@executable_path/..` 那一条落空项），所以转交成立与否都解析到覆盖目录。
 
 ---
 
