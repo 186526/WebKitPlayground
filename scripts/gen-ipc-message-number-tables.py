@@ -38,12 +38,12 @@ correct precisely because that generator emits no conditionals.
 
 For scale, and stated in the only caliber this script can read off the two
 files: the 16.1 enumeration has 3140 messages, largest 3139, with the
-synchronous section starting at 2899. The 18.3 enumeration has 4086 messages
-at file-flat positions, `Count` at 4087, and `FirstSynchronous` at flat
-position 3838. Those four numbers describe the files with every guard counted,
-not any single build: a build removes the entries its configuration excludes
-and every later position shifts down. 2807 messages are shared, 333 exist only
-in 16.1, and 1279 only in 18.3.
+synchronous section starting at 2899. The 18.3 enumeration has 4086 messages,
+largest 4085, `Count` at 4086, and `FirstSynchronous` at 3838. Those figures
+are the values the compiler assigns when every guard is satisfied, not the
+values of any single build: a build removes the entries its configuration
+excludes and every later value shifts down. 2807 messages are shared, 333
+exist only in 16.1, and 1279 only in 18.3.
 
 A build-caliber count is deliberately absent, because reading one requires
 evaluating 703 `#if` conditions against a real toolchain, and a number measured
@@ -81,12 +81,18 @@ answer `MessageName::Invalid`, and the caller *must* consult the predicates firs
   messages only 16.1 has, the 1279 only 18.3 has, and the shared messages whose
   18.3 enumerator a build may compile out. On the outgoing side the caller skips
   the send; on the incoming side it drops the message before any dispatch
-  decision. The peer provably cannot handle a message it does not have, but
-  skipping costs the sender something: its 18.3 number exceeds the older
-  enumeration's `Last`, so the older process would reject it while decoding and
-  the caller would wait out `sendSync`'s default infinite timeout. A synchronous
-  skip therefore reaches `didFailToSendSyncMessage`, which ends an armed WebContent
-  process instead of blocking it. That is the trade, not an absence of cost.
+  decision. The peer provably cannot handle a message it does not have, and
+  refusing is not free for the sender, though the cost differs by section. In the
+  file's own numbering, with every guard satisfied, 373 of those names carry an
+  18.3 value above the older enumeration's `Last` (3139), and the 57 of them that
+  sit in the newer enumeration's synchronous section are all in that group: the
+  peer would reject them while decoding, `sendSync`'s default infinite timeout
+  would hold the main thread, and a synchronous refusal therefore reaches
+  `didFailToSendSyncMessage`, which ends an armed WebContent process instead of
+  blocking it. The remaining 906 carry a value at or below `Last`, so the older
+  process would not reject them at all: it would accept the number as a valid
+  older message and run whichever handler owns it, a different message. That is
+  the trade, not an absence of cost.
 * Anything else reaching `default` means these tables disagree with the
   enumeration they were generated from. That is a defect, and the caller should
   turn it into an invalid-message report so it surfaces during development rather
@@ -159,9 +165,10 @@ class Entry:
     """One enumerator of a generated `MessageName`, in declaration order.
 
     `value` is the slot the compiler assigns under a configuration that keeps
-    every entry: for an implicit enumerator that is its position among all
-    implicit enumerators, sentinels included. `explicit` holds the right-hand
-    side of an enumerator the generator wrote with `=`, if it had one.
+    every entry, explicit right-hand sides included: an enumerator with no `=`
+    takes one past its predecessor's value, and one with `=` takes the value its
+    right-hand side names. `explicit` holds that right-hand side uninterpreted,
+    so a sentinel stays distinguishable from a message.
     """
 
     name: str
@@ -222,8 +229,9 @@ def read_enum_body(path: Path) -> str:
 def parse_enum(path: Path, *, require_unguarded: bool) -> list[Entry]:
     """Return every enumerator of a generated header, in declaration order.
 
-    Explicitly valued entries keep their right-hand side uninterpreted; the
-    script only needs the implicit ones to know what the compiler assigns.
+    Explicitly valued entries keep their right-hand side uninterpreted here and
+    are resolved by `resolve_explicit_values` once the whole file is read; that
+    pass needs every entry, because an explicit entry re-bases the ones after it.
     """
     body = read_enum_body(path)
     entries: list[Entry] = []
@@ -281,38 +289,50 @@ def parse_enum(path: Path, *, require_unguarded: bool) -> list[Entry]:
 
 
 def resolve_explicit_values(entries: list[Entry], path: Path) -> list[Entry]:
-    """Replace every explicit right-hand side with the value it names.
+    """Assign every enumerator the value the compiler gives it, explicit or not.
+
+    An enumerator without `=` takes one past the *previous* enumerator's value,
+    whichever form that previous one had. An explicit enumerator therefore resets
+    the running count to its own value plus one, and the entries after it shift
+    with it. Resolving the explicit right-hand sides without re-basing that count
+    leaves every later implicit entry one too high, which is exactly what the
+    unconditional `LastAsynchronous = FirstSynchronous - 1` in the newer
+    enumeration would do to all 250 entries that follow it.
 
     The generated headers only use explicit values for sentinels, and only in
-    the forms `Count - 1`, `FirstSynchronous - 1` and a bare enumerator name.
-    Anything else is a change this script has not been taught to read.
+    the forms `Count - 1`, `FirstSynchronous - 1` and a bare enumerator name,
+    each naming an entry declared above it. Anything else is a change this
+    script has not been taught to read.
     """
-    known = {entry.name: entry.value for entry in entries if entry.explicit is None}
+    known: dict[str, int] = {}
     resolved: list[Entry] = []
+    next_value = 0
 
     for entry in entries:
-        if entry.explicit is None:
-            resolved.append(entry)
-            continue
-
         expression = entry.explicit
-        match = re.fullmatch(r'(\w+)\s*-\s*1', expression)
-        if match:
-            base = match.group(1)
-            if base not in known:
-                raise TableError(
-                    '%s: %s is defined as `%s`, whose base %s is not yet known'
-                    % (path, entry.name, expression, base)
-                )
-            value = known[base] - 1
-        elif expression in known:
-            value = known[expression]
+        if expression is None:
+            value = next_value
         else:
-            raise TableError(
-                '%s: %s has the explicit value `%s`, which this script cannot '
-                'resolve' % (path, entry.name, expression)
-            )
+            match = re.fullmatch(r'(\w+)\s*-\s*1', expression)
+            if match:
+                base = match.group(1)
+                if base not in known:
+                    raise TableError(
+                        '%s: %s is defined as `%s`, whose base %s is not yet known'
+                        % (path, entry.name, expression, base)
+                    )
+                value = known[base] - 1
+            elif expression in known:
+                value = known[expression]
+            else:
+                raise TableError(
+                    '%s: %s has the explicit value `%s`, which this script cannot '
+                    'resolve' % (path, entry.name, expression)
+                )
+
+        known[entry.name] = value
         resolved.append(Entry(entry.name, value, entry.guards, expression))
+        next_value = value + 1
 
     return resolved
 

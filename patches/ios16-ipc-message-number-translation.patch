@@ -1,5 +1,5 @@
 diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp
-index f7cf0e08156..f5972500f87 100644
+index f7cf0e08156..47f779c4ced 100644
 --- a/Source/WebKit/Platform/IPC/Connection.cpp
 +++ b/Source/WebKit/Platform/IPC/Connection.cpp
 @@ -30,6 +30,7 @@
@@ -10,7 +10,7 @@ index f7cf0e08156..f5972500f87 100644
  #include "MessageReceiveQueues.h"
  #include "WorkQueueMessageReceiver.h"
  #include <memory>
-@@ -615,6 +616,57 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
+@@ -615,6 +616,66 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
      }
  #endif
  
@@ -31,10 +31,19 @@ index f7cf0e08156..f5972500f87 100644
 +    // `didFailToSendSyncMessage`, and a WebContent process armed by
 +    // `WebProcess::setShouldExitOnSyncMessageSendFailure` answers that with
 +    // `exitProcess(0)`: the process ends rather than degrading. That is the
-+    // intended trade. Sending the message anyway would not get a reply either: the
-+    // 18.3 numbers of these messages all exceed the older enumeration's `Last`, so
-+    // the peer would reject them while decoding and the caller would wait out
-+    // `sendSync`'s default infinite timeout with the main thread blocked.
++    // intended trade, and sending anyway is worse for every kind of name. Every
++    // skipped name in the newer synchronous section carries a number above the
++    // older enumeration's `Last`, so sending it would get it rejected while
++    // decoding, and the caller would wait out `sendSync`'s default infinite
++    // timeout with the main thread blocked. Outside that section the opposite
++    // holds for most skipped names: once every guard is satisfied, 906 of the
++    // 1279 carry a number at or below `Last`, so the peer would not reject them
++    // at all. It would accept the number as a valid older message and run
++    // whichever handler owns it, which is a different message than the one that
++    // was sent. The remaining 316 asynchronous names do carry a number above
++    // `Last` and would be rejected without a reply, which for an asynchronous
++    // sender only means the message had no effect. Skipping is the smaller harm
++    // in all three cases.
 +    if (m_shouldTranslateMessageNames) {
 +        auto name = encoder->messageName();
 +        if (isKnownUnmappedOutgoingName(name)) {
@@ -68,7 +77,7 @@ index f7cf0e08156..f5972500f87 100644
      if (isMainRunLoop() && m_inDispatchMessageMarkedToUseFullySynchronousModeForTesting && !encoder->isSyncMessage() && !(encoder->messageReceiverName() == ReceiverName::IPC) && !sendOptions.contains(SendOption::IgnoreFullySynchronousMode)) {
          SyncRequestID syncRequestID;
          auto wrappedMessage = createSyncMessageEncoder(MessageName::WrappedAsyncMessageForTesting, encoder->destinationID(), syncRequestID);
-@@ -912,7 +964,17 @@ auto Connection::sendSyncMessage(SyncRequestID syncRequestID, UniqueRef<Encoder>
+@@ -912,7 +973,17 @@ auto Connection::sendSyncMessage(SyncRequestID syncRequestID, UniqueRef<Encoder>
  
      // Since sync IPC is blocking the current thread, make sure we use the same priority for the IPC sending thread
      // as the current thread.
@@ -87,7 +96,7 @@ index f7cf0e08156..f5972500f87 100644
  
      // Then wait for a reply. Waiting for a reply could involve dispatching incoming sync messages, so
      // keep an extra reference to the connection here in case it's invalidated.
-@@ -1033,6 +1095,43 @@ void Connection::processIncomingSyncReply(UniqueRef<Decoder> decoder)
+@@ -1033,6 +1104,43 @@ void Connection::processIncomingSyncReply(UniqueRef<Decoder> decoder)
  
  void Connection::processIncomingMessage(UniqueRef<Decoder> message)
  {
