@@ -348,6 +348,7 @@ jobs:
           ref_has_core_crypto_signatures_macro=0
           ref_sends_ios17_trait_api=0
           ref_writes_proxy_configurations=0
+          ref_needs_xpc_bootstrap_compat=0
           ref_needs_message_name_translation=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
@@ -621,10 +622,11 @@ jobs:
             fi
             git -C WebKit apply -v "$PWD/$p"
             echo "APPLIED: $p"
-            # git apply's exit status covers the hunks it was asked to place, not whether the
-            # result carries the behaviour. If the translation landed but the marker did not, the
-            # build would compile a WebKit that renumbers nothing and the omission would only show
-            # up as a helper that stops responding on the device, so assert the marker here.
+            # git apply's exit status covers whether the hunks landed, not whether the result carries
+            # the behaviour: a patch whose hunks were rewritten to touch the right lines but drop the
+            # function body still applies cleanly. Checking the marker as well pins the effect the
+            # patch is registered for, so a translation that lands structurally but compiles to
+            # nothing fails here instead of on the device as a helper that stops responding.
             if [ "$(basename "$p")" = ios16-ipc-message-number-translation.patch ] && \
                 ! git -C WebKit grep -q translateOutgoingMessageName -- Source/WebKit/Platform/IPC/Encoder.cpp; then
               echo "PATCH APPLIED BUT HAS NO EFFECT: $p"
