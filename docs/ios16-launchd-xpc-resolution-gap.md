@@ -1,0 +1,354 @@
+# 为什么 app 包内的 `XPCServices` 能被解析而 `/var/jb` 下的一直不行
+
+本文回答一个问题：同样是一个不在 `/System/Library/xpc/launchd.plist` 索引里的 `XPCServices` 目录，Music.app 自己 app 包内的那个能被 launchd 解析成服务，`/var/jb/Library/WebKitOverride` 下的那个不能，而且差别只在于覆盖目录里有没有放那个 `WebKit` 二进制。
+
+证据分三档，全文每条论断都标注属于哪一档：
+
+- **已确证**：有源码行号（可用本文给的命令复现）或设备读数，两者之一即可，且不依赖未验证的推断。
+- **有源码支撑**：能指出代码位置，但「这个调用在设备上产生什么行为」这一步没有公开源码可查（launchd 与 libxpc 未开源）。
+- **假设**：无源码、无直接读数，只有间接证据与文献推断。
+
+## 结论
+
+**直接答案分两部分，对应两个不同的问题。**
+
+**第一，候选集从哪来。** 两个独立事实合起来指向一条规则。事实一（**已确证**，M47 设备读数）：Music.app（pid 42029）加载自己 app 包内的 `MusicApplication.framework`，其 `MusicScriptUpdateService` 被解析到 `/private/var/containers/Bundle/Application/<UUID>/Music.app/Frameworks/.../MusicScriptUpdateService.xpc/...`，该路径不在任何系统索引里。事实二（**已确证**，同一份读数）：`/System/Library/xpc/launchd.plist` 的 1902 条索引键全部落在 `/System/Library/{,Private}Frameworks`，`/var/jb` 命中 0。由此得到的规则是：
+
+```
+候选服务 = （该进程自己 app 包内 Frameworks/**/XPCServices/*.xpc）
+         ∪（系统索引命中的 framework 的 XPCServices）
+```
+
+`/var/jb/Library/WebKitOverride` 不在两项中任何一项下。这条规则本身是**假设**（是对两个事实的归纳，不是观测到的机制），但它同时覆盖 Music.app 成功与 `/var/jb` 失败，不需要额外假设。
+
+**第二，为什么放一个二进制会让情况变坏。** 「放二进制 → 端点从 5 归零」不是候选集问题，是**同一个 framework 的候选条目被替换**：当 UI 进程里那份 `WebKit` 镜像的路径变成索引外路径时，launchd 为该 framework 记录的镜像路径也跟着变，而按旧路径算出的那四个服务名不再与新路径对应，于是这个 framework 贡献的服务集为空。空目录与只含 `Info.plist` 的目录不改变被加载的镜像，所以仍是 5。这一条是**假设**，因为它依赖「`_imagePathToInfo` 以镜像完整路径为键」这个未开源的实现细节，而且现有读数里有一处记录与它冲突（见第五节与第八节）。
+
+**并且有一条必须先写的限定。** 「launchd 只认索引内路径」这个说法本身已被否证两次：Music.app 一次，以及 `build-state.md:267` 记录的一次 `procPath` 指向 `/var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU` 的崩溃报告。后者属于已知有争议的读数（M63 第七节记录它与另一份记录不能同时成立），所以本文不把它当中枢证据，但它足以否定「索引外一律查不到」。
+
+---
+
+## 一、launchd 用来算服务候选集的信息从哪里来
+
+### 已知的字符串与结构（推断来源，非源码）
+
+M47 在设备上从 launchd 与 libxpc 的二进制里取到这些符号与字符串：`_imagePathToInfo`、`_serviceBundles`、`_infoPlist`、`_executablePath`、`"Found XPCService bundle by executable: %s"`，以及 `/System/Library/xpc/launchd.plist` 的 `SystemLibraryTreeState`。**这一整段的证据强度是假设**：libxpc 与 launchd 的源码不在 `apple-oss-distributions` 里，`libxpc` 仓库 404，`launchd` 仓库只有 `support/launchproxy.c`（`WebKitPlayground/docs/dopamine-basebin-webkit-override.md:712` 已记录这一点）。字符串能证明这些名字存在于二进制里，不能证明它们的语义。
+
+按命名推断各自角色，标为假设：
+
+| 符号 | 推断的角色 | 强度 |
+| --- | --- | --- |
+| `_imagePathToInfo` | 一张「镜像路径 → 该镜像对应 framework 的服务条」的映射。这是「以完整路径为键」这个说法的唯一依据 | 假设 |
+| `_serviceBundles` | 某个 framework 目录下 `XPCServices/*.xpc` 的清单 | 假设 |
+| `_infoPlist` | 某个 `.xpc` 的 `Info.plist` 里 `XPCService` 字典的解析结果 | 假设 |
+| `_executablePath` | 一个服务对应到具体可执行文件路径，是 spawn 时 `procPath` 的来源 | 假设 |
+| `"Found XPCService bundle by executable: %s"` | 一条**反向**查找：拿已加载的可执行文件路径反查它所在的 bundle，再取该 bundle 的 `XPCServices` | 假设 |
+
+`Found XPCService bundle by executable: %s` 这条反向查找是唯一能解释「按已加载镜像算候选集」的机制。它是否在每次查服务名时执行、还是只在镜像加载时执行一次，**没有源码可查，也没有设备读数区分**。这是本文最核心的未决点之一。
+
+### 一个被忽略的公开渠道：`_CFBundleSetupXPCBootstrap`
+
+UI 进程自己不注册服务名，它只把一份 bootstrap 字典交给 libxpc（`build-state.md` 与 M63 第一节的结论）。构造这份字典的调用在 16.1 与 18.3 都只有一处：
+
+```c
+// 18.3, Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:324-328
+#if !USE(EXTENSIONKIT)
+auto initializationMessage = adoptOSObject(xpc_dictionary_create(nullptr, nullptr, 0));
+_CFBundleSetupXPCBootstrap(initializationMessage.get());
+xpc_connection_set_bootstrap(m_xpcConnection.get(), initializationMessage.get());
+#endif
+```
+
+16.1 同一份文件里这一段没有条件编译（`:143-144`、`:169`）。
+
+`_CFBundleSetupXPCBootstrap` 在 CoreFoundation 的私有头里有声明（`apple-oss-distributions/CF`, `CFBundlePriv.h:259-260`，`CF_AVAILABLE(10_10, 8_0)`），但 CF 开源树只有 CFLite，**实现不在其中**（`grep -c XPCBootstrap CFBundle.c` = 0）。所以「bootstrap 字典里到底带了哪些 framework 路径」无源码可查。
+
+这一点很重要：launchd 若要从「该 pid 域加载了什么」推算候选集，最直接的通道就是这份握手时提交的 bootstrap 字典。另一条可能的通道是 launchd 在 `dlopen` 时收到 dyld 的通知（dyld 有 `dlopen_from` 一类的回调点，Dopamine 的 dyld 补丁就挂在它上面，`docs/ios16-all-18.3-xpc-endpoint-audit.md:203` 记录过在设备二进制里数到 `dlopen_from` 命中 1 次），所以「launchd 完全不知道进程 dlopen 了什么」这个说法不能成立。两条通道的区别在于时机：bootstrap 字典只在启动时提交一次，dyld 通知则随每次 `dlopen` 发生。
+
+现有读数无法区分这两条通道，但它们对本文结论的影响相同：**两个通道都只在「有镜像被加载」时才带回 framework 路径**。空目录与只含 `Info.plist` 的目录不产生新镜像，两条通道都不触发，于是仍是系统那份 `WebKit` 的条目。
+
+### 本工程把 18.3 的 `.xpc` 放到了哪里
+
+```sh
+# 18.3, Source/WebKit/Configurations/BaseXPCService.xcconfig:45-49
+SKIP_INSTALL[sdk=iphone*] = YES;
+SKIP_INSTALL[sdk=iphone*17.0*] = NO;
+SKIP_INSTALL[sdk=iphone*17.1*] = NO;
+SKIP_INSTALL[sdk=iphone*17.2*] = NO;
+SKIP_INSTALL[sdk=iphone*17.3*] = NO;
+```
+
+16.1 的同一份文件里**没有 `SKIP_INSTALL` 这一组行**（`curl ... | grep -c SKIP_INSTALL` 返回 0）。（已确证，可复现。）
+
+所以 18.3 在 iOS 上默认**不把这些 `.xpc` 装进 `WebKit.framework/XPCServices`**。本工程用 `package-webkit-device-deb.sh:329-342` 把顶层 `.xpc` 搬进 `WebKit.framework/XPCServices`，再整体复制到 `/var/jb/Library/WebKitOverride`。也就是说：18.3 的 `.xpc` 本来就没打算被 launchd 索引，是被本工程的打包步骤强行放进一个索引外目录的。**这是「索引外路径」这个现象的来源，可复现。**
+
+---
+
+## 二、Music.app 与 `/var/jb` 两处路径的结构差异
+
+逐项对比，两列的取值都来自 M47 的设备读数（已确证）。
+
+| 维度 | Music.app | `/var/jb/Library/WebKitOverride` |
+| --- | --- | --- |
+| 完整路径 | `/private/var/containers/Bundle/Application/<UUID>/Music.app/Frameworks/MusicApplication.framework/XPCServices/MusicScriptUpdateService.xpc/MusicScriptUpdateService` | `/var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU` |
+| 归属 | 该 app 自己的安装容器，容器名即该 app 的 UUID | 无归属，对任何 app 都是外来目录 |
+| 是否在 1902 条索引里 | 否 | 否 |
+| 与启动该 framework 的进程的关系 | 同属一个 app 包 | 进程的 app 包在 `/private/var/containers/...`，与此目录无路径关系 |
+| 数据卷 | `/private/var`（Data 卷） | `/var/jb`（Dopamine 的 jbroot，同一 Data 卷上的另一个挂载点） |
+| 目录属主 | 未测（设备离线） | 未测（设备离线）；`install-webkit-override.sh:231` 用 `cp -a` 复制，保留归档属主 |
+
+**「是否在索引里」这个维度两列相同，所以它不能解释差异。** 能解释差异的是「归属」这一列：前者是一个 app 自己的包，后者不是任何包的一部分。
+
+由此得到本文结论第一段给出的那条候选集规则（**假设**，见「结论」）。`/var/jb/Library/WebKitOverride` 不在两项中任何一项下，所以它的 `.xpc` 进不了候选集。这一条同时解释 Music.app 成功与 `/var/jb` 失败，不需要额外假设。
+
+### sandbox 是否参与
+
+**launchd 本身不受调用者的沙箱约束。** launchd 以 root 运行且不在应用沙箱内；限制「进程能读哪些路径」的是被启动的 helper 自己的 sandbox profile（`Source/WebKit/GPUProcess/mac/com.apple.WebKit.GPUProcess.sb.in` 等），而 `.xpc` 的定位与 spawn 由 launchd 完成，发生在 helper 的沙箱生效之前。所以「路径必须落在该进程自己的沙箱可读范围内」这一条作为**名字解析的前提不成立**（有源码支撑：沙箱 profile 由 helper 加载，不是由发起者评估）。
+
+但它在另一个环节是真的：helper 起来之后要能从 `/var/jb` 读它自己的 framework，这一步需要 `sandbox_extension_issue_file_to_process` 之类的授权，或 jbroot 让 sandbox 把 `/var/jb` 当成可读路径。这与端点解析是两个独立环节，不要混谈。
+
+**仍未测**：Music.app 的沙箱 profile 是否显式允许其容器内 `Frameworks`，还是靠容器本身的可读性。设备上读 `/var/containers/Bundle/Application/<UUID>/Music.app/*.sb` 可判，设备离线，未做。
+
+---
+
+## 三、`_CodeSignature` 缺失是否导致端点解析失败
+
+M63 第八节第 5 条把这一项列为「未实测排除」。本节把它拆成三种状态，并把那一项明确接上。
+
+**已由源码排除：`preferences.sb` 缺失无关。** 它是沙箱配置模板，被 `GPUProcess/mac/com.apple.WebKit.GPUProcess.sb.in:25` 等以 `#include` 引用，不参与服务清单；`WebKit.framework` 的 `Source/WebKit/Info.plist` 里没有 `XPCService` 键（16.1 与 18.3 两版 `grep -c XPCService` 都是 0）。
+
+**已由设备读数排除：二进制内嵌签名的完整性。** `build-state.md:338` 记录系统原位置与复制件的 `LC_CODE_SIGNATURE` 偏移（49536）与大小（21856）完全相同。这排除的是「复制二进制破坏内嵌签名」，不是本节的 `_CodeSignature` 目录。
+
+**仍未测：`_CodeSignature` 目录本身。** 没有任何一份记录测过「同一个 `.xpc`，带与不带 `_CodeSignature` 目录，端点数是否不同」。这是 M63 第八节第 5 条留给本文的那一项，本文接上但不闭合。
+
+关于「若校验失败会不会表现为服务名查不到」，可以给出的结构性判断（**假设**）：
+
+- 若 launchd 在**建映射时**校验签名，失败的表现会是该 bundle 不进映射，也就是「查不到服务名」而不是「签名无效」。这与观察到的 `failed lookup` 形态一致，所以这个机制不能排除。
+- 但有一条反向证据：`build-state.md:409` 记录「系统 16.1 的壳与自建的壳给出同样结果」。系统壳带 `_CodeSignature` 且签名有效，自建壳由 `ldid -S` 临时签名（`package-webkit-device-artifacts.sh:291-292`、`:356-358`；`package-webkit-device-deb.sh:362-415`）。两者结果相同，说明**签名差异不是这两个用例之间的变量**。这条证据强度受限于该读数与第五节讨论的争议读数同源。
+
+`ldid` 是 ad-hoc 签名，生成的是 `LC_CODE_SIGNATURE`，不产生 `_CodeSignature` 目录，该目录是 `codesign` 的产物。本工程的打包流程只用 `ldid`，所以 `/var/jb` 那份**结构上不可能有** `_CodeSignature` 目录（**有源码支撑**：`package-webkit-device-deb.sh` 全文 `grep codesign` 无命中）。这意味着这一项无法靠改打包脚本「补上」，只能换签名工具，或证明它无关。
+
+---
+
+## 四、`.xpc` 的 `Info.plist` 里 `XPCService` 字典有哪些键
+
+三份 plist 的路径（16.1 与 18.3 结构相同）：
+
+- `Source/WebKit/GPUProcess/EntryPoint/Cocoa/XPCService/GPUService/Info-iOS.plist`
+- `Source/WebKit/NetworkProcess/EntryPoint/Cocoa/XPCService/NetworkService/Info-iOS.plist`
+- `Source/WebKit/WebProcess/EntryPoint/Cocoa/XPCService/WebContentService/Info-iOS.plist`
+
+### 18.3 的 `XPCService` 字典全文（WebContent 那份，`:31-53`）
+
+```xml
+<key>XPCService</key>
+<dict>
+    <key>ServiceType</key>      <string>Application</string>
+    <key>RunLoopType</key>      <string>NSRunLoop</string>
+    <key>_AdditionalProperties</key>
+    <dict>
+        <key>RunningBoard</key>
+        <dict>
+            <key>Managed</key>   <true/>
+            <key>Reported</key>  <true/>
+        </dict>
+    </dict>
+    <key>_ProcessType</key>     <string>App</string>
+    <key>_MultipleInstances</key> <true/>
+    <key>_HighBitsASLR</key>    <true/>
+</dict>
+```
+
+GPU 与 Network 两份少 `_HighBitsASLR`，其余相同（`:33-53` 与 `:31-51`）。
+
+### 每个键的作用与它在名字解析里的位置
+
+| 键 | 16.1 | 18.3 | 作用 | 是否影响名字解析 |
+| --- | --- | --- | --- | --- |
+| `ServiceType` | `Application` | `Application` | 服务类型。`Application` 表示随宿主 app 生命周期管理，不是 `System` 常驻服务 | 否，两版同值 |
+| `RunLoopType` | `NSRunLoop` | `NSRunLoop` | helper 主线程的 run loop 种类，影响 `xpc_main` 的接线 | 否 |
+| `_ProcessType` | `App` | `App` | 内部：进程类别，供 RunningBoard 分类 | 否 |
+| `_MultipleInstances` | `true` | `true` | 允许同时起多个实例 | 否 |
+| `_HighBitsASLR` | `true`（仅 WebContent） | `true`（仅 WebContent） | 高地址位随机化 | 否 |
+| `_AdditionalProperties.RunningBoard.Managed/Reported` | **无** | **有**（三份都加） | 交给 RunningBoard 管理并上报进程状态 | 否 |
+| `JoinExistingSession` | 无 | 无 | （XPC 服务通用键）加入已有会话 | 两份 plist 都没用 |
+| `EnvironmentVariables` | 无 | 无 | （XPC 服务通用键）给 helper 的额外环境变量 | 两份 plist 都没用；这正是 M1 与 `ios16-xpc-bootstrap-compat.patch` 处理的那一类问题所在，但那条路径走的是 bootstrap 字典的 `ContainerEnvironmentVariables`，不是这个 plist 键 |
+
+### 16.1 与 18.3 的差异（`diff -u` 实测）
+
+三份 plist 的差异只有两类，没有键的增删会影响名字解析：
+
+1. `_AdditionalProperties.RunningBoard`（`Managed` / `Reported`）在 18.3 新增，16.1 没有。
+2. `CFBundleGetInfoString` 的版权年份从 2022 改为 2024，以及若干行首缩进从空格改制表符。
+
+**结论：`.xpc` 的 `Info.plist` 不是变量。** 与 `build-state.md:409` 的读数一致（系统壳与自建壳结果相同）。这一条属于**已确证**（可 `diff` 复现）。
+
+### 服务名从哪来
+
+服务名不来自 `XPCService` 字典，而是 `CFBundleIdentifier`。`PRODUCT_BUNDLE_IDENTIFIER` 在 18.3 的 `sdk=iphone*` 下被加上 `.Service` 后缀：
+
+```sh
+# 18.3, Configurations/NetworkService.xcconfig:27-32（另两份同形）
+PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_NAME);
+PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*] = $(PRODUCT_NAME).Service;
+PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
+...
+```
+
+而 UI 进程请求的是裸名（`ProcessLauncherCocoa.mm:205`、`:208`，16.1 `:71`、`:74`）。这一处已由 `patches/ios16-xpc-service-bundle-identifier.patch` 处理，M47 的设备读数也确认带后缀的名字查不到、裸名才查得到。**这是另一个独立的、已确证的失败模式**，与本文主问题不重叠：即使解决它，`/var/jb` 的 `.xpc` 仍不在候选集里。
+
+---
+
+## 五、`WebKit` 二进制本身为什么是触发条件
+
+这是本次 survey 最核心的问题。先固定被解释的读数，再给机制。
+
+### 被解释的读数
+
+`build-state.md:396-405`（Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` + `JavaScriptCore` 作固定基数）：
+
+| 覆盖目录内容 | 端点 | 已知缺陷 |
+| --- | --- | --- |
+| 自建 `WebCore` + `JavaScriptCore` | 5 | 无 |
+| 再加空目录 `WebKit.framework` | 5 | 无 |
+| 再加只含 `Info.plist` 的 `WebKit.framework` | 5 | 无 |
+| 再加只含 `WebKit` 二进制的 `WebKit.framework` | **0** | 本行的 **spawn 0** 与 `build-state.md:267` 的 `procPath` 记录冲突，未解（M63 第七节） |
+
+**本文只使用「端点」这一列，不使用 spawn 与 lookup 计数。** 理由有两个：`lookup` 取决于应用转圈多久（`build-state.md:383` 自己声明）；spawn 那一列有已知未解冲突。端点列是这组读数里唯一在四种配置间被同一命令、同一判据测过的量。
+
+### 机制假设（标记为假设）
+
+**候选条目按 framework 而不是按服务名叠加，所以「后加载的镜像换掉前一个」会让整个 framework 贡献为空。**
+
+推演如下：
+
+1. 空目录与只含 `Info.plist` 两种配置下，UI 进程实际加载的 `WebKit` 仍是系统那份（`image list` 里只有 `[20] /System/Library/Frameworks/WebKit.framework/WebKit`）。它的路径在索引内，四个服务名照旧算出，端点 5。
+2. 放进二进制后，dyld 从 `DYLD_FRAMEWORK_PATH` 指向的目录绑定 `WebKit`，UI 进程里出现 `[891] JB/Library/WebKitOverride/WebKit.framework/WebKit`。同一时刻系统那份 `[20]` 仍在（`build-state.md:411-421` 的镜像表证明两份共存）。
+3. 若 `_imagePathToInfo` 以镜像完整路径为键，launchd 为「`WebKit.framework` 这个 framework」记录的那条路径被改写成索引外路径；查服务名时用新路径查表未命中，于是这个 framework 贡献 0 条。
+4. 系统那份镜像的条目**不会**作为独立一条留在这里，因为两条记录对应的是同一个 framework 身份（同一 `CFBundleIdentifier`，同一 `WebKit.framework` 后缀），映射里只有一格。
+
+第 3、4 步是这条假设最薄弱的地方：它们假设映射是「一 framework 一格」并且**后来者覆盖**。这两点都没有源码或读数支撑。
+
+### 这条假设的反证与限定
+
+- **反证一：`core` 那一行。** `build-state.md:436` 记录 `core` 用例同样有两份 `WebKit` 镜像（系统 + `/var/jb/Library/Frameworks`）而端点仍有 5 个。若「出现第二份镜像就覆盖」，这一行不该是 5。可能的解释有两种，都无法用现有记录区分：(a) `core` 里那份来自 `/var/jb/Library/Frameworks`（tweak 的 `dlopen`，`build-state.md:538`），而不是 `DYLD_FRAMEWORK_PATH` 决定的绑定路径，两者在 dyld 看来是不同的加载来源，launchd 只对后者敏感；(b) `core` 的读数发生在与第四节不同的测量轮次，变量不止一个。**这一条必须在设备上分开测**，命令见第七节第 1 条。
+- **反证二：`build-state.md:267` 的 `procPath`。** 它证明 launchd 至少一次从 `/var/jb/.../XPCServices/...` 起过进程。若成立，则「索引外 ⇒ 查不到」为假，第 3 步的「查表未命中」需要改成更弱的说法（比如「未命中预计算索引，但走了现扫路径」）。该读数与另一份记录冲突，未定案。
+- **反证三：Music.app。** 已在第二节处理：它是 app 包内目录，与 `/var/jb` 不同类，不构成反证。
+
+### 因此本文能给定论的部分
+
+- **已确证**：18.3 的 `.xpc` 在 iOS 上默认不安装进 `WebKit.framework/XPCServices`（`BaseXPCService.xcconfig:45`），16.1 的安装（16.1 无此组行）；`/var/jb/Library/WebKitOverride` 不在 1902 条索引里；app 包内的 `XPCServices` 可以被解析。
+- **有源码支撑**：UI 进程只通过 `xpc_connection_create(name, nullptr)` 请求服务名，不注册（16.1 `:133`，18.3 `:308`）；launchd 与 libxpc 的行为无源码可查。
+- **假设**：本节第 3、4 步的「一个 framework 一格、后来者覆盖」。「放二进制让情况变坏」的方向可以由它解释，但它未经验证，且有 `core` 行这一处尚未解释的张力。
+
+---
+
+## 六、已排除的替代路线：ExtensionKit
+
+18.3 的 UI 进程有两条互斥的启动路径，这是源码事实（可 `git show` 复现）：
+
+```c
+// 18.3, ProcessLauncherCocoa.mm
+:305    launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
+...
+:306 #else
+:307    auto name = serviceName(m_launchOptions, m_client);
+:308    m_xpcConnection = adoptOSObject(xpc_connection_create(name, nullptr));
+:309    finishLaunchingProcess(name);
+:310 #endif
+```
+
+ExtensionKit 路径下，连接由 UI 进程自己通过 `process.makeLibXPCConnection()` 建立（`:289`），**不注册服务名、也不按名查找**。若这条路可用，本文的整个问题都不成立。它不可用，证据如下：
+
+1. `Source/WTF/wtf/PlatformUse.h:411-413`（18.3）：`USE_EXTENSIONKIT` 要求 `__IPHONE_OS_VERSION_MAX_ALLOWED >= 170400`（**SDK** 版本门槛）。16.1 的同一份文件里根本没有 `USE_EXTENSIONKIT` 这个宏名，全文也没有任何 `__IPHONE_OS_VERSION_MAX_ALLOWED` 引用（`curl ... | grep -c` 两次都返回 0，该文件 363 行）。→ 16.1 的 WebKit 源码里不存在 ExtensionKit 分支，无论用哪个 SDK 编译都走 XPC 路径。**已确证。**
+2. `PlatformUse.h:419-421`：`USE_LEGACY_EXTENSIONKIT_SPI` 的条件含 `PLATFORM(IOS_SIMULATOR)`，**真机永不成立**。**已确证。**
+3. `UIProcess/Launcher/cocoa/ExtensionProcess.h:46-50`：只有 `USE_LEGACY_EXTENSIONKIT_SPI` 为真时，`ExtensionProcessVariant` 才包含 `_SEExtensionProcess`；否则只含 `BEWebContentProcess` / `BENetworkingProcess` / `BERenderingProcess`。这三者全部来自 `<BrowserEngineKit/BrowserEngineKit.h>`（`ExtensionProcess.mm:33`，在 `#if USE(EXTENSIONKIT)` 内无条件 import）。**已确证（源码）。**
+4. ExtensionKit 扩展的安装位置是 `/System/Library/ExtensionKit/Extensions`，并且只对 `sdk=iphone*17.4*` 单独设了路径：`Configurations/BaseExtension.xcconfig:29-31`（`INSTALL_PATH = $(INSTALL_PATH_PREFIX)/System/Library/ExtensionKit/Extensions`，`:31` 是 `sdk=iphone*17.4*` 那一行），配合 `:32-36` 的 `SKIP_INSTALL = NO` 与各平台 `YES`。这条把「ExtensionKit 路线的引入版本是 iOS 17.4」从外部知识变成源码事实。**已确证。**
+
+所以：**在 iOS 16.1 真机上，ExtensionKit 启动路径既不能被编译出来，也不能被运行。** 第 1 条否掉编译期（16.1 的源码里没有这条分支），第 3、4 条否掉运行期（需要 iOS 17.4 才有的 BrowserEngineKit 与 ExtensionKit 扩展安装位置）。没有绕开 launchd 名字解析的技术手段，(A)/(B) 判定是唯一的路。
+
+**仍未测**：16.1 设备上是否真的没有 BrowserEngineKit 与 `ExtensionKit.framework`。设备离线，未验证。但即使有，第 3 条也说明 16.1 的 Safari 进程里不可能有调用它们的代码，因为 16.1 的 `WebKit` 编译时 `USE_EXTENSIONKIT` 为假。
+
+---
+
+## 七、设备在线时可以验证这三条
+
+设备离线（`No route to host`），以下三条都未执行。命令只用设备上实际存在的工具：`ps`、`launchctl`、`lldb`、`killall`、`uiopen`、`ls`、`grep`、`wc`、`tail`、`sed`、`awk`（设备上没有 `plutil`、`strings`、`pgrep`、`lsappinfo`、`otool`、`notifyutil`、`/usr/bin/log`）。`sed` 与 `awk` 只用于 `launchctl print` 的输出切片和取 PID，不用于读 plist——设备没有 `plutil`，所以第 3 条用 `ls -la` 判目录存在性，不解析 `Info.plist` 内容。
+
+截图与读数请连同当时覆盖目录的 `ls` 一起留存，否则无法归档归因。
+
+### 第 1 条：UI 进程里被 launchd 看到的 `WebKit` 镜像路径是哪一条
+
+这一条直接检验第五节的假设。判据是「同一覆盖内容下，`image list` 里有几份 `WebKit`，端点是几」。
+
+```sh
+APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
+echo "PID=$APP"
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+lldb -b -o "process attach --pid $APP" -o "image list -o -f" -o detach -o quit 2>/dev/null \
+  | grep -E "WebKit\.framework/WebKit$"
+```
+
+执行顺序：先在无覆盖目录时取一次，再在「`WebCore` + `JavaScriptCore` + 只含 `WebKit` 二进制」时取一次（每次先 `killall -9 Chrome`，等 4 秒，再 `uiopen https://example.com`）。
+
+预期读数与判读：
+
+- **基线（无覆盖目录）**：端点 8，`image list` 里只有一条 `/System/Library/Frameworks/WebKit.framework/WebKit`。
+- **覆盖目录含二进制**：若端点 0，且 `image list` 里有两条（`/System/...` 与 `/var/jb/...`），则「两份共存」本身不解释归零，需要看第 2 条。
+- **关键分叉**：若端点 0 而 `image list` 里**只有 `/var/jb` 那一条**，说明 dyld 完全替换了镜像，第五节的「覆盖」假设就不必要，直接是「唯一镜像在索引外」。
+- **若端点仍是 5 而两条镜像都在**：第五节假设被否证，需回到 `core` 行的解释上。
+
+### 第 2 条：launchd 是否曾经从 `/var/jb` 下的 `XPCServices` 起过进程
+
+这一条检验 `build-state.md:267` 那条有争议的 `procPath`。判据是新增日志里有没有 `/var/jb` 路径的 spawn 记录。
+
+```sh
+L=/var/log/com.apple.xpc.launchd/launchd.log
+B=$(wc -l < $L)
+killall -9 Chrome 2>/dev/null; sleep 4
+uiopen https://example.com
+sleep 12
+A=$(wc -l < $L)
+echo "new lines: $((A-B))"
+tail -n +$((B+1)) $L | grep -c 'Successfully spawned'
+tail -n +$((B+1)) $L | grep -c 'failed lookup'
+tail -n +$((B+1)) $L | grep -c 'WebKitOverride'
+```
+
+**必须先记行号再触发，只看差值**，否则历史记录会被算进本次结果。
+
+预期读数：
+
+- 若 `WebKitOverride` 计数 > 0 且伴随 `Successfully spawned`：launchd 确实现扫索引外目录，第五节假设的第 3 步要改成「未命中索引但有现扫」，本文结论随之调整。
+- 若 `WebKitOverride` 计数 = 0、`failed lookup` > 0：launchd 从未把 `/var/jb` 下的 `.xpc` 当成候选，与「候选集根目录不含 `/var/jb`」一致。
+- 若两列都是 0：应用没走到请求服务那一步，本次读数对归因不作数，先查崩溃报告。
+
+### 第 3 条：`_CodeSignature` 目录是否影响解析
+
+这一条闭合 M63 第八节第 5 条留给本文的那一项。判据是同一个 `.xpc` 带与不带该目录时端点是否不同。
+
+```sh
+ls -la /System/Library/Frameworks/WebKit.framework/ | grep -E '_CodeSignature|preferences.sb|XPCServices'
+ls -la /var/jb/Library/WebKitOverride/WebKit.framework/ 2>/dev/null | grep -E '_CodeSignature|preferences.sb|XPCServices'
+ls /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/ 2>/dev/null
+```
+
+预期读数：
+
+- 系统那份应有 `_CodeSignature` 与 `preferences.sb`；`/var/jb` 那份按打包流程（只用 `ldid`，不产生 `_CodeSignature` 目录）应当两项都没有。
+- 若 `_CodeSignature` 只在系统那份存在，则「它是不是原因」需要一次 A/B：把系统的 `_CodeSignature` 目录复制进 `/var/jb` 那份（内容不匹配，只测「目录存在」这一个变量），重取端点。**这台设备上不要做这一步写操作，除非另开一个允许写设备的 mission。**
+
+---
+
+## 八、本文没有回答的问题
+
+以下四项都写明为什么没有定案，以及定案需要什么。
+
+**1. `_imagePathToInfo` 的键是「镜像完整路径」还是「framework 目录」。** 无源码（launchd/libxpc 未开源），无设备读数能直接观测。第七节第 1 条只能间接区分。
+
+**2. `XPCServices` 子目录在什么时机被扫。** 两条候选通道（握手时的 bootstrap 字典、每次 `dlopen` 的 dyld 通知）都没有可查的实现：`_CFBundleSetupXPCBootstrap` 在 CF 开源树里只有声明（`CFBundlePriv.h:259-260`），`grep -c XPCBootstrap CFBundle.c` 为 0；launchd 侧未开源。所以「启动时算一次」还是「每次查名时现扫」无法从源码判定，第七节第 1、2 条合起来才能间接区分。
+
+**3. `core` 行（两份镜像 + 端点 5）与「只含二进制」行（两份镜像 + 端点 0）为什么不一致。** 这是本文假设最直接的反证，需要第七节第 1 条在同一轮测量里把「镜像条数」与「端点」同时记下来才能分开。现有记录没记 `image list` 与端点的配对，所以无法事后归因。
+
+**4. `build-state.md:267` 的 `procPath` 记录是否成立。** 它与同一文件第三轮的记录冲突（M63 第七节），两份不能同时为真。定案方式：按第七节第 2 条重测，并在触发前后各存一份 `launchd.log` 的差值段落。
+
+**不受本文结论影响的部分。** 即使第五节假设成立、端点问题解决，全 18.3 仍要过另外两层：helper 与 UI 的 IPC 消息编号差异（`WebKitPlayground/docs/ios16-ipc-layer-audit.md`），以及 16.1 `WebKit` 与 18.3 `WebCore` 同进程的 PAC 崩溃（`build-state.md:344-355`）。本文只处理「端点为什么是 0」这一层。
