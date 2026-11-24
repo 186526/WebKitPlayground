@@ -120,7 +120,7 @@ WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride;
 WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib;
 ```
 
-覆盖目录在本仓写的那条列表里排首位（整条列表在打印顺序里排第二，前一条是上游落空的 `@executable_path/..`，见第二节末），并且第二节已确认「第一命中的候选胜出」，所以只要覆盖目录里存在这五个 framework，拿到覆盖目录的进程对每个 framework 都只会解析到那一份。`install-webkit-override.sh` 的 `preflight_sources` 在缺少任何一个 framework 时直接退出，所以「覆盖目录存在」与「五个 framework 齐全」是同一件事。哪些进程拿得到覆盖目录，见下面这条结论的限定。
+覆盖目录在本仓写的那条列表里排首位（整条列表在打印顺序里排第二，前一条是上游落空的 `@executable_path/..`，见第二节「打印出来的候选里，本仓的目录不是第一条」的 `:87`），并且第二节已确认「第一命中的候选胜出」，所以只要覆盖目录里存在这五个 framework，拿到覆盖目录的进程对每个 framework 都只会解析到那一份。`install-webkit-override.sh` 的 `preflight_sources` 在缺少任何一个 framework 时直接退出，所以「覆盖目录存在」与「五个 framework 齐全」是同一件事。哪些进程拿得到覆盖目录，见下面这条结论的限定。
 
 后备项不是妥协，它保留两个覆盖目录**故意不含**的文件：`/var/jb/usr/lib/systemhook.dylib`（basebin 注入进程的库，`docs/dopamine-basebin-webkit-override.md:342` 记录设备实测里它的 `found:` 就落在这一条）与 `CydiaSubstrate`、`AltList` 这类别的包的 framework。它们不与共享缓存重名，dyld 的 `isOverridablePath` 不会把它们当成替换项，所以后备项不会把系统库换掉。
 
@@ -174,7 +174,7 @@ WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOT
 
 **`scripts/check-webkit-override.sh` 与 `scripts/uninstall-webkit-override.sh`**：两者的 `OVERRIDE_ROOT` 与 `install` 脚本同样处理，消除另外两处独立拼写。`uninstall` 删的就是这个目录，拼错时删不到任何东西，所以它必须与 `install` 建出的路径字面相同。
 
-`.xpc` 的构建参数与安装脚本之所以都要改，理由见第三节末。
+`.xpc` 的构建参数与安装脚本之所以都要改，理由见第三节「为什么不能只改一处」（`:139`–`:145`）。
 
 ---
 
@@ -210,7 +210,7 @@ grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/uninstall-webkit-override.sh | sed 's/.*=
 
 设备回网后按序执行，本文不把这些写成已验证。
 
-**1. helper 是否读到了覆盖目录。** 取 launchd 拉起、经 `xpcproxy` 的那个 helper（就是第 2 项要取 `image list` 的同一个进程）。最直接的读法是第 2 项的 `image list`：它给出的就是实际加载路径，等价于「第一个解析成功的候选」。要看候选行则需给该 helper 置 `DYLD_PRINT_SEARCHING=1`，而本仓没有记录「不重启就给 launchd 拉起的 helper 注入环境变量」的可用方法（第 3 项说明同一个缺口，并给出不需要注入的替代读法）。不要直接执行 `.xpc`：那样绕过 `xpcproxy`，进程环境里有没有那四个变量取决于启动它的 shell 是否经 systemhook 派生，测的就不再是 launchd 拉起的那个进程（理由见第 3 项）。用候选行时判据是**第一个解析成功的候选**，不是第一行打印：`found:` 必须落在 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`。这一条同时覆盖了顺序问题，不需要再核对两行候选的先后：dyld 在 `Loader.cpp:737-740` 命中后置 `stop = true`，搜索就此终止，后面的 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 那行根本不会被打印，所以「覆盖目录那行排在 deb 那行之前」在成功时不成立也无法观测，它只在失败时才有内容可看。若进程环境那条列表为空，第一行打印的会是 `.../com.apple.WebKit.WebContent.xpc/../WebKit.framework/WebKit`，这是上游 `BaseXPCService.xcconfig:70-71`（路径级数由 `:79`→`:81`→`:85` 给出，见第二节）写进去的 `@executable_path/..`，CI run `45331147658` 的 `otool -l` 输出里六个 `.xpc` 都有这一条；进程环境列表带着覆盖目录时内嵌列表不被枚举，这一行不出现。它落在 `.../XPCServices/` 下必然不存在、必然被跳过，它的出现不代表失败，它的缺席也不代表成功（见第二节末）。真正的失败有两种：`image list` 的路径不是覆盖目录那一份，或者用候选行时那里面根本没有覆盖目录那一条、`found:` 落在 `/var/jb/Library/Frameworks/WebKit.framework/WebKit`。
+**1. helper 是否读到了覆盖目录。** 取 launchd 拉起、经 `xpcproxy` 的那个 helper（就是第 2 项要取 `image list` 的同一个进程）。最直接的读法是第 2 项的 `image list`：它给出的就是实际加载路径，等价于「第一个解析成功的候选」。要看候选行则需给该 helper 置 `DYLD_PRINT_SEARCHING=1`，而本仓没有记录「不重启就给 launchd 拉起的 helper 注入环境变量」的可用方法（第 3 项说明同一个缺口，并给出不需要注入的替代读法）。不要直接执行 `.xpc`：那样绕过 `xpcproxy`，进程环境里有没有那四个变量取决于启动它的 shell 是否经 systemhook 派生，测的就不再是 launchd 拉起的那个进程（理由见第 3 项）。用候选行时判据是**第一个解析成功的候选**，不是第一行打印：`found:` 必须落在 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`。这一条同时覆盖了顺序问题，不需要再核对两行候选的先后：dyld 在 `Loader.cpp:737-740` 命中后置 `stop = true`，搜索就此终止，后面的 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 那行根本不会被打印，所以「覆盖目录那行排在 deb 那行之前」在成功时不成立也无法观测，它只在失败时才有内容可看。若进程环境那条列表为空，第一行打印的会是 `.../com.apple.WebKit.WebContent.xpc/../WebKit.framework/WebKit`，这是上游 `BaseXPCService.xcconfig:70-71`（路径级数由 `:79`→`:81`→`:85` 给出，见第二节）写进去的 `@executable_path/..`，CI run `45331147658` 的 `otool -l` 输出里六个 `.xpc` 都有这一条；进程环境列表带着覆盖目录时内嵌列表不被枚举，这一行不出现。它落在 `.../XPCServices/` 下必然不存在、必然被跳过，它的出现不代表失败，它的缺席也不代表成功（见第二节「打印出来的候选里，本仓的目录不是第一条」的 `:87`）。真正的失败有两种：`image list` 的路径不是覆盖目录那一份，或者用候选行时那里面根本没有覆盖目录那一条、`found:` 落在 `/var/jb/Library/Frameworks/WebKit.framework/WebKit`。
 
 **2. UI 进程与 helper 是否同代。** 对两者各取一次 `lldb -b -o "image list -o -f"`，比对 `WebKit.framework/WebKit` 的完整路径。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），只用 `image list`。
 
