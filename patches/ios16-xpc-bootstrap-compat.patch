@@ -171,7 +171,7 @@ index b8112f7..4152e2b 100644
      memcpy(behaviors.storage(), behaviorData, length);
  
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
-index 9c1adcf..044dcd3 100644
+index 9c1adcf..018fed1 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 @@ -124,6 +124,8 @@ static void checkFrameworkVersion(xpc_object_t message)
@@ -183,7 +183,7 @@ index 9c1adcf..044dcd3 100644
      OSObjectPtr<xpc_connection_t> retainedPeerConnection(peer);
  
      xpc_connection_set_target_queue(peer, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
-@@ -152,18 +154,44 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+@@ -152,18 +154,49 @@ void XPCServiceEventHandler(xpc_connection_t peer)
              RELEASE_LOG_ERROR(IPC, "XPCServiceEventHandler: 'message-name' is not present in the XPC dictionary");
              return;
          }
@@ -218,21 +218,26 @@ index 9c1adcf..044dcd3 100644
 +            };
 +
 +            Vector<String> newLanguages;
-+            if (xpc_object_t languages = xpc_dictionary_get_value(event, "OverrideLanguages")) {
-+                if (xpc_get_type(languages) == XPC_TYPE_ARRAY)
-+                    collectOverrideLanguages(languages, newLanguages);
-+            } else if (OSObjectPtr<xpc_object_t> bootstrapMessage = adoptOSObject(xpc_copy_bootstrap())) {
-+                if (xpc_object_t languages = xpc_dictionary_get_value(bootstrapMessage.get(), "OverrideLanguages")) {
++            auto takeOverrideLanguages = [&](xpc_object_t source) {
++                if (!source)
++                    return;
++                if (xpc_object_t languages = xpc_dictionary_get_value(source, "OverrideLanguages")) {
 +                    if (xpc_get_type(languages) == XPC_TYPE_ARRAY)
 +                        collectOverrideLanguages(languages, newLanguages);
 +                }
++            };
++
++            takeOverrideLanguages(event);
++            if (newLanguages.isEmpty()) {
++                if (OSObjectPtr<xpc_object_t> bootstrapMessage = adoptOSObject(xpc_copy_bootstrap()))
++                    takeOverrideLanguages(bootstrapMessage.get());
 +            }
 +
 +            if (!newLanguages.isEmpty()) {
                  LOG_WITH_STREAM(Language, stream << "Bootstrap message contains OverrideLanguages: " << newLanguages);
                  stageOverrideLanguagesForMainThread(WTFMove(newLanguages));
              } else
-@@ -174,11 +202,22 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+@@ -174,11 +207,21 @@ void XPCServiceEventHandler(xpc_connection_t peer)
  #endif
  
  #if PLATFORM(IOS_FAMILY)
@@ -244,23 +249,22 @@ index 9c1adcf..044dcd3 100644
 +            // An older UI process writes ContainerEnvironmentVariables onto the XPC bootstrap message
 +            // instead of into the bootstrap dictionary. Reading only the dictionary yields null, and
 +            // xpc_dictionary_apply on null kills the process with SIGKILL, so both sources are checked.
-+            if (xpc_object_t containerEnvironmentVariables = xpc_dictionary_get_value(event, "ContainerEnvironmentVariables")) {
++            auto applyContainerEnvironmentVariables = [](xpc_object_t containerEnvironmentVariables) {
++                if (!containerEnvironmentVariables)
++                    return;
 +                xpc_dictionary_apply(containerEnvironmentVariables, ^(const char *key, xpc_object_t value) {
 +                    setenv(key, xpc_string_get_string_ptr(value), 1);
 +                    return true;
 +                });
-+            } else if (OSObjectPtr<xpc_object_t> bootstrapMessage = adoptOSObject(xpc_copy_bootstrap())) {
-+                if (xpc_object_t containerEnvironmentVariables = xpc_dictionary_get_value(bootstrapMessage.get(), "ContainerEnvironmentVariables")) {
-+                    xpc_dictionary_apply(containerEnvironmentVariables, ^(const char *key, xpc_object_t value) {
-+                        setenv(key, xpc_string_get_string_ptr(value), 1);
-+                        return true;
-+                    });
-+                }
-+            }
++            };
++
++            applyContainerEnvironmentVariables(xpc_dictionary_get_value(event, "ContainerEnvironmentVariables"));
++            if (OSObjectPtr<xpc_object_t> bootstrapMessage = adoptOSObject(xpc_copy_bootstrap()))
++                applyContainerEnvironmentVariables(xpc_dictionary_get_value(bootstrapMessage.get(), "ContainerEnvironmentVariables"));
  #endif
  
              const char* serviceName = xpc_dictionary_get_string(event, "service-name");
-@@ -201,7 +240,9 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+@@ -201,7 +244,9 @@ void XPCServiceEventHandler(xpc_connection_t peer)
              }
  
              CFBundleRef webKitBundle = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.WebKit"));
@@ -271,7 +275,7 @@ index 9c1adcf..044dcd3 100644
              InitializerFunction initializerFunctionPtr = reinterpret_cast<InitializerFunction>(CFBundleGetFunctionPointerForName(webKitBundle, entryPointFunctionName));
              if (!initializerFunctionPtr) {
                  RELEASE_LOG_FAULT(IPC, "Exiting: Unable to find entry point in WebKit.framework with name: %s", [(__bridge NSString *)entryPointFunctionName UTF8String]);
-@@ -230,11 +271,14 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+@@ -230,11 +275,14 @@ void XPCServiceEventHandler(xpc_connection_t peer)
  #if PLATFORM(MAC) || PLATFORM(MACCATALYST)
                  checkFrameworkVersion(event.get());
  #endif
