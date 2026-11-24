@@ -24,7 +24,7 @@ WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOT
 
 **第二处，deb 的安装位置。** `scripts/package-webkit-device-deb.sh:168` 定义 `INSTALL_FRAMEWORKS_DIR="${PREFIX}/Library/Frameworks"`，同文件 `:155` 在 rootless 模式下把 `PREFIX` 设为 `/var/jb`。deb 把五个 framework 装进 `/var/jb/Library/Frameworks`。这一处没有改动。它与第一处的关系变了：**改动前**第一处也是这个目录，两者相同；**改动后**第一处把 `/var/jb/Library/WebKitOverride` 放在首位、本处退为该搜索列表的第二项（见第三节）。
 
-**第三处，覆盖脚本建立并复制到的目录。** `scripts/install-webkit-override.sh:66` 写成整条字面量，`:75` 到 `:77` 由它派生，`scripts/check-webkit-override.sh:27` 用同一字面量：
+**第三处，覆盖脚本建立、核对并删除的目录。** `scripts/install-webkit-override.sh:66` 写成整条字面量，`:75` 到 `:77` 由它派生；`scripts/check-webkit-override.sh:27` 与 `scripts/uninstall-webkit-override.sh:32` 用同一字面量，三个脚本都在 `JBROOT` 不是 `/var/jb` 时按同一子路径改写：
 
 ```
 OVERRIDE_ROOT=/var/jb/Library/WebKitOverride
@@ -34,7 +34,7 @@ SOURCE_LIBRARIES=${JBROOT}/usr/lib
 OVERRIDE_LIBRARIES=${OVERRIDE_ROOT}/usr/lib
 ```
 
-它从第二处那份复制出第二份副本。basebin 的搜索路径补丁 `dopamine-basebin/0001-systemhook-set-search-paths.patch:92`、`:93` 把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 指向这个目录。**改动前**这一处写作 `OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride`（当时的 `:52`），与第一处的 `/var/jb/Library/Frameworks` 不是同一个目录。
+它从第二处那份复制出第二份副本。basebin 的搜索路径补丁 `dopamine-basebin/0001-systemhook-set-search-paths.patch:92`、`:93` 把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 指向这个目录。**改动前**三个脚本都写作 `OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride`（`install` 当时的 `:52`、`check` 的 `:27`、`uninstall` 的 `:25`），与第一处的 `/var/jb/Library/Frameworks` 不是同一个目录。
 
 **改动前的矛盾，以及它现在在哪里。** 装了 deb 又跑了覆盖脚本之后，五个 framework 在磁盘上有两份副本：`/var/jb/Library/Frameworks`（deb 装的原件）与 `/var/jb/Library/WebKitOverride`（复制件）。改动前 `.xpc` 内嵌列表只有前者，basebin 给 app 进程的只有后者，所以两侧各读一份，哪一份被加载取决于第二节的判定顺序而不取决于哪一份更新。改动后 `.xpc` 内嵌列表以覆盖目录开头、deb 目录作后备，与 basebin 指向同一份，两侧读同一份。
 
@@ -78,7 +78,11 @@ for (const char* list : { list1, list2 }) {
 
 ### 打印出来的候选里，本仓的目录不是第一条
 
-`.xpc` 的 `DYLD_FRAMEWORK_PATH` 不只有本仓写的那一条。上游 `Source/WebKit/Configurations/BaseXPCService.xcconfig:68` 与 `:70-71` 都产出 `DYLD_FRAMEWORK_PATH=@executable_path/$(WK_PATH_FROM_SERVICE_EXECUTABLE_TO_FRAMEWORKS)`，同文件 `:78` 决定那个变量取几级相对路径。这一点有构建产物可查，不必只靠 xcconfig 推理：CI run `45331147658`（Xcode 16.4，改动前的成功构建）的 `otool -l` 步骤对 `com.apple.WebKit.GPU`、`.Model`、`.Networking`、`.WebContent.CaptivePortal`、`.WebContent.Development`、`.WebContent` 六个 `.xpc` 各输出同样四条加载命令，首两条就是 `DYLD_FRAMEWORK_PATH=@executable_path/..` 与 `DYLD_LIBRARY_PATH=@executable_path/..`。本仓补丁 `patches/ios18-public-sdk-xpc-main.patch:9` 的 `OTHER_LDFLAGS` 把 `$(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS)` 排在 `$(WK_ROOTLESS_FRAMEWORKS_LDFLAGS_...)` 之前，所以这一条先被写进 `LC_DYLD_ENVIRONMENT`。dyld 按加载命令顺序读 `LC_DYLD_ENVIRONMENT`（`dyld-1042.1` 的 `DyldProcessConfig.cpp:1424-1428` 的 `forDyldEnv`），展开 `@executable_path/`（`:1627-1652`），再用 `setString`（`:1598-1611`）以 `:` 追加，于是 framework 列表是 `@executable_path/..`、覆盖目录、`/var/jb/Library/Frameworks` 三段。
+`.xpc` 的 `DYLD_FRAMEWORK_PATH` 不只有本仓写的那一条。上游 `Source/WebKit/Configurations/BaseXPCService.xcconfig` 里有两条互斥的写法，按 Xcode 版本只取一条，不会同时产出。`:67` 用 `$(WK_XCODE_15_3)` 在 `:68` 的 `_XCODE_BEFORE_15_3` 后缀与一个 `_XCODE_SINCE_15_3` 后缀之间选（`Configurations/WebKitTargetConditionals.xcconfig:372-374`），后者在整棵树里没有任何定义：Xcode 低于 15.3 时 `:68` 展开，15.3 及以后 `:68` 展开成一个空变量、什么都不写进链接命令，由 `:70` 的 `LD_ENVIRONMENT` 与 `:71` 的 `LD_ENVIRONMENT_RELOCATABLE_YES` 产出同一条 `DYLD_FRAMEWORK_PATH=@executable_path/$(WK_PATH_FROM_SERVICE_EXECUTABLE_TO_FRAMEWORKS)`。CI 用的 Xcode 16.4 属于后者，所以上游在这条 `.xpc` 上只贡献了一对加载命令。
+
+那个变量的级数不在 `:78`。`:77` 先按 `DEPLOYMENT_LOCATION` 在 `:78` 与 `:79` 之间二选一，`:79` 原样引用 `:81`；`:81` 再按 `SHALLOW_BUNDLE` 与 `DEPLOYMENT_LOCATION` 选 `:82` 到 `:85` 四行之一，裸 `..` 是 `:85`（`SHALLOW_BUNDLE=YES`、`DEPLOYMENT_LOCATION=NO`）。`:78` 是 `YES` 分支，它恒在 `:81` 的结果后追加 `/..`，所以两条可能结果是 `../..` 加 `/..` 得 `../../..`（来自 `:83`），或 `../../../../../..` 加 `/..` 得七级（来自 `:82`），拿不到裸 `..`。所以这次构建走的是 `:79` → `:81` → `:85`。同一份产物里 library 那条也是裸 `..`，独立印证了同一个判定：`:74` 是 `YES` 分支，会给 `$(..._TO_FRAMEWORK)/Frameworks`，只有 `:75` 的 `NO` 分支才给出裸 `..`。产物落在 `WebKitBuild/Release-iphoneos/*.xpc` 而不在任何 DSTROOT 下，与两处读数一致。
+
+这一点有构建产物可查，不必只靠 xcconfig 推理：CI run `45331147658`（Xcode 16.4，改动前的成功构建）的 `otool -l` 步骤对 `com.apple.WebKit.GPU`、`.Model`、`.Networking`、`.WebContent.CaptivePortal`、`.WebContent.Development`、`.WebContent` 六个 `.xpc` 各输出同样四条加载命令，首两条就是 `DYLD_FRAMEWORK_PATH=@executable_path/..` 与 `DYLD_LIBRARY_PATH=@executable_path/..`。本仓补丁 `patches/ios18-public-sdk-xpc-main.patch:9` 的 `OTHER_LDFLAGS` 把 `$(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS)` 排在 `$(WK_ROOTLESS_FRAMEWORKS_LDFLAGS_...)` 之前，所以这一条先被写进 `LC_DYLD_ENVIRONMENT`。dyld 按加载命令顺序读 `LC_DYLD_ENVIRONMENT`（`dyld-1042.1` 的 `DyldProcessConfig.cpp:1424-1428` 的 `forDyldEnv`），展开 `@executable_path/`（`:1627-1652`），再用 `setString`（`:1598-1611`）以 `:` 追加，于是 framework 列表是 `@executable_path/..`、覆盖目录、`/var/jb/Library/Frameworks` 三段。
 
 `@executable_path` 是 `.xpc` 自己的主可执行文件路径，`..` 退回它所在的 `XPCServices/` 目录，那里只有 `.xpc` 包，没有 `WebKit.framework`。所以这一条候选**每次都打印，每次都落空**，dyld 按 `Loader.cpp:688-689` 跳到下一条。设备上的读数正是这个顺序：`docs/dopamine-basebin-webkit-override.md:683` 记录四条加载命令的先后，`:699-701` 记录候选行首先打印 `.../WebContent.xpc/../WebKit.framework/WebKit`。
 
@@ -136,7 +140,7 @@ WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOT
 
 `.xpc` 内嵌路径是链接期写进 Mach-O 加载命令的常量，产在 CI 的构建机上，设备侧没有工具能改它（`install_name_tool` 不在设备上，仓库里也没有使用它的地方）。`install-webkit-override.sh` 创建的是设备上的目录。只改脚本，`.xpc` 仍然写着旧目录，helper 在第二种情形下继续加载 deb 那份；只改补丁，脚本继续往一个没人读的目录复制，覆盖目录名存实亡，basebin 的搜索路径指向空目录。
 
-所以两处必须同时改，并且两处必须字面相同。
+所以补丁与脚本必须同时改，并且两边字面相同。
 
 ### 一个跨两种产物共享定义的界限
 
@@ -146,9 +150,9 @@ WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOT
 
 - 补丁里是 `WK_ROOTLESS_FRAMEWORKS_ROOT`，两条 `-dyld_env` 都引用它，字面量出现一次；
 - `install-webkit-override.sh` 里是 `OVERRIDE_ROOT`，`OVERRIDE_LIBRARIES` 由它派生，其余位置全部引用它，字面量出现一次；
-- `check-webkit-override.sh` 用同一个字面量，改动前它按 `${JBROOT}/Library/WebKitOverride` 拼接，是一处独立拼写。
+- `check-webkit-override.sh` 与 `uninstall-webkit-override.sh` 各写一次同一字面量，两个脚本改动前都按 `${JBROOT}/Library/WebKitOverride` 拼接，是两处独立拼写。
 
-因此两个文件的字面量可以直接用一条 `grep` 比对，命令与输出见第五节。
+因此四个文件的字面量可以直接用 `grep` 比对，命令与输出见第五节。
 
 ### 若 `__XPC_` 转交不成立会发生什么
 
@@ -166,22 +170,33 @@ WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOT
 
 **`scripts/install-webkit-override.sh`**：`OVERRIDE_ROOT` 改为整条字面量 `/var/jb/Library/WebKitOverride`，与补丁里那一条字面相同；`JBROOT` 不等于 `/var/jb` 时（文档里的 scratch 目录重放）按同一子路径派生，保持重放布局与设备一致；文件头的 `XPCServices` 说明与 `prune_xpc_services` 的注释改为只陈述能得到支持的理由，不再把「launchd 经 `DYLD_FRAMEWORK_PATH` 解析 helper」当作既定事实。
 
-**`scripts/check-webkit-override.sh`**：`OVERRIDE_ROOT` 与 `install` 脚本同样处理，消除第三处独立拼写。
+**`scripts/check-webkit-override.sh` 与 `scripts/uninstall-webkit-override.sh`**：两者的 `OVERRIDE_ROOT` 与 `install` 脚本同样处理，消除另外两处独立拼写。`uninstall` 删的就是这个目录，拼错时删不到任何东西，所以它必须与 `install` 建出的路径字面相同。
 
 `.xpc` 的构建参数与安装脚本之所以都要改，理由见第三节末。
 
 ---
 
-## 五、改动后如何核对两处字面量相同
+## 五、改动后如何核对四处字面量相同
 
-两条 `grep` 取出各自的字面量，`sed` 去掉变量名与行尾分号后比较：
+`grep` 取出各文件的字面量，`sed` 去掉变量名与行尾分号后比较。四处分别是补丁、`install`、`check`、`uninstall`：
 
 ```sh
 grep -o 'WK_ROOTLESS_FRAMEWORKS_ROOT = [^;]*' patches/ios18-public-sdk-xpc-main.patch | sed 's/.*= //'
 grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/install-webkit-override.sh | sed 's/.*=//'
+grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/check-webkit-override.sh | sed 's/.*=//'
+grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/uninstall-webkit-override.sh | sed 's/.*=//'
 ```
 
-两条命令都输出 `/var/jb/Library/WebKitOverride`，实际输出见第六节。
+本机在分支 tip 上的实际输出，四行完全相同：
+
+```
+/var/jb/Library/WebKitOverride
+/var/jb/Library/WebKitOverride
+/var/jb/Library/WebKitOverride
+/var/jb/Library/WebKitOverride
+```
+
+三个脚本都在 `/var/jb` 之外的 `JBROOT` 下改写成 `${JBROOT}/Library/WebKitOverride`，所以上面四条命令只在默认设备路径上成立；scratch 重放时四处同样同步改写，判定依据仍是四条输出一致。
 
 ---
 
@@ -189,7 +204,7 @@ grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/install-webkit-override.sh | sed 's/.*=//
 
 设备回网后按序执行，本文不把这些写成已验证。
 
-**1. helper 是否读到了覆盖目录。** 对 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1` 后直接运行，看 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行与随后的 `found:` 行。判据是**第一个解析成功的候选**，不是第一行打印：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 必须出现在 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 之前，并且 `found:` 落在覆盖目录那一条。第一行打印的会是 `.../com.apple.WebKit.WebContent.xpc/../WebKit.framework/WebKit`，这是上游 `BaseXPCService.xcconfig:68`、`:70-71`（路径由 `:78` 决定）写进去的 `@executable_path/..`，CI run `45331147658` 的 `otool -l` 输出里六个 `.xpc` 都有这一条。它落在 `.../XPCServices/` 下必然不存在、必然被跳过，它的出现不代表失败，它的缺席也不代表成功（见第二节末）。真正的失败有两种：候选行里根本没有覆盖目录那一条，或者 `found:` 落在 `/var/jb/Library/Frameworks/WebKit.framework/WebKit`。
+**1. helper 是否读到了覆盖目录。** 对 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1` 后直接运行，看 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行与随后的 `found:` 行。判据是**第一个解析成功的候选**，不是第一行打印：`found:` 必须落在 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`。这一条同时覆盖了顺序问题，不需要再核对两行候选的先后：dyld 在 `Loader.cpp:737-740` 命中后置 `stop = true`，搜索就此终止，后面的 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 那行根本不会被打印，所以「覆盖目录那行排在 deb 那行之前」在成功时不成立也无法观测，它只在失败时才有内容可看。第一行打印的会是 `.../com.apple.WebKit.WebContent.xpc/../WebKit.framework/WebKit`，这是上游 `BaseXPCService.xcconfig:70-71`（路径级数由 `:79`→`:81`→`:85` 给出，见第二节）写进去的 `@executable_path/..`，CI run `45331147658` 的 `otool -l` 输出里六个 `.xpc` 都有这一条。它落在 `.../XPCServices/` 下必然不存在、必然被跳过，它的出现不代表失败，它的缺席也不代表成功（见第二节末）。真正的失败有两种：候选行里根本没有覆盖目录那一条，或者 `found:` 落在 `/var/jb/Library/Frameworks/WebKit.framework/WebKit`。
 
 **2. UI 进程与 helper 是否同代。** 对两者各取一次 `lldb -b -o "image list -o -f"`，比对 `WebKit.framework/WebKit` 的完整路径。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），只用 `image list`。
 

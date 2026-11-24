@@ -408,7 +408,7 @@ mtime 判定通过（11-18 晚于 11-03），但两个新 hook 的计数都是 `
 | 路径软链与挂载 | 设备 `ls -l /usr/lib/dyld`、`mount`、`readlink /var/jb/basebin/.fakelib/dyld` |
 | `gen/dyld` 不由 `basebin.tar` 提供 | 设备 `tar -tf /var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar`，31 个条目，无 `gen/`；`gen/dyld` 由 `basebin_gen.m:149-154` 合成（149 复制、151 拼 UUID 前缀、152 `apply_dyld_patch`、153 `merge_dyldhook`、154 `resign_file`） |
 | 本机 `gen/dyld` 里没有 M39 的两个 hook | 设备 python3 读 `gen/dyld`，`_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` 计数 0、`_MACHOMERGER_HOOK__ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc` 计数 0（非 const 成员，前缀 `_ZN5`）、`_MACHOMERGER_HOOK_` 共 2 个（`dlopen_from`、`__fcntl`）；mtime 2026-11-18 10:08 vs dylib 2026-11-03 01:04 |
-| 五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 各 4 条 | 设备上 python3 解析 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices/*.xpc/*` 的 load command；`BaseXPCService.xcconfig:68,78` 提供前两条，本仓 `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES`（第 22 行，取值引用第 16 行的 `WK_ROOTLESS_FRAMEWORKS_ROOT`）提供后两条；表中读数是该变量改值之前的 |
+| 五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 各 4 条 | 设备上 python3 解析 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices/*.xpc/*` 的 load command；`BaseXPCService.xcconfig:70-71` 提供前两条（路径级数由 `:79`→`:81`→`:85` 给出，Xcode 低于 15.3 时改由 `:68` 提供，见 `docs/ios16-override-path-alignment.md` 第二节），本仓 `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES`（第 22 行，取值引用第 16 行的 `WK_ROOTLESS_FRAMEWORKS_ROOT`）提供后两条；表中读数是该变量改值之前的 |
 | `MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 为 0 条 | 设备上 python3 解析 `/Applications/MobileSafari.app/MobileSafari` 的 load command |
 | `.xpc` 的 `@executable_path/..` 两条是死的 | `dyld-1042.1` `DyldProcessConfig.cpp:2135-2141`；设备上以 `DYLD_PRINT_SEARCHING=1` 直接跑 `com.apple.WebKit.WebContent`，候选行落在 `.../WebContent.xpc/../systemhook.dylib`，`found:` 落在 `/var/jb/usr/lib/systemhook.dylib` |
 | 官方 `systemhook.dylib` 不带这四个变量 | 设备 `/usr/lib/systemhook.dylib` 拷回本机（233520 字节，arm64 + arm64e），用 `verify-systemhook-search-paths.py` 判定，每个切片 6 条失败、共 12 条，退出 1 |
@@ -572,7 +572,7 @@ dyld 侧的两处源码对应：`JustInTimeLoader.cpp:460` 设 `depOptions.canBe
 
 安装脚本需要 root（`/var/jb/Library` 是 `root:wheel 775`），检查脚本不需要：安装脚本把两层目录设成 755、7 个文件设成 644，所以 `mobile` 能读到。
 
-`/var/mobile` 下的三个脚本是修前版本，**执行前必须按本仓 `scripts/` 重新拷一遍**。设备上 2026-11-24 02:25 那份的字节数是 `check-webkit-override.sh` 5594、`install-webkit-override.sh` 7734、`uninstall-webkit-override.sh` 1790；本仓当前版本是 7566、11075、1790。旧 `install` 的 `create_layout` 没有符号链接护栏，遇上符号链接目录会写穿到 override 之外；它逐个 `mkdir -p` 且目标都加了引号，所以路径含空格时不会拆分。识别旧版还可以看校验提示文字：旧版写 `eight target files`，当前版本写 `seven`；只比字节数的那版 `unchanged` 行只有路径与字节数，当前版本的 `unchanged` 行带 `kept` 与两个 mtime。已按旧脚本建好的目录内容与当前版本相容（都是纯复制），不需要回滚重装，只换脚本即可。**只比字节数的旧版必须换掉**：新构建与旧副本同尺寸时它会打印 `unchanged`，把旧字节留在 `WebKitOverride` 里。
+`/var/mobile` 下的三个脚本是修前版本，**执行前必须按本仓 `scripts/` 重新拷一遍**。设备上 2026-11-24 02:25 那份的字节数是 `check-webkit-override.sh` 5594、`install-webkit-override.sh` 7734、`uninstall-webkit-override.sh` 1790；本仓当前版本是 7656、16648、2668。旧 `install` 的 `create_layout` 没有符号链接护栏，遇上符号链接目录会写穿到 override 之外；它逐个 `mkdir -p` 且目标都加了引号，所以路径含空格时不会拆分。识别旧版还可以看校验提示文字：旧版写 `eight target files`，当前版本写 `seven`；只比字节数的那版 `unchanged` 行只有路径与字节数，当前版本的 `unchanged` 行带 `kept` 与两个 mtime。已按旧脚本建好的目录内容与当前版本相容（都是纯复制），不需要回滚重装，只换脚本即可。**只比字节数的旧版必须换掉**：新构建与旧副本同尺寸时它会打印 `unchanged`，把旧字节留在 `WebKitOverride` 里。
 
 `install-webkit-override.sh` 的历史里有一处与上面无关的独立缺陷：`82f0fc7` 把目录列表改成未加引号的 `${directories}` 循环，`JBROOT` 含空格时会按词拆开并在 override 之外建树；`55b0c51` 已修（IFS 收窄到单换行）。设备旧副本早于 `82f0fc7`，没有这个问题。
 
@@ -686,7 +686,7 @@ DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks
 DYLD_LIBRARY_PATH=/var/jb/usr/lib
 ```
 
-这 4 条是链接期写进二进制的，不是事后注入：全仓没有 `install_name_tool -add_rpath`，也没有 `insert_dylib`。前两条来自上游 `BaseXPCService.xcconfig:68,78`，后两条来自本仓 `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES`（展开成两条 `-Wl,-dyld_env`）。**该变量现在的取值**是同文件第 22 行的 `DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib`，`WK_ROOTLESS_FRAMEWORKS_ROOT` 在同文件第 16 行等于 `/var/jb/Library/WebKitOverride`。改动的理由与新取值下的候选顺序写在 `docs/ios16-override-path-alignment.md`。
+这 4 条是链接期写进二进制的，不是事后注入：全仓没有 `install_name_tool -add_rpath`，也没有 `insert_dylib`。前两条来自上游 `BaseXPCService.xcconfig:70-71`（Xcode 低于 15.3 时改由 `:68` 提供；相对级数由 `:79`→`:81`→`:85` 给出，见 `docs/ios16-override-path-alignment.md` 第二节），后两条来自本仓 `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES`（展开成两条 `-Wl,-dyld_env`）。**该变量现在的取值**是同文件第 22 行的 `DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib`，`WK_ROOTLESS_FRAMEWORKS_ROOT` 在同文件第 16 行等于 `/var/jb/Library/WebKitOverride`。改动的理由与新取值下的候选顺序写在 `docs/ios16-override-path-alignment.md`。
 
 **前两条是死的。** `DyldProcessConfig.cpp:2135-2141` 把 `@executable_path` 相对 `mainExecutablePath` 展开。WebContent 的 `mainExecutablePath` 是
 

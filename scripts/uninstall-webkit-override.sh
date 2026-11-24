@@ -22,7 +22,22 @@ set -eu
 JBROOT=${JBROOT:-/var/jb}
 JBROOT=${JBROOT%/}
 
-OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride
+# The device path, stated whole and once, because it is the same value
+# patches/ios18-public-sdk-xpc-main.patch sets as WK_ROOTLESS_FRAMEWORKS_ROOT,
+# install-webkit-override.sh creates, and check-webkit-override.sh reports.
+# One literal per file is what makes a grep able to compare them; composing it
+# from a root plus a subpath would let the three drift while each still looks
+# right on its own. This is the script that deletes the directory, so it is the
+# one where a stale spelling would remove the wrong path or none at all.
+OVERRIDE_ROOT=/var/jb/Library/WebKitOverride
+
+# A replay against a scratch tree moves JBROOT and has to move the override with
+# it, or the run would leave the scratch copy behind and delete nothing on the
+# device. Deriving the same subpath keeps the replay layout identical to the
+# device one.
+if [ "${JBROOT}" != "/var/jb" ]; then
+    OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride
+fi
 
 case ${OVERRIDE_ROOT} in
     */Library/WebKitOverride) ;;
