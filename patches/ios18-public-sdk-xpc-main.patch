@@ -1,18 +1,29 @@
 diff --git a/Source/WebKit/Configurations/BaseXPCService.xcconfig b/Source/WebKit/Configurations/BaseXPCService.xcconfig
 --- a/Source/WebKit/Configurations/BaseXPCService.xcconfig
 +++ b/Source/WebKit/Configurations/BaseXPCService.xcconfig
-@@ -59,7 +59,10 @@ WK_NO_STATIC_INITIALIZERS_Release_NO_ = $(WK_ERROR_WHEN_LINKING_WITH_STATIC_INIT
+@@ -59,7 +59,20 @@
  WK_NO_STATIC_INITIALIZERS_Production__ = $(WK_ERROR_WHEN_LINKING_WITH_STATIC_INITIALIZERS);
  WK_NO_STATIC_INITIALIZERS_Production_NO_ = $(WK_ERROR_WHEN_LINKING_WITH_STATIC_INITIALIZERS);
  
 -OTHER_LDFLAGS = $(inherited) $(OTHER_LDFLAGS_STAGED_FRAMEWORK_PATH) $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS) $(WK_NO_STATIC_INITIALIZERS);
 +OTHER_LDFLAGS = $(inherited) $(OTHER_LDFLAGS_STAGED_FRAMEWORK_PATH) $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS) $(WK_ROOTLESS_FRAMEWORKS_LDFLAGS_$(WK_ROOTLESS_FRAMEWORKS)) $(WK_NO_STATIC_INITIALIZERS);
 +
++// The one directory the overridden images are read from. scripts/install-webkit-override.sh
++// builds this same directory and the basebin search-path hook points at it, so a helper process
++// reaches one copy of each framework whether the path arrives from the environment or from this
++// load command. dyld walks a search list in order and stops at the first candidate that resolves,
++// so WK_ROOTLESS_FRAMEWORKS_ROOT coming first is what makes the override win.
++WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride;
++
 +WK_ROOTLESS_FRAMEWORKS_LDFLAGS = $(WK_ROOTLESS_FRAMEWORKS_LDFLAGS_$(WK_ROOTLESS_FRAMEWORKS));
-+WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=/var/jb/usr/lib;
++// The trailing entries are the deb install locations. They keep resolving the jbroot files the
++// override deliberately does not carry, such as /var/jb/usr/lib/systemhook.dylib and the
++// CydiaSubstrate framework, and they are only reached when the override has no such image.
++WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib;
  
  WK_RELOCATABLE_FRAMEWORKS_LDFLAGS = $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS_$(WK_RELOCATABLE_FRAMEWORKS));
  WK_RELOCATABLE_FRAMEWORKS_LDFLAGS_ = $(WK_RELOCATABLE_FRAMEWORKS_LDFLAGS_NO);
+
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
