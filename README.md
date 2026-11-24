@@ -71,16 +71,17 @@ process starts and produces nothing, and the page stays blank instead of raising
 `patches/ios16-ipc-message-number-translation.patch` supplies the missing translation. It renumbers
 messages on the single connection a helper opens to the UI process, where the two ends are from
 different generations, and leaves same-generation connections byte for byte unchanged. The patch is
-generated against `Safari-18.3.1-iOS-18.3.2`. Every file it modifies already exists at
+generated against `Safari-18.3.1-iOS-18.3.2`. Every source file it modifies already exists at
 `Safari-18.2-iOS-18.2` and is byte-identical between the two tags, its new header is created by the
-patch in either tree, and the `WebKit.xcodeproj/project.pbxproj` hunk applies with an offset, so
-**a 18.2 tree accepts the patch too**. Such a run gets 18.3.1's numbering tables against 18.2's
-enumeration; because the tables name messages by symbol, a case naming a message 18.2 does not carry
-would fail to resolve. The 16.x, 17.x, 18.0 and 18.1 tags reject the patch and keep building without
-it. The `Apply worktree patch` step in `.github/workflows/build-webkit.yml` stops the run when the
-patch stops applying to a 18.3 ref, so a stale patch cannot pass silently, but its guard is keyed to
-18.3 alone: a 18.2 run is applied without a stop or a warning. The cross-generation combination this
-covers is 18.3 helpers under a 16.1 UI process; the patch has not been tried on any other pair.
+patch in either tree, and `WebKit.xcodeproj/project.pbxproj` differs between the tags while its hunk
+still applies with a line offset. **A 18.2 tree therefore accepts the patch too.** Such a run gets
+18.3.1's numbering tables against 18.2's enumeration; because the tables name messages by symbol, a
+case naming a message 18.2 does not carry would fail to resolve. The 16.x, 17.x, 18.0 and 18.1 tags
+reject the patch and keep building without it. The `Apply worktree patch` step in
+`.github/workflows/build-webkit.yml` stops the run when the patch stops applying to a 18.3 ref, so a
+stale patch cannot pass silently, but its guard is keyed to 18.3 alone: a 18.2 run is applied without
+a stop or a warning. The cross-generation combination this covers is 18.3 helpers under a 16.1 UI
+process; the patch has not been tried on any other pair.
 
 The message numbering difference itself is measured in `docs/ios16-ipc-layer-audit.md`.
 

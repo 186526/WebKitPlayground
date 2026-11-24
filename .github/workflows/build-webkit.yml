@@ -463,9 +463,10 @@ jobs:
           fi
           # patches/ios16-ipc-message-number-translation.patch renumbers CoreIPC messages on the one
           # connection a helper opens to the UI process. It was generated against
-          # Safari-18.3.1-iOS-18.3.2, and its hunks match that generation's Encoder.cpp and no
-          # other, so the loop's own git apply --check is what decides whether a ref takes it: the
-          # 16.x tags, 17.x and 18.0 through 18.2 do not, and the run continues without it there.
+          # Safari-18.3.1-iOS-18.3.2; 18.2 happens to accept it as well, because every source file it
+          # touches is byte-identical between those two tags, so a git apply --check is not by itself
+          # a statement that the ref is a target generation. It is still the loop's gate: the 16.x
+          # tags, 17.x, 18.0 and 18.1 do not take it, and the run continues without it there.
           # This flag answers the one question the loop cannot. When the patch stops applying to a
           # 18.3 ref, that is a stale patch rather than a ref that never carried it, so the mismatch
           # has to stop the run instead of being skipped behind a green Apply worktree patch step.
@@ -602,11 +603,12 @@ jobs:
                   # patch, and the git apply error says which file refused it.
                   #
                   # The set that reaches this branch is not the set that skips the patch.
-                  # Safari-18.2-iOS-18.2 has every file the patch modifies byte-identical to 18.3.1,
-                  # so its git apply --check succeeds and the loop applies the patch without ever
-                  # entering this case, taking 18.3.1's tables on a 18.2 enumeration. The probe above
-                  # is keyed to 18.3 alone, so that run is not stopped and gets no warning; 18.2 is
-                  # not a target this patch was generated against.
+                  # Safari-18.2-iOS-18.2 has every source file the patch modifies byte-identical to
+                  # 18.3.1, and its project-file hunk applies with an offset, so its git apply --check
+                  # succeeds and the loop applies the patch without ever entering this case, taking
+                  # 18.3.1's tables on a 18.2 enumeration. The probe above is keyed to 18.3 alone, so
+                  # that run is not stopped and gets no warning; 18.2 is not a target this patch was
+                  # generated against.
                   if grep -qF 'translateOutgoingMessageName' \
                       "WebKit/Source/WebKit/Platform/IPC/Encoder.cpp" 2>/dev/null; then
                     echo "already carries the message number translation: $p"
