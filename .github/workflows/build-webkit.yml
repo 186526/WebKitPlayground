@@ -602,11 +602,11 @@ jobs:
                   # patch, and the git apply error says which file refused it.
                   #
                   # The set that reaches this branch is not the set that skips the patch.
-                  # Safari-18.2-iOS-18.2 carries the same nine patched files as 18.3.1, so its
-                  # git apply --check succeeds and the loop applies the patch without ever entering
-                  # the case below, taking 18.3.1's tables on a 18.2 enumeration. The probe above is
-                  # keyed to 18.3 alone, so that run is not stopped and gets no warning; 18.2 is not
-                  # a target this patch was generated against.
+                  # Safari-18.2-iOS-18.2 has every file the patch modifies byte-identical to 18.3.1,
+                  # so its git apply --check succeeds and the loop applies the patch without ever
+                  # entering this case, taking 18.3.1's tables on a 18.2 enumeration. The probe above
+                  # is keyed to 18.3 alone, so that run is not stopped and gets no warning; 18.2 is
+                  # not a target this patch was generated against.
                   if grep -qF 'translateOutgoingMessageName' \
                       "WebKit/Source/WebKit/Platform/IPC/Encoder.cpp" 2>/dev/null; then
                     echo "already carries the message number translation: $p"
