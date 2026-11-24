@@ -8,7 +8,7 @@ on:
         required: true
         default: 'releases/Apple/Safari-18.3.1-iOS-18.3.2'
       apply_patch:
-        description: 'Apply the worktree patch (only known-good for 16.1-16.5 tags)'
+        description: 'Apply the worktree patches (required for the 18.3 ref; 16.x tags need their own worktree dumps)'
         required: true
         default: 'false'
       xcode:
@@ -268,6 +268,41 @@ jobs:
           set -euo pipefail
           cp -R scripts WebKit/
 
+      - name: Decide whether the ref needs the message number translation
+        env:
+          WEBKIT_REF: ${{ inputs.webkit_ref }}
+        run: |
+          set -euo pipefail
+          # Single source of truth for the ref gate on
+          # patches/ios16-ipc-message-number-translation.patch. Two steps need this answer: Apply
+          # worktree patch treats a patch that stops applying as stale on a ref the gate names, and
+          # Refuse a build that ships 18.3 without the message number translation stops the run
+          # before the build when the gate names the ref and apply_patch is false. Both read the
+          # value written here, so the awk program has exactly one copy and changing the gate cannot
+          # leave one caller behind.
+          #
+          # The answer is exported through GITHUB_ENV rather than a step output because the Apply
+          # step is skipped entirely when apply_patch is false, and a skipped step publishes no
+          # output. Those are exactly the runs the ungated assertion exists to catch.
+          ref_name="${WEBKIT_REF##*/}"
+          ref_needs_message_name_translation=0
+          # The patch was generated against Safari-18.3.1-iOS-18.3.2 and renumbers CoreIPC messages
+          # on the one connection a helper opens to the UI process. 18.2 accepts it as well because
+          # every source file it touches is byte-identical between those tags, so git apply --check
+          # is not by itself a statement that the ref is a target generation. The 16.x tags, 17.x,
+          # 18.0 and 18.1 do not take it.
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2; minor = $3 }
+              END {
+                  if (major == "" || minor == "") exit 1
+                  exit !((major + 0) == 18 && (minor + 0) == 3)
+              }' <<< "${ref_name}"; then
+            ref_needs_message_name_translation=1
+          fi
+          echo "REF_NEEDS_MESSAGE_NAME_TRANSLATION=${ref_needs_message_name_translation}" >> "$GITHUB_ENV"
+          echo "the message number translation patch is required in ${WEBKIT_REF}: ${ref_needs_message_name_translation}"
+
       - name: Apply worktree patch
         if: inputs.apply_patch == 'true'
         env:
@@ -349,7 +384,9 @@ jobs:
           ref_sends_ios17_trait_api=0
           ref_writes_proxy_configurations=0
           ref_needs_xpc_bootstrap_compat=0
-          ref_needs_message_name_translation=0
+          # Decided once by the step above and read back from the job environment, so the ref gate on
+          # patches/ios16-ipc-message-number-translation.patch exists in one place only.
+          ref_needs_message_name_translation="${REF_NEEDS_MESSAGE_NAME_TRANSLATION:-0}"
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -461,24 +498,10 @@ jobs:
                 "WebKit/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm" 2>/dev/null; then
             ref_needs_xpc_bootstrap_compat=1
           fi
-          # patches/ios16-ipc-message-number-translation.patch renumbers CoreIPC messages on the one
-          # connection a helper opens to the UI process. It was generated against
-          # Safari-18.3.1-iOS-18.3.2; 18.2 happens to accept it as well, because every source file it
-          # touches is byte-identical between those two tags, so a git apply --check is not by itself
-          # a statement that the ref is a target generation. It is still the loop's gate: the 16.x
-          # tags, 17.x, 18.0 and 18.1 do not take it, and the run continues without it there.
-          # This flag answers the one question the loop cannot. When the patch stops applying to a
-          # 18.3 ref, that is a stale patch rather than a ref that never carried it, so the mismatch
-          # has to stop the run instead of being skipped behind a green Apply worktree patch step.
-          if awk -F'[-.]' '
-              $1 != "Safari" { exit 1 }
-              { major = $2; minor = $3 }
-              END {
-                  if (major == "" || minor == "") exit 1
-                  exit !((major + 0) == 18 && (minor + 0) == 3)
-              }' <<< "${ref_name}"; then
-            ref_needs_message_name_translation=1
-          fi
+          # patches/ios16-ipc-message-number-translation.patch is keyed by the job environment, and
+          # the full explanation of that gate lives with the decision in the step above. Here the
+          # value is only consumed: the loop has to stop when the patch stops applying to a ref the
+          # gate names, because that is a stale patch rather than a ref that never carried it.
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
@@ -606,9 +629,10 @@ jobs:
                   # Safari-18.2-iOS-18.2 has every source file the patch modifies byte-identical to
                   # 18.3.1, and its project-file hunk applies with an offset, so its git apply --check
                   # succeeds and the loop applies the patch without ever entering this case, taking
-                  # 18.3.1's tables on a 18.2 enumeration. The probe above is keyed to 18.3 alone, so
-                  # that run is not stopped and gets no warning; 18.2 is not a target this patch was
-                  # generated against.
+                  # 18.3.1's tables on a 18.2 enumeration. The gate decided by
+                  # "Decide whether the ref needs the message number translation" is keyed to 18.3
+                  # alone, so that run is not stopped and gets no warning; 18.2 is not a target this
+                  # patch was generated against.
                   if grep -qF 'translateOutgoingMessageName' \
                       "WebKit/Source/WebKit/Platform/IPC/Encoder.cpp" 2>/dev/null; then
                     echo "already carries the message number translation: $p"
@@ -691,6 +715,48 @@ jobs:
             exit 0
           fi
           echo "${header} has no HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE block, so this ref needs no patch"
+
+      - name: Refuse a build that ships 18.3 without the message number translation
+        env:
+          APPLY_PATCH: ${{ inputs.apply_patch }}
+          WEBKIT_REF: ${{ inputs.webkit_ref }}
+        run: |
+          set -euo pipefail
+          # patches/ios16-ipc-message-number-translation.patch is only applied when apply_patch is
+          # true, and both checks that follow the patch into the tree live inside Apply worktree
+          # patch, which that same flag skips entirely: the "REQUIRED PATCH DOES NOT APPLY" branch
+          # never runs, and neither does the "PATCH APPLIED BUT HAS NO EFFECT" grep. An
+          # apply_patch=false run on a 18.3 ref therefore stays green, builds for about 5 hours, and
+          # uploads a deb with no translation layer. On 16.1 that deb starts its helpers and leaves
+          # the page blank: the handshake goes out under a number the 16.1 UI process does not know
+          # as InitializeConnection, so m_isConnected stays false and nothing is ever sent to the
+          # helper. This step is the unconditional check for that combination.
+          #
+          # The ref gate is not restated here. It is computed once by "Decide whether the ref needs
+          # the message number translation", which writes REF_NEEDS_MESSAGE_NAME_TRANSLATION to the
+          # job environment, and Apply worktree patch consumes the same value. A second awk program
+          # here would be a second place to keep in step with the one in that decision step.
+          #
+          # apply_patch=false on any other ref is the designed outcome and passes: the 16.x tags,
+          # 17.x, 18.0 and 18.1 reject this patch, and 18.2 is not a generation these tables were
+          # generated for. Within that set 18.2 is the one tree that accepts it, and apply_patch=true
+          # there is what fails at compile time in Build, as its own README paragraph describes.
+          if [ -z "${REF_NEEDS_MESSAGE_NAME_TRANSLATION:-}" ]; then
+            echo "::error::REF_NEEDS_MESSAGE_NAME_TRANSLATION is unset, so the message number translation check cannot decide. The decision step above must run before this one."
+            exit 1
+          fi
+          if [ "$REF_NEEDS_MESSAGE_NAME_TRANSLATION" != 1 ]; then
+            echo "${WEBKIT_REF} does not need the message number translation, so apply_patch=${APPLY_PATCH} is accepted here"
+            exit 0
+          fi
+          if [ "$APPLY_PATCH" = "true" ]; then
+            echo "apply_patch is true, so the message number translation patch is in place for ${WEBKIT_REF}"
+            exit 0
+          fi
+          echo "::error::apply_patch is false but ${WEBKIT_REF} is a 18.3 ref, which requires patches/ios16-ipc-message-number-translation.patch."
+          echo "::error::This run would produce a deb with no message number translation layer. Installed under a 16.1 UI process, a helper's connection handshake carries a number that process does not know as InitializeConnection, so m_isConnected never becomes true and the page renders blank instead of reporting an error."
+          echo "::error::Set apply_patch to true."
+          exit 1
 
       - name: Check the PAL Swift include paths expand at the shipped deployment target
         if: inputs.apply_patch == 'true'
