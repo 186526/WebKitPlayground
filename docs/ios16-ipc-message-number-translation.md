@@ -529,7 +529,7 @@ void setMessageName(MessageName name) { m_messageName = name; }
 | `WebProcessProxy_WaitForSharedPreferencesForWebProcessToSync` | 偏好变更后等待同步 |
 | `WebProcessProxy_WrapCryptoKey`、`UnwrapCryptoKey` | WebCrypto 导入与导出密钥 |
 
-表中五条消息都不带 `#if`，任何 iOS 配置都会编入判据，且在 16.1 的枚举里都不存在。它们都属于上面「编号大于 3139」的那一组，所以这个结论在平坦下标与 iOS 编译值两种读数下都成立；具体编号由编译器赋值，本机没有真实 iOS 构建产物，故不在此列出（§7）。
+表中五条消息都不带 `#if`，任何 iOS 配置都会编入判据，且在 16.1 的枚举里都不存在。它们都属于上面「编号大于 3139」的那一组：把每个可能被条件剔除的条目都当作剔除，得到的是任何 iOS 配置都不可能低于的下界，五条中最小的那条在该下界下是 3350；把全部 703 个 `#if` 当作满足时，最小的那条是 3992。两种读数都大于 3139，任何实际配置的取值只会落在两者之间。具体编号由编译器按实际配置赋值，本机没有真实 iOS 构建产物，故不在此列出（§7）。
 
 **接收方向**：16.1 发来、本构建映射不到的消息共 747 条，是 16.1 独有的 333 条加上 18.3 侧带条件的 414 条共享消息。丢弃前先按 16.1 的同步边界（`firstSynchronousOldMessageNumber`，2899）分类：异步消息只记日志；同步消息回一个空 `SyncMessageReply`，让对端不必等满超时。
 
