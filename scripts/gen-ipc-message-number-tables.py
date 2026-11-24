@@ -81,8 +81,12 @@ answer `MessageName::Invalid`, and the caller *must* consult the predicates firs
   messages only 16.1 has, the 1279 only 18.3 has, and the shared messages whose
   18.3 enumerator a build may compile out. On the outgoing side the caller skips
   the send; on the incoming side it drops the message before any dispatch
-  decision. Neither is an error: a peer from the other generation provably cannot
-  handle a message it does not have, and the older process has no handler for it.
+  decision. The peer provably cannot handle a message it does not have, but
+  skipping costs the sender something: its 18.3 number exceeds the older
+  enumeration's `Last`, so the older process would reject it while decoding and
+  the caller would wait out `sendSync`'s default infinite timeout. A synchronous
+  skip therefore reaches `didFailToSendSyncMessage`, which ends an armed WebContent
+  process instead of blocking it. That is the trade, not an absence of cost.
 * Anything else reaching `default` means these tables disagree with the
   enumeration they were generated from. That is a defect, and the caller should
   turn it into an invalid-message report so it surfaces during development rather
