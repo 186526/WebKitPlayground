@@ -35,7 +35,8 @@
 #
 # Device requirements: a login shell, python3, launchctl, killall, uiopen, ps,
 # and root through sudo. python3 is required because an .ips file is one JSON
-# header line followed by a JSON body, and the device has neither plutil nor jq.
+# header line followed by a JSON body, and AGENTS.md's device tool list has no
+# plist reader to split them.
 #
 # Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when launchctl print
 # gui/501 is empty, 2 for a usage or setup error.
@@ -53,19 +54,6 @@ INSTALL_SCRIPT=/var/mobile/install-webkit-override.sh
 UNINSTALL_SCRIPT=/var/mobile/uninstall-webkit-override.sh
 DEVICE_BASH=/var/jb/usr/bin/bash
 CRASH_DIR=/var/mobile/Library/Logs/CrashReporter
-
-# The four services this experiment counts. Each is counted as a whole token, so
-# com.apple.WebKit.WebContent cannot absorb com.apple.WebKit.WebContent.CaptivePortal.
-WEBKIT_SERVICES='com.apple.WebKit.WebContent
-com.apple.WebKit.GPU
-com.apple.WebKit.Networking
-com.apple.WebKit.WebContent.CaptivePortal'
-
-# Section 4 (B) names the two services that survive when the WebKit endpoints
-# are gone: BrailleTranslation and MTLCompilerService. They are counted
-# separately so a B reading can be checked against that description.
-SURVIVING_SERVICES='com.apple.accessibility.BrailleTranslation.BrailleTranslationService
-com.apple.MTLCompilerService'
 
 # Safari is launched with a URL, because a bare exec of MobileSafari produces a
 # UI process that never asks for a page, and a process that never asks for a
@@ -180,9 +168,13 @@ is empty, 2 for a usage or setup error.
 USAGE
 }
 
+# LOG_FILE is empty until prepare_log runs, and a usage error is reported before
+# that, so the log copy happens only once there is a log to append to.
 die() {
     printf 'Error: %s\n' "$1" >&2
-    printf 'Error: %s\n' "$1" >>"${LOG_FILE}"
+    if [ -n "${LOG_FILE}" ]; then
+        printf 'Error: %s\n' "$1" >>"${LOG_FILE}"
+    fi
     exit 2
 }
 
@@ -300,7 +292,7 @@ def describe(path):
             handle.readline()
             document = json.loads(handle.read().decode("utf-8", "replace"))
     except (OSError, ValueError) as error:
-        return "IPS %s unreadable: %s" % (name, error)
+        return "IPS %s unreadable: %s" % (name, error), False
     termination = document.get("termination") or {}
     exception = document.get("exception") or {}
     images = [
@@ -316,11 +308,23 @@ def describe(path):
         len(images),
         images[0] if images else "-",
         document.get("procPath") or "-",
-    )
+    ), True
 
 
+# Every report is printed, including the unreadable ones, so the log keeps the
+# names. The exit status is what carries the verdict: any unreadable report in
+# this step is an exclusion that could not be established, and the caller turns
+# a nonzero status into INVALID. Writing "unreadable" and exiting 0 would let the
+# step claim it had ruled crashes out while the file said otherwise.
+unreadable = 0
 for report_path in sys.argv[1:]:
-    print(describe(report_path))
+    line, parsed = describe(report_path)
+    print(line)
+    if not parsed:
+        unreadable += 1
+if unreadable:
+    sys.stderr.write("IPS %d report(s) in this step could not be read\n" % unreadable)
+    sys.exit(3)
 PYTHON
 }
 
@@ -336,21 +340,39 @@ crash_invalidates() {
     esac
 }
 
+# Every new report in the step is printed and then judged, and the two failures
+# are ranked. The parser exits 3 as soon as one report's body could not be read
+# (CrashReporter may still be writing it when the snapshot taken seconds after the
+# crash lists it), but it prints the reports it did read first, so a DYLD or
+# PAC_EXCEPTION report in that output is a stronger fact than a later unreadable
+# file: the crash happened, whether or not everything else could be read.
+#
+# Returns 0 when every report was read and none invalidates the step, 1 when one
+# did, 2 when the exclusion could not be established.
 describe_new_reports() {
     local new_file=$1
     local arguments=''
-    local line
+    local line invalidating=no
     [ -s "${new_file}" ] || return 0
     while IFS= read -r line; do
         arguments="${arguments} ${line}"
     done <"${new_file}"
     # shellcheck disable=SC2086 # intentional word splitting over known paths
     remote_python ${arguments}
-    if [ "${REMOTE_RC}" -ne 0 ]; then
-        emit "  Error: could not parse the new reports (exit ${REMOTE_RC}): ${REMOTE_OUTPUT}"
+    emit "${REMOTE_OUTPUT}"
+    while IFS= read -r line; do
+        crash_invalidates "${line}" && invalidating=yes
+    done <<EOF
+${REMOTE_OUTPUT}
+EOF
+    if [ "${invalidating}" = yes ]; then
         return 1
     fi
-    emit "${REMOTE_OUTPUT}"
+    if [ "${REMOTE_RC}" -ne 0 ]; then
+        emit "  Error: at least one of this step's new reports could not be read (exit ${REMOTE_RC}), so a DYLD or PAC_EXCEPTION crash cannot be ruled out."
+        return 2
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -380,36 +402,49 @@ record_step() {
 
 # Records the step exactly once, on every path out of a step body including the
 # failure paths, so no step can be missing from the summary.
+#
+# The fourth column is one of three values and both readers match all three by
+# name, so a step the log prints as INVALID cannot be dropped from the summary by
+# a matcher that happens to know only two of them:
+#   no         every new report was read and none of them invalidates the step
+#   crash      a DYLD or PAC_EXCEPTION report appeared during the step
+#   unreadable the crash exclusion could not be established: a report's body could
+#              not be read, or the CrashReporter listing failed
 step_end() {
-    local count new_count invalid=no
+    local count new_count invalid=no parsed=clean parsed_rc=0
     local new_file="${WORK_DIR}/crashes-${STEP_NUMBER}-new"
     if count=$(crash_snapshot "${WORK_DIR}/crashes-${STEP_NUMBER}-after"); then
         new_count=$(crash_new_list "${WORK_DIR}/crashes-${STEP_NUMBER}-before" \
             "${WORK_DIR}/crashes-${STEP_NUMBER}-after" "${new_file}")
         emit "  crash reports after this step: ${count}; new: ${new_count}"
     else
+        # Without the "after" list there is no diff, so the step cannot show that
+        # no DYLD or PAC_EXCEPTION report appeared. That is the same state as an
+        # unreadable report, not a clean step.
         new_count=unavailable
+        parsed=unreadable
         : >"${new_file}"
-        emit "  crash reports after this step: unavailable (exit ${REMOTE_RC})"
+        emit "  crash reports after this step: unavailable (exit ${REMOTE_RC}), so this step's crash exclusion is not established."
     fi
     if [ -s "${new_file}" ]; then
-        if describe_new_reports "${new_file}"; then
-            local line
-            while IFS= read -r line; do
-                crash_invalidates "${line}" && invalid=yes
-            done <<EOF
-${REMOTE_OUTPUT}
-EOF
-        else
-            invalid=unparsed
+        describe_new_reports "${new_file}"
+        parsed_rc=$?
+        if [ "${parsed_rc}" -eq 1 ]; then
+            parsed=crash
+        elif [ "${parsed_rc}" -eq 2 ]; then
+            parsed=unreadable
         fi
     fi
+    case ${parsed} in
+        crash) invalid=crash ;;
+        unreadable) invalid=unreadable ;;
+    esac
     case ${invalid} in
-        yes)
+        crash)
             emit "  step ${STEP_NUMBER} is INVALID: a DYLD or PAC_EXCEPTION crash appeared during this step, so its reading cannot be attributed to how launchd resolved the path."
             ;;
-        unparsed)
-            emit "  step ${STEP_NUMBER} is INVALID: its new crash reports could not be parsed, so they cannot be ruled out as the cause."
+        unreadable)
+            emit "  step ${STEP_NUMBER} is INVALID: its crash exclusion is not established (a new report could not be read, or the CrashReporter listing failed), so a DYLD or PAC_EXCEPTION crash cannot be ruled out."
             ;;
     esac
     record_step "${STEP_NUMBER}" "${STEP_TITLE}" "${new_count}" "${invalid}"
@@ -1035,12 +1070,29 @@ step_uninstall() {
 # Step 7: summary and verdict
 # ---------------------------------------------------------------------------
 
+# Both selectors match "crash" and "unreadable", the two values step_end writes
+# for a step whose crash exclusion did not hold. "no" is the only clean value, and
+# it is listed explicitly so a fourth value can never be silently ignored: a step
+# the log prints as INVALID must reach both the summary and the verdict gate.
 invalid_steps() {
-    awk -F'\t' '$4 == "yes" { printf "%s%s", separator, $1; separator = "," }' "${STEPS_FILE}"
+    awk -F'\t' '$4 == "crash" || $4 == "unreadable" { printf "%s%s", separator, $1; separator = "," }' "${STEPS_FILE}"
 }
 
+# Answers crash, unestablished or none. The two failures are kept apart because
+# they mean different things to a reader of the log: crash says a DYLD or
+# PAC_EXCEPTION report really appeared, unestablished says the step could not
+# show that none did. Collapsing them would put "a crash appeared" into the
+# PROBE_REASON of a run that may have had no crash at all.
 invalid_in_reading_window() {
-    awk -F'\t' '$4 == "yes" && ($1 == 3 || $1 == 4 || $1 == 5) { found = 1 } END { print found ? "yes" : "no" }' "${STEPS_FILE}"
+    awk -F'\t' '
+        ($1 == 3 || $1 == 4 || $1 == 5) && $4 == "crash" { crash = 1 }
+        ($1 == 3 || $1 == 4 || $1 == 5) && $4 == "unreadable" { unestablished = 1 }
+        END {
+            if (crash) print "crash"
+            else if (unestablished) print "unestablished"
+            else print "none"
+        }
+    ' "${STEPS_FILE}"
 }
 
 webkit_service_count() {
@@ -1085,11 +1137,18 @@ decide_verdict() {
         PROBE_REASON=safari_not_running
         return
     fi
-    if [ "$(invalid_in_reading_window)" = yes ]; then
-        VERDICT=UNKNOWN
-        PROBE_REASON=dyld_or_pac_crash_in_reading_window
-        return
-    fi
+    case $(invalid_in_reading_window) in
+        crash)
+            VERDICT=UNKNOWN
+            PROBE_REASON=dyld_or_pac_crash_in_reading_window
+            return
+            ;;
+        unestablished)
+            VERDICT=UNKNOWN
+            PROBE_REASON=crash_exclusion_not_established_in_reading_window
+            return
+            ;;
+    esac
     if [ "${SVC_DISTINCT}" -eq 0 ] && [ "${webkit_count}" -eq 0 ]; then
         VERDICT=UNKNOWN
         PROBE_REASON=services_section_empty

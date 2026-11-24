@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Stand-in for ssh that mirrors the one behaviour of the real binary that
+matters here: it consumes its local stdin unless -n was passed. Without that,
+a command run inside a `while read` loop silently swallows the rest of the list
+and the run reports a verdict from partial evidence.
+
+Every reading comes from $FAKE_DEVICE_STATE/scenario.json; the override
+directory's existence is kept in $FAKE_DEVICE_STATE/installed so separate ssh
+invocations agree about it."""
+import json
+import os
+import subprocess
+import sys
+
+state = os.environ["FAKE_DEVICE_STATE"]
+scenario = json.load(open(os.path.join(state, "scenario.json")))
+argv = sys.argv[1:]
+command = argv[-1]
+
+stdin_data = "" if "-n" in argv else sys.stdin.buffer.read().decode("utf-8", "replace")
+
+# The probe sends the whole remote command as one argument, sudo prefix included.
+for prefix in ("sudo -S -p '' ", "sudo -n "):
+    if command.startswith(prefix):
+        command = command[len(prefix):]
+
+with open(os.path.join(state, "calls.log"), "a") as handle:
+    handle.write("%s\t%s\n" % ("-n" if "-n" in argv else "stdin", command))
+
+marker = os.path.join(state, "installed")
+
+
+def reply(text, code=0, stderr=False):
+    stream = sys.stderr if stderr else sys.stdout
+    if text:
+        stream.write(text if text.endswith("\n") else text + "\n")
+    sys.exit(code)
+
+
+services = scenario.get("services") or []
+helpers = scenario.get("helpers") or []
+stale = scenario.get("stale_helpers") or []
+safari_pid = scenario.get("safari_pid", 7001)
+
+mode = scenario.get("mode")
+if mode == "gui_error" and command == "launchctl print gui/501":
+    reply("Could not find domain for gui/501", 113, stderr=True)
+if command == "launchctl print gui/501":
+    reply("" if scenario.get("gui_empty") else "domain = {\n\ttype = gui\n}")
+if command == "id -u":
+    reply("501")
+if command.startswith("test -f"):
+    reply("scripts-present")
+if command.startswith("ls -l"):
+    reply("ok")
+
+
+def next_call_count(kind):
+    path = os.path.join(state, "count-%s" % kind)
+    count = int(open(path).read()) if os.path.exists(path) else 0
+    count += 1
+    with open(path, "w") as handle:
+        handle.write(str(count))
+    return count
+
+
+if command.startswith("find ") and "CrashReporter" in command:
+    crash_dir = os.path.join(state, "crash")
+    crash_calls = next_call_count("find")
+    # A report can appear between the "before" and "after" listing of one step,
+    # which is the shape that makes a step's exclusion depend on reading it.
+    appear = scenario.get("crash_timing") or {}
+    if appear.get("after_call") and crash_calls > appear["after_call"]:
+        # The body comes from a fixture file next to the case, so a report with
+        # quotes in it does not have to survive being nested in scenario.json.
+        for name, fixture in (appear.get("files") or {}).items():
+            with open(os.path.join(os.path.dirname(state), fixture)) as handle:
+                body = handle.read()
+            with open(os.path.join(crash_dir, name), "w") as handle:
+                handle.write(body)
+    fail_from = (scenario.get("find_timing") or {}).get("fail_from_call")
+    if fail_from and crash_calls >= fail_from:
+        reply("find: /var/mobile/Library/Logs/CrashReporter: Operation not permitted",
+              1, stderr=True)
+    for name in sorted(os.listdir(crash_dir)):
+        print("/var/mobile/Library/Logs/CrashReporter/%s" % name)
+    sys.exit(0)
+
+if command == "python3 -" or command.startswith("python3 - "):
+    # Run the probe's real parser, so an unreadable .ips reaches the probe with the
+    # exit status the device would give it, not a status this stub invented.
+    program = os.path.join(state, "program.py")
+    with open(program, "w") as handle:
+        handle.write(stdin_data)
+    local_paths = []
+    for argument in command.split()[2:]:
+        name = argument[len("/var/mobile/Library/Logs/CrashReporter/"):] \
+            if argument.startswith("/var/mobile/Library/Logs/CrashReporter/") else argument
+        local_paths.append(os.path.join(state, "crash", name))
+    completed = subprocess.run([sys.executable, program] + local_paths,
+                               capture_output=True, text=True)
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
+    sys.exit(completed.returncode)
+
+def killed_pids():
+    path = os.path.join(state, "killed")
+    if not os.path.exists(path):
+        return set()
+    return set(open(path).read().split())
+
+
+if command in ("ps -Ao pid,ppid,comm", "ps -Ao pid,comm"):
+    if scenario.get("ps_rejects_ppid") and "ppid" in command:
+        reply("ps: illegal argument: p", 1, stderr=True)
+    launched = os.path.exists(os.path.join(state, "launched"))
+    gone = killed_pids()
+    with_ppid = "ppid" in command
+
+    def emit_row(pid, ppid, path):
+        if with_ppid:
+            print("%d %d %s" % (pid, ppid, path))
+        else:
+            print("%d %s" % (pid, path))
+
+    emit_row(1, 0, "/sbin/launchd")
+    if safari_pid and (launched or scenario.get("safari_always_running")):
+        if not scenario.get("safari_never_starts") and str(safari_pid) not in gone:
+            emit_row(safari_pid, 1, "/Applications/MobileSafari.app/MobileSafari")
+    # Step 1 sees only the stale helpers: the new ones do not exist until a launch
+    # has happened, which is what makes the baseline subtraction meaningful.
+    for entry in stale:
+        if str(entry["pid"]) in gone:
+            continue
+        emit_row(entry["pid"], entry.get("ppid", 1), entry["path"])
+    if launched:
+        for entry in helpers:
+            if str(entry["pid"]) in gone:
+                continue
+            emit_row(entry["pid"], entry.get("ppid", 1), entry["path"])
+    sys.exit(0)
+
+if command.startswith("kill -9 "):
+    pid = command.split()[2]
+    with open(os.path.join(state, "killed"), "a") as handle:
+        handle.write(pid + "\n")
+    sys.exit(0)
+if command.startswith("killall"):
+    if scenario.get("safari_survives"):
+        sys.exit(0)
+    if os.path.exists(os.path.join(state, "launched")):
+        os.unlink(os.path.join(state, "launched"))
+    sys.exit(scenario.get("killall_rc", 0))
+if command.startswith("uiopen"):
+    open(os.path.join(state, "launched"), "w").close()
+    sys.exit(0)
+
+if command.startswith("launchctl print pid/"):
+    if scenario.get("services_hidden"):
+        reply("pid = %d" % safari_pid)
+    body = ["pid = %d" % safari_pid, "services = {"]
+    for name in services:
+        body.append('\t"0x1" = %s' % name)
+    body.append("}")
+    reply("\n".join(body))
+
+if "lldb" in command:
+    if scenario.get("lldb_fails"):
+        reply("error: attach failed", 1, stderr=True)
+    pid = int(command.split("process attach --pid ")[1].split("'")[0])
+    target = None
+    for entry in helpers:
+        if entry["pid"] == pid:
+            target = entry
+    lines = ["(lldb) process attach --pid %d" % pid]
+    if target:
+        for framework in target.get("frameworks") or []:
+            lines.append("[  0] 0x0000000100000000 %s" % framework)
+    reply("\n".join(lines))
+
+# uninstall is tested first: its name contains the install script's name as a
+# substring, so the other order sends every removal down the install branch.
+if "uninstall-webkit-override.sh" in command:
+    if os.path.exists(marker):
+        os.unlink(marker)
+    reply("removed")
+if "install-webkit-override.sh" in command:
+    if scenario.get("install_fails"):
+        reply("preflight: missing source", 1, stderr=True)
+    open(marker, "w").close()
+    reply("  copied     /var/jb/Library/WebKitOverride/WebKit.framework\n"
+          "  pruned     /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices")
+
+if "[ -d /var/jb/Library/WebKitOverride ]" in command:
+    present = os.path.exists(marker) or scenario.get("override_initial") == "present"
+    reply("present" if present else "absent")
+
+if command.startswith("true"):
+    sys.exit(0)
+
+reply("stub: unhandled command: %s" % command, 1, stderr=True)

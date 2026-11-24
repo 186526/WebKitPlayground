@@ -59,6 +59,8 @@ DEVICE_SUDO_PASSWORD='...' scripts/probe-webkit-override-endpoints.sh
 
 跑之前确认三件事：设备可达（`ssh` 免密）、`launchctl print gui/501` 正常退出且非空、覆盖目录当前不存在（已存在时第二步拒绝安装，因为那样测不到「从无到有」的转变）。
 
+不接触设备的回归套件在 `scripts/probe-override-harness/`，直接运行即可，产物全部落在临时目录、退出时删除（`HARNESS_KEEP=1` 可保留并打印路径）。它用一个假 `ssh` 冒充设备，那个假 `ssh` 会像真 `ssh` 一样读走 stdin（只有带 `-n` 才不读），并执行脚本自己发过去的那段 `.ips` 解析程序，所以「报告读不出正文」这条路径得到的退出码是真实代码给出的，不是桩猜出来的。
+
 ## 四、结论怎么读
 
 脚本最后打印 `PROBE_VERDICT` 与 `PROBE_REASON`。判据的主力是「本轮新起 helper 的 framework 路径」，不是 `comm` 里的可执行路径 —— 覆盖目录删掉了 `XPCServices`，每个 helper 的可执行文件都在系统的 `.xpc` 里，`comm` 只说明启动路径。但 `comm` 并没有被丢掉：A 触发后它用来区分「launchd 启动了覆盖目录的 `.xpc`」与「launchd 启动了系统桩、由 dyld 环境把覆盖 framework 交接过去」，见下表。
@@ -83,6 +85,7 @@ A 与 `build-state.md:402` 矛盾，说明那次读数（以及依赖它的「(B
 | --- | --- | --- |
 | `safari_not_running` | 三次拉起都没得到 MobileSafari pid | 看第 3 步的每次尝试与输出；确认 `uiopen --path` 是否可用 |
 | `dyld_or_pac_crash_in_reading_window` | 第 3、4、5 步新增了 DYLD 或 PAC_EXCEPTION 报告 | 归因是进程没起来，对 (A)/(B) 不作数；先解决缺符号或 ABI 问题 |
+| `crash_exclusion_not_established_in_reading_window` | 第 3、4、5 步里有一份新报告读不出正文，或 CrashReporter 列表取不到，所以「没有 DYLD/PAC 崩溃」这一条无法建立 | 与上一条同为拒绝结论，但原因不同：没有证据说明发生过崩溃。看那几步的 `INVALID` 行与 `unreadable` 消息；报告可能还在写入，重跑一次通常就好了 |
 | `services_section_empty` | `launchctl print` 的 services 段为空或不存在 | 域状态本身异常，先重启再测 |
 | `no_new_helper_after_launch` | 本轮没有产生任何新 helper | 与路径规则无关；看第 4 步端点是否也全无、第 3 步是否只起了 UI 进程 |
 | `four_services_present_but_no_helper_framework_path_read` | 四个服务在，但一个 framework 路径都没读到 | 无法区分「覆盖真的生效」与「覆盖只生效了一半」；A 拒绝降级到只凭端点数 |
@@ -92,6 +95,12 @@ A 与 `build-state.md:402` 矛盾，说明那次读数（以及依赖它的「(B
 | `intermediate_service_count_N_of_4` | 端点数落在 3 这种中间值 | 既不符 (A) 也不符 (B)，需重测确认是否抖动 |
 
 两个 UNKNOWN 理由被刻意拆开：`no_new_helper_after_launch` 与「新 helper 全部加载系统 framework」是不同的事实，前者对 launchd 的路径规则什么也没说，后者才是 (B) 的正面证据。合并两者会让「一次没起出 helper 的启动」被读成「launchd 只认索引内路径」。A 与 B 两侧各有一个「没读到 framework 路径」的 UNKNOWN，理由同理：一侧拒绝在没证据时说「覆盖生效了」，另一侧拒绝在没证据时说「覆盖没生效」。
+
+`dyld_or_pac_crash_in_reading_window` 与 `crash_exclusion_not_established_in_reading_window` 也是同一类拆分。B 的定义里有一条「读窗口内没有 DYLD 或 PAC_EXCEPTION 崩溃」，而这条只有在读窗口里每一步的崩溃排除都成立时才算数。两种情况都让它不成立：真出现了那种崩溃，或者根本没读出来。前者是证据，后者是没有证据，`PROBE_REASON` 因此分开命名。
+
+步骤表的第 4 列记的就是这件事，取值只有三个：`no`、`crash`、`unreadable`。`crash` 表示该步新增了一份 `termination.namespace` 为 `DYLD` 或 `PAC_EXCEPTION` 的报告；`unreadable` 表示该步的崩溃排除没建立起来 —— 有一份新报告读不出正文，或者 CrashReporter 列表取不到。`PROBE_INVALID_STEPS` 列出 `crash` 与 `unreadable` 两种，读窗口的判断也两者都算，只有 `no` 是干净值。读不出正文的报告也算不干净，理由是 CrashReporter 在崩溃后几秒内可能仍在写文件，而 `find` 正好会抓到这种写了一半的 `.ips`；把它当成「没有崩溃」正是这个探针要避免的错误。
+
+一份报告读不出时，脚本仍把已读出的那些行打印出来，并且「确实出现了 DYLD 报告」优先于「后面还有一份读不出」：两类失败都让该步不可用，但只有前者说明崩溃真的发生过。
 
 ## 五、设备上的工具限制，以及为什么用 python3
 
@@ -103,16 +112,16 @@ M63 的实测与 `AGENTS.md` 记过设备缺哪些工具：没有 `plutil`、`st
 - **设备上没有 `/bin/sh`。** 所有远程命令由登录 shell 解析，或显式用 `/var/jb/usr/bin/bash`；安装与卸载脚本都这样调用。
 - **device 上没有 `pgrep` / `pkill`。** 旧 Safari 用 `killall -9 MobileSafari`，退出码 0/1 视为正常（1 表示本来就没在跑），其它退出码说明旧进程可能还在，本步判失败。旧 helper 用 `ps` 取 pid 后逐个 `kill -9`，且只杀 `ppid` 为 1 的那些 —— 别的父进程拥有的 helper 不是本轮该清理的对象。
 - **`ps` 的 ppid 列不一定可用。** 脚本先试 `ps -Ao pid,ppid,comm`，被拒则退回 `ps -Ao pid,comm` 并在日志里声明降级；此时旧 helper 的 ppid 过滤失效，脚本不会杀任何 helper，也不会把残留算成本轮新起。
-- **framework 路径只能靠 `lldb` 附着。** 设备上没有 `lsof` 与 `vmmap`，读不到进程打开了哪些文件。`lldb -b -o 'process attach --pid <pid>' -o 'image list -o -f' -o detach -o quit` 是唯一途径，且要 `sudo`。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），所以只用 `image list`。附着失败或输出里没有 `WebKit.framework/WebKit` 行时，该 helper 记为 unknown，不猜。
+- **framework 路径只能靠 `lldb` 附着。** `AGENTS.md` 的「设备」一节列出设备可用的诊断工具有 `rabin2`、`r2`、`lldb`、`debugserver-nonui`、`python3`、`shasum`、`clang`，没有任何一个读取「某个正在运行的进程打开了哪些文件」。`lldb -b -o 'process attach --pid <pid>' -o 'image list -o -f' -o detach -o quit` 因此是取这个读数的途径，且要 `sudo`。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），所以只用 `image list`。附着失败或输出里没有 `WebKit.framework/WebKit` 行时，该 helper 记为 unknown，不猜。
 - **同一个进程里有两份同名 `WebKit` 是常态**（外层 `AGENTS.md` 的「设备」一节记过）。`image list` 因此可能给出两行，脚本把每一行都收下并逐条分类，其中任意一条来自 `/var/jb` 就算该 helper 加载了 `/var/jb` 版本；只取第一行会让 `lldb` 的输出顺序决定判据。
 - **循环里不能直接调 `ssh`。** `ssh` 会读走本地 stdin，在 `while read` 里会让循环只跑第一轮。脚本对 `remote` 与无密码模式的 `remote_sudo` 加 `-n`；密码模式的 `remote_sudo` 必须用 stdin 送密码，不能加 `-n`，所以所有这种循环都从单独的 fd 读列表，而不是从 stdin。
 
 ## 六、局限
 
-- **脚本从未在真机上跑过。** 设备在本轮编写期间不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：17 个场景、56 条断言（A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形域缺失中止），每条断言检查退出码或日志里的关键行。
+- **脚本从未在真机上跑过。** 设备在本轮编写期间不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：21 个场景、75 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形域缺失中止，以及崩溃排除的三条路径（读不出正文、列表失败、读窗口外的报告只记不拦），每条断言检查退出码或日志里的关键行。
 - `bash -n` 通过。`shellcheck` 在本机不可用（`which shellcheck` 无输出），**没有跑**，所以本节不声称它通过。
 - 因此下列事实只有 `AGENTS.md` 的间接依据，没有实测：`ps -Ao pid,ppid,comm` 在 iPadOS 16.1 上是否接受 ppid 列；`sudo lldb` 附着 helper 是否被允许；`image list -o -f` 的实际行格式（脚本按「路径是行末字段、可含空格」解析）。
-- 设备无 `lsof`，一个 helper 也可能在 lldb 附着前就退出。此时 framework 路径读不到，A 与 B 都不可达，脚本会给出对应的 `..._no_helper_framework_path_read` 而不是猜。
+- 一个 helper 也可能在 lldb 附着前就退出。此时 framework 路径读不到，A 与 B 都不可达，脚本会给出对应的 `..._no_helper_framework_path_read` 而不是猜。
 - 端点数只统计 Safari。`build-state.md` 那张表用的是 Chrome，两者的 per-pid 域结构相同但读数不必一一对应；比对时看的是「四个 WebKit 服务在不在」这个定性结论。
 - 本探针只覆盖安装脚本产出的那一种目录内容。要测「带 `XPCServices` 的覆盖目录」，需要先改安装脚本，那属于另一个实验，本脚本检测到覆盖目录已存在时会拒绝安装。在本探针的配置下 A 只能来自系统桩的 framework 交接，判定 (A) 需要未剪枝的覆盖目录。
 

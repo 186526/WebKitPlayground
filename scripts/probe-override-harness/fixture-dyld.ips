@@ -1,0 +1,2 @@
+{"app_name":"MobileSafari","timestamp":"2026-11-25 10:00:00.00"}
+{"procPath":"/Applications/MobileSafari.app/MobileSafari","termination":{"namespace":"DYLD","code":4},"exception":{"type":"EXC_CRASH"},"usedImages":[{"path":"/var/jb/Library/Frameworks/WebKit.framework/WebKit"}]}
