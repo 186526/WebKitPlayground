@@ -56,6 +56,30 @@ Build an open-source version of WebKit and replace it system-wide on iOS jailbro
     </tr>
 </table>
 
+The table covers same-generation replacements: the WebKit tag and the iOS version that runs it come
+from one release. Building 18.3 and running it on 16.1 is a different case, and the `Patch File`
+column above does not describe it.
+
+CoreIPC message numbers come from enumeration order, so two generations assign the same message
+different numbers. A 18.3 helper launched by a 16.1 UI process sends the connection handshake under
+a number the UI process does not know as `InitializeConnection`. The receiving branch compares
+numbers, does not match, and leaves `m_isConnected` false, so the UI process never sends anything to
+that helper. The same message is then dispatched under whichever name that number carries in 16.1's
+enumeration, which usually terminates the helper. Both outcomes look alike from outside: the helper
+process starts and produces nothing, and the page stays blank instead of raising an error.
+
+`patches/ios16-ipc-message-number-translation.patch` supplies the missing translation. It renumbers
+messages on the single connection a helper opens to the UI process, where the two ends are from
+different generations, and leaves same-generation connections byte for byte unchanged. The patch is
+generated against `Safari-18.3.1-iOS-18.3.2`, so its hunks match that generation's tree and no other:
+the 16.x, 17.x and 18.0 through 18.2 tags skip it and keep building. The `Apply worktree patch` step
+in `.github/workflows/build-webkit.yml` encodes that split, and stops the run when the patch stops
+applying to a 18.3 ref instead of skipping it, so a patch that went stale cannot pass silently. The
+cross-generation combination this covers is 18.3 helpers under a 16.1 UI process; the patch has not
+been tried on any other pair.
+
+The message numbering difference itself is measured in `docs/ios16-ipc-layer-audit.md`.
+
 ## How to use
 
 1. We need to [patch dyld](https://github.com/Lessica/Dopamine/blob/rh2.x_modify_white/BaseBin/dyldhook/src/roothider.c) to allow `DYLD_FRAMEWORK_PATH` to work on top of DSC

@@ -348,6 +348,7 @@ jobs:
           ref_has_core_crypto_signatures_macro=0
           ref_sends_ios17_trait_api=0
           ref_writes_proxy_configurations=0
+          ref_needs_message_name_translation=0
           ref_name="${WEBKIT_REF##*/}"
           if awk -F'[-.]' '
               $1 != "Safari" { exit 1 }
@@ -459,6 +460,23 @@ jobs:
                 "WebKit/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm" 2>/dev/null; then
             ref_needs_xpc_bootstrap_compat=1
           fi
+          # patches/ios16-ipc-message-number-translation.patch renumbers CoreIPC messages on the one
+          # connection a helper opens to the UI process. It was generated against
+          # Safari-18.3.1-iOS-18.3.2, and its hunks match that generation's Encoder.cpp and no
+          # other, so the loop's own git apply --check is what decides whether a ref takes it: the
+          # 16.x tags, 17.x and 18.0 through 18.2 do not, and the run continues without it there.
+          # This flag answers the one question the loop cannot. When the patch stops applying to a
+          # 18.3 ref, that is a stale patch rather than a ref that never carried it, so the mismatch
+          # has to stop the run instead of being skipped behind a green Apply worktree patch step.
+          if awk -F'[-.]' '
+              $1 != "Safari" { exit 1 }
+              { major = $2; minor = $3 }
+              END {
+                  if (major == "" || minor == "") exit 1
+                  exit !((major + 0) == 18 && (minor + 0) == 3)
+              }' <<< "${ref_name}"; then
+            ref_needs_message_name_translation=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
@@ -469,6 +487,7 @@ jobs:
           echo "HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE present in ${WEBKIT_REF}: ${ref_has_core_crypto_signatures_macro}"
           echo "traitCollectionByModifyingTraits sent in ${WEBKIT_REF}: ${ref_sends_ios17_trait_api}"
           echo "unguarded proxyConfigurations write in ${WEBKIT_REF}: ${ref_writes_proxy_configurations}"
+          echo "the message number translation patch is required in ${WEBKIT_REF}: ${ref_needs_message_name_translation}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -572,6 +591,23 @@ jobs:
                   # These two are the tag-specific worktree dumps: they record a whole worktree
                   # against one tag and match no other, so a skip is the designed outcome.
                   ;;
+                ios16-ipc-message-number-translation.patch)
+                  # Three outcomes, and the difference between them is the point of registering
+                  # this patch at all. A ref that already carries translateOutgoingMessageName has
+                  # the patch applied or upstreamed, so a second copy has nothing to add. A 18.3 ref
+                  # does need it, and failing to apply there means it went stale against the tree it
+                  # was generated from, which has to stop the run. Every other ref skips, and the
+                  # git apply error says which file refused it.
+                  if grep -qF 'translateOutgoingMessageName' \
+                      "WebKit/Source/WebKit/Platform/IPC/Encoder.cpp" 2>/dev/null; then
+                    echo "already carries the message number translation: $p"
+                  elif [ "$ref_needs_message_name_translation" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  else
+                    echo "${WEBKIT_REF} does not take the message number translation: $(git -C WebKit apply --check "$PWD/$p" 2>&1 | head -1)"
+                  fi
+                  ;;
                 *)
                   # Anything else that stops applying is stale, not inapplicable. Namespacing this
                   # way means a new patch family cannot reach the device untested because nobody
@@ -585,6 +621,15 @@ jobs:
             fi
             git -C WebKit apply -v "$PWD/$p"
             echo "APPLIED: $p"
+            # git apply's exit status covers the hunks it was asked to place, not whether the
+            # result carries the behaviour. If the translation landed but the marker did not, the
+            # build would compile a WebKit that renumbers nothing and the omission would only show
+            # up as a helper that stops responding on the device, so assert the marker here.
+            if [ "$(basename "$p")" = ios16-ipc-message-number-translation.patch ] && \
+                ! git -C WebKit grep -q translateOutgoingMessageName -- Source/WebKit/Platform/IPC/Encoder.cpp; then
+              echo "PATCH APPLIED BUT HAS NO EFFECT: $p"
+              exit 1
+            fi
           done
 
       - name: Refuse a build that ships a WebCore which cannot dlopen
