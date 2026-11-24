@@ -516,18 +516,18 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 **被拒的同步消息会结束本进程，不是静默丢弃。** 异步路径上返回值只落在日志里。同步路径上是另一条链：`sendSyncMessage` 拿到非 `NoError` 就调 `didFailToSendSyncMessage(error)`（补丁里 `sendSyncMessage` 那个 hunk），而 `WebProcess.cpp:395-397` 在 `#if !PLATFORM(GTK) && !PLATFORM(WPE) && !ENABLE(IPC_TESTING_API)` 下调过 `connection->setShouldExitOnSyncMessageSendFailure(true)`，`Connection::didFailToSendSyncMessage`（`Connection.cpp:1321-1327`）在该标志为真时执行 `exitProcess(0)`。Release 的 iOS 构建 `ENABLE(IPC_TESTING_API)` 为 0，所以这个标志为真，WebContent 在发出这条消息时直接退出。
 
-不跳过也没有出路。按 18.3.1 枚举的平坦下标统计，判据里落在同步区的有 57 条，最小 3840、最大 4085，全部大于 16.1 的 `Last`（3139）。§7 已说明平坦下标不是 iOS 编译值，但 iOS 编译值只会更小，而这些名字集中在枚举最尾部，与 3139 的差距远大于 §7 估算的前移量。16.1 UI 进程的 `isValidEnum<MessageName>` 在解码阶段就会拒收超出 `Last` 的编号，`sendSync` 的回调永远不到，而 `sendSync` 的默认超时是 `Timeout::infinity()`，主线程就此永久阻塞。**把永久挂起换成快速退出是取舍**：退出是本补丁引入的变化，「这条消息在 16.1 上不可用」则是补丁前后都成立的事实。
+不跳过也没有出路。判据里落在同步区的那些名字，18.3 编号全部大于 16.1 的 `Last`（3139）。这一点在两种口径下都成立：按 18.3.1 枚举的平坦下标，它们最小 3840；按 iOS 编译值，它们最小 3563。§7 说明过平坦下标不是 iOS 编译值，而这些名字集中在枚举最尾部，与 3139 的差距远大于 §7 估算的前移量，所以前移不改变结论。16.1 UI 进程的 `isValidEnum<MessageName>` 在解码阶段就会拒收超出 `Last` 的编号，`sendSync` 的回调永远不到，而 `sendSync` 的默认超时是 `Timeout::infinity()`，主线程就此永久阻塞。**把永久挂起换成快速退出是取舍**：退出是本补丁引入的变化，「这条消息在 16.1 上不可用」则是补丁前后都成立的事实。
 
 这几条常规路径因此不可用，补丁前表现为页面主线程卡死，补丁后表现为 WebContent 进程退出：
 
-| 消息 | 18.3.1 触发路径 |
-| --- | --- |
-| `WebPageProxy_BackForwardListContainsItem` | `history.back()` / `history.go()` |
-| `WebScreenOrientationManagerProxy_CurrentOrientation` | JS `screen.orientation` |
-| `WebProcessProxy_WaitForSharedPreferencesForWebProcessToSync` | 偏好变更后等待同步 |
-| `WebProcessProxy_WrapCryptoKey`、`UnwrapCryptoKey` | WebCrypto 导入与导出密钥 |
+| 消息 | 18.3.1 iOS 编号 | 触发路径 |
+| --- | --- | --- |
+| `WebPageProxy_BackForwardListContainsItem` | 3712 | `history.back()` / `history.go()` |
+| `WebScreenOrientationManagerProxy_CurrentOrientation` | 3797 | JS `screen.orientation` |
+| `WebProcessProxy_WaitForSharedPreferencesForWebProcessToSync` | 3795 | 偏好变更后等待同步 |
+| `WebProcessProxy_WrapCryptoKey`、`UnwrapCryptoKey` | 3796、3794 | WebCrypto 导入与导出密钥 |
 
-表中五条消息都不带 `#if`，任何 iOS 配置都会编入判据。
+表中五条消息都不带 `#if`，任何 iOS 配置都会编入判据。编号是 18.3.1 的 iOS 编译值，全部远高于 16.1 的 3139。
 
 **接收方向**：16.1 发来、本构建映射不到的消息共 747 条，是 16.1 独有的 333 条加上 18.3 侧带条件的 414 条共享消息。丢弃前先按 16.1 的同步边界（`firstSynchronousOldMessageNumber`，2899）分类：异步消息只记日志；同步消息回一个空 `SyncMessageReply`，让对端不必等满超时。
 
