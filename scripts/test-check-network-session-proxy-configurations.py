@@ -409,6 +409,18 @@ def main() -> int:
     else:
         print("PASS --help names the skip code 3")
 
+    # A signature cut off before its closing paren is an unreadable file, not a file without the
+    # method: reading it as "nothing to guard" is the direction that ships a crashing package.
+    case("--needs-guard reports a truncated signature as a failure, not as a skip",
+         UNPATCHED.split("void NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration(")[0]
+         + "void NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration("
+           "NSURLSessionConfiguration *configuration", 1,
+         ("cannot be parsed", "never closes", "neither answer is known"), "--needs-guard")
+    # The same truncation elsewhere in the file must not hide a real definition, so the rule is
+    # "cannot decide" only when no definition was found.
+    case("a truncated call site does not hide a real unguarded definition",
+         "void elsewhere(NSURLSessionConfiguration *c\n" + UNPATCHED, 0, "NEEDS GUARD:", "--needs-guard")
+
     case_missing_file()
 
     if failures:

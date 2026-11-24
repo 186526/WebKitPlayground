@@ -71,7 +71,7 @@ WRITE = "proxyConfigurations"
 NOT_NEEDED = 3
 ASSIGNMENT = re.compile(r"\bconfiguration\s*\.\s*proxyConfigurations\s*=")
 RETURN = re.compile(r"\breturn\s*;")
-DIRECTORIVE = re.compile(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b")
+DIRECTIVE = re.compile(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b")
 
 # The runtime capability tests the guard may use. Both name the setter selector, the name the
 # receiver either implements or does not.
@@ -371,17 +371,29 @@ def find_body(text: str) -> tuple[int, int] | None:
 
     A definition whose body cannot be bounded raises rather than returning None. Returning None would
     report "no such function" for a file that does have one, which every caller reads as nothing to
-    guard, and that is the one wrong direction: the device would still abort.
+    guard, and that is the one wrong direction: the device would still abort. That covers a signature
+    cut off before its closing paren too: such a file cannot be compiled, but reading it as "no such
+    function" would still be the wrong answer, so it is reported as unreadable instead.
     """
     found: tuple[int, int] | None = None
+    unterminated: ValueError | None = None
     for match in re.finditer(rf"\b{FUNCTION}\s*\(", text):
         try:
             closing = match_pair(text, match.end() - 1, "(", ")")
-        except ValueError:
+        except ValueError as error:
+            # A call site is only ever a call, so an unterminated argument list keeps looking like a
+            # call until the end of the file. Only report it once no definition was found, so a file
+            # with both a definition and a truncated call elsewhere still reads normally.
+            unterminated = unterminated or error
             continue
         after = skip_space(text, closing + 1)
         if after < len(text) and text[after] == "{":
             found = (after, match_brace_conditional(text, after) + 1)
+    if found is None and unterminated is not None:
+        raise ValueError(
+            f"the argument list after {FUNCTION} never closes ({unterminated}), so whether the "
+            f"method is present cannot be decided"
+        )
     return found
 
 
@@ -493,7 +505,7 @@ class Conditional:
 
 
 def directive_keyword(line: str) -> str | None:
-    match = DIRECTORIVE.match(line)
+    match = DIRECTIVE.match(line)
     return match.group(1) if match else None
 
 
