@@ -443,20 +443,77 @@ def assert_guards_are_one_level(table: Table) -> None:
             )
 
 
-def assert_round_trip(table: Table) -> None:
-    """Each shared name must come back from its own number, and vice versa."""
-    by_number = {message.old.value: message.name for message in table.shared}
-    for message in table.shared:
-        back = by_number.get(message.old.value)
-        if back != message.name:
-            raise TableError(
-                'round trip failed: %s is number %d, which reads back as %s'
-                % (message.name, message.old.value, back)
-            )
-    if len(by_number) != len(table.shared):
+def section_lines(document: str, function_signature: str) -> list[str]:
+    """The body lines of one emitted function, excluding the next one."""
+    start = document.index(function_signature)
+    end = document.find('\n\n', document.index('{', start))
+    return document[start:end].split('\n')
+
+
+def rendered_outgoing_pairs(document: str) -> dict[str, int]:
+    """The name -> older number pairs the emitted outgoing switch actually has."""
+    pattern = re.compile(
+        r'case MessageName::(\w+): return static_cast<MessageName>\((\d+)\);'
+    )
+    pairs: dict[str, int] = {}
+    for line in section_lines(document, 'MessageName translateOutgoingMessageName(MessageName name)'):
+        for name, number in pattern.findall(line):
+            if name in pairs:
+                raise TableError('the outgoing switch emits %s twice' % name)
+            pairs[name] = int(number)
+    return pairs
+
+
+def rendered_incoming_pairs(document: str) -> dict[int, str]:
+    """The older number -> name pairs the emitted incoming switch actually has."""
+    pattern = re.compile(r'case (\d+): return MessageName::(\w+);')
+    pairs: dict[int, str] = {}
+    for line in section_lines(document, 'MessageName translateIncomingMessageName(MessageName name)'):
+        for number, name in pattern.findall(line):
+            if int(number) in pairs:
+                raise TableError('the incoming switch emits %s twice' % number)
+            pairs[int(number)] = name
+    return pairs
+
+
+def assert_round_trip(table: Table, document: str) -> None:
+    """The two emitted switches must be inverses of each other and of the table.
+
+    Both sides are read back from the rendered `case` labels, not from the table
+    they came from: comparing the table with itself cannot fail, and would pass a
+    renderer that emitted the wrong number for every message.
+    """
+    outgoing = rendered_outgoing_pairs(document)
+    incoming = rendered_incoming_pairs(document)
+    expected = {message.name: message.old.value for message in table.shared}
+
+    if outgoing != expected:
+        missing = sorted(set(expected) - set(outgoing))[:3]
+        extra = sorted(set(outgoing) - set(expected))[:3]
+        wrong = sorted(
+            (name, expected[name], outgoing[name])
+            for name in set(expected) & set(outgoing)
+            if expected[name] != outgoing[name]
+        )[:3]
         raise TableError(
-            'the incoming table has %d numbers for %d names'
-            % (len(by_number), len(table.shared))
+            'the outgoing switch names %d messages, the table %d; missing %s, '
+            'unexpected %s, wrong number %s'
+            % (len(outgoing), len(expected), missing, extra, wrong)
+        )
+
+    inverted = {number: name for name, number in expected.items()}
+    if incoming != inverted:
+        missing = sorted(set(inverted) - set(incoming))[:3]
+        extra = sorted(set(incoming) - set(inverted))[:3]
+        wrong = sorted(
+            (number, inverted[number], incoming[number])
+            for number in set(inverted) & set(incoming)
+            if inverted[number] != incoming[number]
+        )[:3]
+        raise TableError(
+            'the incoming switch maps %d numbers, the outgoing switch has %d; '
+            'missing %s, unexpected %s, wrong name %s'
+            % (len(incoming), len(inverted), missing, extra, wrong)
         )
 
 
@@ -472,26 +529,30 @@ def assert_old_numbers_fit_new_enum(table: Table) -> None:
 
 
 def assert_guarded_cases_are_wrapped(table: Table, document: str) -> None:
-    """Every case naming a conditionally compiled enumerator must sit in an `#if`.
+    """Every case naming a conditionally compiled enumerator must sit in its `#if`.
 
     A case without its guard names an enumerator the configuration does not
-    declare, and the header does not compile. The check reads the emitted text
-    rather than the table, so it fails on the artefact a reader gets, not on the
-    intent behind it.
+    declare, and the document does not compile. A case under the wrong `#if`
+    compiles only in configurations its enumerator is absent from, which is the
+    same failure with a different trigger. The check reads the emitted text so it
+    fails on the artefact a reader gets, and compares the condition itself rather
+    than the nesting depth: any non-zero depth would satisfy the depth alone.
     """
     guards_by_name = {message.name: effective_guards(message.new) for message in table.shared}
     guards_by_name.update(
         {entry.name: effective_guards(entry) for entry in table.new_only}
     )
 
-    depth = 0
+    open_guards: list[str] = []
     for line in document.split('\n'):
         stripped = line.strip()
-        if stripped.startswith('#if'):
-            depth += 1
+        if stripped.startswith('#if '):
+            open_guards.append(stripped[len('#if '):].strip())
             continue
         if stripped == '#endif':
-            depth -= 1
+            if not open_guards:
+                raise TableError('the emitted document closes an #if it never opened')
+            open_guards.pop()
             continue
         match = re.match(r'case MessageName::(\w+):', stripped)
         if not match:
@@ -500,14 +561,20 @@ def assert_guarded_cases_are_wrapped(table: Table, document: str) -> None:
         expected_guard = guards_by_name.get(name)
         if expected_guard is None:
             continue
-        if bool(expected_guard) != bool(depth):
+        emitted = open_guards[-1] if open_guards else ''
+        wanted = ' && '.join(expected_guard)
+        if emitted != wanted:
             raise TableError(
-                'case %s is emitted at #if depth %d, but its enumerator is %s'
-                % (name, depth,
-                   'conditionally compiled' if expected_guard else 'unconditional')
+                'case %s is emitted under %r, but its enumerator needs %r'
+                % (name, emitted, wanted)
             )
-    if depth:
-        raise TableError('the emitted document leaves %d #if block(s) open' % depth)
+        if len(open_guards) > 1:
+            raise TableError(
+                'case %s sits under %d stacked conditions; the generator emits '
+                'each guard as a single `#if`' % (name, len(open_guards))
+            )
+    if open_guards:
+        raise TableError('the emitted document leaves the #if %r open' % open_guards[-1])
 
 
 def render_cases(rows: list[tuple[str, tuple[str, ...]]]) -> list[str]:
@@ -548,14 +615,13 @@ def unmapped_incoming_numbers(table: Table) -> list[int]:
 def unmapped_outgoing_names(table: Table) -> list[Entry]:
     """18.3 messages with no 16.1 counterpart, keeping their own guards.
 
-    Each such message is emitted only under the condition that keeps its
-    enumerator present, so the name compiles in exactly the configurations that
-    have it.
+    Only `new_only` qualifies: a shared name exists in both enumerations, so the
+    older process has a handler for it and the translator has a case for it.
+    Listing a shared name here would refuse a send the translator can perform.
+    Each entry is emitted only under the condition that keeps its enumerator
+    present, so the name compiles in exactly the configurations that have it.
     """
-    guarded_shared = [message.new for message in table.shared
-                      if effective_guards(message.new)]
-    entries = list(table.new_only) + guarded_shared
-    return sorted(entries, key=lambda entry: entry.name)
+    return sorted(table.new_only, key=lambda entry: entry.name)
 
 
 def render_unmapped_incoming(table: Table) -> str:
@@ -721,9 +787,9 @@ def main(argv: list[str]) -> int:
         assert_names_unique(table)
         assert_numbers_unique(table)
         assert_guards_are_one_level(table)
-        assert_round_trip(table)
         assert_old_numbers_fit_new_enum(table)
         document = render(table)
+        assert_round_trip(table, document)
         assert_guarded_cases_are_wrapped(table, document)
     except TableError as error:
         print('gen-ipc-message-number-tables: %s' % error, file=sys.stderr)

@@ -1,5 +1,5 @@
 diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp
-index f7cf0e08156..e97bb766e7c 100644
+index f7cf0e08156..401fa8a7986 100644
 --- a/Source/WebKit/Platform/IPC/Connection.cpp
 +++ b/Source/WebKit/Platform/IPC/Connection.cpp
 @@ -30,6 +30,7 @@
@@ -10,7 +10,7 @@ index f7cf0e08156..e97bb766e7c 100644
  #include "MessageReceiveQueues.h"
  #include "WorkQueueMessageReceiver.h"
  #include <memory>
-@@ -615,6 +616,31 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
+@@ -615,6 +616,47 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
      }
  #endif
  
@@ -30,9 +30,25 @@ index f7cf0e08156..e97bb766e7c 100644
 +        if (isKnownUnmappedOutgoingName(name)) {
 +            // Once per name: this is a per-send path, and a message sent in a
 +            // loop would otherwise fill the log with the same line.
-+            static NeverDestroyed<HashSet<MessageName>> reportedNames;
-+            if (reportedNames.get().add(name).isNewEntry)
-+                WTFLogAlways("Not sending %s to an iOS 16 process: the older enumeration has no message of that name", description(name).characters());
++            //
++            // send() is thread-safe, so this runs on whichever thread the caller
++            // is on and the set needs a lock. MessageName is a scoped
++            // enumeration and WTF derives no hash trait for it, so both traits
++            // are named explicitly, as SuspendedPageProxy.cpp does for this key.
++            static Lock reportedUnmappedNamesLock;
++            static NeverDestroyed<HashSet<MessageName, WTF::IntHash<MessageName>, WTF::StrongEnumHashTraits<MessageName>>> reportedUnmappedNames;
++            bool isFirstReport;
++            {
++                Locker locker { reportedUnmappedNamesLock };
++                isFirstReport = reportedUnmappedNames.get().add(name).isNewEntry;
++            }
++            if (isFirstReport) {
++#if OS(DARWIN)
++                RELEASE_LOG_ERROR(IPC, "Not sending %" PUBLIC_LOG_STRING " to an iOS 16 process: the older enumeration has no message of that name", description(name).characters());
++#else
++                RELEASE_LOG_ERROR(IPC, "Not sending %s to an iOS 16 process: the older enumeration has no message of that name", description(name).characters());
++#endif
++            }
 +            return Error::Unspecified;
 +        }
 +        encoder->setMessageName(translateOutgoingMessageName(name));
@@ -42,7 +58,7 @@ index f7cf0e08156..e97bb766e7c 100644
      if (isMainRunLoop() && m_inDispatchMessageMarkedToUseFullySynchronousModeForTesting && !encoder->isSyncMessage() && !(encoder->messageReceiverName() == ReceiverName::IPC) && !sendOptions.contains(SendOption::IgnoreFullySynchronousMode)) {
          SyncRequestID syncRequestID;
          auto wrappedMessage = createSyncMessageEncoder(MessageName::WrappedAsyncMessageForTesting, encoder->destinationID(), syncRequestID);
-@@ -912,7 +938,17 @@ auto Connection::sendSyncMessage(SyncRequestID syncRequestID, UniqueRef<Encoder>
+@@ -912,7 +954,17 @@ auto Connection::sendSyncMessage(SyncRequestID syncRequestID, UniqueRef<Encoder>
  
      // Since sync IPC is blocking the current thread, make sure we use the same priority for the IPC sending thread
      // as the current thread.
@@ -61,7 +77,7 @@ index f7cf0e08156..e97bb766e7c 100644
  
      // Then wait for a reply. Waiting for a reply could involve dispatching incoming sync messages, so
      // keep an extra reference to the connection here in case it's invalidated.
-@@ -1033,6 +1069,35 @@ void Connection::processIncomingSyncReply(UniqueRef<Decoder> decoder)
+@@ -1033,6 +1085,43 @@ void Connection::processIncomingSyncReply(UniqueRef<Decoder> decoder)
  
  void Connection::processIncomingMessage(UniqueRef<Decoder> message)
  {
@@ -76,10 +92,18 @@ index f7cf0e08156..e97bb766e7c 100644
 +            RELEASE_LOG_ERROR(IPC, "Dropping message %u: the translation table has no case for it, so the table and this build's enumeration disagree", number);
 +        else if (number >= firstSynchronousOldMessageNumber) {
 +            // The peer is blocked on this reply. Answer it with the empty reply an
-+            // unhandled message gets from dispatchSyncMessage, so it decodes a
-+            // default value instead of waiting out its sendSync timeout. The
-+            // payload is not a message this build can dispatch, so this branch
-+            // does not fall through to the dispatch path.
++            // unhandled message gets from dispatchSyncMessage, so it stops waiting
++            // instead of running out its sendSync timeout. The payload is not a
++            // message this build can dispatch, so this branch does not fall through
++            // to the dispatch path.
++            //
++            // An empty reply is not a neutral answer. 16.1's
++            // WebPageProxy::sendSync for WebPage_TouchEventSync reads
++            // `bool handled = false; bool replyReceived = !!sendSync(...);` and sets
++            // `handled = true` when no reply decodes, so the older UI process takes
++            // every touch as already consumed and the page stops responding to
++            // clicks. That follows from dropping the message at all: the timeout
++            // path sets the same flag.
 +            if (auto syncRequestID = message->decode<SyncRequestID>()) {
 +                RELEASE_LOG_ERROR(IPC, "Dropping a synchronous message %u numbered by an older WebKit, replying empty, id=%" PRIu64, number, syncRequestID->toUInt64());
 +                sendSyncReply(makeUniqueRef<Encoder>(MessageName::SyncMessageReply, syncRequestID->toUInt64()));
@@ -160,7 +184,7 @@ index 0dddb73b6bb..5a700b51c25 100644
  #if PLATFORM(MAC)
      ImportanceAssertion m_importanceAssertion;
 diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp
-index 9662098cd75..6ed6a0f8fa5 100644
+index 9662098cd75..9b1d14a77e0 100644
 --- a/Source/WebKit/Platform/IPC/Encoder.cpp
 +++ b/Source/WebKit/Platform/IPC/Encoder.cpp
 @@ -28,6 +28,7 @@
@@ -171,7 +195,7 @@ index 9662098cd75..6ed6a0f8fa5 100644
  #include <algorithm>
  #include <wtf/OptionSet.h>
  #include <wtf/TZoneMallocInlines.h>
-@@ -205,4 +206,8441 @@ bool Encoder::hasAttachments() const
+@@ -205,4 +206,7606 @@ bool Encoder::hasAttachments() const
      return !m_attachments.isEmpty();
  }
  
@@ -333,9 +357,6 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +bool isKnownUnmappedOutgoingName(MessageName name)
 +{
 +    switch (name) {
-+#if OS(LINUX)
-+    case MessageName::AuxiliaryProcess_DidReceiveMemoryPressureEvent:
-+#endif
 +#if ENABLE(CFPREFS_DIRECT_MODE)
 +    case MessageName::AuxiliaryProcess_PreferenceDidUpdate: case MessageName::AuxiliaryProcess_PreferencesDidUpdate:
 +#endif
@@ -344,11 +365,8 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::DownloadProxy_DidReceiveFinalURL: case MessageName::DownloadProxy_DidReceivePlaceholderURL: case MessageName::DownloadProxy_DidReceivePlaceholderURLReply:
 +#endif
 +    case MessageName::DownloadProxy_WillSendRequestReply:
-+#if USE(COORDINATED_GRAPHICS) || USE(TEXTURE_MAPPER)
-+    case MessageName::DrawingAreaProxy_ExitAcceleratedCompositingMode: case MessageName::DrawingAreaProxy_Update:
-+#endif
 +#if PLATFORM(COCOA) || PLATFORM(GTK)
-+    case MessageName::DrawingArea_AdjustTransientZoom: case MessageName::DrawingArea_CommitTransientZoom: case MessageName::DrawingArea_CommitTransientZoomReply:
++    case MessageName::DrawingArea_CommitTransientZoomReply:
 +#endif
 +#if USE(COORDINATED_GRAPHICS) || USE(TEXTURE_MAPPER)
 +    case MessageName::DrawingArea_DidDiscardBackingStore:
@@ -358,7 +376,7 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::DrawingArea_ForceUpdate:
 +#endif
 +#if USE(COORDINATED_GRAPHICS) || USE(TEXTURE_MAPPER) || PLATFORM(COCOA)
-+    case MessageName::DrawingArea_SetDeviceScaleFactor: case MessageName::DrawingArea_UpdateGeometry: case MessageName::DrawingArea_UpdateGeometryReply:
++    case MessageName::DrawingArea_UpdateGeometryReply:
 +#endif
 +#if USE(GRAPHICS_LAYER_WC)
 +    case MessageName::DrawingArea_UpdateGeometryWC:
@@ -367,59 +385,20 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::EventDispatcher_DisplayDidRefresh:
 +#endif
 +#if ENABLE(MAC_GESTURE_EVENTS)
-+    case MessageName::EventDispatcher_GestureEvent: case MessageName::EventDispatcher_GestureEventReply:
-+#endif
-+#if ENABLE(MOMENTUM_EVENT_DISPATCHER)
-+    case MessageName::EventDispatcher_SetScrollingAccelerationCurve:
-+#endif
-+#if ENABLE(IOS_TOUCH_EVENTS)
-+    case MessageName::EventDispatcher_TouchEvent: case MessageName::EventDispatcher_TouchEventReply:
++    case MessageName::EventDispatcher_GestureEventReply:
 +#endif
 +    case MessageName::GPUConnectionToWebProcess_CreateGPU:
-+#if ENABLE(WEBGL)
-+    case MessageName::GPUConnectionToWebProcess_CreateGraphicsContextGL:
-+#endif
-+#if HAVE(VISIBILITY_PROPAGATION_VIEW)
-+    case MessageName::GPUConnectionToWebProcess_CreateVisibilityPropagationContextForPage:
-+#endif
-+#if USE(GRAPHICS_LAYER_WC)
-+    case MessageName::GPUConnectionToWebProcess_CreateWCLayerTreeHost:
-+#endif
-+#if HAVE(VISIBILITY_PROPAGATION_VIEW)
-+    case MessageName::GPUConnectionToWebProcess_DestroyVisibilityPropagationContextForPage:
-+#endif
 +#if ENABLE(MEDIA_SOURCE)
 +    case MessageName::GPUConnectionToWebProcess_EnableMockMediaSource:
 +#endif
-+#if USE(AUDIO_SESSION)
-+    case MessageName::GPUConnectionToWebProcess_EnsureAudioSession:
-+#endif
 +    case MessageName::GPUConnectionToWebProcess_ReleaseGPU:
-+#if ENABLE(WEBGL)
-+    case MessageName::GPUConnectionToWebProcess_ReleaseGraphicsContextGL:
-+#endif
-+#if USE(GRAPHICS_LAYER_WC)
-+    case MessageName::GPUConnectionToWebProcess_ReleaseWCLayerTreeHost:
-+#endif
 +#if ENABLE(EXTENSION_CAPABILITIES)
 +    case MessageName::GPUConnectionToWebProcess_SetMediaEnvironment:
 +#endif
 +#if PLATFORM(COCOA) && ENABLE(MEDIA_STREAM)
 +    case MessageName::GPUConnectionToWebProcess_UpdateSampleBufferDisplayLayerBoundsAndPosition:
 +#endif
-+#if ENABLE(ROUTING_ARBITRATION)
-+    case MessageName::GPUProcessConnection_BeginRoutingArbitrationWithCategory: case MessageName::GPUProcessConnection_BeginRoutingArbitrationWithCategoryReply:
-+#endif
 +    case MessageName::GPUProcessConnection_DidInitialize:
-+#if ENABLE(ROUTING_ARBITRATION)
-+    case MessageName::GPUProcessConnection_EndRoutingArbitration:
-+#endif
-+#if ENABLE(MEDIA_STREAM) && PLATFORM(COCOA)
-+    case MessageName::GPUProcessConnection_ResetAudioMediaStreamTrackRendererInternalUnit:
-+#endif
-+#if HAVE(VISIBILITY_PROPAGATION_VIEW)
-+    case MessageName::GPUProcessProxy_DidCreateContextForVisibilityPropagation:
-+#endif
 +#if ENABLE(AV1)
 +    case MessageName::GPUProcessProxy_SetHasAV1HardwareDecoder:
 +#endif
@@ -433,13 +412,10 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::GPUProcessProxy_StatusBarWasTapped: case MessageName::GPUProcessProxy_StatusBarWasTappedReply:
 +#endif
 +#if ENABLE(MEDIA_STREAM)
-+    case MessageName::GPUProcessProxy_StopMonitoringCaptureDeviceRotation: case MessageName::GPUProcessProxy_VoiceActivityDetected: case MessageName::GPUProcess_AddMockMediaDevice:
++    case MessageName::GPUProcessProxy_StopMonitoringCaptureDeviceRotation: case MessageName::GPUProcessProxy_VoiceActivityDetected:
 +#endif
 +#if HAVE(SCREEN_CAPTURE_KIT)
 +    case MessageName::GPUProcess_CancelGetDisplayMediaPrompt:
-+#endif
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::GPUProcess_ClearMockMediaDevices:
 +#endif
 +#if HAVE(AUDIO_COMPONENT_SERVER_REGISTRATIONS)
 +    case MessageName::GPUProcess_ConsumeAudioComponentRegistrations:
@@ -454,65 +430,24 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if HAVE(SCREEN_CAPTURE_KIT)
 +    case MessageName::GPUProcess_PromptForGetDisplayMedia: case MessageName::GPUProcess_PromptForGetDisplayMediaReply:
 +#endif
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::GPUProcess_RemoveMockMediaDevice:
-+#endif
-+#if ENABLE(VIDEO)
-+    case MessageName::GPUProcess_RequestBitmapImageForCurrentTime: case MessageName::GPUProcess_RequestBitmapImageForCurrentTimeReply:
-+#endif
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::GPUProcess_ResetMockMediaDevices:
-+#endif
 +#if USE(EXTENSIONKIT)
 +    case MessageName::GPUProcess_ResolveBookmarkDataForCacheDirectory:
 +#endif
 +#if ENABLE(MEDIA_STREAM)
-+    case MessageName::GPUProcess_RotationAngleForCaptureDeviceChanged: case MessageName::GPUProcess_SetMockCaptureDevicesEnabled: case MessageName::GPUProcess_SetMockCaptureDevicesInterrupted: case MessageName::GPUProcess_SetMockMediaDeviceIsEphemeral: case MessageName::GPUProcess_SetOrientationForMediaCapture:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::GPUProcess_SetScreenProperties:
-+#endif
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::GPUProcess_SetShouldListenToVoiceActivity:
++    case MessageName::GPUProcess_RotationAngleForCaptureDeviceChanged: case MessageName::GPUProcess_SetMockMediaDeviceIsEphemeral: case MessageName::GPUProcess_SetShouldListenToVoiceActivity:
 +#endif
 +#if HAVE(SC_CONTENT_SHARING_PICKER)
 +    case MessageName::GPUProcess_SetUseSCContentSharingPicker:
 +#endif
 +    case MessageName::GPUProcess_SharedPreferencesForWebProcessDidChange: case MessageName::GPUProcess_SharedPreferencesForWebProcessDidChangeReply:
 +#if ENABLE(MEDIA_STREAM)
-+    case MessageName::GPUProcess_TriggerMockCaptureConfigurationChange: case MessageName::GPUProcess_UpdateCaptureAccess: case MessageName::GPUProcess_UpdateCaptureAccessReply: case MessageName::GPUProcess_UpdateCaptureOrigin:
++    case MessageName::GPUProcess_TriggerMockCaptureConfigurationChange:
 +#endif
 +    case MessageName::GPUProcess_UpdateGPUProcessPreferences: case MessageName::GPUProcess_UserPreferredLanguagesChanged:
 +#if ENABLE(WEBXR)
 +    case MessageName::GPUProcess_WebXRPromptAccepted: case MessageName::GPUProcess_WebXRPromptAcceptedReply:
 +#endif
-+    case MessageName::IPCConnectionTester_AsyncMessage: case MessageName::IPCConnectionTester_SyncMessage: case MessageName::IPCStreamTester_AsyncPing: case MessageName::IPCStreamTester_AsyncPingReply: case MessageName::IPCStreamTester_CheckAutoreleasePool: case MessageName::IPCStreamTester_EmptyMessage: case MessageName::IPCStreamTester_SyncCrashOnZero: case MessageName::IPCStreamTester_SyncMessage: case MessageName::IPCStreamTester_SyncMessageEmptyReply: case MessageName::IPCStreamTester_SyncMessageNotStreamEncodableReply: case MessageName::IPCTesterReceiver_AsyncMessage: case MessageName::IPCTesterReceiver_AsyncMessageReply: case MessageName::IPCTester_AsyncOptionalExceptionData: case MessageName::IPCTester_AsyncOptionalExceptionDataReply: case MessageName::IPCTester_AsyncPing: case MessageName::IPCTester_AsyncPingReply: case MessageName::IPCTester_CreateConnectionTester: case MessageName::IPCTester_CreateConnectionTesterAndSendAsyncMessages: case MessageName::IPCTester_ReleaseConnectionTester: case MessageName::IPCTester_SendAsyncMessageToReceiver: case MessageName::IPCTester_SendSameSemaphoreBack: case MessageName::IPCTester_SendSemaphoreBackAndSignalProtocol: case MessageName::IPCTester_SyncPing: case MessageName::IPCTester_SyncPingEmptyReply: case MessageName::LibWebRTCCodecsProxy_CreateDecoder: case MessageName::LibWebRTCCodecsProxy_CreateDecoderReply: case MessageName::LibWebRTCCodecsProxy_CreateEncoderReply: case MessageName::LibWebRTCCodecsProxy_DecodeFrameReply: case MessageName::LibWebRTCCodecsProxy_EncodeFrameReply: case MessageName::LibWebRTCCodecsProxy_FlushDecoder: case MessageName::LibWebRTCCodecsProxy_FlushDecoderReply: case MessageName::LibWebRTCCodecsProxy_FlushEncoder: case MessageName::LibWebRTCCodecsProxy_FlushEncoderReply: case MessageName::LibWebRTCCodecsProxy_SetDecoderFormatDescription: case MessageName::LibWebRTCCodecsProxy_SetEncodeRatesReply: case MessageName::LibWebRTCCodecs_SetEncodingConfiguration: case MessageName::LibWebRTCNetwork_SignalUsedInterface:
-+#if ENABLE(DATACUE_VALUE)
-+    case MessageName::MediaPlayerPrivateRemote_AddDataCueWithType:
-+#endif
-+    case MessageName::MediaPlayerPrivateRemote_CommitAllTransactions: case MessageName::MediaPlayerPrivateRemote_CommitAllTransactionsReply:
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET)
-+    case MessageName::MediaPlayerPrivateRemote_CurrentPlaybackTargetIsWirelessChanged:
-+#endif
-+#if ENABLE(ENCRYPTED_MEDIA)
-+    case MessageName::MediaPlayerPrivateRemote_InitializationDataEncountered:
-+#endif
-+    case MessageName::MediaPlayerPrivateRemote_LayerHostingContextIdChanged:
-+#if ENABLE(LEGACY_ENCRYPTED_MEDIA)
-+    case MessageName::MediaPlayerPrivateRemote_MediaPlayerKeyNeeded:
-+#endif
-+#if ENABLE(DATACUE_VALUE)
-+    case MessageName::MediaPlayerPrivateRemote_RemoveDataCue:
-+#endif
-+    case MessageName::MediaPlayerPrivateRemote_Seeked:
-+#if ENABLE(DATACUE_VALUE)
-+    case MessageName::MediaPlayerPrivateRemote_UpdateDataCue:
-+#endif
-+    case MessageName::MediaPlayerPrivateRemote_UpdatePlaybackQualityMetrics:
-+#if ENABLE(ENCRYPTED_MEDIA)
-+    case MessageName::MediaPlayerPrivateRemote_WaitingForKeyChanged:
-+#endif
-+    case MessageName::MediaSourcePrivateRemoteMessageReceiver_MediaSourcePrivateShuttingDown: case MessageName::MediaSourcePrivateRemoteMessageReceiver_MediaSourcePrivateShuttingDownReply: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxySeekToTime: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxySeekToTimeReply: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxyWaitForTarget: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxyWaitForTargetReply: case MessageName::ModelConnectionToWebProcess_ConfigureLoggingChannel:
++    case MessageName::IPCConnectionTester_AsyncMessage: case MessageName::IPCConnectionTester_SyncMessage: case MessageName::IPCStreamTester_AsyncPing: case MessageName::IPCStreamTester_AsyncPingReply: case MessageName::IPCStreamTester_CheckAutoreleasePool: case MessageName::IPCStreamTester_EmptyMessage: case MessageName::IPCStreamTester_SyncCrashOnZero: case MessageName::IPCStreamTester_SyncMessage: case MessageName::IPCStreamTester_SyncMessageEmptyReply: case MessageName::IPCStreamTester_SyncMessageNotStreamEncodableReply: case MessageName::IPCTesterReceiver_AsyncMessage: case MessageName::IPCTesterReceiver_AsyncMessageReply: case MessageName::IPCTester_AsyncOptionalExceptionData: case MessageName::IPCTester_AsyncOptionalExceptionDataReply: case MessageName::IPCTester_AsyncPing: case MessageName::IPCTester_AsyncPingReply: case MessageName::IPCTester_CreateConnectionTester: case MessageName::IPCTester_CreateConnectionTesterAndSendAsyncMessages: case MessageName::IPCTester_ReleaseConnectionTester: case MessageName::IPCTester_SendAsyncMessageToReceiver: case MessageName::IPCTester_SendSameSemaphoreBack: case MessageName::IPCTester_SendSemaphoreBackAndSignalProtocol: case MessageName::IPCTester_SyncPing: case MessageName::IPCTester_SyncPingEmptyReply: case MessageName::LibWebRTCCodecsProxy_CreateDecoder: case MessageName::LibWebRTCCodecsProxy_CreateDecoderReply: case MessageName::LibWebRTCCodecsProxy_CreateEncoderReply: case MessageName::LibWebRTCCodecsProxy_DecodeFrameReply: case MessageName::LibWebRTCCodecsProxy_EncodeFrameReply: case MessageName::LibWebRTCCodecsProxy_FlushDecoder: case MessageName::LibWebRTCCodecsProxy_FlushDecoderReply: case MessageName::LibWebRTCCodecsProxy_FlushEncoder: case MessageName::LibWebRTCCodecsProxy_FlushEncoderReply: case MessageName::LibWebRTCCodecsProxy_SetDecoderFormatDescription: case MessageName::LibWebRTCCodecsProxy_SetEncodeRatesReply: case MessageName::LibWebRTCCodecs_SetEncodingConfiguration: case MessageName::LibWebRTCNetwork_SignalUsedInterface: case MessageName::MediaPlayerPrivateRemote_CommitAllTransactions: case MessageName::MediaPlayerPrivateRemote_CommitAllTransactionsReply: case MessageName::MediaPlayerPrivateRemote_LayerHostingContextIdChanged: case MessageName::MediaPlayerPrivateRemote_Seeked: case MessageName::MediaPlayerPrivateRemote_UpdatePlaybackQualityMetrics: case MessageName::MediaSourcePrivateRemoteMessageReceiver_MediaSourcePrivateShuttingDown: case MessageName::MediaSourcePrivateRemoteMessageReceiver_MediaSourcePrivateShuttingDownReply: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxySeekToTime: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxySeekToTimeReply: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxyWaitForTarget: case MessageName::MediaSourcePrivateRemoteMessageReceiver_ProxyWaitForTargetReply: case MessageName::ModelConnectionToWebProcess_ConfigureLoggingChannel:
 +#if HAVE(VISIBILITY_PROPAGATION_VIEW)
 +    case MessageName::ModelConnectionToWebProcess_CreateVisibilityPropagationContextForPage: case MessageName::ModelConnectionToWebProcess_DestroyVisibilityPropagationContextForPage:
 +#endif
@@ -520,19 +455,7 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if HAVE(VISIBILITY_PROPAGATION_VIEW)
 +    case MessageName::ModelProcessProxy_DidCreateContextForVisibilityPropagation:
 +#endif
-+    case MessageName::ModelProcessProxy_ProcessIsReadyToExit: case MessageName::ModelProcessProxy_TerminateWebProcess: case MessageName::ModelProcess_AddSession: case MessageName::ModelProcess_CreateModelConnectionToWebProcess: case MessageName::ModelProcess_CreateModelConnectionToWebProcessReply: case MessageName::ModelProcess_InitializeModelProcess: case MessageName::ModelProcess_InitializeModelProcessReply: case MessageName::ModelProcess_PrepareToSuspend: case MessageName::ModelProcess_PrepareToSuspendReply: case MessageName::ModelProcess_ProcessDidResume: case MessageName::ModelProcess_RemoveSession: case MessageName::ModelProcess_WebProcessConnectionCountForTesting: case MessageName::ModelProcess_WebProcessConnectionCountForTestingReply: case MessageName::NetworkConnectionToWebProcess_BlobType: case MessageName::NetworkConnectionToWebProcess_ClearFrameLoadRecordsForStorageAccess:
-+#if ENABLE(WEB_RTC)
-+    case MessageName::NetworkConnectionToWebProcess_ConnectToRTCDataChannelRemoteSource: case MessageName::NetworkConnectionToWebProcess_ConnectToRTCDataChannelRemoteSourceReply:
-+#endif
-+    case MessageName::NetworkConnectionToWebProcess_CookiesEnabled: case MessageName::NetworkConnectionToWebProcess_CookiesEnabledReply: case MessageName::NetworkConnectionToWebProcess_CookiesEnabledSync: case MessageName::NetworkConnectionToWebProcess_CookiesForDOMAsync: case MessageName::NetworkConnectionToWebProcess_CookiesForDOMAsyncReply: case MessageName::NetworkConnectionToWebProcess_DeleteCookieReply: case MessageName::NetworkConnectionToWebProcess_DestroyWebTransportSession:
-+#if PLATFORM(MAC)
-+    case MessageName::NetworkConnectionToWebProcess_GetProcessDisplayName: case MessageName::NetworkConnectionToWebProcess_GetProcessDisplayNameReply:
-+#endif
-+    case MessageName::NetworkConnectionToWebProcess_InitializeWebTransportSession: case MessageName::NetworkConnectionToWebProcess_InitializeWebTransportSessionReply:
-+#if ENABLE(CONTENT_FILTERING)
-+    case MessageName::NetworkConnectionToWebProcess_InstallMockContentFilter:
-+#endif
-+    case MessageName::NetworkConnectionToWebProcess_IsLoggedIn: case MessageName::NetworkConnectionToWebProcess_IsLoggedInReply: case MessageName::NetworkConnectionToWebProcess_LoadImageForDecoding: case MessageName::NetworkConnectionToWebProcess_LoadImageForDecodingReply:
++    case MessageName::ModelProcessProxy_ProcessIsReadyToExit: case MessageName::ModelProcessProxy_TerminateWebProcess: case MessageName::ModelProcess_AddSession: case MessageName::ModelProcess_CreateModelConnectionToWebProcess: case MessageName::ModelProcess_CreateModelConnectionToWebProcessReply: case MessageName::ModelProcess_InitializeModelProcess: case MessageName::ModelProcess_InitializeModelProcessReply: case MessageName::ModelProcess_PrepareToSuspend: case MessageName::ModelProcess_PrepareToSuspendReply: case MessageName::ModelProcess_ProcessDidResume: case MessageName::ModelProcess_RemoveSession: case MessageName::ModelProcess_WebProcessConnectionCountForTesting: case MessageName::ModelProcess_WebProcessConnectionCountForTestingReply: case MessageName::NetworkConnectionToWebProcess_BlobType: case MessageName::NetworkConnectionToWebProcess_ClearFrameLoadRecordsForStorageAccess: case MessageName::NetworkConnectionToWebProcess_CookiesEnabled: case MessageName::NetworkConnectionToWebProcess_CookiesEnabledReply: case MessageName::NetworkConnectionToWebProcess_CookiesEnabledSync: case MessageName::NetworkConnectionToWebProcess_CookiesForDOMAsync: case MessageName::NetworkConnectionToWebProcess_CookiesForDOMAsyncReply: case MessageName::NetworkConnectionToWebProcess_DeleteCookieReply: case MessageName::NetworkConnectionToWebProcess_DestroyWebTransportSession: case MessageName::NetworkConnectionToWebProcess_InitializeWebTransportSession: case MessageName::NetworkConnectionToWebProcess_InitializeWebTransportSessionReply: case MessageName::NetworkConnectionToWebProcess_IsLoggedIn: case MessageName::NetworkConnectionToWebProcess_IsLoggedInReply: case MessageName::NetworkConnectionToWebProcess_LoadImageForDecoding: case MessageName::NetworkConnectionToWebProcess_LoadImageForDecodingReply:
 +#if ENABLE(LOGD_BLOCKING_IN_WEBCONTENT)
 +    case MessageName::NetworkConnectionToWebProcess_LogOnBehalfOfWebContent:
 +#endif
@@ -541,35 +464,9 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#endif
 +    case MessageName::NetworkConnectionToWebProcess_RegisterBlobPathForTesting: case MessageName::NetworkConnectionToWebProcess_RegisterBlobPathForTestingReply: case MessageName::NetworkConnectionToWebProcess_RegisterInternalBlobURL: case MessageName::NetworkConnectionToWebProcess_RegisterInternalBlobURLForSlice: case MessageName::NetworkConnectionToWebProcess_RegisterInternalBlobURLOptionallyFileBacked: case MessageName::NetworkConnectionToWebProcess_RegisterInternalFileBlobURL: case MessageName::NetworkConnectionToWebProcess_SetCookieFromDOMAsync: case MessageName::NetworkConnectionToWebProcess_SetCookieFromDOMAsyncReply: case MessageName::NetworkConnectionToWebProcess_SetLoginStatus: case MessageName::NetworkConnectionToWebProcess_SetLoginStatusReply: case MessageName::NetworkConnectionToWebProcess_StorageAccessQuirkForTopFrameDomain: case MessageName::NetworkConnectionToWebProcess_StorageAccessQuirkForTopFrameDomainReply:
 +#if HAVE(COOKIE_CHANGE_LISTENER_API)
-+    case MessageName::NetworkConnectionToWebProcess_SubscribeToCookieChangeNotifications: case MessageName::NetworkConnectionToWebProcess_UnsubscribeFromCookieChangeNotifications:
++    case MessageName::NetworkConnectionToWebProcess_SubscribeToCookieChangeNotifications:
 +#endif
-+#if PLATFORM(MAC)
-+    case MessageName::NetworkConnectionToWebProcess_UpdateActivePages:
-+#endif
-+    case MessageName::NetworkConnectionToWebProcess_UseRedirectionForCurrentNavigation: case MessageName::NetworkMDNSRegister_RegisterMDNSNameReply:
-+#if HAVE(COOKIE_CHANGE_LISTENER_API)
-+    case MessageName::NetworkProcessConnection_AllCookiesDeleted:
-+#endif
-+#if ENABLE(WEB_RTC)
-+    case MessageName::NetworkProcessConnection_ConnectToRTCDataChannelRemoteSource: case MessageName::NetworkProcessConnection_ConnectToRTCDataChannelRemoteSourceReply:
-+#endif
-+#if HAVE(COOKIE_CHANGE_LISTENER_API)
-+    case MessageName::NetworkProcessConnection_CookiesAdded: case MessageName::NetworkProcessConnection_CookiesDeleted:
-+#endif
-+#if ENABLE(SHAREABLE_RESOURCE)
-+    case MessageName::NetworkProcessConnection_DidCacheResource:
-+#endif
-+    case MessageName::NetworkProcessConnection_LoadCancelledDownloadRedirectRequestInFrame: case MessageName::NetworkProcessConnection_UpdateCachedCookiesEnabled:
-+#if ENABLE(CONTENT_EXTENSIONS)
-+    case MessageName::NetworkProcessProxy_ContentExtensionRules:
-+#endif
-+    case MessageName::NetworkProcessProxy_CookiesDidChange: case MessageName::NetworkProcessProxy_DeleteWebsiteDataInWebProcessesForOrigin: case MessageName::NetworkProcessProxy_DeleteWebsiteDataInWebProcessesForOriginReply: case MessageName::NetworkProcessProxy_DidAllowPrivateTokenUsageByThirdPartyForTesting: case MessageName::NetworkProcessProxy_DidBlockLoadToKnownTracker:
-+#if USE(SOUP)
-+    case MessageName::NetworkProcessProxy_DidExceedMemoryLimit:
-+#endif
-+#if ENABLE(APP_BOUND_DOMAINS)
-+    case MessageName::NetworkProcessProxy_GetAppBoundDomains: case MessageName::NetworkProcessProxy_GetAppBoundDomainsReply:
-+#endif
++    case MessageName::NetworkConnectionToWebProcess_UseRedirectionForCurrentNavigation: case MessageName::NetworkMDNSRegister_RegisterMDNSNameReply: case MessageName::NetworkProcessConnection_LoadCancelledDownloadRedirectRequestInFrame: case MessageName::NetworkProcessConnection_UpdateCachedCookiesEnabled: case MessageName::NetworkProcessProxy_CookiesDidChange: case MessageName::NetworkProcessProxy_DeleteWebsiteDataInWebProcessesForOrigin: case MessageName::NetworkProcessProxy_DeleteWebsiteDataInWebProcessesForOriginReply: case MessageName::NetworkProcessProxy_DidAllowPrivateTokenUsageByThirdPartyForTesting: case MessageName::NetworkProcessProxy_DidBlockLoadToKnownTracker:
 +#if ENABLE(APPLE_PAY_REMOTE_UI)
 +    case MessageName::NetworkProcessProxy_GetPaymentCoordinatorEmbeddingUserAgent: case MessageName::NetworkProcessProxy_GetPaymentCoordinatorEmbeddingUserAgentReply:
 +#endif
@@ -584,66 +481,23 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if USE(RUNNINGBOARD)
 +    case MessageName::NetworkProcessProxy_WakeUpWebProcessForIPC:
 +#endif
-+    case MessageName::NetworkProcess_AbortBackgroundFetch: case MessageName::NetworkProcess_AbortBackgroundFetchReply: case MessageName::NetworkProcess_AddAllowedFirstPartyForCookies: case MessageName::NetworkProcess_AddAllowedFirstPartyForCookiesReply: case MessageName::NetworkProcess_AllowFileAccessFromWebProcess: case MessageName::NetworkProcess_AllowFileAccessFromWebProcessReply: case MessageName::NetworkProcess_AllowFilesAccessFromWebProcess: case MessageName::NetworkProcess_AllowFilesAccessFromWebProcessReply:
-+#if !PLATFORM(COCOA)
-+    case MessageName::NetworkProcess_AllowSpecificHTTPSCertificateForHost:
-+#endif
-+    case MessageName::NetworkProcess_CancelDataTaskReply:
-+#if ENABLE(APP_BOUND_DOMAINS)
-+    case MessageName::NetworkProcess_ClearAppBoundSession: case MessageName::NetworkProcess_ClearAppBoundSessionReply:
-+#endif
++    case MessageName::NetworkProcess_AbortBackgroundFetch: case MessageName::NetworkProcess_AbortBackgroundFetchReply: case MessageName::NetworkProcess_AddAllowedFirstPartyForCookies: case MessageName::NetworkProcess_AddAllowedFirstPartyForCookiesReply: case MessageName::NetworkProcess_AllowFileAccessFromWebProcess: case MessageName::NetworkProcess_AllowFileAccessFromWebProcessReply: case MessageName::NetworkProcess_AllowFilesAccessFromWebProcess: case MessageName::NetworkProcess_AllowFilesAccessFromWebProcessReply: case MessageName::NetworkProcess_CancelDataTaskReply:
 +#if HAVE(NW_PROXY_CONFIG)
 +    case MessageName::NetworkProcess_ClearProxyConfigData:
 +#endif
-+#if PLATFORM(IOS_FAMILY) && !PLATFORM(MACCATALYST)
-+    case MessageName::NetworkProcess_ClearServiceWorkerEntitlementOverride: case MessageName::NetworkProcess_ClearServiceWorkerEntitlementOverrideReply:
-+#endif
-+    case MessageName::NetworkProcess_ClickBackgroundFetch: case MessageName::NetworkProcess_ClickBackgroundFetchReply: case MessageName::NetworkProcess_CloneSessionStorageForWebPage: case MessageName::NetworkProcess_DestroySessionReply:
-+#if PLATFORM(IOS_FAMILY) && !PLATFORM(MACCATALYST)
-+    case MessageName::NetworkProcess_DisableServiceWorkerEntitlement:
-+#endif
-+    case MessageName::NetworkProcess_GetAllBackgroundFetchIdentifiers: case MessageName::NetworkProcess_GetAllBackgroundFetchIdentifiersReply: case MessageName::NetworkProcess_GetAppBadgeForTesting: case MessageName::NetworkProcess_GetAppBadgeForTestingReply: case MessageName::NetworkProcess_GetBackgroundFetchState: case MessageName::NetworkProcess_GetBackgroundFetchStateReply: case MessageName::NetworkProcess_GetPendingPushMessage: case MessageName::NetworkProcess_GetPendingPushMessageReply: case MessageName::NetworkProcess_GrantStorageAccessForTesting: case MessageName::NetworkProcess_GrantStorageAccessForTestingReply:
-+#if ENABLE(APP_BOUND_DOMAINS)
-+    case MessageName::NetworkProcess_HasAppBoundSession: case MessageName::NetworkProcess_HasAppBoundSessionReply:
-+#endif
-+    case MessageName::NetworkProcess_NotifyMediaStreamingActivity: case MessageName::NetworkProcess_PauseBackgroundFetch: case MessageName::NetworkProcess_PauseBackgroundFetchReply:
-+#if USE(SOUP)
-+    case MessageName::NetworkProcess_PrefetchDNS:
-+#endif
-+    case MessageName::NetworkProcess_ProcessNotificationEventReply:
-+#if (PLATFORM(COCOA) && HAVE(MODERN_DOWNLOADPROGRESS)) || (PLATFORM(COCOA) && !HAVE(MODERN_DOWNLOADPROGRESS))
-+    case MessageName::NetworkProcess_PublishDownloadProgress:
-+#endif
-+    case MessageName::NetworkProcess_RemovePushSubscriptionsForOrigin: case MessageName::NetworkProcess_RemovePushSubscriptionsForOriginReply: case MessageName::NetworkProcess_ResetStoragePersistedState: case MessageName::NetworkProcess_ResetStoragePersistedStateReply: case MessageName::NetworkProcess_ResumeBackgroundFetch: case MessageName::NetworkProcess_ResumeBackgroundFetchReply:
-+#if ENABLE(APP_BOUND_DOMAINS)
-+    case MessageName::NetworkProcess_SetAppBoundDomainsForResourceLoadStatistics: case MessageName::NetworkProcess_SetAppBoundDomainsForResourceLoadStatisticsReply:
-+#endif
-+    case MessageName::NetworkProcess_SetBackupExclusionPeriodForTesting: case MessageName::NetworkProcess_SetBackupExclusionPeriodForTestingReply: case MessageName::NetworkProcess_SetBlobRegistryTopOriginPartitioningEnabled:
++    case MessageName::NetworkProcess_ClickBackgroundFetch: case MessageName::NetworkProcess_ClickBackgroundFetchReply: case MessageName::NetworkProcess_CloneSessionStorageForWebPage: case MessageName::NetworkProcess_DestroySessionReply: case MessageName::NetworkProcess_GetAllBackgroundFetchIdentifiers: case MessageName::NetworkProcess_GetAllBackgroundFetchIdentifiersReply: case MessageName::NetworkProcess_GetAppBadgeForTesting: case MessageName::NetworkProcess_GetAppBadgeForTestingReply: case MessageName::NetworkProcess_GetBackgroundFetchState: case MessageName::NetworkProcess_GetBackgroundFetchStateReply: case MessageName::NetworkProcess_GetPendingPushMessage: case MessageName::NetworkProcess_GetPendingPushMessageReply: case MessageName::NetworkProcess_GrantStorageAccessForTesting: case MessageName::NetworkProcess_GrantStorageAccessForTestingReply: case MessageName::NetworkProcess_NotifyMediaStreamingActivity: case MessageName::NetworkProcess_PauseBackgroundFetch: case MessageName::NetworkProcess_PauseBackgroundFetchReply: case MessageName::NetworkProcess_ProcessNotificationEventReply: case MessageName::NetworkProcess_RemovePushSubscriptionsForOrigin: case MessageName::NetworkProcess_RemovePushSubscriptionsForOriginReply: case MessageName::NetworkProcess_ResetStoragePersistedState: case MessageName::NetworkProcess_ResetStoragePersistedStateReply: case MessageName::NetworkProcess_ResumeBackgroundFetch: case MessageName::NetworkProcess_ResumeBackgroundFetchReply: case MessageName::NetworkProcess_SetBackupExclusionPeriodForTesting: case MessageName::NetworkProcess_SetBackupExclusionPeriodForTestingReply: case MessageName::NetworkProcess_SetBlobRegistryTopOriginPartitioningEnabled:
 +#if ENABLE(INSPECTOR_NETWORK_THROTTLING)
 +    case MessageName::NetworkProcess_SetEmulatedConditions:
-+#endif
-+#if USE(SOUP)
-+    case MessageName::NetworkProcess_SetIgnoreTLSErrors:
 +#endif
 +    case MessageName::NetworkProcess_SetInspectionForServiceWorkersAllowed:
 +#if ENABLE(MANAGED_DOMAINS)
 +    case MessageName::NetworkProcess_SetManagedDomainsForResourceLoadStatistics: case MessageName::NetworkProcess_SetManagedDomainsForResourceLoadStatisticsReply:
 +#endif
-+#if USE(SOUP) || USE(CURL)
-+    case MessageName::NetworkProcess_SetNetworkProxySettings:
-+#endif
 +    case MessageName::NetworkProcess_SetOriginQuotaRatioEnabledForTesting: case MessageName::NetworkProcess_SetOriginQuotaRatioEnabledForTestingReply: case MessageName::NetworkProcess_SetPersistedDomains:
-+#if USE(SOUP)
-+    case MessageName::NetworkProcess_SetPersistentCredentialStorageEnabled:
-+#endif
 +#if HAVE(NW_PROXY_CONFIG)
 +    case MessageName::NetworkProcess_SetProxyConfigData:
 +#endif
-+    case MessageName::NetworkProcess_SetPushAndNotificationsEnabledForOrigin: case MessageName::NetworkProcess_SetPushAndNotificationsEnabledForOriginReply: case MessageName::NetworkProcess_SetResourceLoadStatisticsTimeAdvanceForTesting: case MessageName::NetworkProcess_SetResourceLoadStatisticsTimeAdvanceForTestingReply: case MessageName::NetworkProcess_SetShouldRelaxThirdPartyCookieBlockingForPage: case MessageName::NetworkProcess_SetShouldSendPrivateTokenIPCForTesting: case MessageName::NetworkProcess_SetStorageSiteValidationEnabled: case MessageName::NetworkProcess_SetTrackingPreventionEnabled: case MessageName::NetworkProcess_SharedPreferencesForWebProcessDidChange: case MessageName::NetworkProcess_SharedPreferencesForWebProcessDidChangeReply: case MessageName::NetworkProcess_StoreServiceWorkerRegistrations: case MessageName::NetworkProcess_StoreServiceWorkerRegistrationsReply: case MessageName::NetworkProcess_UpdateStorageAccessPromptQuirks:
-+#if USE(SOUP)
-+    case MessageName::NetworkProcess_UserPreferredLanguagesChanged:
-+#endif
-+    case MessageName::NetworkRTCProvider_GetInterfaceName: case MessageName::NetworkRTCProvider_GetInterfaceNameReply: case MessageName::NetworkStorageManager_CacheStorageAllCaches: case MessageName::NetworkStorageManager_CacheStorageAllCachesReply: case MessageName::NetworkStorageManager_CacheStorageClearMemoryRepresentation: case MessageName::NetworkStorageManager_CacheStorageClearMemoryRepresentationReply: case MessageName::NetworkStorageManager_CacheStorageDereference: case MessageName::NetworkStorageManager_CacheStorageOpenCache: case MessageName::NetworkStorageManager_CacheStorageOpenCacheReply: case MessageName::NetworkStorageManager_CacheStoragePutRecords: case MessageName::NetworkStorageManager_CacheStoragePutRecordsReply: case MessageName::NetworkStorageManager_CacheStorageReference: case MessageName::NetworkStorageManager_CacheStorageRemoveCache: case MessageName::NetworkStorageManager_CacheStorageRemoveCacheReply: case MessageName::NetworkStorageManager_CacheStorageRemoveRecords: case MessageName::NetworkStorageManager_CacheStorageRemoveRecordsReply: case MessageName::NetworkStorageManager_CacheStorageRepresentation: case MessageName::NetworkStorageManager_CacheStorageRepresentationReply: case MessageName::NetworkStorageManager_CacheStorageRetrieveRecords: case MessageName::NetworkStorageManager_CacheStorageRetrieveRecordsReply: case MessageName::NetworkStorageManager_Estimate: case MessageName::NetworkStorageManager_EstimateReply: case MessageName::NetworkStorageManager_LockCacheStorage: case MessageName::NetworkStorageManager_RequestNewCapacityForSyncAccessHandle: case MessageName::NetworkStorageManager_RequestNewCapacityForSyncAccessHandleReply: case MessageName::NetworkStorageManager_ResetQuotaUpdatedBasedOnUsageForTesting: case MessageName::NetworkStorageManager_UnlockCacheStorage: case MessageName::NetworkTransportSession_CreateBidirectionalStream: case MessageName::NetworkTransportSession_CreateBidirectionalStreamReply: case MessageName::NetworkTransportSession_CreateOutgoingUnidirectionalStream: case MessageName::NetworkTransportSession_CreateOutgoingUnidirectionalStreamReply: case MessageName::NetworkTransportSession_DestroyBidirectionalStream: case MessageName::NetworkTransportSession_DestroyOutgoingUnidirectionalStream: case MessageName::NetworkTransportSession_SendDatagram: case MessageName::NetworkTransportSession_SendDatagramReply: case MessageName::NetworkTransportSession_SendStreamSendBytes: case MessageName::NetworkTransportSession_SendStreamSendBytesReply: case MessageName::NetworkTransportSession_StreamSendBytes: case MessageName::NetworkTransportSession_StreamSendBytesReply: case MessageName::NetworkTransportSession_Terminate: case MessageName::NotificationManagerMessageHandler_GetPermissionState: case MessageName::NotificationManagerMessageHandler_GetPermissionStateReply: case MessageName::NotificationManagerMessageHandler_GetPermissionStateSync: case MessageName::NotificationManagerMessageHandler_PageWasNotifiedOfNotificationPermission: case MessageName::NotificationManagerMessageHandler_RequestPermission: case MessageName::NotificationManagerMessageHandler_RequestPermissionReply: case MessageName::NotificationManagerMessageHandler_SetAppBadge: case MessageName::NotificationManagerMessageHandler_ShowNotificationReply: case MessageName::PlatformXRSystem_DidCompleteShutdownTriggeredBySystem: case MessageName::PlaybackSessionManagerProxy_IsInWindowFullscreenActiveChanged:
++    case MessageName::NetworkProcess_SetPushAndNotificationsEnabledForOrigin: case MessageName::NetworkProcess_SetPushAndNotificationsEnabledForOriginReply: case MessageName::NetworkProcess_SetResourceLoadStatisticsTimeAdvanceForTesting: case MessageName::NetworkProcess_SetResourceLoadStatisticsTimeAdvanceForTestingReply: case MessageName::NetworkProcess_SetShouldRelaxThirdPartyCookieBlockingForPage: case MessageName::NetworkProcess_SetShouldSendPrivateTokenIPCForTesting: case MessageName::NetworkProcess_SetStorageSiteValidationEnabled: case MessageName::NetworkProcess_SetTrackingPreventionEnabled: case MessageName::NetworkProcess_SharedPreferencesForWebProcessDidChange: case MessageName::NetworkProcess_SharedPreferencesForWebProcessDidChangeReply: case MessageName::NetworkProcess_StoreServiceWorkerRegistrations: case MessageName::NetworkProcess_StoreServiceWorkerRegistrationsReply: case MessageName::NetworkProcess_UpdateStorageAccessPromptQuirks: case MessageName::NetworkRTCProvider_GetInterfaceName: case MessageName::NetworkRTCProvider_GetInterfaceNameReply: case MessageName::NetworkStorageManager_CacheStorageAllCaches: case MessageName::NetworkStorageManager_CacheStorageAllCachesReply: case MessageName::NetworkStorageManager_CacheStorageClearMemoryRepresentation: case MessageName::NetworkStorageManager_CacheStorageClearMemoryRepresentationReply: case MessageName::NetworkStorageManager_CacheStorageDereference: case MessageName::NetworkStorageManager_CacheStorageOpenCache: case MessageName::NetworkStorageManager_CacheStorageOpenCacheReply: case MessageName::NetworkStorageManager_CacheStoragePutRecords: case MessageName::NetworkStorageManager_CacheStoragePutRecordsReply: case MessageName::NetworkStorageManager_CacheStorageReference: case MessageName::NetworkStorageManager_CacheStorageRemoveCache: case MessageName::NetworkStorageManager_CacheStorageRemoveCacheReply: case MessageName::NetworkStorageManager_CacheStorageRemoveRecords: case MessageName::NetworkStorageManager_CacheStorageRemoveRecordsReply: case MessageName::NetworkStorageManager_CacheStorageRepresentation: case MessageName::NetworkStorageManager_CacheStorageRepresentationReply: case MessageName::NetworkStorageManager_CacheStorageRetrieveRecords: case MessageName::NetworkStorageManager_CacheStorageRetrieveRecordsReply: case MessageName::NetworkStorageManager_Estimate: case MessageName::NetworkStorageManager_EstimateReply: case MessageName::NetworkStorageManager_LockCacheStorage: case MessageName::NetworkStorageManager_RequestNewCapacityForSyncAccessHandle: case MessageName::NetworkStorageManager_RequestNewCapacityForSyncAccessHandleReply: case MessageName::NetworkStorageManager_ResetQuotaUpdatedBasedOnUsageForTesting: case MessageName::NetworkStorageManager_UnlockCacheStorage: case MessageName::NetworkTransportSession_CreateBidirectionalStream: case MessageName::NetworkTransportSession_CreateBidirectionalStreamReply: case MessageName::NetworkTransportSession_CreateOutgoingUnidirectionalStream: case MessageName::NetworkTransportSession_CreateOutgoingUnidirectionalStreamReply: case MessageName::NetworkTransportSession_DestroyBidirectionalStream: case MessageName::NetworkTransportSession_DestroyOutgoingUnidirectionalStream: case MessageName::NetworkTransportSession_SendDatagram: case MessageName::NetworkTransportSession_SendDatagramReply: case MessageName::NetworkTransportSession_SendStreamSendBytes: case MessageName::NetworkTransportSession_SendStreamSendBytesReply: case MessageName::NetworkTransportSession_StreamSendBytes: case MessageName::NetworkTransportSession_StreamSendBytesReply: case MessageName::NetworkTransportSession_Terminate: case MessageName::NotificationManagerMessageHandler_GetPermissionState: case MessageName::NotificationManagerMessageHandler_GetPermissionStateReply: case MessageName::NotificationManagerMessageHandler_GetPermissionStateSync: case MessageName::NotificationManagerMessageHandler_PageWasNotifiedOfNotificationPermission: case MessageName::NotificationManagerMessageHandler_RequestPermission: case MessageName::NotificationManagerMessageHandler_RequestPermissionReply: case MessageName::NotificationManagerMessageHandler_SetAppBadge: case MessageName::NotificationManagerMessageHandler_ShowNotificationReply: case MessageName::PlatformXRSystem_DidCompleteShutdownTriggeredBySystem: case MessageName::PlaybackSessionManagerProxy_IsInWindowFullscreenActiveChanged:
 +#if !RELEASE_LOG_DISABLED
 +    case MessageName::PlaybackSessionManagerProxy_SetLogIdentifier:
 +#endif
@@ -662,32 +516,21 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if PLATFORM(COCOA) && ENABLE(VIDEO)
 +    case MessageName::RemoteDevice_SetSharedVideoFrameMemory: case MessageName::RemoteDevice_SetSharedVideoFrameSemaphore: case MessageName::RemoteDevice_UpdateExternalTexture:
 +#endif
-+#if USE(CG)
-+    case MessageName::RemoteDisplayListRecorder_ApplyFillPattern: case MessageName::RemoteDisplayListRecorder_ApplyStrokePattern:
-+#endif
 +    case MessageName::RemoteDisplayListRecorder_BeginTransparencyLayerWithCompositeMode: case MessageName::RemoteDisplayListRecorder_ClearDropShadow: case MessageName::RemoteDisplayListRecorder_ClipOutRoundedRect: case MessageName::RemoteDisplayListRecorder_ClipRoundedRect: case MessageName::RemoteDisplayListRecorder_DrawControlPart: case MessageName::RemoteDisplayListRecorder_DrawDecomposedGlyphs: case MessageName::RemoteDisplayListRecorder_DrawDisplayListItems:
 +#if PLATFORM(COCOA) && ENABLE(VIDEO)
 +    case MessageName::RemoteDisplayListRecorder_DrawVideoFrame:
 +#endif
 +#if ENABLE(INLINE_PATH_DATA)
-+    case MessageName::RemoteDisplayListRecorder_FillArc: case MessageName::RemoteDisplayListRecorder_FillBezierCurve: case MessageName::RemoteDisplayListRecorder_FillClosedArc: case MessageName::RemoteDisplayListRecorder_FillLine:
++    case MessageName::RemoteDisplayListRecorder_FillClosedArc:
 +#endif
-+    case MessageName::RemoteDisplayListRecorder_FillPathSegment:
-+#if ENABLE(INLINE_PATH_DATA)
-+    case MessageName::RemoteDisplayListRecorder_FillQuadCurve:
-+#endif
-+    case MessageName::RemoteDisplayListRecorder_FillRectWithGradientAndSpaceTransform: case MessageName::RemoteDisplayListRecorder_ResetClip: case MessageName::RemoteDisplayListRecorder_SetInlineStroke:
++    case MessageName::RemoteDisplayListRecorder_FillPathSegment: case MessageName::RemoteDisplayListRecorder_FillRectWithGradientAndSpaceTransform: case MessageName::RemoteDisplayListRecorder_ResetClip: case MessageName::RemoteDisplayListRecorder_SetInlineStroke:
 +#if PLATFORM(COCOA) && ENABLE(VIDEO)
 +    case MessageName::RemoteDisplayListRecorder_SetSharedVideoFrameMemory: case MessageName::RemoteDisplayListRecorder_SetSharedVideoFrameSemaphore:
 +#endif
 +#if ENABLE(INLINE_PATH_DATA)
-+    case MessageName::RemoteDisplayListRecorder_StrokeArc: case MessageName::RemoteDisplayListRecorder_StrokeBezierCurve: case MessageName::RemoteDisplayListRecorder_StrokeClosedArc: case MessageName::RemoteDisplayListRecorder_StrokeLine: case MessageName::RemoteDisplayListRecorder_StrokeLineWithColorAndThickness:
++    case MessageName::RemoteDisplayListRecorder_StrokeClosedArc: case MessageName::RemoteDisplayListRecorder_StrokeLineWithColorAndThickness:
 +#endif
-+    case MessageName::RemoteDisplayListRecorder_StrokePathSegment:
-+#if ENABLE(INLINE_PATH_DATA)
-+    case MessageName::RemoteDisplayListRecorder_StrokeQuadCurve:
-+#endif
-+    case MessageName::RemoteExternalTexture_Destroy: case MessageName::RemoteExternalTexture_Destruct: case MessageName::RemoteExternalTexture_Undestroy: case MessageName::RemoteFaceDetector_Detect: case MessageName::RemoteFaceDetector_DetectReply: case MessageName::RemoteGPU_CreateCompositorIntegration: case MessageName::RemoteGPU_CreatePresentationContext: case MessageName::RemoteGPU_IsValid: case MessageName::RemoteGraphicsContextGLProxy_addDebugMessage:
++    case MessageName::RemoteDisplayListRecorder_StrokePathSegment: case MessageName::RemoteExternalTexture_Destroy: case MessageName::RemoteExternalTexture_Destruct: case MessageName::RemoteExternalTexture_Undestroy: case MessageName::RemoteFaceDetector_Detect: case MessageName::RemoteFaceDetector_DetectReply: case MessageName::RemoteGPU_CreateCompositorIntegration: case MessageName::RemoteGPU_CreatePresentationContext: case MessageName::RemoteGPU_IsValid: case MessageName::RemoteGraphicsContextGLProxy_addDebugMessage:
 +#if ENABLE(WEBXR)
 +    case MessageName::RemoteGraphicsContextGL_AddFoveation:
 +#endif
@@ -696,9 +539,6 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::RemoteGraphicsContextGL_BindExternalImage:
 +#endif
 +    case MessageName::RemoteGraphicsContextGL_BlendEquationSeparateiOES: case MessageName::RemoteGraphicsContextGL_BlendEquationiOES: case MessageName::RemoteGraphicsContextGL_BlendFuncSeparateiOES: case MessageName::RemoteGraphicsContextGL_BlendFunciOES: case MessageName::RemoteGraphicsContextGL_ClipControlEXT: case MessageName::RemoteGraphicsContextGL_ColorMaskiOES:
-+#if ENABLE(VIDEO) && PLATFORM(COCOA)
-+    case MessageName::RemoteGraphicsContextGL_CopyTextureFromVideoFrame:
-+#endif
 +#if ENABLE(WEBXR)
 +    case MessageName::RemoteGraphicsContextGL_CreateExternalImage: case MessageName::RemoteGraphicsContextGL_CreateExternalSync:
 +#endif
@@ -718,11 +558,7 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if ENABLE(WEBXR)
 +    case MessageName::RemoteGraphicsContextGL_FramebufferDiscard: case MessageName::RemoteGraphicsContextGL_FramebufferResolveRenderbuffer:
 +#endif
-+    case MessageName::RemoteGraphicsContextGL_GetBufferSubDataInline: case MessageName::RemoteGraphicsContextGL_GetBufferSubDataSharedMemory: case MessageName::RemoteGraphicsContextGL_GetErrors: case MessageName::RemoteGraphicsContextGL_GetInteger64EXT: case MessageName::RemoteGraphicsContextGL_GetIntegeri_v: case MessageName::RemoteGraphicsContextGL_GetQueryObjectiEXT: case MessageName::RemoteGraphicsContextGL_GetQueryObjectui64EXT: case MessageName::RemoteGraphicsContextGL_GetQueryiEXT: case MessageName::RemoteGraphicsContextGL_IsQueryEXT: case MessageName::RemoteGraphicsContextGL_MultiDrawArraysInstancedBaseInstanceANGLE: case MessageName::RemoteGraphicsContextGL_MultiDrawElementsInstancedBaseVertexBaseInstanceANGLE: case MessageName::RemoteGraphicsContextGL_PolygonModeANGLE: case MessageName::RemoteGraphicsContextGL_PolygonOffsetClampEXT:
-+#if PLATFORM(COCOA) || USE(GRAPHICS_LAYER_WC) || USE(GBM) || !PLATFORM(COCOA) && !USE(GRAPHICS_LAYER_WC) && !USE(GBM)
-+    case MessageName::RemoteGraphicsContextGL_PrepareForDisplay:
-+#endif
-+    case MessageName::RemoteGraphicsContextGL_ProvokingVertexANGLE: case MessageName::RemoteGraphicsContextGL_QueryCounterEXT: case MessageName::RemoteGraphicsContextGL_ReadPixelsBufferObject: case MessageName::RemoteGraphicsContextGL_ReadPixelsInline: case MessageName::RemoteGraphicsContextGL_ReadPixelsSharedMemory: case MessageName::RemoteGraphicsContextGL_RenderbufferStorageMultisampleANGLE: case MessageName::RemoteGraphicsContextGL_SetDrawingBufferColorSpace:
++    case MessageName::RemoteGraphicsContextGL_GetBufferSubDataInline: case MessageName::RemoteGraphicsContextGL_GetBufferSubDataSharedMemory: case MessageName::RemoteGraphicsContextGL_GetErrors: case MessageName::RemoteGraphicsContextGL_GetInteger64EXT: case MessageName::RemoteGraphicsContextGL_GetIntegeri_v: case MessageName::RemoteGraphicsContextGL_GetQueryObjectiEXT: case MessageName::RemoteGraphicsContextGL_GetQueryObjectui64EXT: case MessageName::RemoteGraphicsContextGL_GetQueryiEXT: case MessageName::RemoteGraphicsContextGL_IsQueryEXT: case MessageName::RemoteGraphicsContextGL_MultiDrawArraysInstancedBaseInstanceANGLE: case MessageName::RemoteGraphicsContextGL_MultiDrawElementsInstancedBaseVertexBaseInstanceANGLE: case MessageName::RemoteGraphicsContextGL_PolygonModeANGLE: case MessageName::RemoteGraphicsContextGL_PolygonOffsetClampEXT: case MessageName::RemoteGraphicsContextGL_ProvokingVertexANGLE: case MessageName::RemoteGraphicsContextGL_QueryCounterEXT: case MessageName::RemoteGraphicsContextGL_ReadPixelsBufferObject: case MessageName::RemoteGraphicsContextGL_ReadPixelsInline: case MessageName::RemoteGraphicsContextGL_ReadPixelsSharedMemory: case MessageName::RemoteGraphicsContextGL_RenderbufferStorageMultisampleANGLE: case MessageName::RemoteGraphicsContextGL_SetDrawingBufferColorSpace:
 +#if ENABLE(VIDEO) && PLATFORM(COCOA)
 +    case MessageName::RemoteGraphicsContextGL_SetSharedVideoFrameMemory: case MessageName::RemoteGraphicsContextGL_SetSharedVideoFrameSemaphore:
 +#endif
@@ -737,51 +573,15 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if ENABLE(RE_DYNAMIC_CONTENT_SCALING)
 +    case MessageName::RemoteImageBuffer_DynamicContentScalingDisplayList:
 +#endif
-+    case MessageName::RemoteImageBuffer_FilteredNativeImage: case MessageName::RemoteImageBuffer_FlushContext: case MessageName::RemoteImageBuffer_FlushContextSync: case MessageName::RemoteImageBuffer_GetPixelBuffer: case MessageName::RemoteImageBuffer_GetPixelBufferWithNewMemory: case MessageName::RemoteImageBuffer_GetShareableBitmap: case MessageName::RemoteImageBuffer_PutPixelBuffer: case MessageName::RemoteImageBuffer_TransformToColorSpace: case MessageName::RemoteLayerTreeDrawingAreaProxy_AsyncSetLayerContents: case MessageName::RemoteLayerTreeDrawingAreaProxy_CommitLayerTreeNotTriggered: case MessageName::RemoteLegacyCDMFactoryProxy_RemoveSession: case MessageName::RemoteLegacyCDMFactoryProxy_RemoveSessionReply:
-+#if ENABLE(ENCRYPTED_MEDIA)
-+    case MessageName::RemoteMediaPlayerProxy_AttemptToDecryptWithInstance: case MessageName::RemoteMediaPlayerProxy_CdmInstanceAttached: case MessageName::RemoteMediaPlayerProxy_CdmInstanceDetached:
-+#endif
-+#if ENABLE(WEB_AUDIO)
-+    case MessageName::RemoteMediaPlayerProxy_CreateAudioSourceProvider:
-+#endif
-+    case MessageName::RemoteMediaPlayerProxy_IsCrossOrigin: case MessageName::RemoteMediaPlayerProxy_IsInFullscreenOrPictureInPictureChanged:
-+#if ENABLE(LEGACY_ENCRYPTED_MEDIA)
-+    case MessageName::RemoteMediaPlayerProxy_KeyAdded:
-+#endif
-+#if ENABLE(MEDIA_SOURCE)
-+    case MessageName::RemoteMediaPlayerProxy_LoadMediaSource: case MessageName::RemoteMediaPlayerProxy_LoadMediaSourceReply:
-+#endif
-+    case MessageName::RemoteMediaPlayerProxy_PerformTaskAtTime: case MessageName::RemoteMediaPlayerProxy_PerformTaskAtTimeReply: case MessageName::RemoteMediaPlayerProxy_RequestHostingContextID: case MessageName::RemoteMediaPlayerProxy_RequestHostingContextIDReply: case MessageName::RemoteMediaPlayerProxy_SeekToTarget:
++    case MessageName::RemoteImageBuffer_FilteredNativeImage: case MessageName::RemoteImageBuffer_FlushContext: case MessageName::RemoteImageBuffer_FlushContextSync: case MessageName::RemoteImageBuffer_GetPixelBuffer: case MessageName::RemoteImageBuffer_GetPixelBufferWithNewMemory: case MessageName::RemoteImageBuffer_GetShareableBitmap: case MessageName::RemoteImageBuffer_PutPixelBuffer: case MessageName::RemoteImageBuffer_TransformToColorSpace: case MessageName::RemoteLayerTreeDrawingAreaProxy_AsyncSetLayerContents: case MessageName::RemoteLayerTreeDrawingAreaProxy_CommitLayerTreeNotTriggered: case MessageName::RemoteLegacyCDMFactoryProxy_RemoveSession: case MessageName::RemoteLegacyCDMFactoryProxy_RemoveSessionReply: case MessageName::RemoteMediaPlayerProxy_IsCrossOrigin: case MessageName::RemoteMediaPlayerProxy_IsInFullscreenOrPictureInPictureChanged: case MessageName::RemoteMediaPlayerProxy_PerformTaskAtTime: case MessageName::RemoteMediaPlayerProxy_PerformTaskAtTimeReply: case MessageName::RemoteMediaPlayerProxy_RequestHostingContextID: case MessageName::RemoteMediaPlayerProxy_RequestHostingContextIDReply: case MessageName::RemoteMediaPlayerProxy_SeekToTarget:
 +#if HAVE(SPATIAL_TRACKING_LABEL)
 +    case MessageName::RemoteMediaPlayerProxy_SetDefaultSpatialTrackingLabel:
 +#endif
-+#if ENABLE(LEGACY_ENCRYPTED_MEDIA)
-+    case MessageName::RemoteMediaPlayerProxy_SetLegacyCDMSession:
-+#endif
-+    case MessageName::RemoteMediaPlayerProxy_SetPresentationSize: case MessageName::RemoteMediaPlayerProxy_SetShouldCheckHardwareSupport:
-+#if ENABLE(LEGACY_ENCRYPTED_MEDIA) && ENABLE(ENCRYPTED_MEDIA)
-+    case MessageName::RemoteMediaPlayerProxy_SetShouldContinueAfterKeyNeeded:
-+#endif
-+    case MessageName::RemoteMediaPlayerProxy_SetShouldDisableHDR:
-+#if ENABLE(WEB_AUDIO)
-+    case MessageName::RemoteMediaPlayerProxy_SetShouldEnableAudioSourceProvider:
-+#endif
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET)
-+    case MessageName::RemoteMediaPlayerProxy_SetShouldPlayToPlaybackTarget:
-+#endif
++    case MessageName::RemoteMediaPlayerProxy_SetPresentationSize: case MessageName::RemoteMediaPlayerProxy_SetShouldCheckHardwareSupport: case MessageName::RemoteMediaPlayerProxy_SetShouldDisableHDR:
 +#if HAVE(SPATIAL_TRACKING_LABEL)
 +    case MessageName::RemoteMediaPlayerProxy_SetSpatialTrackingLabel:
 +#endif
-+#if ENABLE(VIDEO_PRESENTATION_MODE)
-+    case MessageName::RemoteMediaPlayerProxy_SetVideoFullscreenGravity: case MessageName::RemoteMediaPlayerProxy_SetVideoFullscreenMode:
-+#endif
 +    case MessageName::RemoteMediaPlayerProxy_SetVideoLayerSizeFenced:
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET)
-+    case MessageName::RemoteMediaPlayerProxy_SetWirelessPlaybackTarget: case MessageName::RemoteMediaPlayerProxy_SetWirelessVideoPlaybackDisabled:
-+#endif
-+#if ENABLE(VIDEO_PRESENTATION_MODE)
-+    case MessageName::RemoteMediaPlayerProxy_UpdateVideoFullscreenInlineImage: case MessageName::RemoteMediaPlayerProxy_VideoFullscreenStandbyChanged:
-+#endif
 +#if (PLATFORM(COCOA) && !HAVE(AVSAMPLEBUFFERDISPLAYLAYER_COPYDISPLAYEDPIXELBUFFER))
 +    case MessageName::RemoteMediaPlayerProxy_WillBeAskedToPaintGL:
 +#endif
@@ -793,19 +593,7 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if USE(GRAPHICS_LAYER_WC)
 +    case MessageName::RemoteRenderingBackend_Flush:
 +#endif
-+    case MessageName::RemoteRenderingBackend_GetImageBufferResourceLimitsForTesting: case MessageName::RemoteRenderingBackend_GetImageBufferResourceLimitsForTestingReply: case MessageName::RemoteRenderingBackend_GetRemoteBarcodeDetectorSupportedFormats: case MessageName::RemoteRenderingBackend_GetRemoteBarcodeDetectorSupportedFormatsReply: case MessageName::RemoteRenderingBackend_MoveToImageBuffer: case MessageName::RemoteRenderingBackend_MoveToSerializedBuffer: case MessageName::RemoteRenderingBackend_PrepareImageBufferSetsForDisplay: case MessageName::RemoteRenderingBackend_PrepareImageBufferSetsForDisplaySync: case MessageName::RemoteRenderingBackend_ReleaseAllDrawingResources: case MessageName::RemoteRenderingBackend_ReleaseAllImageResources: case MessageName::RemoteRenderingBackend_ReleaseImageBuffer: case MessageName::RemoteRenderingBackend_ReleaseRemoteBarcodeDetector: case MessageName::RemoteRenderingBackend_ReleaseRemoteFaceDetector: case MessageName::RemoteRenderingBackend_ReleaseRemoteImageBufferSet: case MessageName::RemoteRenderingBackend_ReleaseRemoteTextDetector: case MessageName::RemoteRenderingBackend_ReleaseRenderingResource:
-+#if !RELEASE_LOG_DISABLED
-+    case MessageName::RemoteSampleBufferDisplayLayer_SetLogIdentifier:
-+#endif
-+    case MessageName::RemoteSampleBufferDisplayLayer_SetShouldMaintainAspectRatio: case MessageName::RemoteSampler_Destruct: case MessageName::RemoteScrollingCoordinator_ReceivedWheelEventWithPhases: case MessageName::RemoteScrollingCoordinator_ScrollPositionChangedForNodeReply: case MessageName::RemoteScrollingCoordinator_ScrollingTreeNodeScrollbarMinimumThumbLengthDidChange: case MessageName::RemoteScrollingCoordinator_ScrollingTreeNodeScrollbarVisibilityDidChange: case MessageName::RemoteScrollingCoordinator_StartDeferringScrollingTestCompletionForNode: case MessageName::RemoteScrollingCoordinator_StopDeferringScrollingTestCompletionForNode: case MessageName::RemoteShaderModule_CompilationInfoReply: case MessageName::RemoteShaderModule_Destruct: case MessageName::RemoteSharedResourceCache_ReleaseSerializedImageBuffer: case MessageName::RemoteSourceBufferProxy_AppendReply: case MessageName::RemoteSourceBufferProxy_AsyncEvictCodedFrames: case MessageName::RemoteSourceBufferProxy_ComputeSeekTime: case MessageName::RemoteSourceBufferProxy_ComputeSeekTimeReply: case MessageName::RemoteSourceBufferProxy_MemoryPressure: case MessageName::RemoteSourceBufferProxy_MinimumUpcomingPresentationTimeForTrackID: case MessageName::RemoteSourceBufferProxy_SetMaximumBufferSize: case MessageName::RemoteSourceBufferProxy_SetMaximumBufferSizeReply: case MessageName::RemoteSourceBufferProxy_SetMaximumQueueDepthForTrackID: case MessageName::RemoteTextDetector_Detect: case MessageName::RemoteTextDetector_DetectReply: case MessageName::RemoteTextureView_Destruct: case MessageName::RemoteTexture_Destruct: case MessageName::RemoteVideoFrameObjectHeapProxyProcessor_NewConvertedVideoFrameBuffer: case MessageName::RemoteVideoFrameObjectHeap_ConvertFrameBuffer: case MessageName::RemoteVideoFrameObjectHeap_SetSharedVideoFrameMemory: case MessageName::RemoteVideoFrameObjectHeap_SetSharedVideoFrameSemaphore: case MessageName::RemoteWebInspectorUIProxy_PickColorFromScreen: case MessageName::RemoteWebInspectorUIProxy_PickColorFromScreenReply: case MessageName::RemoteWebInspectorUIProxy_SetInspectorPageDeveloperExtrasEnabled:
-+#if ENABLE(INSPECTOR_TELEMETRY)
-+    case MessageName::RemoteWebInspectorUI_SetDiagnosticLoggingAvailable:
-+#endif
-+    case MessageName::RemoteXRBinding_CreateProjectionLayer: case MessageName::RemoteXRBinding_Destruct: case MessageName::RemoteXRBinding_GetViewSubImage: case MessageName::RemoteXRProjectionLayer_Destruct: case MessageName::RemoteXRProjectionLayer_EndFrame: case MessageName::RemoteXRProjectionLayer_StartFrame: case MessageName::RemoteXRSubImage_Destruct: case MessageName::RemoteXRView_Destruct:
-+#if ENABLE(SEC_ITEM_SHIM)
-+    case MessageName::SecItemShimProxy_SecItemRequest: case MessageName::SecItemShimProxy_SecItemRequestReply: case MessageName::SecItemShimProxy_SecItemRequestSync:
-+#endif
-+    case MessageName::ServiceWorkerFetchTask_UsePreload: case MessageName::ServiceWorkerFetchTask_WorkerClosed: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateBufferedChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateBufferedChangedReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidDropSample: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidReceiveInitializationSegment: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidReceiveInitializationSegmentReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidReceiveRenderingError: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDurationChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDurationChangedReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateEvictionDataChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateHighestPresentationTimestampChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateShuttingDown: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateShuttingDownReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_TakeOwnershipOfMemory: case MessageName::UserMediaCaptureManagerProxy_GetPhotoCapabilities: case MessageName::UserMediaCaptureManagerProxy_GetPhotoCapabilitiesReply: case MessageName::UserMediaCaptureManagerProxy_GetPhotoSettings: case MessageName::UserMediaCaptureManagerProxy_GetPhotoSettingsReply: case MessageName::UserMediaCaptureManagerProxy_IsPowerEfficient: case MessageName::UserMediaCaptureManagerProxy_SetIsInBackground: case MessageName::UserMediaCaptureManagerProxy_TakePhoto: case MessageName::UserMediaCaptureManagerProxy_TakePhotoReply: case MessageName::UserMediaCaptureManager_SourceConfigurationChanged: case MessageName::VideoPresentationManagerProxy_CleanupFullscreen: case MessageName::VideoPresentationManagerProxy_ClearVideoFullscreenMode:
++    case MessageName::RemoteRenderingBackend_GetImageBufferResourceLimitsForTesting: case MessageName::RemoteRenderingBackend_GetImageBufferResourceLimitsForTestingReply: case MessageName::RemoteRenderingBackend_GetRemoteBarcodeDetectorSupportedFormats: case MessageName::RemoteRenderingBackend_GetRemoteBarcodeDetectorSupportedFormatsReply: case MessageName::RemoteRenderingBackend_MoveToImageBuffer: case MessageName::RemoteRenderingBackend_MoveToSerializedBuffer: case MessageName::RemoteRenderingBackend_PrepareImageBufferSetsForDisplay: case MessageName::RemoteRenderingBackend_PrepareImageBufferSetsForDisplaySync: case MessageName::RemoteRenderingBackend_ReleaseAllDrawingResources: case MessageName::RemoteRenderingBackend_ReleaseAllImageResources: case MessageName::RemoteRenderingBackend_ReleaseImageBuffer: case MessageName::RemoteRenderingBackend_ReleaseRemoteBarcodeDetector: case MessageName::RemoteRenderingBackend_ReleaseRemoteFaceDetector: case MessageName::RemoteRenderingBackend_ReleaseRemoteImageBufferSet: case MessageName::RemoteRenderingBackend_ReleaseRemoteTextDetector: case MessageName::RemoteRenderingBackend_ReleaseRenderingResource: case MessageName::RemoteSampleBufferDisplayLayer_SetShouldMaintainAspectRatio: case MessageName::RemoteSampler_Destruct: case MessageName::RemoteScrollingCoordinator_ReceivedWheelEventWithPhases: case MessageName::RemoteScrollingCoordinator_ScrollPositionChangedForNodeReply: case MessageName::RemoteScrollingCoordinator_ScrollingTreeNodeScrollbarMinimumThumbLengthDidChange: case MessageName::RemoteScrollingCoordinator_ScrollingTreeNodeScrollbarVisibilityDidChange: case MessageName::RemoteScrollingCoordinator_StartDeferringScrollingTestCompletionForNode: case MessageName::RemoteScrollingCoordinator_StopDeferringScrollingTestCompletionForNode: case MessageName::RemoteShaderModule_CompilationInfoReply: case MessageName::RemoteShaderModule_Destruct: case MessageName::RemoteSharedResourceCache_ReleaseSerializedImageBuffer: case MessageName::RemoteSourceBufferProxy_AppendReply: case MessageName::RemoteSourceBufferProxy_AsyncEvictCodedFrames: case MessageName::RemoteSourceBufferProxy_ComputeSeekTime: case MessageName::RemoteSourceBufferProxy_ComputeSeekTimeReply: case MessageName::RemoteSourceBufferProxy_MemoryPressure: case MessageName::RemoteSourceBufferProxy_MinimumUpcomingPresentationTimeForTrackID: case MessageName::RemoteSourceBufferProxy_SetMaximumBufferSize: case MessageName::RemoteSourceBufferProxy_SetMaximumBufferSizeReply: case MessageName::RemoteSourceBufferProxy_SetMaximumQueueDepthForTrackID: case MessageName::RemoteTextDetector_Detect: case MessageName::RemoteTextDetector_DetectReply: case MessageName::RemoteTextureView_Destruct: case MessageName::RemoteTexture_Destruct: case MessageName::RemoteVideoFrameObjectHeapProxyProcessor_NewConvertedVideoFrameBuffer: case MessageName::RemoteVideoFrameObjectHeap_ConvertFrameBuffer: case MessageName::RemoteVideoFrameObjectHeap_SetSharedVideoFrameMemory: case MessageName::RemoteVideoFrameObjectHeap_SetSharedVideoFrameSemaphore: case MessageName::RemoteWebInspectorUIProxy_PickColorFromScreen: case MessageName::RemoteWebInspectorUIProxy_PickColorFromScreenReply: case MessageName::RemoteWebInspectorUIProxy_SetInspectorPageDeveloperExtrasEnabled: case MessageName::RemoteXRBinding_CreateProjectionLayer: case MessageName::RemoteXRBinding_Destruct: case MessageName::RemoteXRBinding_GetViewSubImage: case MessageName::RemoteXRProjectionLayer_Destruct: case MessageName::RemoteXRProjectionLayer_EndFrame: case MessageName::RemoteXRProjectionLayer_StartFrame: case MessageName::RemoteXRSubImage_Destruct: case MessageName::RemoteXRView_Destruct: case MessageName::ServiceWorkerFetchTask_UsePreload: case MessageName::ServiceWorkerFetchTask_WorkerClosed: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateBufferedChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateBufferedChangedReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidDropSample: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidReceiveInitializationSegment: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidReceiveInitializationSegmentReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDidReceiveRenderingError: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDurationChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateDurationChangedReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateEvictionDataChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateHighestPresentationTimestampChanged: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateShuttingDown: case MessageName::SourceBufferPrivateRemoteMessageReceiver_SourceBufferPrivateShuttingDownReply: case MessageName::SourceBufferPrivateRemoteMessageReceiver_TakeOwnershipOfMemory: case MessageName::UserMediaCaptureManagerProxy_GetPhotoCapabilities: case MessageName::UserMediaCaptureManagerProxy_GetPhotoCapabilitiesReply: case MessageName::UserMediaCaptureManagerProxy_GetPhotoSettings: case MessageName::UserMediaCaptureManagerProxy_GetPhotoSettingsReply: case MessageName::UserMediaCaptureManagerProxy_IsPowerEfficient: case MessageName::UserMediaCaptureManagerProxy_SetIsInBackground: case MessageName::UserMediaCaptureManagerProxy_TakePhoto: case MessageName::UserMediaCaptureManagerProxy_TakePhotoReply: case MessageName::UserMediaCaptureManager_SourceConfigurationChanged: case MessageName::VideoPresentationManagerProxy_CleanupFullscreen: case MessageName::VideoPresentationManagerProxy_ClearVideoFullscreenMode:
 +#if !PLATFORM(IOS_FAMILY)
 +    case MessageName::VideoPresentationManagerProxy_EnterFullscreen:
 +#endif
@@ -813,19 +601,9 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if !PLATFORM(IOS_FAMILY)
 +    case MessageName::VideoPresentationManager_DidSetupFullscreen:
 +#endif
-+    case MessageName::VideoPresentationManager_EnsureUpdatedVideoDimensions: case MessageName::VideoPresentationManager_FailedToEnterFullscreen: case MessageName::VideoPresentationManager_FullscreenMayReturnToInline: case MessageName::VideoPresentationManager_FullscreenModeChanged: case MessageName::VideoPresentationManager_RequestFullscreenMode: case MessageName::VideoPresentationManager_RequestRouteSharingPolicyAndContextUID: case MessageName::VideoPresentationManager_RequestRouteSharingPolicyAndContextUIDReply: case MessageName::VideoPresentationManager_RequestUpdateInlineRect: case MessageName::VideoPresentationManager_RequestVideoContentLayer: case MessageName::VideoPresentationManager_ReturnVideoContentLayer: case MessageName::VideoPresentationManager_SetRequiresTextTrackRepresentation: case MessageName::VideoPresentationManager_SetTextTrackRepresentationBounds: case MessageName::VideoPresentationManager_SetVideoFullscreenFrame: case MessageName::VideoPresentationManager_SetVideoLayerFrameFenced: case MessageName::VideoPresentationManager_SetVideoLayerGravityEnum: case MessageName::VideoPresentationManager_WillExitFullscreen:
-+#if !PLATFORM(IOS_FAMILY)
-+    case MessageName::ViewGestureController_DidCollectGeometryForMagnificationGesture:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::ViewGestureController_DidCollectGeometryForSmartMagnificationGesture:
-+#endif
-+#if !PLATFORM(IOS_FAMILY)
-+    case MessageName::ViewGestureController_DidHitRenderTreeSizeThreshold: case MessageName::ViewGestureGeometryCollector_CollectGeometryForMagnificationGesture: case MessageName::ViewGestureGeometryCollector_SetRenderTreeSizeNotificationThreshold:
-+#endif
-+    case MessageName::WebAuthenticatorCoordinatorProxy_Cancel: case MessageName::WebAuthenticatorCoordinatorProxy_CancelReply: case MessageName::WebAuthenticatorCoordinatorProxy_GetClientCapabilities: case MessageName::WebAuthenticatorCoordinatorProxy_GetClientCapabilitiesReply: case MessageName::WebAutomationSessionProxy_GetComputedLabel: case MessageName::WebAutomationSessionProxy_GetComputedLabelReply: case MessageName::WebAutomationSessionProxy_GetComputedRole: case MessageName::WebAutomationSessionProxy_GetComputedRoleReply: case MessageName::WebCookieManager_DeleteAllCookiesReply: case MessageName::WebCookieManager_DeleteCookiesForHostnamesReply:
++    case MessageName::VideoPresentationManager_EnsureUpdatedVideoDimensions: case MessageName::VideoPresentationManager_FailedToEnterFullscreen: case MessageName::VideoPresentationManager_FullscreenMayReturnToInline: case MessageName::VideoPresentationManager_FullscreenModeChanged: case MessageName::VideoPresentationManager_RequestFullscreenMode: case MessageName::VideoPresentationManager_RequestRouteSharingPolicyAndContextUID: case MessageName::VideoPresentationManager_RequestRouteSharingPolicyAndContextUIDReply: case MessageName::VideoPresentationManager_RequestUpdateInlineRect: case MessageName::VideoPresentationManager_RequestVideoContentLayer: case MessageName::VideoPresentationManager_ReturnVideoContentLayer: case MessageName::VideoPresentationManager_SetRequiresTextTrackRepresentation: case MessageName::VideoPresentationManager_SetTextTrackRepresentationBounds: case MessageName::VideoPresentationManager_SetVideoFullscreenFrame: case MessageName::VideoPresentationManager_SetVideoLayerFrameFenced: case MessageName::VideoPresentationManager_SetVideoLayerGravityEnum: case MessageName::VideoPresentationManager_WillExitFullscreen: case MessageName::WebAuthenticatorCoordinatorProxy_Cancel: case MessageName::WebAuthenticatorCoordinatorProxy_CancelReply: case MessageName::WebAuthenticatorCoordinatorProxy_GetClientCapabilities: case MessageName::WebAuthenticatorCoordinatorProxy_GetClientCapabilitiesReply: case MessageName::WebAutomationSessionProxy_GetComputedLabel: case MessageName::WebAutomationSessionProxy_GetComputedLabelReply: case MessageName::WebAutomationSessionProxy_GetComputedRole: case MessageName::WebAutomationSessionProxy_GetComputedRoleReply: case MessageName::WebCookieManager_DeleteAllCookiesReply: case MessageName::WebCookieManager_DeleteCookiesForHostnamesReply:
 +#if USE(SOUP)
-+    case MessageName::WebCookieManager_ReplaceCookies: case MessageName::WebCookieManager_ReplaceCookiesReply: case MessageName::WebCookieManager_SetCookiePersistentStorage:
++    case MessageName::WebCookieManager_ReplaceCookies: case MessageName::WebCookieManager_ReplaceCookiesReply:
 +#endif
 +#if ENABLE(INSPECTOR_EXTENSIONS)
 +    case MessageName::WebExtensionContextProxy_AddInspectorBackgroundPageIdentifier: case MessageName::WebExtensionContextProxy_AddInspectorPageIdentifier:
@@ -846,349 +624,78 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if ENABLE(INSPECTOR_NETWORK_THROTTLING)
 +    case MessageName::WebInspectorUIProxy_SetEmulatedConditions:
 +#endif
-+    case MessageName::WebInspectorUIProxy_SetInspectorPageDeveloperExtrasEnabled:
-+#if ENABLE(INSPECTOR_TELEMETRY)
-+    case MessageName::WebInspectorUI_SetDiagnosticLoggingAvailable:
-+#endif
-+    case MessageName::WebInspector_ShowReply:
-+#if ENABLE(APPLE_PAY_AMS_UI)
-+    case MessageName::WebPageProxy_AbortApplePayAMSUISession:
-+#endif
-+#if ENABLE(MEDIA_USAGE)
-+    case MessageName::WebPageProxy_AddMediaUsageManagerSession:
-+#endif
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPageProxy_AddPlaybackTargetPickerClient:
-+#endif
++    case MessageName::WebInspectorUIProxy_SetInspectorPageDeveloperExtrasEnabled: case MessageName::WebInspector_ShowReply:
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPageProxy_AddTextAnimationForAnimationID: case MessageName::WebPageProxy_AddTextAnimationForAnimationIDWithCompletionHandler: case MessageName::WebPageProxy_AddTextAnimationForAnimationIDWithCompletionHandlerReply:
 +#endif
 +    case MessageName::WebPageProxy_BackForwardListContainsItem:
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebPageProxy_BeginMonitoringCaptureDevices:
-+#endif
 +#if USE(SYSTEM_PREVIEW)
 +    case MessageName::WebPageProxy_BeginSystemPreview: case MessageName::WebPageProxy_BeginSystemPreviewReply:
 +#endif
 +#if ENABLE(IMAGE_ANALYSIS) && ENABLE(VIDEO)
 +    case MessageName::WebPageProxy_BeginTextRecognitionForVideoInElementFullScreen:
 +#endif
-+#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebPageProxy_BindAccessibilityTree:
-+#endif
 +    case MessageName::WebPageProxy_BindRemoteAccessibilityFrames: case MessageName::WebPageProxy_BroadcastMainFrameURLChangeToOtherProcesses:
 +#if ENABLE(IMAGE_ANALYSIS) && ENABLE(VIDEO)
 +    case MessageName::WebPageProxy_CancelTextRecognitionForVideoInElementFullScreen:
 +#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_ChangeUniversalAccessZoomFocus:
-+#endif
-+#if USE(UNIFIED_TEXT_CHECKING)
-+    case MessageName::WebPageProxy_CheckTextOfParagraph:
-+#endif
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPageProxy_CloneAttachmentData:
-+#endif
-+#if ENABLE(CONTENT_FILTERING)
-+    case MessageName::WebPageProxy_ContentFilterDidBlockLoadForFrame:
-+#endif
-+#if ENABLE(CONTENT_EXTENSIONS)
-+    case MessageName::WebPageProxy_ContentRuleListNotification:
-+#endif
-+#if ENABLE(PDF_HUD)
-+    case MessageName::WebPageProxy_CreatePDFHUD:
-+#endif
 +    case MessageName::WebPageProxy_DecidePolicyForNavigationActionAsyncReply: case MessageName::WebPageProxy_DecidePolicyForNewWindowActionReply: case MessageName::WebPageProxy_DecidePolicyForResponseReply:
-+#if USE(DICTATION_ALTERNATIVES)
-+    case MessageName::WebPageProxy_DictationAlternatives:
-+#endif
 +#if ENABLE(WINDOW_PROXY_PROPERTY_ACCESS_NOTIFICATION)
 +    case MessageName::WebPageProxy_DidAccessWindowProxyPropertyViaOpenerForFrame:
 +#endif
-+    case MessageName::WebPageProxy_DidAdjustVisibilityWithSelectors: case MessageName::WebPageProxy_DidApplyLinkDecorationFiltering:
-+#if HAVE(VISIBILITY_PROPAGATION_VIEW)
-+    case MessageName::WebPageProxy_DidCreateContextInWebProcessForVisibilityPropagation:
-+#endif
-+    case MessageName::WebPageProxy_DidCreateSleepDisabler: case MessageName::WebPageProxy_DidDestroySleepDisabler:
++    case MessageName::WebPageProxy_DidAdjustVisibilityWithSelectors: case MessageName::WebPageProxy_DidApplyLinkDecorationFiltering: case MessageName::WebPageProxy_DidCreateSleepDisabler: case MessageName::WebPageProxy_DidDestroySleepDisabler:
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPageProxy_DidEndPartialIntelligenceTextAnimation:
-+#endif
-+#if USE(QUICK_LOOK)
-+    case MessageName::WebPageProxy_DidFinishLoadForQuickLookDocumentInMainFrame:
 +#endif
 +#if PLATFORM(GTK) || PLATFORM(WPE)
 +    case MessageName::WebPageProxy_DidFinishLoadForResource:
 +#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_DidHandleAcceptedCandidate:
-+#endif
-+#if PLATFORM(IOS_FAMILY) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPageProxy_DidHandleAdditionalDragItemsRequest: case MessageName::WebPageProxy_DidHandleDragStartRequest:
-+#endif
 +    case MessageName::WebPageProxy_DidHandleTapAsHover:
 +#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebPageProxy_DidInitiateLoadForResource:
-+#endif
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPageProxy_DidInsertAttachmentWithIdentifier:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_DidPerformImmediateActionHitTest:
-+#endif
-+#if PLATFORM(IOS_FAMILY) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPageProxy_DidReceiveEditDragSnapshot:
-+#endif
-+#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebPageProxy_DidReceiveResponseForResource:
-+#endif
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPageProxy_DidRemoveAttachmentWithIdentifier:
++    case MessageName::WebPageProxy_DidInitiateLoadForResource: case MessageName::WebPageProxy_DidReceiveResponseForResource:
 +#endif
 +    case MessageName::WebPageProxy_DidSameDocumentNavigationForFrameViaJSHistoryAPI:
 +#if PLATFORM(GTK) || PLATFORM(WPE)
 +    case MessageName::WebPageProxy_DidSendRequestForResource:
 +#endif
-+#if USE(QUICK_LOOK)
-+    case MessageName::WebPageProxy_DidStartLoadForQuickLookDocumentInMainFrame:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_DismissCorrectionPanel: case MessageName::WebPageProxy_DismissCorrectionPanelSoon:
-+#endif
-+    case MessageName::WebPageProxy_DispatchLoadEventToFrameOwnerElement: case MessageName::WebPageProxy_DocumentURLForConsoleLog: case MessageName::WebPageProxy_DocumentURLForConsoleLogReply:
-+#if ENABLE(INPUT_TYPE_COLOR)
-+    case MessageName::WebPageProxy_EndColorPicker:
-+#endif
-+#if ENABLE(DATALIST_ELEMENT)
-+    case MessageName::WebPageProxy_EndDataListSuggestions:
-+#endif
-+#if ENABLE(DATE_AND_TIME_INPUT_TYPES)
-+    case MessageName::WebPageProxy_EndDateTimePicker:
-+#endif
-+    case MessageName::WebPageProxy_EndNetworkRequestsForPageLoadTiming:
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebPageProxy_EnumerateMediaDevicesForFrame: case MessageName::WebPageProxy_EnumerateMediaDevicesForFrameReply:
-+#endif
-+    case MessageName::WebPageProxy_FocusRemoteFrame: case MessageName::WebPageProxy_FrameNameChanged: case MessageName::WebPageProxy_FrameTextForTesting:
++    case MessageName::WebPageProxy_DispatchLoadEventToFrameOwnerElement: case MessageName::WebPageProxy_DocumentURLForConsoleLog: case MessageName::WebPageProxy_DocumentURLForConsoleLogReply: case MessageName::WebPageProxy_EndNetworkRequestsForPageLoadTiming: case MessageName::WebPageProxy_FocusRemoteFrame: case MessageName::WebPageProxy_FrameNameChanged: case MessageName::WebPageProxy_FrameTextForTesting:
 +#if ENABLE(GAMEPAD)
 +    case MessageName::WebPageProxy_GamepadsRecentlyAccessed:
 +#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_HandleAcceptsFirstMouse:
-+#endif
-+#if ENABLE(DATA_DETECTION)
-+    case MessageName::WebPageProxy_HandleClickForDataDetectionResult:
-+#endif
-+#if HAVE(TRANSLATION_UI_SERVICES) && ENABLE(CONTEXT_MENUS)
-+    case MessageName::WebPageProxy_HandleContextMenuTranslation:
-+#endif
-+#if ENABLE(DATALIST_ELEMENT)
-+    case MessageName::WebPageProxy_HandleKeydownInDataList:
-+#endif
-+    case MessageName::WebPageProxy_HandleMessageWithAsyncReply: case MessageName::WebPageProxy_HandleMessageWithAsyncReplyReply:
-+#if ENABLE(ARKIT_INLINE_PREVIEW_MAC)
-+    case MessageName::WebPageProxy_HandleMouseDownForModelElement: case MessageName::WebPageProxy_HandleMouseMoveForModelElement: case MessageName::WebPageProxy_HandleMouseUpForModelElement:
-+#endif
-+    case MessageName::WebPageProxy_HasActiveNowPlayingSessionChanged:
-+#if PLATFORM(COCOA) || PLATFORM(GTK)
-+    case MessageName::WebPageProxy_HideValidationMessage:
-+#endif
++    case MessageName::WebPageProxy_HandleMessageWithAsyncReply: case MessageName::WebPageProxy_HandleMessageWithAsyncReplyReply: case MessageName::WebPageProxy_HasActiveNowPlayingSessionChanged:
 +#if ENABLE(ACCESSIBILITY_ANIMATION_CONTROL)
 +    case MessageName::WebPageProxy_IsAnyAnimationAllowedToPlayDidChange:
 +#endif
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPageProxy_MockMediaPlaybackTargetPickerDismissPopup:
-+#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW)
-+    case MessageName::WebPageProxy_ModelElementAnimationCurrentTime: case MessageName::WebPageProxy_ModelElementAnimationCurrentTimeReply: case MessageName::WebPageProxy_ModelElementAnimationDuration: case MessageName::WebPageProxy_ModelElementAnimationDurationReply:
-+#endif
 +#if ENABLE(ARKIT_INLINE_PREVIEW_MAC)
-+    case MessageName::WebPageProxy_ModelElementCreateRemotePreview: case MessageName::WebPageProxy_ModelElementCreateRemotePreviewReply: case MessageName::WebPageProxy_ModelElementDestroyRemotePreview:
++    case MessageName::WebPageProxy_ModelElementDestroyRemotePreview: case MessageName::WebPageProxy_ModelInlinePreviewUUIDs: case MessageName::WebPageProxy_ModelInlinePreviewUUIDsReply:
 +#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW)
-+    case MessageName::WebPageProxy_ModelElementGetCamera: case MessageName::WebPageProxy_ModelElementGetCameraReply: case MessageName::WebPageProxy_ModelElementHasAudio: case MessageName::WebPageProxy_ModelElementHasAudioReply: case MessageName::WebPageProxy_ModelElementIsLoopingAnimation: case MessageName::WebPageProxy_ModelElementIsLoopingAnimationReply: case MessageName::WebPageProxy_ModelElementIsMuted: case MessageName::WebPageProxy_ModelElementIsMutedReply: case MessageName::WebPageProxy_ModelElementIsPlayingAnimation: case MessageName::WebPageProxy_ModelElementIsPlayingAnimationReply:
-+#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW_MAC)
-+    case MessageName::WebPageProxy_ModelElementLoadRemotePreview: case MessageName::WebPageProxy_ModelElementLoadRemotePreviewReply:
-+#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW)
-+    case MessageName::WebPageProxy_ModelElementSetAnimationCurrentTime: case MessageName::WebPageProxy_ModelElementSetAnimationCurrentTimeReply: case MessageName::WebPageProxy_ModelElementSetAnimationIsPlaying: case MessageName::WebPageProxy_ModelElementSetAnimationIsPlayingReply: case MessageName::WebPageProxy_ModelElementSetCamera: case MessageName::WebPageProxy_ModelElementSetCameraReply:
-+#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW_IOS)
-+    case MessageName::WebPageProxy_ModelElementSetInteractionEnabled:
-+#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW)
-+    case MessageName::WebPageProxy_ModelElementSetIsLoopingAnimation: case MessageName::WebPageProxy_ModelElementSetIsLoopingAnimationReply: case MessageName::WebPageProxy_ModelElementSetIsMuted: case MessageName::WebPageProxy_ModelElementSetIsMutedReply:
-+#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW_MAC)
-+    case MessageName::WebPageProxy_ModelElementSizeDidChange: case MessageName::WebPageProxy_ModelElementSizeDidChangeReply: case MessageName::WebPageProxy_ModelInlinePreviewUUIDs: case MessageName::WebPageProxy_ModelInlinePreviewUUIDsReply:
-+#endif
-+    case MessageName::WebPageProxy_NowPlayingMetadataChanged: case MessageName::WebPageProxy_PerformSwitchHapticFeedback:
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPageProxy_PlaybackTargetPickerClientStateDidChange:
-+#endif
-+    case MessageName::WebPageProxy_PostMessageToRemote:
++    case MessageName::WebPageProxy_NowPlayingMetadataChanged: case MessageName::WebPageProxy_PerformSwitchHapticFeedback: case MessageName::WebPageProxy_PostMessageToRemote:
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPageProxy_ProofreadingSessionShowDetailsForSuggestionWithIDRelativeToRect: case MessageName::WebPageProxy_ProofreadingSessionUpdateStateForSuggestionWithID:
 +#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_RecordAutocorrectionResponse:
-+#endif
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPageProxy_RegisterAttachmentIdentifier: case MessageName::WebPageProxy_RegisterAttachmentIdentifierFromData: case MessageName::WebPageProxy_RegisterAttachmentIdentifierFromFilePath: case MessageName::WebPageProxy_RegisterAttachmentsFromSerializedData:
-+#endif
 +    case MessageName::WebPageProxy_RelayAccessibilityNotification:
-+#if USE(DICTATION_ALTERNATIVES)
-+    case MessageName::WebPageProxy_RemoveDictationAlternatives:
-+#endif
-+#if ENABLE(MEDIA_USAGE)
-+    case MessageName::WebPageProxy_RemoveMediaUsageManagerSession:
-+#endif
-+#if ENABLE(PDF_HUD)
-+    case MessageName::WebPageProxy_RemovePDFHUD:
-+#endif
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPageProxy_RemovePlaybackTargetPickerClient:
-+#endif
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPageProxy_RemoveTextAnimationForAnimationID:
 +#endif
-+    case MessageName::WebPageProxy_RenderTreeAsTextForTesting:
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPageProxy_RequestAttachmentIcon:
-+#endif
-+#if ENABLE(ENCRYPTED_MEDIA)
-+    case MessageName::WebPageProxy_RequestMediaKeySystemPermissionForFrame:
-+#endif
-+#if USE(QUICK_LOOK)
-+    case MessageName::WebPageProxy_RequestPasswordForQuickLookDocumentInMainFrame: case MessageName::WebPageProxy_RequestPasswordForQuickLookDocumentInMainFrameReply:
-+#endif
-+#if ENABLE(POINTER_LOCK)
-+    case MessageName::WebPageProxy_RequestPointerLock: case MessageName::WebPageProxy_RequestPointerUnlock:
-+#endif
-+#if ENABLE(IMAGE_ANALYSIS)
-+    case MessageName::WebPageProxy_RequestTextRecognition: case MessageName::WebPageProxy_RequestTextRecognitionReply:
-+#endif
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebPageProxy_RequestUserMediaPermissionForFrame:
-+#endif
-+#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebPageProxy_SendMessageToWebView: case MessageName::WebPageProxy_SendMessageToWebViewWithReply: case MessageName::WebPageProxy_SendMessageToWebViewWithReplyReply:
-+#endif
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPageProxy_SerializedAttachmentDataForIdentifiers:
-+#endif
-+    case MessageName::WebPageProxy_SetAllowsLayoutViewportHeightExpansion:
-+#if ENABLE(INPUT_TYPE_COLOR)
-+    case MessageName::WebPageProxy_SetColorPickerColor:
-+#endif
-+#if ENABLE(DATA_DETECTION)
-+    case MessageName::WebPageProxy_SetDataDetectionResult:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_SetEditableElementIsFocused:
-+#endif
-+#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebPageProxy_SetInputMethodState:
-+#endif
++    case MessageName::WebPageProxy_RenderTreeAsTextForTesting: case MessageName::WebPageProxy_SetAllowsLayoutViewportHeightExpansion:
 +#if HAVE(TOUCH_BAR)
-+    case MessageName::WebPageProxy_SetIsNeverRichlyEditableForTouchBar: case MessageName::WebPageProxy_SetIsTouchBarUpdateSuppressedForHiddenContentEditable:
-+#endif
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPageProxy_SetMockMediaPlaybackTargetPickerEnabled: case MessageName::WebPageProxy_SetMockMediaPlaybackTargetPickerState:
-+#endif
-+#if ENABLE(VIDEO_PRESENTATION_MODE)
-+    case MessageName::WebPageProxy_SetMockVideoPresentationModeEnabled:
-+#endif
-+#if ENABLE(WEB_AUTHN)
-+    case MessageName::WebPageProxy_SetMockWebAuthenticationConfiguration:
-+#endif
-+#if PLATFORM(COCOA) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPageProxy_SetPromisedDataForImage:
++    case MessageName::WebPageProxy_SetIsTouchBarUpdateSuppressedForHiddenContentEditable:
 +#endif
 +#if ENABLE(MEDIA_STREAM)
 +    case MessageName::WebPageProxy_SetShouldListenToVoiceActivity:
 +#endif
 +    case MessageName::WebPageProxy_SetTextIndicatorFromFrame:
-+#if ENABLE(DEVICE_ORIENTATION)
-+    case MessageName::WebPageProxy_ShouldAllowDeviceOrientationAndMotionAccess: case MessageName::WebPageProxy_ShouldAllowDeviceOrientationAndMotionAccessReply:
-+#endif
-+#if ENABLE(INPUT_TYPE_COLOR)
-+    case MessageName::WebPageProxy_ShowColorPicker:
-+#endif
 +#if ENABLE(CONTEXT_MENUS)
-+    case MessageName::WebPageProxy_ShowContextMenu: case MessageName::WebPageProxy_ShowContextMenuFromFrame:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_ShowCorrectionPanel:
-+#endif
-+#if ENABLE(DATALIST_ELEMENT)
-+    case MessageName::WebPageProxy_ShowDataListSuggestions:
-+#endif
-+#if ENABLE(DATE_AND_TIME_INPUT_TYPES)
-+    case MessageName::WebPageProxy_ShowDateTimePicker:
-+#endif
-+#if USE(DICTATION_ALTERNATIVES)
-+    case MessageName::WebPageProxy_ShowDictationAlternativeUI:
-+#endif
-+#if PLATFORM(GTK)
-+    case MessageName::WebPageProxy_ShowEmojiPicker: case MessageName::WebPageProxy_ShowEmojiPickerReply:
-+#endif
-+#if ENABLE(MEDIA_CONTROLS_CONTEXT_MENUS) && USE(UICONTEXTMENU)
-+    case MessageName::WebPageProxy_ShowMediaControlsContextMenu: case MessageName::WebPageProxy_ShowMediaControlsContextMenuReply:
++    case MessageName::WebPageProxy_ShowContextMenuFromFrame:
 +#endif
 +#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)
-+    case MessageName::WebPageProxy_ShowPDFContextMenu: case MessageName::WebPageProxy_ShowPDFContextMenuReply:
++    case MessageName::WebPageProxy_ShowPDFContextMenuReply:
 +#endif
-+#if PLATFORM(IOS_FAMILY) || ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPageProxy_ShowPlaybackTargetPicker:
-+#endif
-+    case MessageName::WebPageProxy_ShowPopupMenuFromFrame:
-+#if (ENABLE(TELEPHONE_NUMBER_DETECTION) && PLATFORM(MAC))
-+    case MessageName::WebPageProxy_ShowTelephoneNumberMenu:
-+#endif
-+#if PLATFORM(COCOA) || PLATFORM(GTK)
-+    case MessageName::WebPageProxy_ShowValidationMessage:
-+#endif
-+#if ENABLE(SPEECH_SYNTHESIS)
-+    case MessageName::WebPageProxy_SpeechSynthesisCancel: case MessageName::WebPageProxy_SpeechSynthesisPause: case MessageName::WebPageProxy_SpeechSynthesisPauseReply: case MessageName::WebPageProxy_SpeechSynthesisResetState: case MessageName::WebPageProxy_SpeechSynthesisResume: case MessageName::WebPageProxy_SpeechSynthesisResumeReply: case MessageName::WebPageProxy_SpeechSynthesisSetFinishedCallback: case MessageName::WebPageProxy_SpeechSynthesisSetFinishedCallbackReply: case MessageName::WebPageProxy_SpeechSynthesisSpeak: case MessageName::WebPageProxy_SpeechSynthesisSpeakReply: case MessageName::WebPageProxy_SpeechSynthesisVoiceList:
-+#endif
-+#if ENABLE(APPLE_PAY_AMS_UI)
-+    case MessageName::WebPageProxy_StartApplePayAMSUISession: case MessageName::WebPageProxy_StartApplePayAMSUISessionReply:
-+#endif
-+#if PLATFORM(COCOA) && ENABLE(DRAG_SUPPORT) || PLATFORM(GTK) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPageProxy_StartDrag:
-+#endif
-+    case MessageName::WebPageProxy_StartNetworkRequestsForPageLoadTiming:
-+#if USE(APPKIT)
-+    case MessageName::WebPageProxy_SubstitutionsPanelIsShowing:
-+#endif
-+#if ENABLE(ARKIT_INLINE_PREVIEW_IOS)
-+    case MessageName::WebPageProxy_TakeModelElementFullscreen:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPageProxy_ThemeColorChanged:
-+#endif
-+    case MessageName::WebPageProxy_UpdateFocusedElementInformation:
-+#if ENABLE(MEDIA_USAGE)
-+    case MessageName::WebPageProxy_UpdateMediaUsageManagerSessionState:
-+#endif
-+#if ENABLE(PDF_HUD)
-+    case MessageName::WebPageProxy_UpdatePDFHUDLocation:
-+#endif
-+    case MessageName::WebPageProxy_UpdateRemoteFrameAccessibilityOffset: case MessageName::WebPageProxy_UpdateRemoteFrameSize:
++    case MessageName::WebPageProxy_ShowPopupMenuFromFrame: case MessageName::WebPageProxy_StartNetworkRequestsForPageLoadTiming: case MessageName::WebPageProxy_UpdateFocusedElementInformation: case MessageName::WebPageProxy_UpdateRemoteFrameAccessibilityOffset: case MessageName::WebPageProxy_UpdateRemoteFrameSize:
 +#if ENABLE(MEDIA_STREAM)
 +    case MessageName::WebPageProxy_ValidateCaptureStateUpdate: case MessageName::WebPageProxy_ValidateCaptureStateUpdateReply:
 +#endif
-+#if PLATFORM(IOS_FAMILY) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPageProxy_WillReceiveEditDragSnapshot:
-+#endif
 +    case MessageName::WebPageProxy_WillSubmitFormReply:
-+#if (ENABLE(ATTACHMENT_ELEMENT) && PLATFORM(IOS_FAMILY))
-+    case MessageName::WebPageProxy_WritePromisedAttachmentToPasteboard:
-+#endif
-+#if USE(AUTOMATIC_TEXT_REPLACEMENT)
-+    case MessageName::WebPageProxy_toggleAutomaticDashSubstitution: case MessageName::WebPageProxy_toggleAutomaticLinkDetection: case MessageName::WebPageProxy_toggleAutomaticQuoteSubstitution: case MessageName::WebPageProxy_toggleAutomaticTextReplacement: case MessageName::WebPageProxy_toggleSmartInsertDelete:
-+#endif
 +#if ENABLE(NOTIFICATIONS)
 +    case MessageName::WebPageTesting_ClearNotificationPermissionState:
 +#endif
@@ -1196,242 +703,81 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if (ENABLE(GAMEPAD) && PLATFORM(VISION))
 +    case MessageName::WebPage_AllowGamepadAccess:
 +#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_AttributedSubstringForCharacterRangeAsync: case MessageName::WebPage_AttributedSubstringForCharacterRangeAsyncReply:
-+#endif
-+    case MessageName::WebPage_BeginPrintingDuringDOMPrintOperation: case MessageName::WebPage_BindRemoteAccessibilityFrames:
-+#if ENABLE(SPEECH_SYNTHESIS)
-+    case MessageName::WebPage_BoundaryEventOccurred:
-+#endif
-+#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebPage_CancelComposition:
-+#endif
-+#if USE(APPKIT)
-+    case MessageName::WebPage_CapitalizeWord:
-+#endif
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebPage_CaptureDevicesChanged:
-+#endif
-+    case MessageName::WebPage_ClearSelectionAfterTappingSelectionHighlightIfNeeded: case MessageName::WebPage_CloseCurrentTypingCommand:
-+#if PLATFORM(GTK)
-+    case MessageName::WebPage_CollapseSelectionInFrame:
-+#endif
++    case MessageName::WebPage_BeginPrintingDuringDOMPrintOperation: case MessageName::WebPage_BindRemoteAccessibilityFrames: case MessageName::WebPage_ClearSelectionAfterTappingSelectionHighlightIfNeeded: case MessageName::WebPage_CloseCurrentTypingCommand:
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_CompositionSessionDidReceiveTextWithReplacementRange:
 +#endif
-+    case MessageName::WebPage_ComputePagesForPrintingDuringDOMPrintOperation: case MessageName::WebPage_ComputePagesForPrintingDuringDOMPrintOperationReply:
-+#if (PLATFORM(COCOA) && PLATFORM(IOS_FAMILY))
-+    case MessageName::WebPage_ComputePagesForPrintingiOS:
-+#endif
-+#if ENABLE(CONTEXT_MENUS)
-+    case MessageName::WebPage_ContextMenuForKeyEvent:
-+#endif
-+    case MessageName::WebPage_CopyLinkWithHighlight: case MessageName::WebPage_CountStringMatchesReply:
++    case MessageName::WebPage_ComputePagesForPrintingDuringDOMPrintOperation: case MessageName::WebPage_ComputePagesForPrintingDuringDOMPrintOperationReply: case MessageName::WebPage_CopyLinkWithHighlight: case MessageName::WebPage_CountStringMatchesReply:
 +#if ENABLE(APP_HIGHLIGHTS)
-+    case MessageName::WebPage_CreateAppHighlightInSelectedRange: case MessageName::WebPage_CreateAppHighlightInSelectedRangeReply:
-+#endif
-+#if ENABLE(MEDIA_SESSION_COORDINATOR)
-+    case MessageName::WebPage_CreateMediaSessionCoordinator: case MessageName::WebPage_CreateMediaSessionCoordinatorReply:
++    case MessageName::WebPage_CreateAppHighlightInSelectedRangeReply:
 +#endif
 +    case MessageName::WebPage_CreateProvisionalFrame: case MessageName::WebPage_CreateRemoteSubframe: case MessageName::WebPage_CreateTextIndicatorForElementWithID: case MessageName::WebPage_CreateTextIndicatorForElementWithIDReply:
 +#if ENABLE(WRITING_TOOLS)
-+    case MessageName::WebPage_CreateTextIndicatorForTextAnimationID: case MessageName::WebPage_CreateTextIndicatorForTextAnimationIDReply:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_DataDetectorsDidChangeUI: case MessageName::WebPage_DataDetectorsDidHideUI: case MessageName::WebPage_DataDetectorsDidPresentUI:
-+#endif
-+#if ENABLE(WRITING_TOOLS)
-+    case MessageName::WebPage_DecorateTextReplacementsForActiveWritingToolsSession: case MessageName::WebPage_DecorateTextReplacementsForActiveWritingToolsSessionReply:
-+#endif
-+#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebPage_DeleteSurrounding:
++    case MessageName::WebPage_CreateTextIndicatorForTextAnimationID: case MessageName::WebPage_CreateTextIndicatorForTextAnimationIDReply: case MessageName::WebPage_DecorateTextReplacementsForActiveWritingToolsSession: case MessageName::WebPage_DecorateTextReplacementsForActiveWritingToolsSessionReply:
 +#endif
 +    case MessageName::WebPage_DestroyProvisionalFrame:
-+#if ENABLE(DATA_DETECTION)
-+    case MessageName::WebPage_DetectDataInAllFrames: case MessageName::WebPage_DetectDataInAllFramesReply:
-+#endif
-+#if ENABLE(POINTER_LOCK)
-+    case MessageName::WebPage_DidAcquirePointerLock:
-+#endif
 +#if PLATFORM(MAC)
 +    case MessageName::WebPage_DidBeginMagnificationGesture:
 +#endif
 +#if ENABLE(WRITING_TOOLS)
-+    case MessageName::WebPage_DidBeginWritingToolsSession:
++    case MessageName::WebPage_DidBeginWritingToolsSession: case MessageName::WebPage_DidEndWritingToolsSession:
 +#endif
-+#if ENABLE(INPUT_TYPE_COLOR)
-+    case MessageName::WebPage_DidChooseColor:
-+#endif
-+#if ENABLE(DATE_AND_TIME_INPUT_TYPES)
-+    case MessageName::WebPage_DidChooseDate:
-+#endif
-+#if ENABLE(DATALIST_ELEMENT)
-+    case MessageName::WebPage_DidCloseSuggestions:
-+#endif
-+#if PLATFORM(IOS_FAMILY) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPage_DidConcludeDrop:
-+#endif
-+#if ENABLE(CONTEXT_MENUS)
-+    case MessageName::WebPage_DidDismissContextMenu:
-+#endif
-+#if ENABLE(INPUT_TYPE_COLOR)
-+    case MessageName::WebPage_DidEndColorPicker:
-+#endif
-+#if ENABLE(DATE_AND_TIME_INPUT_TYPES)
-+    case MessageName::WebPage_DidEndDateTimePicker:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_DidEndMagnificationGesture:
-+#endif
-+#if ENABLE(WRITING_TOOLS)
-+    case MessageName::WebPage_DidEndWritingToolsSession:
-+#endif
-+    case MessageName::WebPage_DidFinishLoadInAnotherProcess: case MessageName::WebPage_DidInsertFinalDictationResult:
-+#if ENABLE(POINTER_LOCK)
-+    case MessageName::WebPage_DidLosePointerLock: case MessageName::WebPage_DidNotAcquirePointerLock:
-+#endif
-+#if ENABLE(GEOLOCATION)
-+    case MessageName::WebPage_DidReceiveGeolocationPermissionDecision:
-+#endif
-+    case MessageName::WebPage_DidScalePage: case MessageName::WebPage_DidScalePageInViewCoordinates: case MessageName::WebPage_DidScalePageRelativeToScrollPosition:
-+#if ENABLE(DATALIST_ELEMENT)
-+    case MessageName::WebPage_DidSelectDataListOption:
-+#endif
-+#if ENABLE(CONTEXT_MENUS)
-+    case MessageName::WebPage_DidSelectItemFromActiveContextMenu:
-+#endif
++    case MessageName::WebPage_DidFinishLoadInAnotherProcess: case MessageName::WebPage_DidInsertFinalDictationResult: case MessageName::WebPage_DidScalePage: case MessageName::WebPage_DidScalePageInViewCoordinates: case MessageName::WebPage_DidScalePageRelativeToScrollPosition: case MessageName::WebPage_DispatchLoadEventToFrameOwnerElement:
 +#if ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPage_DidStartDrag:
-+#endif
-+    case MessageName::WebPage_DispatchLoadEventToFrameOwnerElement:
-+#if ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPage_DragCancelled: case MessageName::WebPage_DragEnded: case MessageName::WebPage_DragEndedReply:
++    case MessageName::WebPage_DragEndedReply:
 +#endif
 +#if PLATFORM(GTK)
-+    case MessageName::WebPage_DrawPagesForPrinting: case MessageName::WebPage_DrawPagesForPrintingDuringDOMPrintOperation: case MessageName::WebPage_DrawPagesForPrintingDuringDOMPrintOperationReply: case MessageName::WebPage_DrawPagesForPrintingReply:
++    case MessageName::WebPage_DrawPagesForPrintingDuringDOMPrintOperation: case MessageName::WebPage_DrawPagesForPrintingDuringDOMPrintOperationReply:
 +#endif
 +    case MessageName::WebPage_DrawPagesToPDFDuringDOMPrintOperation: case MessageName::WebPage_DrawPagesToPDFDuringDOMPrintOperationReply: case MessageName::WebPage_DrawRectToImageDuringDOMPrintOperation: case MessageName::WebPage_DrawRectToImageDuringDOMPrintOperationReply:
 +#if (PLATFORM(COCOA) && PLATFORM(IOS_FAMILY))
-+    case MessageName::WebPage_DrawToImage: case MessageName::WebPage_DrawToImageReply: case MessageName::WebPage_DrawToPDFiOS: case MessageName::WebPage_DrawToPDFiOSReply:
++    case MessageName::WebPage_DrawToImage: case MessageName::WebPage_DrawToImageReply:
 +#endif
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_EnableSourceTextAnimationAfterElementWithID: case MessageName::WebPage_EnableTextAnimationTypeForElementWithID:
 +#endif
-+    case MessageName::WebPage_EndPrintingDuringDOMPrintOperation: case MessageName::WebPage_EndPrintingDuringDOMPrintOperationReply: case MessageName::WebPage_EndPrintingReply:
-+#if ENABLE(SANDBOX_EXTENSIONS)
-+    case MessageName::WebPage_ExtendSandboxForFilesFromOpenPanel:
-+#endif
-+    case MessageName::WebPage_ExtendSelectionForReplacement: case MessageName::WebPage_ExtendSelectionForReplacementReply:
-+#if PLATFORM(GTK)
-+    case MessageName::WebPage_FailedToShowPopupMenu:
-+#endif
++    case MessageName::WebPage_EndPrintingDuringDOMPrintOperation: case MessageName::WebPage_EndPrintingDuringDOMPrintOperationReply: case MessageName::WebPage_EndPrintingReply: case MessageName::WebPage_ExtendSelectionForReplacement: case MessageName::WebPage_ExtendSelectionForReplacementReply:
 +#if ENABLE(IMAGE_ANALYSIS)
 +    case MessageName::WebPage_FindStringIncludingImages: case MessageName::WebPage_FindStringIncludingImagesReply:
 +#endif
-+    case MessageName::WebPage_FindStringMatchesReply: case MessageName::WebPage_FlushDeferredDidReceiveMouseEvent: case MessageName::WebPage_FlushDeferredResizeEvents: case MessageName::WebPage_FlushDeferredScrollEvents: case MessageName::WebPage_FrameNameWasChangedInAnotherProcess: case MessageName::WebPage_FrameTextForTesting: case MessageName::WebPage_FrameWasFocusedInAnotherProcess: case MessageName::WebPage_FrameWasRemovedInAnotherProcess:
-+#if ENABLE(GAMEPAD)
-+    case MessageName::WebPage_GamepadActivity:
-+#endif
-+    case MessageName::WebPage_GenerateTestReport:
-+#if ENABLE(APPLICATION_MANIFEST)
-+    case MessageName::WebPage_GetApplicationManifest: case MessageName::WebPage_GetApplicationManifestReply:
-+#endif
-+#if ENABLE(MHTML)
-+    case MessageName::WebPage_GetContentsAsMHTMLData: case MessageName::WebPage_GetContentsAsMHTMLDataReply:
-+#endif
-+    case MessageName::WebPage_GetFrameInfo: case MessageName::WebPage_GetFrameInfoReply: case MessageName::WebPage_GetFrameTree: case MessageName::WebPage_GetFrameTreeReply: case MessageName::WebPage_GetTextFragmentMatch: case MessageName::WebPage_GetTextFragmentMatchReply: case MessageName::WebPage_GetWebArchiveOfFrameWithFileName: case MessageName::WebPage_GetWebArchiveOfFrameWithFileNameReply: case MessageName::WebPage_GoToBackForwardItemWaitingForProcessLaunch:
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_HandleAcceptedCandidate:
-+#endif
-+    case MessageName::WebPage_HandleWheelEvent: case MessageName::WebPage_HandleWheelEventReply:
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_ImmediateActionDidCancel: case MessageName::WebPage_ImmediateActionDidComplete: case MessageName::WebPage_ImmediateActionDidUpdate:
-+#endif
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPage_InsertAttachment: case MessageName::WebPage_InsertAttachmentReply:
-+#endif
-+#if PLATFORM(IOS_FAMILY) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPage_InsertDroppedImagePlaceholders: case MessageName::WebPage_InsertDroppedImagePlaceholdersReply:
-+#endif
++    case MessageName::WebPage_FindStringMatchesReply: case MessageName::WebPage_FlushDeferredDidReceiveMouseEvent: case MessageName::WebPage_FlushDeferredResizeEvents: case MessageName::WebPage_FlushDeferredScrollEvents: case MessageName::WebPage_FrameNameWasChangedInAnotherProcess: case MessageName::WebPage_FrameTextForTesting: case MessageName::WebPage_FrameWasFocusedInAnotherProcess: case MessageName::WebPage_FrameWasRemovedInAnotherProcess: case MessageName::WebPage_GenerateTestReport: case MessageName::WebPage_GetFrameInfo: case MessageName::WebPage_GetFrameInfoReply: case MessageName::WebPage_GetFrameTree: case MessageName::WebPage_GetFrameTreeReply: case MessageName::WebPage_GetTextFragmentMatch: case MessageName::WebPage_GetTextFragmentMatchReply: case MessageName::WebPage_GetWebArchiveOfFrameWithFileName: case MessageName::WebPage_GetWebArchiveOfFrameWithFileNameReply: case MessageName::WebPage_GoToBackForwardItemWaitingForProcessLaunch: case MessageName::WebPage_HandleWheelEvent: case MessageName::WebPage_HandleWheelEventReply:
 +#if (PLATFORM(COCOA) && ENABLE(MULTI_REPRESENTATION_HEIC))
 +    case MessageName::WebPage_InsertMultiRepresentationHEIC:
 +#endif
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_IntelligenceTextAnimationsDidComplete:
 +#endif
-+    case MessageName::WebPage_LoadAndDecodeImage: case MessageName::WebPage_LoadAndDecodeImageReply: case MessageName::WebPage_LoadDidCommitInAnotherProcess:
-+#if USE(APPKIT)
-+    case MessageName::WebPage_LowercaseWord:
-+#endif
-+    case MessageName::WebPage_MainFrameURLChangedInAnotherProcess:
-+#if ENABLE(ENCRYPTED_MEDIA)
-+    case MessageName::WebPage_MediaKeySystemWasDenied: case MessageName::WebPage_MediaKeySystemWasGranted:
-+#endif
++    case MessageName::WebPage_LoadAndDecodeImage: case MessageName::WebPage_LoadAndDecodeImageReply: case MessageName::WebPage_LoadDidCommitInAnotherProcess: case MessageName::WebPage_MainFrameURLChangedInAnotherProcess:
 +#if ENABLE(ARKIT_INLINE_PREVIEW_IOS)
 +    case MessageName::WebPage_ModelInlinePreviewDidFailToLoad: case MessageName::WebPage_ModelInlinePreviewDidLoad:
 +#endif
 +    case MessageName::WebPage_NavigateServiceWorkerClient: case MessageName::WebPage_NavigateServiceWorkerClientReply: case MessageName::WebPage_NotifyReportObservers: case MessageName::WebPage_NumberOfVisibilityAdjustmentRects: case MessageName::WebPage_NumberOfVisibilityAdjustmentRectsReply:
-+#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)
-+    case MessageName::WebPage_OpenPDFWithPreview: case MessageName::WebPage_OpenPDFWithPreviewReply:
-+#endif
 +#if ENABLE(ACCESSIBILITY_ANIMATION_CONTROL)
 +    case MessageName::WebPage_PauseAllAnimations: case MessageName::WebPage_PauseAllAnimationsReply:
 +#endif
 +    case MessageName::WebPage_PerformActionOnElements:
 +#if PLATFORM(GTK) && ENABLE(DRAG_SUPPORT) || !PLATFORM(GTK) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPage_PerformDragControllerAction: case MessageName::WebPage_PerformDragControllerActionReply:
++    case MessageName::WebPage_PerformDragControllerActionReply:
 +#endif
 +#if !PLATFORM(GTK) && ENABLE(DRAG_SUPPORT)
 +    case MessageName::WebPage_PerformDragOperation: case MessageName::WebPage_PerformDragOperationReply:
 +#endif
 +    case MessageName::WebPage_PerformHitTestForMouseEvent: case MessageName::WebPage_PerformHitTestForMouseEventReply:
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_PerformImmediateActionHitTestAtLocation:
-+#endif
 +#if ENABLE(ACCESSIBILITY_ANIMATION_CONTROL)
 +    case MessageName::WebPage_PlayAllAnimations: case MessageName::WebPage_PlayAllAnimationsReply:
-+#endif
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPage_PlaybackTargetAvailabilityDidChange: case MessageName::WebPage_PlaybackTargetPickerWasDismissed: case MessageName::WebPage_PlaybackTargetSelected:
 +#endif
 +    case MessageName::WebPage_PreferencesDidChangeDuringDOMPrintOperation:
 +#if PLATFORM(WPE) && USE(GBM) && ENABLE(WPE_PLATFORM)
 +    case MessageName::WebPage_PreferredBufferFormatsDidChange:
 +#endif
-+#if (PLATFORM(IOS_FAMILY) && ENABLE(REVEAL))
-+    case MessageName::WebPage_PrepareSelectionForContextMenuWithLocationInView: case MessageName::WebPage_PrepareSelectionForContextMenuWithLocationInViewReply:
-+#endif
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_ProofreadingSessionDidReceiveSuggestions: case MessageName::WebPage_ProofreadingSessionDidReceiveSuggestionsReply: case MessageName::WebPage_ProofreadingSessionDidUpdateStateForSuggestion: case MessageName::WebPage_ProofreadingSessionSuggestionTextRectsInRootViewCoordinates: case MessageName::WebPage_ProofreadingSessionSuggestionTextRectsInRootViewCoordinatesReply:
 +#endif
-+    case MessageName::WebPage_RemoteDictionaryPopupInfoToRootView: case MessageName::WebPage_RemoteDictionaryPopupInfoToRootViewReply: case MessageName::WebPage_RemotePostMessage: case MessageName::WebPage_RemoteViewPointToRootView: case MessageName::WebPage_RemoteViewPointToRootViewReply: case MessageName::WebPage_RemoteViewRectToRootView: case MessageName::WebPage_RemoteViewRectToRootViewReply:
-+#if ENABLE(DATA_DETECTION)
-+    case MessageName::WebPage_RemoveDataDetectedLinks: case MessageName::WebPage_RemoveDataDetectedLinksReply:
-+#endif
-+    case MessageName::WebPage_RemoveLayerForFindOverlay: case MessageName::WebPage_RemoveLayerForFindOverlayReply: case MessageName::WebPage_RenderTreeAsTextForTesting:
++    case MessageName::WebPage_RemoteDictionaryPopupInfoToRootView: case MessageName::WebPage_RemoteDictionaryPopupInfoToRootViewReply: case MessageName::WebPage_RemotePostMessage: case MessageName::WebPage_RemoteViewPointToRootView: case MessageName::WebPage_RemoteViewPointToRootViewReply: case MessageName::WebPage_RemoteViewRectToRootView: case MessageName::WebPage_RemoteViewRectToRootViewReply: case MessageName::WebPage_RemoveLayerForFindOverlay: case MessageName::WebPage_RemoveLayerForFindOverlayReply: case MessageName::WebPage_RenderTreeAsTextForTesting:
 +#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
 +    case MessageName::WebPage_ReplaceImageForRemoveBackground:
 +#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_RequestAcceptsFirstMouse:
-+#endif
-+#if PLATFORM(IOS_FAMILY) && ENABLE(DRAG_SUPPORT)
-+    case MessageName::WebPage_RequestAdditionalItemsForDragSession: case MessageName::WebPage_RequestDragStart:
-+#endif
-+#if (PLATFORM(IOS_FAMILY) && ENABLE(REVEAL))
-+    case MessageName::WebPage_RequestRVItemInCurrentSelectedRange: case MessageName::WebPage_RequestRVItemInCurrentSelectedRangeReply:
-+#endif
-+    case MessageName::WebPage_RequestTargetedElement: case MessageName::WebPage_RequestTargetedElementReply: case MessageName::WebPage_RequestTextExtraction: case MessageName::WebPage_RequestTextExtractionReply:
-+#if ENABLE(IOS_TOUCH_EVENTS)
-+    case MessageName::WebPage_ResetPotentialTapSecurityOrigin:
-+#endif
-+    case MessageName::WebPage_ResetVisibilityAdjustmentsForTargetedElements: case MessageName::WebPage_ResetVisibilityAdjustmentsForTargetedElementsReply:
-+#if ENABLE(APP_HIGHLIGHTS)
-+    case MessageName::WebPage_RestoreAppHighlightsAndScrollToIndex:
-+#endif
-+#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)
-+    case MessageName::WebPage_SavePDF: case MessageName::WebPage_SavePDFReply:
-+#endif
++    case MessageName::WebPage_RequestTargetedElement: case MessageName::WebPage_RequestTargetedElementReply: case MessageName::WebPage_RequestTextExtraction: case MessageName::WebPage_RequestTextExtractionReply: case MessageName::WebPage_ResetVisibilityAdjustmentsForTargetedElements: case MessageName::WebPage_ResetVisibilityAdjustmentsForTargetedElementsReply:
 +#if PLATFORM(MAC)
 +    case MessageName::WebPage_SemanticContextDidChange:
 +#endif
@@ -1439,14 +785,8 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::WebPage_SendMessageToWebProcessExtension: case MessageName::WebPage_SendMessageToWebProcessExtensionWithReply: case MessageName::WebPage_SendMessageToWebProcessExtensionWithReplyReply:
 +#endif
 +    case MessageName::WebPage_SendReportToEndpoints:
-+#if HAVE(APP_ACCENT_COLORS)
-+    case MessageName::WebPage_SetAccentColor:
-+#endif
 +#if ENABLE(ADVANCED_PRIVACY_PROTECTIONS)
 +    case MessageName::WebPage_SetAllowedQueryParametersForAdvancedPrivacyProtections:
-+#endif
-+#if ENABLE(APP_HIGHLIGHTS)
-+    case MessageName::WebPage_SetAppHighlightsVisibility:
 +#endif
 +#if PLATFORM(MAC)
 +    case MessageName::WebPage_SetCaretAnimatorType: case MessageName::WebPage_SetCaretBlinkingSuspended:
@@ -1460,9 +800,6 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::WebPage_SetHasCustomUserAgent:
 +#if PLATFORM(MAC)
 +    case MessageName::WebPage_SetHeaderBannerHeight:
-+#endif
-+#if ENABLE(REMOTE_INSPECTOR)
-+    case MessageName::WebPage_SetIndicating:
 +#endif
 +    case MessageName::WebPage_SetInsertionPointColor:
 +#if ENABLE(INTERACTION_REGIONS_IN_EVENT_REGION)
@@ -1478,67 +815,35 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if ENABLE(EXTENSION_CAPABILITIES)
 +    case MessageName::WebPage_SetMediaEnvironment:
 +#endif
-+#if (ENABLE(MEDIA_STREAM) && USE(GSTREAMER))
-+    case MessageName::WebPage_SetMockCaptureDevicesInterrupted: case MessageName::WebPage_SetOrientationForMediaCapture:
-+#endif
 +    case MessageName::WebPage_SetSceneIdentifier:
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_SetSelectionForActiveWritingToolsSession: case MessageName::WebPage_SetSelectionForActiveWritingToolsSessionReply:
-+#endif
-+#if ENABLE(WIRELESS_PLAYBACK_TARGET) && !PLATFORM(IOS_FAMILY)
-+    case MessageName::WebPage_SetShouldPlayToPlaybackTarget:
-+#endif
-+#if !PLATFORM(COCOA)
-+    case MessageName::WebPage_SetTopContentInset:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebPage_SetUseSystemAppearance:
 +#endif
 +    case MessageName::WebPage_SetWritingSuggestion:
 +#if ENABLE(IMAGE_ANALYSIS_ENHANCEMENTS)
 +    case MessageName::WebPage_ShouldAllowRemoveBackground: case MessageName::WebPage_ShouldAllowRemoveBackgroundReply:
 +#endif
-+    case MessageName::WebPage_ShouldDismissKeyboardAfterTapAtPoint: case MessageName::WebPage_ShouldDismissKeyboardAfterTapAtPointReply: case MessageName::WebPage_SimulateClickOverFirstMatchingTextInViewportWithUserInteraction: case MessageName::WebPage_SimulateClickOverFirstMatchingTextInViewportWithUserInteractionReply:
-+#if ENABLE(SPEECH_SYNTHESIS)
-+    case MessageName::WebPage_SpeakingErrorOccurred:
-+#endif
-+    case MessageName::WebPage_StartDeferringResizeEvents: case MessageName::WebPage_StartDeferringScrollEvents: case MessageName::WebPage_StartObservingNowPlayingMetadata:
++    case MessageName::WebPage_ShouldDismissKeyboardAfterTapAtPoint: case MessageName::WebPage_ShouldDismissKeyboardAfterTapAtPointReply: case MessageName::WebPage_SimulateClickOverFirstMatchingTextInViewportWithUserInteraction: case MessageName::WebPage_SimulateClickOverFirstMatchingTextInViewportWithUserInteractionReply: case MessageName::WebPage_StartDeferringResizeEvents: case MessageName::WebPage_StartDeferringScrollEvents: case MessageName::WebPage_StartObservingNowPlayingMetadata:
 +#if ENABLE(VIDEO_PRESENTATION_MODE)
 +    case MessageName::WebPage_StartPlayingPredominantVideo: case MessageName::WebPage_StartPlayingPredominantVideoReply:
 +#endif
 +#if ENABLE(IMAGE_ANALYSIS)
 +    case MessageName::WebPage_StartVisualTranslation:
 +#endif
-+    case MessageName::WebPage_StopObservingNowPlayingMetadata: case MessageName::WebPage_SwipeAnimationDidEnd: case MessageName::WebPage_SwipeAnimationDidStart:
-+#if USE(SYSTEM_PREVIEW)
-+    case MessageName::WebPage_SystemPreviewActionTriggered:
-+#endif
-+    case MessageName::WebPage_TakeSnapshotForTargetedElement: case MessageName::WebPage_TakeSnapshotForTargetedElementReply:
++    case MessageName::WebPage_StopObservingNowPlayingMetadata: case MessageName::WebPage_SwipeAnimationDidEnd: case MessageName::WebPage_SwipeAnimationDidStart: case MessageName::WebPage_TakeSnapshotForTargetedElement: case MessageName::WebPage_TakeSnapshotForTargetedElementReply:
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_TextPreviewDataForActiveWritingToolsSession: case MessageName::WebPage_TextPreviewDataForActiveWritingToolsSessionReply:
 +#endif
 +#if !ENABLE(IOS_TOUCH_EVENTS) && ENABLE(TOUCH_EVENTS)
-+    case MessageName::WebPage_TouchEvent: case MessageName::WebPage_TouchEventReply:
-+#endif
-+#if ENABLE(ATTACHMENT_ELEMENT)
-+    case MessageName::WebPage_UpdateAttachmentAttributes: case MessageName::WebPage_UpdateAttachmentAttributesReply: case MessageName::WebPage_UpdateAttachmentIcon: case MessageName::WebPage_UpdateAttachmentThumbnail:
++    case MessageName::WebPage_TouchEventReply:
 +#endif
 +    case MessageName::WebPage_UpdateFrameSize: case MessageName::WebPage_UpdateRemotePageAccessibilityOffset: case MessageName::WebPage_UpdateRenderingWithForcedRepaint: case MessageName::WebPage_UpdateRenderingWithForcedRepaintReply:
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_UpdateTextVisibilityForActiveWritingToolsSession: case MessageName::WebPage_UpdateTextVisibilityForActiveWritingToolsSessionReply: case MessageName::WebPage_UpdateUnderlyingTextVisibilityForTextAnimationID: case MessageName::WebPage_UpdateUnderlyingTextVisibilityForTextAnimationIDReply:
 +#endif
-+#if ENABLE(IMAGE_ANALYSIS)
-+    case MessageName::WebPage_UpdateWithTextRecognitionResult: case MessageName::WebPage_UpdateWithTextRecognitionResultReply:
-+#endif
-+#if USE(APPKIT)
-+    case MessageName::WebPage_UppercaseWord:
-+#endif
 +    case MessageName::WebPage_UseRedirectionForCurrentNavigation:
 +#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebPage_UserMediaAccessWasDenied: case MessageName::WebPage_UserMediaAccessWasGranted: case MessageName::WebPage_UserMediaAccessWasGrantedReply: case MessageName::WebPage_VoiceActivityDetected:
-+#endif
-+#if ENABLE(SPEECH_SYNTHESIS)
-+    case MessageName::WebPage_VoicesDidChange:
++    case MessageName::WebPage_VoiceActivityDetected:
 +#endif
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_WillBeginWritingToolsSession: case MessageName::WebPage_WillBeginWritingToolsSessionReply: case MessageName::WebPage_WillEndWritingToolsSession: case MessageName::WebPage_WillEndWritingToolsSessionReply:
@@ -1547,39 +852,12 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if ENABLE(WRITING_TOOLS)
 +    case MessageName::WebPage_WritingToolsSessionDidReceiveAction:
 +#endif
-+#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)
-+    case MessageName::WebPage_ZoomPDFIn: case MessageName::WebPage_ZoomPDFOut:
-+#endif
-+#if PLATFORM(GTK)
-+    case MessageName::WebPasteboardProxy_ClearClipboard:
-+#endif
-+#if PLATFORM(COCOA) || PLATFORM(GTK)
-+    case MessageName::WebPasteboardProxy_GetPasteboardChangeCount:
-+#endif
-+#if PLATFORM(COCOA) || USE(LIBWPE)
-+    case MessageName::WebPasteboardProxy_GetPasteboardTypes:
-+#endif
-+#if PLATFORM(GTK)
-+    case MessageName::WebPasteboardProxy_GetTypes: case MessageName::WebPasteboardProxy_ReadBuffer: case MessageName::WebPasteboardProxy_ReadFilePaths: case MessageName::WebPasteboardProxy_ReadText:
-+#endif
 +#if (PLATFORM(COCOA) && ENABLE(IPC_TESTING_API))
 +    case MessageName::WebPasteboardProxy_TestIPCSharedMemory:
 +#endif
-+#if PLATFORM(IOS_FAMILY) || USE(LIBWPE)
-+    case MessageName::WebPasteboardProxy_WriteStringToPasteboard:
-+#endif
-+#if PLATFORM(GTK)
-+    case MessageName::WebPasteboardProxy_WriteToClipboard:
-+#endif
-+#if PLATFORM(IOS_FAMILY) || USE(LIBWPE)
-+    case MessageName::WebPasteboardProxy_WriteWebContentToPasteboard:
-+#endif
-+#if ENABLE(APPLE_PAY_COUPON_CODE)
-+    case MessageName::WebPaymentCoordinatorProxy_CompleteCouponCodeChange: case MessageName::WebPaymentCoordinator_DidChangeCouponCode:
-+#endif
 +    case MessageName::WebPermissionControllerProxy_Query: case MessageName::WebPermissionControllerProxy_QueryReply: case MessageName::WebPermissionController_permissionChanged:
 +#if ENABLE(GAMEPAD)
-+    case MessageName::WebProcessPool_PlayGamepadEffect: case MessageName::WebProcessPool_PlayGamepadEffectReply: case MessageName::WebProcessPool_StartedUsingGamepads: case MessageName::WebProcessPool_StopGamepadEffects: case MessageName::WebProcessPool_StopGamepadEffectsReply: case MessageName::WebProcessPool_StoppedUsingGamepads: case MessageName::WebProcessPool_StoppedUsingGamepadsReply:
++    case MessageName::WebProcessPool_PlayGamepadEffect: case MessageName::WebProcessPool_PlayGamepadEffectReply: case MessageName::WebProcessPool_StopGamepadEffects: case MessageName::WebProcessPool_StopGamepadEffectsReply: case MessageName::WebProcessPool_StoppedUsingGamepadsReply:
 +#endif
 +#if ENABLE(GPU_PROCESS)
 +    case MessageName::WebProcessProxy_CreateGPUProcessConnection:
@@ -1591,49 +869,9 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +#if ENABLE(GPU_PROCESS)
 +    case MessageName::WebProcessProxy_GPUProcessConnectionDidBecomeUnresponsive:
 +#endif
-+#if PLATFORM(MAC) || PLATFORM(MACCATALYST)
-+    case MessageName::WebProcessProxy_IsAXAuthenticated:
-+#endif
-+#if PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebProcessProxy_SendMessageToWebContext: case MessageName::WebProcessProxy_SendMessageToWebContextWithReply: case MessageName::WebProcessProxy_SendMessageToWebContextWithReplyReply:
-+#endif
-+    case MessageName::WebProcessProxy_SetAppBadge:
-+#if HAVE(MEDIA_ACCESSIBILITY_FRAMEWORK)
-+    case MessageName::WebProcessProxy_SetCaptionDisplayMode: case MessageName::WebProcessProxy_SetCaptionLanguage:
-+#endif
-+    case MessageName::WebProcessProxy_SetClientBadge:
-+#if HAVE(DISPLAY_LINK)
-+    case MessageName::WebProcessProxy_SetDisplayLinkPreferredFramesPerSecond: case MessageName::WebProcessProxy_StartDisplayLink: case MessageName::WebProcessProxy_StopDisplayLink:
-+#endif
-+    case MessageName::WebProcessProxy_UnwrapCryptoKey: case MessageName::WebProcessProxy_WaitForSharedPreferencesForWebProcessToSync: case MessageName::WebProcessProxy_WrapCryptoKey:
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebProcess_AddMockMediaDevice:
-+#endif
-+#if PLATFORM(IOS_FAMILY) && !PLATFORM(MACCATALYST)
-+    case MessageName::WebProcess_BacklightLevelDidChange:
-+#endif
-+    case MessageName::WebProcess_BindAccessibilityFrameWithData:
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebProcess_ClearMockMediaDevices:
-+#endif
-+#if PLATFORM(MAC) || PLATFORM(MACCATALYST)
-+    case MessageName::WebProcess_ColorPreferencesDidChange:
-+#endif
-+#if HAVE(AUDIO_COMPONENT_SERVER_REGISTRATIONS)
-+    case MessageName::WebProcess_ConsumeAudioComponentRegistrations:
-+#endif
-+    case MessageName::WebProcess_DeleteAllCookies: case MessageName::WebProcess_DeleteAllCookiesReply: case MessageName::WebProcess_DeleteWebsiteDataForOrigin: case MessageName::WebProcess_DeleteWebsiteDataForOriginReply: case MessageName::WebProcess_DisableURLSchemeCheckInDataDetectors:
++    case MessageName::WebProcessProxy_SetAppBadge: case MessageName::WebProcessProxy_SetClientBadge: case MessageName::WebProcessProxy_UnwrapCryptoKey: case MessageName::WebProcessProxy_WaitForSharedPreferencesForWebProcessToSync: case MessageName::WebProcessProxy_WrapCryptoKey: case MessageName::WebProcess_BindAccessibilityFrameWithData: case MessageName::WebProcess_DeleteAllCookies: case MessageName::WebProcess_DeleteAllCookiesReply: case MessageName::WebProcess_DeleteWebsiteDataForOrigin: case MessageName::WebProcess_DeleteWebsiteDataForOriginReply: case MessageName::WebProcess_DisableURLSchemeCheckInDataDetectors:
 +#if HAVE(DISPLAY_LINK)
 +    case MessageName::WebProcess_DisplayDidRefresh:
-+#endif
-+#if (PLATFORM(COCOA) && ENABLE(REMOTE_INSPECTOR))
-+    case MessageName::WebProcess_EnableRemoteWebInspector:
-+#endif
-+#if ENABLE(GAMEPAD)
-+    case MessageName::WebProcess_GamepadConnected: case MessageName::WebProcess_GamepadDisconnected:
-+#endif
-+#if (ENABLE(MEDIA_STREAM) && ENABLE(SANDBOX_EXTENSIONS))
-+    case MessageName::WebProcess_GrantUserMediaDeviceSandboxExtensions:
 +#endif
 +    case MessageName::WebProcess_InitializeWebProcessReply:
 +#if PLATFORM(MAC)
@@ -1646,67 +884,18 @@ index 9662098cd75..6ed6a0f8fa5 100644
 +    case MessageName::WebProcess_RegisterURLSchemeAsWebExtension:
 +#endif
 +    case MessageName::WebProcess_ReleaseMemory: case MessageName::WebProcess_ReleaseMemoryReply: case MessageName::WebProcess_ReloadExecutionContextsForOrigin: case MessageName::WebProcess_ReloadExecutionContextsForOriginReply:
-+#if ENABLE(MEDIA_STREAM)
-+    case MessageName::WebProcess_RemoveMockMediaDevice: case MessageName::WebProcess_ResetMockMediaDevices:
-+#endif
-+#if (ENABLE(MEDIA_STREAM) && ENABLE(SANDBOX_EXTENSIONS))
-+    case MessageName::WebProcess_RevokeUserMediaDeviceSandboxExtensions:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebProcess_ScrollerStylePreferenceChanged:
-+#endif
 +#if PLATFORM(GTK) || PLATFORM(WPE)
 +    case MessageName::WebProcess_SendMessageToWebProcessExtension:
 +#endif
-+    case MessageName::WebProcess_SetDisableFontSubpixelAntialiasingForTesting:
-+#if ENABLE(SERVICE_CONTROLS)
-+    case MessageName::WebProcess_SetEnabledServices:
-+#endif
-+#if HAVE(MOUSE_DEVICE_OBSERVATION)
-+    case MessageName::WebProcess_SetHasMouseDevice:
-+#endif
-+#if HAVE(STYLUS_DEVICE_OBSERVATION)
-+    case MessageName::WebProcess_SetHasStylusDevice:
-+#endif
-+#if ENABLE(GAMEPAD)
-+    case MessageName::WebProcess_SetInitialGamepads:
-+#endif
-+    case MessageName::WebProcess_SetIsInProcessCacheReply:
-+#if HAVE(MEDIA_ACCESSIBILITY_FRAMEWORK)
-+    case MessageName::WebProcess_SetMediaAccessibilityPreferences:
-+#endif
++    case MessageName::WebProcess_SetDisableFontSubpixelAntialiasingForTesting: case MessageName::WebProcess_SetIsInProcessCacheReply:
 +#if ENABLE(MEDIA_STREAM)
 +    case MessageName::WebProcess_SetMockMediaDeviceIsEphemeral:
 +#endif
-+#if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)
-+    case MessageName::WebProcess_SetScreenProperties:
-+#endif
-+    case MessageName::WebProcess_SetTrackingPreventionEnabled:
-+#if PLATFORM(GTK) && !USE(GTK4) && USE(CAIRO)
-+    case MessageName::WebProcess_SetUseSystemAppearanceForScrollbars:
-+#endif
-+#if PLATFORM(MAC)
-+    case MessageName::WebProcess_SystemDidWake: case MessageName::WebProcess_SystemWillPowerOn: case MessageName::WebProcess_SystemWillSleep:
-+#endif
-+    case MessageName::WebProcess_UpdateDomainsWithStorageAccessQuirks: case MessageName::WebProcess_UpdateStorageAccessUserAgentStringQuirks:
-+#if ENABLE(CONTENT_FILTERING)
-+    case MessageName::WebResourceLoader_ContentFilterDidBlockLoad:
-+#endif
-+#if ENABLE(SHAREABLE_RESOURCE)
-+    case MessageName::WebResourceLoader_DidReceiveResource:
-+#endif
-+    case MessageName::WebResourceLoader_SetWorkerStart: case MessageName::WebResourceLoader_WillSendRequestReply: case MessageName::WebSWClientConnection_NotifyRecordResponseBodyChunk: case MessageName::WebSWClientConnection_NotifyRecordResponseBodyEnd: case MessageName::WebSWClientConnection_SetServiceWorkerClientIsControlled: case MessageName::WebSWClientConnection_SetServiceWorkerClientIsControlledReply: case MessageName::WebSWClientConnection_UpdateBackgroundFetchRegistration:
-+#if ENABLE(SHAREABLE_RESOURCE) && PLATFORM(COCOA)
-+    case MessageName::WebSWContextManagerConnection_DidSaveScriptsToDisk:
-+#endif
-+    case MessageName::WebSWContextManagerConnection_FireBackgroundFetchClickEvent: case MessageName::WebSWContextManagerConnection_FireBackgroundFetchClickEventReply: case MessageName::WebSWContextManagerConnection_FireBackgroundFetchEvent: case MessageName::WebSWContextManagerConnection_FireBackgroundFetchEventReply: case MessageName::WebSWContextManagerConnection_FireUpdateFoundEvent: case MessageName::WebSWContextManagerConnection_NavigationPreloadFailed: case MessageName::WebSWContextManagerConnection_NavigationPreloadIsReady: case MessageName::WebSWContextManagerConnection_SetInspectable: case MessageName::WebSWContextManagerConnection_SetRegistrationLastUpdateTime: case MessageName::WebSWContextManagerConnection_SetRegistrationUpdateViaCache: case MessageName::WebSWContextManagerConnection_SkipWaitingCompleted: case MessageName::WebSWContextManagerConnection_UpdateRegistrationState: case MessageName::WebSWContextManagerConnection_UpdateWorkerState: case MessageName::WebSWServerConnection_AbortBackgroundFetch: case MessageName::WebSWServerConnection_AbortBackgroundFetchReply: case MessageName::WebSWServerConnection_AddCookieChangeSubscriptions: case MessageName::WebSWServerConnection_AddCookieChangeSubscriptionsReply: case MessageName::WebSWServerConnection_BackgroundFetchIdentifiers: case MessageName::WebSWServerConnection_BackgroundFetchIdentifiersReply: case MessageName::WebSWServerConnection_BackgroundFetchInformation: case MessageName::WebSWServerConnection_BackgroundFetchInformationReply: case MessageName::WebSWServerConnection_CookieChangeSubscriptions: case MessageName::WebSWServerConnection_CookieChangeSubscriptionsReply:
++    case MessageName::WebProcess_SetTrackingPreventionEnabled: case MessageName::WebProcess_UpdateDomainsWithStorageAccessQuirks: case MessageName::WebProcess_UpdateStorageAccessUserAgentStringQuirks: case MessageName::WebResourceLoader_SetWorkerStart: case MessageName::WebResourceLoader_WillSendRequestReply: case MessageName::WebSWClientConnection_NotifyRecordResponseBodyChunk: case MessageName::WebSWClientConnection_NotifyRecordResponseBodyEnd: case MessageName::WebSWClientConnection_SetServiceWorkerClientIsControlled: case MessageName::WebSWClientConnection_SetServiceWorkerClientIsControlledReply: case MessageName::WebSWClientConnection_UpdateBackgroundFetchRegistration: case MessageName::WebSWContextManagerConnection_FireBackgroundFetchClickEvent: case MessageName::WebSWContextManagerConnection_FireBackgroundFetchClickEventReply: case MessageName::WebSWContextManagerConnection_FireBackgroundFetchEvent: case MessageName::WebSWContextManagerConnection_FireBackgroundFetchEventReply: case MessageName::WebSWContextManagerConnection_FireUpdateFoundEvent: case MessageName::WebSWContextManagerConnection_NavigationPreloadFailed: case MessageName::WebSWContextManagerConnection_NavigationPreloadIsReady: case MessageName::WebSWContextManagerConnection_SetInspectable: case MessageName::WebSWContextManagerConnection_SetRegistrationLastUpdateTime: case MessageName::WebSWContextManagerConnection_SetRegistrationUpdateViaCache: case MessageName::WebSWContextManagerConnection_SkipWaitingCompleted: case MessageName::WebSWContextManagerConnection_UpdateRegistrationState: case MessageName::WebSWContextManagerConnection_UpdateWorkerState: case MessageName::WebSWServerConnection_AbortBackgroundFetch: case MessageName::WebSWServerConnection_AbortBackgroundFetchReply: case MessageName::WebSWServerConnection_AddCookieChangeSubscriptions: case MessageName::WebSWServerConnection_AddCookieChangeSubscriptionsReply: case MessageName::WebSWServerConnection_BackgroundFetchIdentifiers: case MessageName::WebSWServerConnection_BackgroundFetchIdentifiersReply: case MessageName::WebSWServerConnection_BackgroundFetchInformation: case MessageName::WebSWServerConnection_BackgroundFetchInformationReply: case MessageName::WebSWServerConnection_CookieChangeSubscriptions: case MessageName::WebSWServerConnection_CookieChangeSubscriptionsReply:
 +#if ENABLE(WEB_PUSH_NOTIFICATIONS)
 +    case MessageName::WebSWServerConnection_GetNotifications: case MessageName::WebSWServerConnection_GetNotificationsReply:
 +#endif
 +    case MessageName::WebSWServerConnection_MatchBackgroundFetch: case MessageName::WebSWServerConnection_MatchBackgroundFetchReply: case MessageName::WebSWServerConnection_RemoveCookieChangeSubscriptions: case MessageName::WebSWServerConnection_RemoveCookieChangeSubscriptionsReply: case MessageName::WebSWServerConnection_RetrieveRecordResponse: case MessageName::WebSWServerConnection_RetrieveRecordResponseBody: case MessageName::WebSWServerConnection_RetrieveRecordResponseReply: case MessageName::WebSWServerConnection_StartBackgroundFetch: case MessageName::WebSWServerConnection_StartBackgroundFetchReply: case MessageName::WebSWServerToContextConnection_Navigate: case MessageName::WebSWServerToContextConnection_NavigateReply: case MessageName::WebSWServerToContextConnection_ReportConsoleMessage: case MessageName::WebScreenOrientationManagerProxy_CurrentOrientation: case MessageName::WebScreenOrientationManagerProxy_Lock: case MessageName::WebScreenOrientationManagerProxy_LockReply: case MessageName::WebScreenOrientationManagerProxy_SetShouldSendChangeNotification: case MessageName::WebScreenOrientationManagerProxy_Unlock: case MessageName::WebScreenOrientationManager_OrientationDidChange: case MessageName::WebSharedWorkerContextManagerConnection_PostConnectEventReply: case MessageName::WebSharedWorkerContextManagerConnection_ResumeSharedWorker: case MessageName::WebSharedWorkerContextManagerConnection_SuspendSharedWorker: case MessageName::WebSharedWorkerObjectConnection_PostErrorToWorkerObject: case MessageName::WebSharedWorkerServerConnection_ResumeForBackForwardCache: case MessageName::WebSharedWorkerServerConnection_SuspendForBackForwardCache: case MessageName::WebSharedWorkerServerToContextConnection_PostErrorToWorkerObject: case MessageName::WebSharedWorkerServerToContextConnection_SharedWorkerTerminated: case MessageName::WebTransportSession_ReceiveBidirectionalStream: case MessageName::WebTransportSession_ReceiveDatagram: case MessageName::WebTransportSession_ReceiveIncomingUnidirectionalStream: case MessageName::WebTransportSession_StreamReceiveBytes:
-+#if ENABLE(CONTENT_EXTENSIONS)
-+    case MessageName::WebUserContentController_AddContentRuleLists: case MessageName::WebUserContentController_RemoveAllContentRuleLists: case MessageName::WebUserContentController_RemoveContentRuleList:
-+#endif
 +    default:
 +        return false;
 +    }

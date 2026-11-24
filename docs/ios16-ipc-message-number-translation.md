@@ -506,6 +506,27 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 唯一耦合点是消息体里显式编码了 `MessageName` 的字段，18.3 的 `WrappedAsyncMessageForTesting` 属于这一类但它是外层消息名（第 5.4 节已处理）。`SyncRequestID` 与 `destinationID` 是独立字段，不受影响。
 
+### 5.8 两类消息被丢弃后的实际后果
+
+表覆盖不到的消息不会得到近似翻译，只有两条出路：发送方向不发，接收方向丢弃。两条路都按消息名判定，判定集合由生成器算出，与翻译表互补。
+
+**发送方向**：`isKnownUnmappedOutgoingName` 为真时不发，`sendMessageImpl` 返回 `Error::Unspecified`。这类消息是 18.3 独有、16.1 枚举里没有对应名字的消息，共 1279 条，其中 245 条在 18.3 侧带 `#if`，只在含该枚举项的配置里编入。`sendMessageImpl` 的返回值在异步路径上只落在日志里，在同步路径上由 `sendSyncMessage` 转成 `didFailToSendSyncMessage(error)` 并立即返回，不等超时。
+
+**接收方向**：16.1 发来、本构建映射不到的消息共 747 条，是 16.1 独有的 333 条加上 18.3 侧带条件的 414 条共享消息。丢弃前先按 16.1 的同步边界（`firstSynchronousOldMessageNumber`，2899）分类：异步消息只记日志；同步消息回一个空 `SyncMessageReply`，让对端不必等满超时。
+
+**空回复不是中性答复。** 16.1 的 `WebPageProxy::sendSync` 调用点普遍写成先置默认值、再用 `!!sendSync(...)` 判断是否拿到回复。以 `WebPage_TouchEventSync`（16.1 编号 3100，18.3 已无此消息）为例，16.1 `WebPageProxy.cpp:3233-3239` 是：
+
+```cpp
+bool handled = false;
+bool replyReceived = !!sendSync(Messages::WebPage::TouchEventSync(event), m_pageID);
+if (!replyReceived)
+    handled = true;
+```
+
+空回复让 `sendSync` 本身成功返回，但 `*replyDecoder >> replyArguments` 解不出 `bool` 而返回空，`!!sendSync` 因此为假，`handled` 被置为真。于是 16.1 UI 进程把每一次触摸都当作已被页面消费，不再走默认动作，表现为该页面点击无反应。超时路径同样置真，所以这是丢弃设计本身的后果，不是回空包引入的偏差。
+
+被丢弃的同步消息中 2899 是最小的一条、3137 是最大的一条，共 50 条。这 50 条分两类：31 条是 16.1 独有、18.3 已删除的消息（`RemoteGraphicsContextGL_*`、`RemoteRenderingBackend_*`、`StorageManagerSet_*` 等），19 条是两棵树同名、但本配置把 18.3 枚举项编译掉的共享消息。第二类的回包落在对端真实存在的调用点上，`WebPage_TouchEventSync`（3100）、`WebPage_GetPositionInformation`（3094）、`WebPasteboardProxy_GetPasteboardTypes`（3113）都属于这一类，对端解到默认值后的后果取决于各自的调用点写法；第一类在本构建里连接收者都没有，空回复只是让对端不再等待。基线 `Encoder.cpp` 的注释与本节给出这些后果，供部署时判断哪些功能不可用。
+
 ## 6. 转换层与载荷层的关系
 
 ### 6.1 两层各自解决什么
