@@ -1,5 +1,5 @@
 diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp
-index f7cf0e0815..7fc97963b7 100644
+index f7cf0e0815..e129f2ccc4 100644
 --- a/Source/WebKit/Platform/IPC/Connection.cpp
 +++ b/Source/WebKit/Platform/IPC/Connection.cpp
 @@ -30,6 +30,7 @@
@@ -10,17 +10,22 @@ index f7cf0e0815..7fc97963b7 100644
  #include "MessageReceiveQueues.h"
  #include "WorkQueueMessageReceiver.h"
  #include <memory>
-@@ -652,6 +653,10 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
-     {
-         Locker locker { m_outgoingMessagesLock };
-         shouldDispatchMessageSend = m_outgoingMessages.isEmpty();
+@@ -615,6 +616,15 @@ Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOp
+     }
+ #endif
+ 
 +#if IOS_16_MESSAGE_NUMBER_TRANSLATION
-+        if (m_shouldTranslateMessageNames)
-+            encoder->setMessageName(translateOutgoingMessageName(encoder->messageName()));
++    // Before the wrapping branch below, not at the enqueue site: wrapping copies
++    // the encoder's already-encoded bytes into a new message (Encoder::wrapForTesting),
++    // so a number rewritten afterwards would never reach the wrapped copy, and the
++    // inner message is the one the peer dispatches.
++    if (m_shouldTranslateMessageNames)
++        encoder->setMessageName(translateOutgoingMessageName(encoder->messageName()));
 +#endif
-         m_outgoingMessages.append(WTFMove(encoder));
-         outgoingMessagesCount = m_outgoingMessages.size();
-         shouldNotifyOfQueueGrowingLarge = m_outgoingMessageQueueIsGrowingLargeCallback && outgoingMessagesCount > largeOutgoingMessageQueueCountThreshold && (MonotonicTime::now() - m_lastOutgoingMessageQueueIsGrowingLargeCallbackCallTime) >= largeOutgoingMessageQueueTimeThreshold;
++
+     if (isMainRunLoop() && m_inDispatchMessageMarkedToUseFullySynchronousModeForTesting && !encoder->isSyncMessage() && !(encoder->messageReceiverName() == ReceiverName::IPC) && !sendOptions.contains(SendOption::IgnoreFullySynchronousMode)) {
+         SyncRequestID syncRequestID;
+         auto wrappedMessage = createSyncMessageEncoder(MessageName::WrappedAsyncMessageForTesting, encoder->destinationID(), syncRequestID);
 diff --git a/Source/WebKit/Platform/IPC/Connection.h b/Source/WebKit/Platform/IPC/Connection.h
 index a8c07cbc1d..86492fd7d6 100644
 --- a/Source/WebKit/Platform/IPC/Connection.h
@@ -45,22 +50,26 @@ index a8c07cbc1d..86492fd7d6 100644
      bool m_onlySendMessagesAsDispatchWhenWaitingForSyncReplyWhenProcessingSuchAMessage { false };
      bool m_shouldExitOnSyncMessageSendFailure { false };
 diff --git a/Source/WebKit/Platform/IPC/Decoder.h b/Source/WebKit/Platform/IPC/Decoder.h
-index 0dddb73b6b..24e39baa09 100644
+index 0dddb73b6b..2c9ad07f63 100644
 --- a/Source/WebKit/Platform/IPC/Decoder.h
 +++ b/Source/WebKit/Platform/IPC/Decoder.h
-@@ -87,6 +87,10 @@ public:
+@@ -87,6 +87,14 @@ public:
  
      ReceiverName messageReceiverName() const { return receiverName(m_messageName); }
      MessageName messageName() const { return m_messageName; }
 +
 +    // Replaces the message name decoded from the header. Used when the peer
 +    // numbers messages differently than this build does.
++    //
++    // Unlike Encoder::setMessageName, this one must change the member: everything
++    // downstream dispatches on decoder.messageName(), so it has to hold the value
++    // this build's enumeration assigns.
 +    void setMessageName(MessageName name) { m_messageName = name; }
      uint64_t destinationID() const { return m_destinationID; }
      bool matches(const ReceiverMatcher& matcher) const { return matcher.matches(messageReceiverName(), destinationID()); }
  
 diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp
-index 9662098cd7..428b3788cb 100644
+index 9662098cd7..c1dcd0f877 100644
 --- a/Source/WebKit/Platform/IPC/Encoder.cpp
 +++ b/Source/WebKit/Platform/IPC/Encoder.cpp
 @@ -28,6 +28,7 @@
@@ -71,21 +80,22 @@ index 9662098cd7..428b3788cb 100644
  #include <algorithm>
  #include <wtf/OptionSet.h>
  #include <wtf/TZoneMallocInlines.h>
-@@ -205,4 +206,6925 @@ bool Encoder::hasAttachments() const
+@@ -205,4 +206,6926 @@ bool Encoder::hasAttachments() const
      return !m_attachments.isEmpty();
  }
  
 +
 +void Encoder::setMessageName(MessageName name)
 +{
-+    if (m_messageName == name)
-+        return;
-+
-+    m_messageName = name;
-+
-+    // encodeHeader() wrote the message flags byte first. grow() then aligned the
-+    // name to alignof(MessageName), which is 2 for this uint16_t, so the name
-+    // occupies bytes 2 and 3 and byte 1 is padding.
++    // Rewrites the bytes encodeHeader() wrote and leaves the member alone. The
++    // member must keep the value this build's enumeration assigns because
++    // receiverName() indexes this build's messageDescriptions table with it, so
++    // storing the peer's numbering there would report the wrong receiver. The
++    // buffer is what the peer actually reads.
++    //
++    // encodeHeader() wrote the flags byte first; grow() then aligned the name to
++    // alignof(MessageName), so for this uint16_t the name occupies bytes 2 and 3
++    // and byte 1 is padding.
 +    size_t messageNameOffset = roundUpToAlignment(sizeof(defaultMessageFlags), alignof(MessageName));
 +    auto bytes = asBytes(std::span { &name, 1 });
 +    ASSERT(messageNameOffset + bytes.size() <= m_bufferSize);
