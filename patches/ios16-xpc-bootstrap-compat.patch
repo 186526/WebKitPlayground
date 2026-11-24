@@ -1,0 +1,289 @@
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
+index 0c1c422..6699031 100644
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
+@@ -93,8 +93,14 @@ enum class EnableLockdownMode: bool { No, Yes };
+ void setJSCOptions(xpc_object_t initializerMessage, EnableLockdownMode, bool isWebContentProcess);
+ 
+ template<typename XPCServiceType, typename XPCServiceInitializerDelegateType, bool isWebContentProcess = false>
+-void XPCServiceInitializer(OSObjectPtr<xpc_connection_t> connection, xpc_object_t initializerMessage)
++void XPCServiceInitializer(OSObjectPtr<xpc_connection_t> connection, xpc_object_t initializerMessage, xpc_object_t priorityBoostMessage = nullptr)
+ {
++    // 16.x UI processes send a pre-bootstrap message ahead of the bootstrap dictionary and expect
++    // the entry point to take it as a third argument. The message only carries an XPC transaction
++    // that the process is meant to hold, and 18.x has no use for it, so drop the reference here and
++    // let the handler's own copy keep the transaction alive.
++    UNUSED_PARAM(priorityBoostMessage);
++
+     XPCServiceInitializerDelegateType delegate(WTFMove(connection), initializerMessage);
+ 
+     // We don't want XPC to be in charge of whether the process should be terminated or not,
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
+index b8112f7..4152e2b 100644
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
+@@ -34,6 +34,7 @@
+ #import <wtf/WTFProcess.h>
+ #import <wtf/cocoa/Entitlements.h>
+ #import <wtf/spi/darwin/SandboxSPI.h>
++#import <wtf/spi/darwin/dyldSPI.h>
+ #import <wtf/text/StringToIntegerConversion.h>
+ 
+ namespace WebKit {
+@@ -84,12 +85,137 @@ bool XPCServiceInitializerDelegate::getClientBundleIdentifier(String& clientBund
+     return !clientBundleIdentifier.isEmpty();
+ }
+ 
++// The version each behavior was introduced in, mirroring the linkedBefore calls in
++// WTF::computeSDKAlignedBehaviors (Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.cpp). A
++// client linked before the version does not get the behavior.
++static void setSDKAlignedBehaviorsFromClientSDKVersion(uint32_t clientSDKVersion, SDKAlignedBehaviors& behaviors)
++{
++    struct SDKVersionBehaviorPair {
++        uint32_t sdkVersion;
++        SDKAlignedBehavior behavior;
++    };
++
++    static const SDKVersionBehaviorPair behaviorsIntroducedInVersion[] = {
++        { DYLD_IOS_VERSION_9_0, SDKAlignedBehavior::PictureInPictureMediaPlayback },
++        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::MediaTypesRequiringUserActionForPlayback },
++        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::RequiresUserGestureToLoadVideo },
++        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::LinkPreviewEnabledByDefault },
++        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::ConvertsInvalidURLsToBlank },
++        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::NoTheSecretSocietyHiddenMysteryWindowOpenQuirk },
++        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::UnprefixedPlaysInlineAttribute },
++        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::SupportsInitConstructors },
++        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::ExceptionsForDuplicateCompletionHandlerCalls },
++        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::ExpiredOnlyReloadBehavior },
++        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::DropToNavigateDisallowedByDefault },
++        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::WebIconDatabaseWarning },
++        { DYLD_IOS_VERSION_11_3, SDKAlignedBehavior::DisallowsSettingAnyXHRHeaderFromFileURLs },
++        { DYLD_IOS_VERSION_11_3, SDKAlignedBehavior::DefaultsToPassiveTouchListenersOnDocument },
++        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::ScrollViewContentInsetsAreNotObscuringInsets },
++        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::UIScrollViewDoesNotApplyKeyboardInsetsUnconditionally },
++        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::MainThreadReleaseAssertionInWebPageProxy },
++        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::NoMoviStarPlusCORSPreflightQuirk },
++        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::TimerThreadSafetyChecks },
++        { DYLD_IOS_VERSION_12_2, SDKAlignedBehavior::LazyGestureRecognizerInstallation },
++        { DYLD_IOS_VERSION_12_2, SDKAlignedBehavior::ProcessSwapOnCrossSiteNavigation },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::NoUnconditionalUniversalSandboxExtension },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::SnapshotAfterScreenUpdates },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::SupportsDeviceOrientationAndMotionPermissionAPI },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::DecidesPolicyBeforeLoadingQuickLookPreview },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::ExceptionsForRelatedWebViewsUsingDifferentDataStores },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::ModernCompabilityModeByDefault },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::HasUIContextMenuInteraction },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::WKContentViewDoesNotOverrideKeyCommands },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::SupportsOverflowHiddenOnMainFrame },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::NoIMDbCSSOMViewScrollingQuirk },
++        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::DownloadDelegatesCalledOnTheMainThread },
++        { DYLD_IOS_VERSION_13_2, SDKAlignedBehavior::SiteSpecificQuirksAreEnabledByDefault },
++        { DYLD_IOS_VERSION_13_4, SDKAlignedBehavior::RestrictsBaseURLSchemes },
++        { DYLD_IOS_VERSION_13_4, SDKAlignedBehavior::SendsNativeMouseEvents },
++        { DYLD_IOS_VERSION_13_4, SDKAlignedBehavior::MinimizesLanguages },
++        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::SessionCleanupByDefault },
++        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::InitializeWebKit2MainThreadAssertion },
++        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::WKWebsiteDataStoreInitReturningNil },
++        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::WebSQLDisabledByDefaultInLegacyWebKit },
++        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::NoLaBanquePostaleQuirks },
++        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::NoPokerBrosBuiltInTagQuirk },
++        { DYLD_IOS_VERSION_14_2, SDKAlignedBehavior::SupportsiOSAppsOnMacOS },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::DataURLFragmentRemoval },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::HTMLDocumentSupportedPropertyNames },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::ObservesClassProperty },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::NoWeChatScrollingQuirk },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::SharedNetworkProcess },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::BlanksViewOnJSPrompt },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::NoClientCertificateLookup },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::DefaultsToPassiveWheelListenersOnDocument },
++        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::AllowsWheelEventGesturesToBecomeNonBlocking },
++        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::NullOriginForNonSpecialSchemedURLs },
++        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::DOMWindowReuseRestriction },
++        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::NoExpandoIndexedPropertiesOnWindow },
++        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::DoesNotDrainTheMicrotaskQueueWhenCallingObjC },
++        { DYLD_IOS_VERSION_15_4, SDKAlignedBehavior::AuthorizationHeaderOnSameOriginRedirects },
++        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::NoTypedArrayAPIQuirk },
++        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::ForbidsDotPrefixedFonts },
++        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::ContextMenuTriggersLinkActivationNavigationType },
++        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::DoesNotParseStringEndingWithFullStopAsFloatingPointNumber },
++        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::UIBackForwardSkipsHistoryItemsWithoutUserGesture },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::NoShowModalDialog },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::DoesNotAddIntrinsicMarginsToFormControls },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::ProgrammaticFocusDuringUserScriptShowsInputViews },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::DefaultsToExcludingBackgroundsWhenPrinting },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::InspectableDefaultsToDisabled },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::PushStateFilePathRestriction },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::NoUNIQLOLazyIframeLoadingQuirk },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::UsesGameControllerPhysicalInputProfile },
++        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::ScreenOrientationAPIEnabled },
++        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::FullySuspendsBackgroundContent },
++        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::RunningBoardThrottling },
++        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::PopoverAttributeEnabled },
++        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::LiveRangeSelectionEnabledForAllApps },
++        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::DoesNotOverrideUAFromNSUserDefault },
++        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::EvaluateJavaScriptWithoutTransientActivation },
++        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::ResettingTransitionCancelsRunningTransitionQuirk },
++        { DYLD_IOS_VERSION_17_2, SDKAlignedBehavior::OnlyLoadWellKnownAboutURLs },
++        { DYLD_IOS_VERSION_17_2, SDKAlignedBehavior::ThrowIfCanDeclareGlobalFunctionFails },
++        { DYLD_IOS_VERSION_17_4, SDKAlignedBehavior::AsyncFragmentNavigationPolicyDecision },
++        { DYLD_IOS_VERSION_17_4, SDKAlignedBehavior::DoNotLoadStyleSheetIfHTTPStatusIsNotOK },
++        { DYLD_IOS_VERSION_17_4, SDKAlignedBehavior::ScrollViewSubclassImplementsAddGestureRecognizer },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::FullySuspendsBackgroundContentImmediately },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::NoGetElementsByNameQuirk },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::ApplicationStateTrackerDoesNotObserveWindow },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::ThrowOnKVCInstanceVariableAccess },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BlockOptionallyBlockableMixedContent },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::LaxCookieSameSiteAttribute },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::UseCFNetworkNetworkLoader },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BrowsingContextControllerSPIAccessRemoved },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BlocksConnectionsToAddressWithOnlyZeros },
++        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BlockCrossOriginRedirectDownloads },
++    };
++
++    behaviors.setAll();
++    for (auto& pair : behaviorsIntroducedInVersion) {
++        if (clientSDKVersion < pair.sdkVersion)
++            behaviors.clear(static_cast<size_t>(pair.behavior));
++    }
++}
++
+ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehaviors& behaviors)
+ {
+     size_t length = 0;
+     auto behaviorData = xpc_dictionary_get_data(m_initializerMessage, "client-sdk-aligned-behaviors", &length);
+-    if (!length || !behaviorData)
+-        return false;
++    if (!length || !behaviorData) {
++        // A UI process older than 18.x sends the version it was linked against as a decimal string
++        // instead of the behavior bit set. Rebuild the set from that version, so a helper launched
++        // by such a UI process does not start with every behavior disabled. The caller ignores the
++        // return value, so the behaviors have to be filled in here.
++        auto clientSDKVersionString = xpc_dictionary_get_string(m_initializerMessage, "client-sdk-version");
++        if (!clientSDKVersionString)
++            return false;
++        auto clientSDKVersion = parseInteger<uint32_t>(StringView::fromLatin1(clientSDKVersionString));
++        if (!clientSDKVersion)
++            return false;
++        setSDKAlignedBehaviorsFromClientSDKVersion(*clientSDKVersion, behaviors);
++        return true;
++    }
+     RELEASE_ASSERT(length == behaviors.storageLengthInBytes());
+     memcpy(behaviors.storage(), behaviorData, length);
+ 
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+index 9c1adcf..044dcd3 100644
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+@@ -124,6 +124,8 @@ static void checkFrameworkVersion(xpc_object_t message)
+ 
+ void XPCServiceEventHandler(xpc_connection_t peer)
+ {
++    static NeverDestroyed<OSObjectPtr<xpc_object_t>> priorityBoostMessage;
++
+     OSObjectPtr<xpc_connection_t> retainedPeerConnection(peer);
+ 
+     xpc_connection_set_target_queue(peer, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+@@ -152,18 +154,44 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+             RELEASE_LOG_ERROR(IPC, "XPCServiceEventHandler: 'message-name' is not present in the XPC dictionary");
+             return;
+         }
++        // A UI process that leaks a priority boost sends this message ahead of the bootstrap
++        // dictionary. Hold it so the initializer can be called with the three-argument convention
++        // 16.x entry points use, and so the XPC transaction it carries stays alive.
++        if (!strcmp(messageName, "pre-bootstrap")) {
++            if (priorityBoostMessage.get())
++                RELEASE_LOG_ERROR(IPC, "XPCServiceEventHandler: Received a second pre-bootstrap message");
++            priorityBoostMessage.get() = event;
++            return;
++        }
++
+         if (!strcmp(messageName, "bootstrap")) {
+             bool disableLogging = xpc_dictionary_get_bool(event, "disable-logging");
+             initializeLogd(disableLogging);
+ 
+-            if (xpc_object_t languages = xpc_dictionary_get_value(event, "OverrideLanguages")) {
+-                Vector<String> newLanguages;
++            // A UI process from an older release puts OverrideLanguages on the XPC bootstrap message
++            // rather than in the bootstrap dictionary. Read the dictionary first and fall back to the
++            // bootstrap message so both layouts are honoured.
++            auto collectOverrideLanguages = [](xpc_object_t value, Vector<String>& destination) {
+                 @autoreleasepool {
+-                    xpc_array_apply(languages, makeBlockPtr([&newLanguages](size_t index, xpc_object_t value) {
+-                        newLanguages.append(String::fromUTF8(xpc_string_get_string_ptr(value)));
++                    xpc_array_apply(value, makeBlockPtr([&destination](size_t index, xpc_object_t element) {
++                        destination.append(String::fromUTF8(xpc_string_get_string_ptr(element)));
+                         return true;
+                     }).get());
+                 }
++            };
++
++            Vector<String> newLanguages;
++            if (xpc_object_t languages = xpc_dictionary_get_value(event, "OverrideLanguages")) {
++                if (xpc_get_type(languages) == XPC_TYPE_ARRAY)
++                    collectOverrideLanguages(languages, newLanguages);
++            } else if (OSObjectPtr<xpc_object_t> bootstrapMessage = adoptOSObject(xpc_copy_bootstrap())) {
++                if (xpc_object_t languages = xpc_dictionary_get_value(bootstrapMessage.get(), "OverrideLanguages")) {
++                    if (xpc_get_type(languages) == XPC_TYPE_ARRAY)
++                        collectOverrideLanguages(languages, newLanguages);
++                }
++            }
++
++            if (!newLanguages.isEmpty()) {
+                 LOG_WITH_STREAM(Language, stream << "Bootstrap message contains OverrideLanguages: " << newLanguages);
+                 stageOverrideLanguagesForMainThread(WTFMove(newLanguages));
+             } else
+@@ -174,11 +202,22 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+ #endif
+ 
+ #if PLATFORM(IOS_FAMILY)
+-            auto containerEnvironmentVariables = xpc_dictionary_get_value(event, "ContainerEnvironmentVariables");
+-            xpc_dictionary_apply(containerEnvironmentVariables, ^(const char *key, xpc_object_t value) {
+-                setenv(key, xpc_string_get_string_ptr(value), 1);
+-                return true;
+-            });
++            // An older UI process writes ContainerEnvironmentVariables onto the XPC bootstrap message
++            // instead of into the bootstrap dictionary. Reading only the dictionary yields null, and
++            // xpc_dictionary_apply on null kills the process with SIGKILL, so both sources are checked.
++            if (xpc_object_t containerEnvironmentVariables = xpc_dictionary_get_value(event, "ContainerEnvironmentVariables")) {
++                xpc_dictionary_apply(containerEnvironmentVariables, ^(const char *key, xpc_object_t value) {
++                    setenv(key, xpc_string_get_string_ptr(value), 1);
++                    return true;
++                });
++            } else if (OSObjectPtr<xpc_object_t> bootstrapMessage = adoptOSObject(xpc_copy_bootstrap())) {
++                if (xpc_object_t containerEnvironmentVariables = xpc_dictionary_get_value(bootstrapMessage.get(), "ContainerEnvironmentVariables")) {
++                    xpc_dictionary_apply(containerEnvironmentVariables, ^(const char *key, xpc_object_t value) {
++                        setenv(key, xpc_string_get_string_ptr(value), 1);
++                        return true;
++                    });
++                }
++            }
+ #endif
+ 
+             const char* serviceName = xpc_dictionary_get_string(event, "service-name");
+@@ -201,7 +240,9 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+             }
+ 
+             CFBundleRef webKitBundle = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.WebKit"));
+-            typedef void (*InitializerFunction)(xpc_connection_t, xpc_object_t);
++            // The third argument is the priority boost message; it is null when the UI process
++            // sends only the bootstrap dictionary, and 18.x entry points ignore it.
++            typedef void (*InitializerFunction)(xpc_connection_t, xpc_object_t, xpc_object_t);
+             InitializerFunction initializerFunctionPtr = reinterpret_cast<InitializerFunction>(CFBundleGetFunctionPointerForName(webKitBundle, entryPointFunctionName));
+             if (!initializerFunctionPtr) {
+                 RELEASE_LOG_FAULT(IPC, "Exiting: Unable to find entry point in WebKit.framework with name: %s", [(__bridge NSString *)entryPointFunctionName UTF8String]);
+@@ -230,11 +271,14 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+ #if PLATFORM(MAC) || PLATFORM(MACCATALYST)
+                 checkFrameworkVersion(event.get());
+ #endif
+-                initializerFunctionPtr(retainedPeerConnection.get(), event.get());
++                initializerFunctionPtr(retainedPeerConnection.get(), event.get(), priorityBoostMessage.get().get());
+ 
+                 setAppleLanguagesPreference();
+             });
+ 
++            // The reference is deliberately kept for the life of the process. 16.x holds the
++            // transaction the message carries until it exits, which is what keeps the launched
++            // process boosted, and 18.x has no AuxiliaryProcess member to take it over.
+             return;
+         }
+ 

@@ -451,6 +451,14 @@ jobs:
                 --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm; then
             ref_writes_proxy_configurations=1
           fi
+          # The XPC bootstrap compat patch only matches a ref whose XPCServiceMain.mm reads
+          # ContainerEnvironmentVariables from the bootstrap dictionary without a null guard and
+          # whose entry point takes two arguments. A ref that already guards the read or already
+          # takes the third argument has nothing to fix, so a skip is correct there.
+          if grep -qF 'auto containerEnvironmentVariables = xpc_dictionary_get_value(event, "ContainerEnvironmentVariables");' \
+                "WebKit/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm" 2>/dev/null; then
+            ref_needs_xpc_bootstrap_compat=1
+          fi
           echo "PAS_USE_ULOCK_FLAGS_API present in ${WEBKIT_REF}: ${ref_needs_ulock_flags_api}"
           echo "PAL Swift module present in ${WEBKIT_REF}: ${ref_has_pal_swift}"
           echo "_networkContext declaration present in ${WEBKIT_REF}: ${ref_needs_networkcontext_property}"
@@ -527,6 +535,17 @@ jobs:
                   # builds the collection with the class methods (upstream before 278011@main) has
                   # no iOS 17 send to guard, so skipping is correct there.
                   if [ "$ref_sends_ios17_trait_api" = 1 ]; then
+                    echo "REQUIRED PATCH DOES NOT APPLY: $p"
+                    exit 1
+                  fi
+                  ;;
+                ios16-xpc-bootstrap-compat.patch)
+                  # A ref whose XPCServiceMain.mm reads ContainerEnvironmentVariables from the
+                  # bootstrap dictionary with no null guard needs this patch: on the libxpc this
+                  # build runs against, xpc_dictionary_apply(NULL, ...) kills the helper with
+                  # SIGKILL, and a 16.1 UI process writes that key onto the XPC bootstrap message
+                  # instead. A ref that already guards the read has nothing to fix.
+                  if [ "$ref_needs_xpc_bootstrap_compat" = 1 ]; then
                     echo "REQUIRED PATCH DOES NOT APPLY: $p"
                     exit 1
                   fi

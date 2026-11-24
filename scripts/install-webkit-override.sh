@@ -3,8 +3,27 @@
 # Build the rootless WebKit override directory:
 #
 #   /var/jb/Library/WebKitOverride/            <- DYLD_FRAMEWORK_PATH
-#       <name>.framework/<name>                 the five framework binaries
+#       <name>.framework/                       the five framework directories,
+#           <name>                              binary plus every resource
+#           Info.plist
+#           <lang>.lproj/
+#           Frameworks/                         (WebKit only)
 #       usr/lib/<leaf>                          the two dylibs, top level
+#
+# The resources are not optional. Each framework directory is copied whole,
+# because a bare binary in <name>.framework/ has no Info.plist and CFBundle
+# returns nil for it: the first WebCore::localizedString call then
+# dereferences a null bundle and takes the host process down with
+# EXC_BAD_ACCESS at 0x8. That was the crash in WeChat-2026-11-24-212444.ips.
+#
+# XPCServices/ is deliberately excluded from WebKit.framework. launchd resolves
+# each WebKit helper through DYLD_FRAMEWORK_PATH, so a present
+# WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc makes it launch the
+# copied stub rather than the system one. The system stubs are the right
+# partners: each is a four-instruction tail call into WKXPCServiceMain, which
+# DYLD_FRAMEWORK_PATH already points at the overridden WebKit, so the override
+# still takes effect and no second copy of every .xpc bundle enters the search
+# path.
 #
 # Every file is copied from the copy already installed under
 # /var/jb/Library/Frameworks and /var/jb/usr/lib. Nothing under those two
@@ -101,6 +120,10 @@ preflight_sources() {
             print_error "missing source ${SOURCE_FRAMEWORKS}/${name}.framework/${name}"
             missing=1
         fi
+        if [ ! -f "${SOURCE_FRAMEWORKS}/${name}.framework/Info.plist" ]; then
+            print_error "missing source ${SOURCE_FRAMEWORKS}/${name}.framework/Info.plist (without it CFBundle resolves to nil and WebCore::localizedString faults)"
+            missing=1
+        fi
     done
     for name in ${LIBRARY_NAMES}; do
         if [ ! -f "${SOURCE_LIBRARIES}/${name}" ]; then
@@ -187,11 +210,52 @@ copy_from_source() {
     printf '  copied     %s (%s bytes)\n' "${path_target}" "$(file_size "${path_target}")"
 }
 
+copy_framework_tree() {
+    path_source=$1
+    path_target=$2
+    if [ -L "${path_target}" ]; then
+        die "${path_target} is a symlink; refusing to write through it"
+    fi
+    if [ -f "${path_target}" ] && [ ! -d "${path_target}" ]; then
+        die "${path_target} is a file; remove ${OVERRIDE_ROOT} and re-run"
+    fi
+    # The trailing /. copies the contents into the existing directory; without
+    # it cp would nest a second <name>.framework inside the first. -a keeps
+    # modes and timestamps. A real copy, not a hard link, so that stripping or
+    # re-signing a file in the override can never rewrite the deb-installed
+    # source it came from.
+    # Resources travel with the binary on purpose: a framework without its
+    # Info.plist makes CFBundle return nil, and WebCore::localizedString then
+    # faults on it.
+    mkdir -p "${path_target}"
+    cp -a "${path_source}/." "${path_target}/"
+    printf '  copied     %s (%s bytes)\n' "${path_target}" "$(du -sk "${path_target}" | awk '{print $1*1024}')"
+}
+
+prune_xpc_services() {
+    # launchd resolves the WebKit helpers through DYLD_FRAMEWORK_PATH, so an
+    # XPCServices directory inside the override would make it launch the copied
+    # stubs instead of the system ones. The system stubs are the right partners:
+    # each is a tail call into WKXPCServiceMain, which DYLD_FRAMEWORK_PATH
+    # already points at the overridden WebKit, and they leave the helper's
+    # environment alone. Keeping the copied stubs would also put a second copy of
+    # every .xpc bundle in the search path with no benefit.
+    path_target=${OVERRIDE_ROOT}/WebKit.framework/XPCServices
+    if [ -L "${path_target}" ]; then
+        die "${path_target} is a symlink; refusing to remove through it"
+    fi
+    if [ -d "${path_target}" ]; then
+        rm -rf "${path_target}"
+        printf '  pruned     %s\n' "${path_target}"
+    fi
+}
+
 copy_all() {
     for name in ${FRAMEWORK_NAMES}; do
-        copy_from_source "${SOURCE_FRAMEWORKS}/${name}.framework/${name}" \
-            "${OVERRIDE_ROOT}/${name}.framework/${name}"
+        copy_framework_tree "${SOURCE_FRAMEWORKS}/${name}.framework" \
+            "${OVERRIDE_ROOT}/${name}.framework"
     done
+    prune_xpc_services
     for name in ${LIBRARY_NAMES}; do
         copy_from_source "${SOURCE_LIBRARIES}/${name}" "${OVERRIDE_LIBRARIES}/${name}"
     done
@@ -207,7 +271,6 @@ set_permissions() {
         chmod "${FILE_MODE}" "${OVERRIDE_LIBRARIES}/${name}"
     done
 }
-
 verify_layout() {
     "${PYTHON_BIN}" - "${OVERRIDE_ROOT}" ${FRAMEWORK_NAMES} -- ${LIBRARY_NAMES} <<'PYTHON'
 import os
@@ -284,11 +347,25 @@ for path in targets:
         print("  wrong-arch %s (%s): %s" % (path, ",".join(names), EXPLANATION))
         wrong_arch += 1
 
+# A framework directory without Info.plist resolves to a nil CFBundle, and the
+# first WebCore::localizedString call then faults at 0x8. The binary check
+# above cannot see that, so the plist is verified separately.
+no_plist = 0
+for name in frameworks:
+    plist = os.path.join(override_root, name + ".framework", "Info.plist")
+    if os.path.isfile(plist):
+        print("  plist      %s" % plist)
+    else:
+        print("  no-plist   %s (CFBundle would return nil; WebCore::localizedString crashes)" % plist)
+        no_plist += 1
+
 if missing:
     print("Error: %d of the %d target files are missing" % (missing, len(targets)))
 if wrong_arch:
     print("Error: %d of the %d target files are not arm64e" % (wrong_arch, len(targets)))
-sys.exit(1 if (missing or wrong_arch) else 0)
+if no_plist:
+    print("Error: %d of the %d framework directories have no Info.plist" % (no_plist, len(frameworks)))
+sys.exit(1 if (missing or wrong_arch or no_plist) else 0)
 PYTHON
 }
 
@@ -314,7 +391,7 @@ copy_all
 printf '\nSetting permissions\n'
 set_permissions
 
-printf '\nVerifying the seven target files\n'
+printf '\nVerifying the target files and framework plists\n'
 verify_layout
 
 printf '\nDone. %s is in place; nothing was restarted and no system or basebin file was touched.\n' "${OVERRIDE_ROOT}"
