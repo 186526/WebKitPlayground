@@ -129,7 +129,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | 7 | `xpc_main` 在公开 iOS SDK 上不可用 | `XPCServiceMain.mm` | 用 `xpc_connection_create(nullptr,nullptr)` 复现 `xpc_main` 的接线 | helper 能被拉起并回 `process-finished-launching` | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
 | 8 | helper 需要知道去哪找 18.3 的 framework | `BaseXPCService.xcconfig` | `-Wl,-dyld_env,...` 写进 `.xpc` | `otool -l` 里 `.xpc` 有 `LC_DYLD_ENVIRONMENT`；`lldb image list` 里 helper 的 `WebKit` 路径为 `/var/jb` | 已覆盖，但路径与 install 脚本不一致，见第七节发现 |
 | 9 | **launchd 是否为索引外的 `XPCServices` 现扫** | 无（判定项） | 不改代码 | 第四节的判据命令 | **未知，未测** |
-| 10 | `ios18-public-sdk-xpc-main.patch` 里的 `/var/jb/Library/Frameworks` 与 install 脚本的 `/var/jb/Library/WebKitOverride` 不一致 | 二选一对齐 | 见已提交的 finding | 对 UI 与 helper 各取一次 `image list`，两者 `WebKit` 必须同目录 | **未修** |
+| 10 | `ios18-public-sdk-xpc-main.patch` 里的 `/var/jb/Library/Frameworks` 与 install 脚本的 `/var/jb/Library/WebKitOverride` 不一致 | `patches/ios18-public-sdk-xpc-main.patch`、`scripts/install-webkit-override.sh`、`scripts/check-webkit-override.sh` | 两处改成同一个字面量 `/var/jb/Library/WebKitOverride`：补丁第 16 行的 `WK_ROOTLESS_FRAMEWORKS_ROOT` 供第 22 行两条 `-dyld_env` 引用，`install-webkit-override.sh:66` 与 `check-webkit-override.sh:27` 各写一次同一字面量；两条搜索列表改为覆盖目录在前、deb 目录作后备 | 先 `grep` 两处字面量必须相等（命令与输出见 `docs/ios16-override-path-alignment.md` 第五节）；设备回网后对 UI 与 helper 各取一次 `image list`，两者 `WebKit` 必须同目录，且对 helper 置 `DYLD_PRINT_SEARCHING=1` 时第一条候选必须是 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` | **已修**；机制、后备项的用途与未验证项见 `docs/ios16-override-path-alignment.md` |
 
 第 9 行是唯一的阻断项，其余九项都已落地或有明确改法。第 10 行不影响归零判定，但会让「是否真的跑的是全 18.3」无法从路径前缀反推。
 

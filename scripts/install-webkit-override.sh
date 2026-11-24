@@ -16,14 +16,17 @@
 # dereferences a null bundle and takes the host process down with
 # EXC_BAD_ACCESS at 0x8. That was the crash in WeChat-2026-11-24-212444.ips.
 #
-# XPCServices/ is deliberately excluded from WebKit.framework. launchd resolves
-# each WebKit helper through DYLD_FRAMEWORK_PATH, so a present
-# WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc makes it launch the
-# copied stub rather than the system one. The system stubs are the right
-# partners: each is a four-instruction tail call into WKXPCServiceMain, which
-# DYLD_FRAMEWORK_PATH already points at the overridden WebKit, so the override
-# still takes effect and no second copy of every .xpc bundle enters the search
-# path.
+# XPCServices/ is deliberately excluded from WebKit.framework, so exactly one
+# copy of each .xpc bundle exists on the device: the one the deb installed.
+# The reason often given for that, that launchd resolves the helpers through
+# DYLD_FRAMEWORK_PATH and would therefore launch a copied stub, is an
+# UNVERIFIED premise: the transfer of DYLD_* to an XPC service under the
+# __XPC_ prefix has no located implementation in launchd, libxpc or xpcproxy.
+# What the pruning does establish is narrower and still worth keeping: a helper
+# stub read from the override would itself be a second copy of the same bundle,
+# and two copies cannot be shown to carry the same bytes after a partial
+# reinstall. The stub is a short tail call into WKXPCServiceMain, so whichever
+# WebKit.framework dyld resolves supplies the code either way.
 #
 # Every file is copied from the copy already installed under
 # /var/jb/Library/Frameworks and /var/jb/usr/lib. Nothing under those two
@@ -42,14 +45,35 @@
 # JBROOT sets the root prefix (default /var/jb) so the flow can be replayed
 # against a scratch directory without a device.
 #
+# OVERRIDE_ROOT is stated once, as one whole literal, because it is the same
+# literal patches/ios18-public-sdk-xpc-main.patch sets as
+# WK_ROOTLESS_FRAMEWORKS_ROOT and therefore the directory the built .xpc files
+# name in their LC_DYLD_ENVIRONMENT. Composing it from a root plus a subpath
+# would let the two drift while still looking right in each file; one literal in
+# each file is what makes a single grep able to compare them.
+#
 set -eu
 
 JBROOT=${JBROOT:-/var/jb}
 JBROOT=${JBROOT%/}
 
+# The device path, stated whole and once, because it is the same value
+# patches/ios18-public-sdk-xpc-main.patch sets as WK_ROOTLESS_FRAMEWORKS_ROOT
+# and therefore the directory the built .xpc files name in LC_DYLD_ENVIRONMENT.
+# One literal per file is what makes a grep able to compare them; composing it
+# from a root plus a subpath would let the two drift while each still looks
+# right on its own.
+OVERRIDE_ROOT=/var/jb/Library/WebKitOverride
+
+# A replay against a scratch tree moves JBROOT and has to move the override with
+# it, or the run would write into the device's real /var/jb. Deriving the same
+# subpath keeps the replay layout identical to the device one.
+if [ "${JBROOT}" != "/var/jb" ]; then
+    OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride
+fi
+
 SOURCE_FRAMEWORKS=${JBROOT}/Library/Frameworks
 SOURCE_LIBRARIES=${JBROOT}/usr/lib
-OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride
 OVERRIDE_LIBRARIES=${OVERRIDE_ROOT}/usr/lib
 
 FRAMEWORK_NAMES='WebKit WebCore JavaScriptCore WebKitLegacy WebGPU'
@@ -233,13 +257,16 @@ copy_framework_tree() {
 }
 
 prune_xpc_services() {
-    # launchd resolves the WebKit helpers through DYLD_FRAMEWORK_PATH, so an
-    # XPCServices directory inside the override would make it launch the copied
-    # stubs instead of the system ones. The system stubs are the right partners:
-    # each is a tail call into WKXPCServiceMain, which DYLD_FRAMEWORK_PATH
-    # already points at the overridden WebKit, and they leave the helper's
-    # environment alone. Keeping the copied stubs would also put a second copy of
-    # every .xpc bundle in the search path with no benefit.
+    # Keep one copy of each .xpc bundle on the device: the one the deb
+    # installed. The commonly cited reason, that launchd resolves the helpers
+    # through DYLD_FRAMEWORK_PATH and would launch a copied stub, is an
+    # unverified premise: where launchd and xpcproxy apply the __XPC_ prefix
+    # has no located implementation. What pruning does establish does not
+    # depend on that premise. A stub kept in the override would be a second
+    # copy of the same bundle, and after a partial reinstall the two copies
+    # cannot be shown to carry the same bytes; the stub is a short tail call
+    # into WKXPCServiceMain, so the WebKit.framework dyld resolves supplies
+    # the code either way.
     path_target=${OVERRIDE_ROOT}/WebKit.framework/XPCServices
     if [ -L "${path_target}" ]; then
         die "${path_target} is a symlink; refusing to remove through it"

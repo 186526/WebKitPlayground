@@ -24,7 +24,10 @@ set -u
 JBROOT=${JBROOT:-/var/jb}
 JBROOT=${JBROOT%/}
 
-OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride
+OVERRIDE_ROOT=/var/jb/Library/WebKitOverride
+if [ "${JBROOT}" != "/var/jb" ]; then
+    OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride
+fi
 SOURCE_FRAMEWORKS=${JBROOT}/Library/Frameworks
 SOURCE_LIBRARIES=${JBROOT}/usr/lib
 
