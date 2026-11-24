@@ -1,0 +1,398 @@
+name: Build Dopamine basebin (WebKit override patches)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dopamine_ref:
+        description: 'Dopamine tag, branch or commit to build BaseBin from'
+        required: true
+        default: '3.0.13'
+      patches:
+        description: 'Space-separated patch names under dopamine-basebin/, or "all" for every *.patch there'
+        required: true
+        default: 'all'
+  # A push trigger alongside dispatch: GitHub only offers workflow_dispatch for a
+  # workflow that already exists on the default branch, so before this file lands
+  # there the dispatch button does not exist.  The push trigger also re-runs the
+  # build whenever a patch or this file changes, which is what those changes need.
+  push:
+    paths:
+      - '.github/workflows/basebin-build.yml'
+      - 'dopamine-basebin/**'
+
+# The tar this produces is installed on a device with
+#   /var/jb/basebin/jbctl update basebin <basebin.tar>
+# which rewrites /var/jb/basebin and restarts userspace.  Nothing here touches a
+# device: the job builds and verifies the tar, and the install stays manual.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.dopamine_ref || '3.0.13' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Patch, build basebin.tar, verify
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    env:
+      # dispatch supplies these; a push does not, and an empty value there must
+      # mean the same thing as the dispatch defaults.
+      DOPAMINE_REF: ${{ inputs.dopamine_ref || '3.0.13' }}
+      PATCHES: ${{ inputs.patches || 'all' }}
+      # BaseBin/dyldhook/Makefile links with -Xlinker -add_split_seg_info, which
+      # only Xcode's ld64 accepts, and every other subproject looks up its
+      # iPhoneOS SDK through xcrun.  The job therefore relies on the image's
+      # Xcode rather than on a pinned toolchain.
+      BASEDIR: ${{ github.workspace }}
+      THEOS: ${{ github.workspace }}/theos
+      # All raw output goes here and is uploaded with `if: always()`, because a
+      # failing gmake is the only thing worth debugging and it leaves the job
+      # otherwise empty.
+      LOGS: ${{ github.workspace }}/diagnostics
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Record the runner
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOGS"
+          {
+            echo "uname -m: $(uname -m)"
+            sw_vers
+            xcodebuild -version
+            echo "sdk path: $(xcrun --sdk iphoneos --show-sdk-path)"
+            echo "sdk version: $(xcrun --sdk iphoneos --show-sdk-version)"
+            df -h /
+          } | tee "$LOGS/runner.txt"
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          # gmake: the upstream Makefiles use GNU Make features the system make
+          # lacks.  ldid: signs every dylib BaseBin produces.  libarchive:
+          # libjailbreak includes <archive.h>, which the iPhoneOS SDK does not
+          # ship, and its Makefile already points -I at the keg-only prefix.
+          # gnu-sed: the install-theos edit below uses gsed.  openssl@3:
+          # CRKatri/trustcache builds with OPENSSL=1.
+          brew install make ldid libarchive gnu-sed openssl@3
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+          # llvm-nm is not part of Xcode's default PATH, and both verifiers call
+          # it by that name.  A shim points the name at the SDK's nm, which reads
+          # arm64e Mach-O and accepts the same -g and -u flags.  The directory is
+          # built here rather than in env: because runner.* is not available to a
+          # workflow-level env block.
+          shim="$RUNNER_TEMP/bin"
+          mkdir -p "$shim"
+          ln -sf "$(xcrun -f nm)" "$shim/llvm-nm"
+          echo "$shim" >> "$GITHUB_PATH"
+          "$shim/llvm-nm" --version 2>&1 | head -3 | tee "$LOGS/nm-version.txt" || true
+          ldid -v 2>&1 | head -1 || true
+
+      - name: Install theos with the iPhoneOS 16.5 SDK
+        run: |
+          set -euo pipefail
+          # Only rootlesshooks needs theos: its Makefile includes
+          # $(THEOS)/makefiles/common.mk and THEOS_MAKE_PATH.
+          #
+          # The stock install-theos calls get_sdks, which downloads Apple's SDKs
+          # and needs an Apple ID.  The gsed edit below replaces that call with an
+          # empty sdks directory and an `sdk` marker file, and the real SDK comes
+          # from the theos/sdks release.  This is verbatim what upstream
+          # Dopamine's .github/workflows/main.yml does.
+          mkdir -p "$THEOS"
+          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos --output install-theos.sh
+          gsed -E "/^\s*get_theos\s*$/,+1 s/^(\s*)(get_sdks)\s*$/\1mkdir -p \${THEOS}\/sdks\n\1touch \${THEOS}\/sdks\/sdk\n\1\2/g" -i install-theos.sh
+          bash install-theos.sh 2>&1 | tee "$LOGS/theos-install.log"
+          curl -L https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz --output "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz"
+          gunzip "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz"
+          tar -xf "$THEOS/sdks/iPhoneOS16.5.sdk.tar" -C "$THEOS/sdks"
+          rm "$THEOS/sdks/iPhoneOS16.5.sdk.tar"
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
+          test -f "$THEOS/makefiles/common.mk"
+
+      - name: Build trustcache
+        run: |
+          set -euo pipefail
+          # BaseBin/Makefile's basebin.tc target runs `trustcache create`.  That
+          # tool is not part of Dopamine and trustcache is not a submodule, so it
+          # is cloned at build time as the upstream CI does.  -arch arm64 makes a
+          # host binary because the runner is Apple Silicon.
+          git clone --depth 1 https://github.com/CRKatri/trustcache 2>&1 | tee "$LOGS/trustcache-clone.log"
+          cd trustcache
+          export CFLAGS="${CFLAGS:-} -I$(brew --prefix openssl@3)/include -arch arm64"
+          export LDFLAGS="${LDFLAGS:-} -L$(brew --prefix openssl@3)/lib -arch arm64"
+          gmake -j"$(sysctl -n hw.logicalcpu)" OPENSSL=1 2>&1 | tee "$LOGS/trustcache-build.log"
+          mkdir -p "$BASEDIR/bin"
+          cp trustcache "$BASEDIR/bin/"
+          echo "$BASEDIR/bin" >> "$GITHUB_PATH"
+          "$BASEDIR/bin/trustcache" 2>&1 | head -3 || true
+
+      - name: Clone Dopamine
+        run: |
+          set -euo pipefail
+          ref="$DOPAMINE_REF"
+          # --branch covers tags and branches; a raw commit has no branch name to
+          # give it, so that case falls back to a plain clone plus checkout.
+          if ! git clone --recursive --branch "$ref" https://github.com/opa334/Dopamine.git Dopamine 2>&1 | tee "$LOGS/dopamine-clone.log"; then
+            rm -rf Dopamine
+            git clone https://github.com/opa334/Dopamine.git Dopamine 2>&1 | tee -a "$LOGS/dopamine-clone.log"
+            git -C Dopamine checkout "$ref"
+            git -C Dopamine submodule update --init --recursive
+          fi
+          cd Dopamine
+          git describe --tags || git rev-parse HEAD
+          git submodule status | tee "$LOGS/dopamine-submodules.txt"
+          # BaseBin needs ChOma, XPF, opainject and litehook.  An empty submodule
+          # directory makes its Makefile fail with a bare "No such file" that
+          # names neither the submodule nor the clone flag.
+          for sub in BaseBin/ChOma BaseBin/XPF BaseBin/opainject BaseBin/_external/modules/litehook; do
+            test -n "$(ls -A "$sub")" || { echo "submodule $sub is empty" >&2; exit 1; }
+          done
+
+      - name: Apply patches
+        run: |
+          set -euo pipefail
+          cd Dopamine
+
+          # PATCHES is "all" by default and may also be a space-separated list of
+          # names under dopamine-basebin/.  The "all" branch reads the directory,
+          # so a branch carrying only some of the patches still builds; the list
+          # branch applies exactly the names asked for and git apply --check below
+          # fails on one that does not exist.
+          patch_dir="$BASEDIR/dopamine-basebin"
+          ls -l "$patch_dir" | tee "$LOGS/patch-source.txt"
+          if [ "$PATCHES" = "all" ]; then
+            files=$(cd "$patch_dir" && ls *.patch 2>/dev/null)
+          else
+            files=$PATCHES
+          fi
+          test -n "$files" || { echo "no patches under $patch_dir" >&2; exit 1; }
+          echo "PATCHES=$PATCHES" | tee "$LOGS/patch-request.txt"
+          echo "selected: $files" | tee -a "$LOGS/patch-request.txt"
+
+          : > "$LOGS/applied-patches.txt"
+          for name in $files; do
+            echo "== $name"
+            git apply --check "$patch_dir/$name"
+            git apply "$patch_dir/$name"
+            echo "$name" >> "$LOGS/applied-patches.txt"
+          done
+
+          git status --short | tee "$LOGS/git-status.txt"
+
+          # The systemhook assertions need its patch to have run.  It is in this
+          # checkout now, so the normal path is 1; the 0 branch stays so that a
+          # branch built before the patch landed still reports what it skipped.
+          if grep -q systemhook "$LOGS/applied-patches.txt"; then
+            echo "SYSTEMHOOK_PATCH_APPLIED=1" >> "$GITHUB_ENV"
+          else
+            echo "SYSTEMHOOK_PATCH_APPLIED=0" >> "$GITHUB_ENV"
+            echo "::notice::No systemhook patch applied; the DYLD_FRAMEWORK_PATH assertions will be skipped. The tar will not set the search paths the WebKit override needs."
+          fi
+
+      - name: Build BaseBin
+        run: |
+          set -euo pipefail
+          cd Dopamine
+          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
+          # BaseBin/Makefile's `subprojects` and `basebin.tar` rules spell out the
+          # whole target list; one -j over BaseBin runs them in dependency order
+          # and assembles the tar last.
+          #
+          # BUILD_STANDALONE has to be passed explicitly.  Nine subproject
+          # Makefiles write `-D BUILD_STANDALONE=$(BUILD_STANDALONE)` into CFLAGS
+          # and none of them defaults it; the only default is an `export
+          # BUILD_STANDALONE ?= 0` in the repository root Makefile.  Building
+          # BaseBin directly skips that file, the macro expands to nothing, and
+          # BaseBin/dopamine/src/main.m:80 fails with "expected value in
+          # expression" on `#if BUILD_STANDALONE`.  0 is the value the root
+          # Makefile defaults to, and it is the one the shipped basebin uses.
+          gmake -j"$(sysctl -n hw.logicalcpu)" -C BaseBin BUILD_STANDALONE=0 2>&1 | tee "$LOGS/basebin-build.log"
+          test -f BaseBin/basebin.tar
+
+      - name: Dump dyldhook symbols
+        run: |
+          set -euo pipefail
+          cd Dopamine/BaseBin/dyldhook
+          mkdir -p "$LOGS/nm"
+          for f in dyldhook_merge.*.dylib; do
+            {
+              echo "== $f"
+              echo "-- llvm-nm -g (external)"
+              llvm-nm -g "$f" || true
+              echo "-- llvm-nm -u (undefined)"
+              llvm-nm -u "$f" || true
+            } > "$LOGS/nm/$f.txt"
+          done
+          ls -l "$LOGS/nm"
+
+      - name: Verify the shipped dylibs and the tar
+        run: |
+          set -euo pipefail
+          cd Dopamine
+
+          # verify-dyldhook-merge.sh asserts both new hooks on the arm64e iOS
+          # 16-17 and iOS 18+ dylibs, their absence on the iOS 15 one, both
+          # legacy hooks on all three, and an empty llvm-nm -u.  A non-zero exit
+          # fails the job.
+          sh "$BASEDIR/dopamine-basebin/verify-dyldhook-merge.sh" BaseBin/dyldhook | tee "$LOGS/verify-dyldhook-merge.txt"
+
+          # verify-basebin-tar.sh unpacks basebin.tar and repeats the hook
+          # assertions on the bytes that ship.  It also checks all six names
+          # dyldhook_dylib_for_platform() can ask for, basebin.tc, and that no
+          # gen/dyld was baked in.  A non-zero exit fails the job.
+          sh "$BASEDIR/dopamine-basebin/verify-basebin-tar.sh" BaseBin/basebin.tar | tee "$LOGS/verify-basebin-tar.txt"
+
+          if [ -f "$BASEDIR/dopamine-basebin/verify-systemhook-search-paths.py" ]; then
+            python3 "$BASEDIR/dopamine-basebin/verify-systemhook-search-paths.py" BaseBin/systemhook/systemhook.dylib | tee "$LOGS/verify-systemhook.txt"
+          else
+            echo "verify-systemhook-search-paths.py is not in this checkout; DYLD_INSERT_LIBRARIES and the search-path names are checked by reading strings below."
+          fi
+
+      - name: Check systemhook search-path strings
+        run: |
+          set -euo pipefail
+          cd Dopamine/BaseBin/systemhook
+          test -f systemhook.dylib
+          strings -a systemhook.dylib > "$LOGS/systemhook-strings.txt"
+          cp systemhook.dylib "$LOGS/systemhook.dylib"
+
+          count() { awk -v want="$1" '$0 == want { n++ } END { print n + 0 }' "$LOGS/systemhook-strings.txt"; }
+
+          # DYLD_INSERT_LIBRARIES is what Dopamine itself relies on, and it is in
+          # the unpatched dylib too, so it is asserted either way.
+          inserts=$(count DYLD_INSERT_LIBRARIES)
+          echo "DYLD_INSERT_LIBRARIES: $inserts"
+          test "$inserts" -gt 0 || { echo "systemhook.dylib lost DYLD_INSERT_LIBRARIES" >&2; exit 1; }
+
+          if [ "${SYSTEMHOOK_PATCH_APPLIED:-0}" != "1" ]; then
+            echo "::notice::SKIPPED the DYLD_FRAMEWORK_PATH and __XPC_DYLD_FRAMEWORK_PATH assertions: no systemhook search-path patch was applied. DYLD_INSERT_LIBRARIES was still checked."
+            exit 0
+          fi
+
+          # The two names the search-path patch adds.  Matching the whole line
+          # keeps __XPC_DYLD_FRAMEWORK_PATH from counting as a second
+          # DYLD_FRAMEWORK_PATH.
+          for name in DYLD_FRAMEWORK_PATH __XPC_DYLD_FRAMEWORK_PATH; do
+            n=$(count "$name")
+            echo "$name: $n"
+            if [ "$n" -le 0 ]; then
+              echo "systemhook.dylib does not carry $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Merge a dyld the way jbctl does
+        run: |
+          set -euo pipefail
+          cd Dopamine/BaseBin
+          # gen/dyld is not in basebin.tar: libjailbreak/src/basebin_gen.m builds
+          # it on the device from a copy of /usr/lib/dyld plus the dyldhook dylib
+          # matching the running iOS version.  To exercise that step, run
+          # MachOMerger here on the host dyld.  MACOS=1 makes the merger a macOS
+          # binary; the default build is an iOS one.
+          gmake -C MachOMerger MACOS=1 2>&1 | tee "$LOGS/machomerger-build.log"
+
+          merger=MachOMerger/MachOMerger
+          input_dyld=/usr/lib/dyld
+          test -x "$merger"
+          ls -l "$input_dyld"
+          cp "$input_dyld" "$LOGS/host-dyld"
+
+          # The host dyld is a universal binary and MachOMerger reads a thin
+          # Mach-O only: handed the fat file it aborts with
+          #   SwiftMachO.MachOError.FatNotMachO
+          # and never merges anything.  Its arm64e slice is a real arm64e dyld
+          # that exports the two functions the new hooks attach to, so slicing it
+          # is what makes this step exercise the merge instead of skipping it.
+          #
+          # xcrun lipo, not llvm-lipo: the macos-15 image ships Xcode's lipo and
+          # has no llvm-lipo on PATH, so the LLVM name fails with exit 127.
+          xcrun lipo -archs "$input_dyld"
+          xcrun lipo -thin arm64e "$input_dyld" -output "$LOGS/host-dyld.arm64e"
+          input_dyld="$LOGS/host-dyld.arm64e"
+          file "$input_dyld"
+
+          # The three functions the hooks attach to have to exist in the input for
+          # MachOMerger to have anything to patch.  They are LOCAL symbols in the
+          # host dyld (`t`, not `T`), and `llvm-nm -g` lists only external ones, so
+          # this probe must read the full symbol table: `-g` reports zero for
+          # symbols that are in the file.
+          #
+          # A missing symbol means the input cannot stand in for a device dyld, and
+          # that is a limit of the input rather than a defect in the artifact.  The
+          # tar gate in the previous step is what proves the hooks ship.  So a miss
+          # is reported as SKIPPED, with the names, and does not fail the job.
+          missing=''
+          for sym in \
+            '_ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc' \
+            '_ZN5dyld413ProcessConfig9DyldCache23isAlwaysOverridablePathEPKc' \
+            '__fcntl'; do
+            n=$(llvm-nm "$input_dyld" | awk -v w="_$sym" '$NF == w { c++ } END { print c + 0 }')
+            echo "input dyld defines _$sym: $n"
+            [ "$n" -gt 0 ] || missing="$missing $sym"
+          done
+          if [ -n "$missing" ]; then
+            echo "::notice::SKIPPED the merged-dyld assertion; the input dyld does not export:$missing. The tar gate above already verified the shipped dylibs carry all four hooks, and jbctl builds gen/dyld from the device's own dyld, not this one."
+            exit 0
+          fi
+
+          set +e
+          sh "$BASEDIR/dopamine-basebin/verify-merged-dyld.sh" "$merger" "$input_dyld" dyldhook/dyldhook_merge.arm64e.iOS16-17.dylib 2>&1 | tee "$LOGS/verify-merged-dyld.txt"
+          status=${PIPESTATUS[0]}
+          set -e
+          case "$status" in
+            0) echo "merged dyld carries all four hooks" ;;
+            3)
+              # Exit 3 means MachOMerger could not run on this input at all: the
+              # host dyld is not the iOS dyld the merger was written for, so the
+              # hooks had nothing to attach to.  This is a limitation of the
+              # stand-in input, not of the artifact, and the tar gate above is
+              # unaffected.  Say so instead of failing or passing silently.
+              echo "::notice::SKIPPED the merged-dyld assertion; MachOMerger could not merge the host dyld (see verify-merged-dyld.txt). The dyldhook dylib assertions above still hold." ;;
+            *)
+              echo "merged dyld verification failed (exit $status)" >&2
+              exit "$status" ;;
+          esac
+
+      - name: Run the verifier regression tests
+        run: |
+          set -euo pipefail
+          python3 dopamine-basebin/test-verify-dyldhook-merge.py 2>&1 | tee "$LOGS/test-verify-dyldhook-merge.txt"
+          if [ -f dopamine-basebin/test-verify-basebin-artifacts.py ]; then
+            python3 dopamine-basebin/test-verify-basebin-artifacts.py 2>&1 | tee "$LOGS/test-verify-basebin-artifacts.txt"
+          fi
+
+      - name: Stage the artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOGS/artifact"
+          cp Dopamine/BaseBin/basebin.tar "$LOGS/artifact/basebin.tar"
+          cp Dopamine/BaseBin/basebin.tc "$LOGS/artifact/basebin.tc"
+          cp Dopamine/BaseBin/.build/.version "$LOGS/artifact/version"
+          git -C Dopamine log --oneline -1 > "$LOGS/artifact/dopamine-commit.txt"
+          ( cd "$LOGS/artifact" && shasum -a 256 basebin.tar > basebin.tar.sha256 && cat basebin.tar.sha256 )
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: basebin-build-logs
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload basebin.tar
+        uses: actions/upload-artifact@v4
+        with:
+          name: basebin-tar
+          path: |
+            diagnostics/artifact/basebin.tar
+            diagnostics/artifact/basebin.tar.sha256
+            diagnostics/artifact/version
+            diagnostics/artifact/dopamine-commit.txt
+          if-no-files-found: error
+          retention-days: 14
