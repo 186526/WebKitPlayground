@@ -101,7 +101,7 @@ A 与 `build-state.md:402` 矛盾，说明那次读数（以及依赖它的「(B
 
 步骤表的第 4 列记的就是这件事，取值只有三个：`no`、`crash`、`unreadable`。`crash` 表示该步新增了一份 `termination.namespace` 为 `DYLD` 或 `PAC_EXCEPTION` 的报告；`unreadable` 表示该步的崩溃排除没建立起来 —— 有一份新报告读不出正文，CrashReporter 列表取不到，或者该步的 before 列表取不到因而没有基线可差分。`PROBE_INVALID_STEPS` 列出 `crash` 与 `unreadable` 两种，读窗口的判断也两者都算，只有 `no` 是干净值。读不出正文的报告也算不干净，理由是 CrashReporter 在崩溃后几秒内可能仍在写文件，而 `find` 正好会抓到这种写了一半的 `.ips`；把它当成「没有崩溃」正是这个探针要避免的错误。before 列表取不到时不做差分，因为拿空文件当基线会把设备上原有的报告全算成新出现的。
 
-`crash_baseline_missing_in_reading_window` 与 `crash_exclusion_not_established_in_reading_window` 是对同一个 `unreadable` 状态的进一步区分：前者没有基线，后者有基线但有一份新报告读不出正文。两者都不改三态取值与退出码，只让 `PROBE_REASON` 说清是哪一种。
+`crash_baseline_missing_in_reading_window` 只在一种情形下出现：该步的 after 列表取到了，而它之前的 before 列表取不到。脚本只在这条路径上把该步记进「没有基线」的列表，所以出现这个理由时，该步必然有一份成功的 after 列表。`crash_exclusion_not_established_in_reading_window` 覆盖其余情形：有一份新报告读不出正文，或者 CrashReporter 列表取不到。after 列表自己失败时也走后者 —— 这一步同样没有基线，但它没有 after 列表可读，脚本不会把它记进「没有基线」的列表。两者都不改三态取值与退出码，只让 `PROBE_REASON` 说清是哪一种。
 
 一份报告读不出时，脚本仍把已读出的那些行打印出来，并且「确实出现了 DYLD 报告」优先于「后面还有一份读不出」：两类失败都让该步不可用，但只有前者说明崩溃真的发生过。
 
