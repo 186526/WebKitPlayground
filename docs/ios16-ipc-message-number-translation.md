@@ -520,25 +520,27 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 编号层只解决消息路由：它决定一条消息落到哪个 `MessageReceiver`。载荷层是另一件事，决定这条消息的参数能不能按对端的布局解出来。两版的参数签名差距是成规模的，不是个别例外。
 
-按 receiver 聚合全树比对 16.1 与 18.3 的消息，结果是：仅 16.1 有 340 条、仅 18.3 有 777 条、同名但参数签名实质变化 574 条。也就是说，即便编号翻译让每一条消息都落到正确的接收者，绝大多数消息的参数仍按另一套结构体布局编码。
+按 receiver 聚合全树比对 16.1 与 18.3 的消息，结果是：仅 16.1 有 340 条、仅 18.3 有 777 条、同名但参数签名实质变化 572 条。也就是说，即便编号翻译让每一条消息都落到正确的接收者，绝大多数消息的参数仍按另一套结构体布局编码。
 
 按接收者拆开看几个主要通道：
 
-| 接收者 | 16.1 消息数 | 18.3 消息数 | 共同 | 仅 16.1 | 仅 18.3 | 签名变化（其中实质） |
-| --- | --- | --- | --- | --- | --- | --- |
-| `WebPage` | 402 | 492 | 370 | 32 | 122 | 79（76） |
-| `WebPageProxy` | 343 | 306 | 261 | 82 | 45 | 61（52） |
-| `DrawingArea` | 11 | 13 | — | 3 | 5 | 4 |
-| `EventDispatcher` | 7 | 6 | — | 2 | 1 | 2（1） |
+| 接收者 | 16.1 消息数 | 18.3 消息数 | 共同 | 仅 16.1 | 仅 18.3 |
+| --- | --- | --- | --- | --- | --- |
+| `WebPage` | 402 | 492 | 370 | 32 | 122 |
+| `WebPageProxy` | 343 | 306 | 261 | 82 | 45 |
+| `DrawingArea` | 11 | 13 | — | 3 | 5 |
+| `EventDispatcher` | 7 | 6 | — | 2 | 1 |
 
-`WebPage` 与 `WebPageProxy` 是主文档通道，两条合计仅 16.1 有 114 条、仅 18.3 有 167 条、签名变化 140 条（实质 128）。这两条通道上的消息几乎覆盖页面加载与渲染的全部往返，载荷层不解决它们，页面就没有内容。
+参数签名的实质变化条数未列入本表：按不同口径（是否比较返回值、是否比较属性、是否把编译条件差异计入）会得到不同结果，本文未取得一组可复现的单一口径值。上表五列由 `messages -> Receiver [: Base | Modifier*]` 解析全部 `.messages.in` 得出，可逐项复现。
+
+`WebPage` 与 `WebPageProxy` 是主文档通道，两条合计仅 16.1 有 114 条、仅 18.3 有 167 条。这两条通道上的消息几乎覆盖页面加载与渲染的全部往返，载荷层不解决它们，页面就没有内容。
 
 两个具体的形态差异，说明这类差距不是「字段加减」可以吸收的：
 
 - **`RemoteLayerTreeDrawingAreaProxy` 的 `CommitLayerTree`。** 16.1 的参数是 `(RemoteLayerTreeTransaction, RemoteScrollingCoordinatorTransaction)` 两个单值；18.3 变成 `(Vector<pair<...>>, HashMap<RemoteImageBufferSetIdentifier, unique_ptr<BufferSetBackendHandle>>)`。参数个数、容器类型、元素类型三者同时变化，无法用兼容读取或忽略字段处理。
-- **`LayerChange` 位掩码。** 37 个同名项里只有 `UserInteractionEnabledChanged` 一个位号相同；`BoundsChanged` 在 16.1 是 bit 4、18.3 是 bit 8，`AnimationsChanged` 在 16.1 是 bit 34、18.3 是 bit 5。位掩码错位不会解码失败，会静默地让对端以为另一组属性变了。
+- **`LayerChange` 位掩码。** 40 个同名项里有 3 个（`DescendentOfSeparatedPortalChanged`、`SeparatedChanged`、`SeparatedPortalChanged`）带编译条件，余下 37 个在两侧都无条件编译；这 40 个里只有 `UserInteractionEnabledChanged` 一个位号相同；`BoundsChanged` 在 16.1 是 bit 4、18.3 是 bit 8，`AnimationsChanged` 在 16.1 是 bit 34、18.3 是 bit 5。位掩码错位不会解码失败，会静默地让对端以为另一组属性变了。
 
-边界因此可以说成一句完整的话：**编号层只解决消息路由；载荷层的这些差距单靠编号翻译不能解决，因此编号层不足以让页面渲染。** 本文只设计编号层，第 7 节把载荷层留作未验证项。
+边界因此可以说成一句完整的话：**编号层只解决消息路由；载荷层的这些差距单靠编号翻译不能解决，因此编号层不足以让页面渲染。** 本文只设计编号层。
 
 ### 6.3 编号层通过后立刻暴露的第一个载荷层问题
 
@@ -615,6 +617,8 @@ AuxiliaryProcess_MainThreadPing                                          4
 
 **19 条同步性质翻转里 `WebPageProxy_ShowPDFContextMenu` 在 iOS 上不成立这一判断**依据是它的 `#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 守卫（第 6.3 节），没有在真实 iOS 构建上核对这份枚举被剔除后的确切编号。
 
+**第 6.2 节的计数来自 M64 的 survey，本文未独立重算。** 其中「实质签名变化」一列因无法统一口径已从表格移除，`574` 与 `37` 两个数字按 reviewer-t1b 的复现分别更正为 `572` 与 `40`。
+
 ## 取证环境
 
 18.3.1 的稀疏克隆（本机执行过，用于取本文全部行号）：
@@ -652,6 +656,6 @@ phase('8DC2EF560486A6940098B216 /* Frameworks */ = {')# WebKit Frameworks
 
 头文件登记统计用同一份 pbxproj 加 `git show HEAD:<path>` 读每个被编译源文件的 `#include "X.h"`，按「同目录是否存在」「是否出现在 `PBXFileReference`」分类，结果见第 3.2 节。
 
-16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4086，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4086，唯一的空洞是 `FirstSynchronous` 占用的 3838。枚举体里还有四个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4087`、`Last = Count - 1`（4086）。`Count = 4087` 与「最大编号 4086」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 5 节与第 6、7 节的全部计数都取自这两份文件。
+16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4086，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4086，唯一的空洞是 `FirstSynchronous` 占用的 3838。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4087`、`Invalid = Count`（值 4087，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4086）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4087` 与「最大编号 4086」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 5 节与第 6、7 节的全部计数都取自这两份文件。
 
 **口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3140 个消息名」「2807 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3141 条、4087 条（18.3 侧把 `Last` 计入）、同名 2808 条。两套口径的差值恰好是这一个别名，`only16`/`only18` 与其余结论完全一致。tower 早先给的 3141 / 4087 / 2808 就是含别名的口径，本文统一用排除别名的口径，因为映射表里不会给别名单独建项。
