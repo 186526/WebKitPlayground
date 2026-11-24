@@ -488,6 +488,7 @@ jobs:
           echo "HAVE_CORE_CRYPTO_SIGNATURES_INT_RETURN_VALUE present in ${WEBKIT_REF}: ${ref_has_core_crypto_signatures_macro}"
           echo "traitCollectionByModifyingTraits sent in ${WEBKIT_REF}: ${ref_sends_ios17_trait_api}"
           echo "unguarded proxyConfigurations write in ${WEBKIT_REF}: ${ref_writes_proxy_configurations}"
+          echo "the XPC bootstrap compat patch is required in ${WEBKIT_REF}: ${ref_needs_xpc_bootstrap_compat}"
           echo "the message number translation patch is required in ${WEBKIT_REF}: ${ref_needs_message_name_translation}"
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
