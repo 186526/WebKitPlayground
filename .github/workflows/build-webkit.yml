@@ -633,10 +633,11 @@ jobs:
             git -C WebKit apply -v "$PWD/$p"
             echo "APPLIED: $p"
             # git apply's exit status covers whether the hunks landed, not whether the result carries
-            # the behaviour: a patch whose hunks were rewritten to touch the right lines but drop the
-            # function body still applies cleanly. Checking the marker as well pins the effect the
-            # patch is registered for, so a translation that lands structurally but compiles to
-            # nothing fails here instead of on the device as a helper that stops responding.
+            # the edit: a patch whose hunks were rewritten to touch the right lines but drop the new
+            # code still applies cleanly. This grep covers that case, and only that case. It is a text
+            # search, so a declaration, a call site, or a comment naming the symbol satisfies it; what
+            # shows the translation actually behaves is compiling the tables, which happens in Build.
+            # Read it as a check that the edit landed, not as a check that it compiles.
             if [ "$(basename "$p")" = ios16-ipc-message-number-translation.patch ] && \
                 ! git -C WebKit grep -q translateOutgoingMessageName -- Source/WebKit/Platform/IPC/Encoder.cpp; then
               echo "PATCH APPLIED BUT HAS NO EFFECT: $p"
