@@ -438,7 +438,7 @@ grep 'found:' "$L" | grep 'WebKit\.framework/WebKit"'
 - `found:` 的路径**含 `/Library/Frameworks/`** 且不含 `WebKitOverride` → `.xpc` 的 `LC_DYLD_ENVIRONMENT` 在这一步上压过环境变量；
 - 路径含 `Cryptexes/OS/System/Library` 或 `/System/Library/Frameworks` → 两串都没被采用，落回系统 16.1。
 
-`symlink` 到 `procursus` 是 `/var/jb` 指向的目录，两种前缀指向的是同一个覆盖目录，所以「含 `WebKitOverride`」这一条对两种写法都成立，这正是它比字面匹配可靠的原因。
+`/var/jb` 是指向 `procursus` 的符号链接，两种前缀指向同一个覆盖目录，所以「含 `WebKitOverride`」这一条对两种写法都成立，这正是它比字面匹配可靠的原因。
 
 **只有一种情况需要另做一次实验：3d-1 的日志里只出现一串候选。** 那说明 `systemhook` 没有注入（或注入的值被判为「已存在」而跳过），此时的优先级问题没有数据。手工注入的办法是把变量设成一个**不含目标 framework 的目录**（例如 `/tmp`），这样 `systemhook` 认为它已存在、不再覆盖，dyld 只在 `/tmp` 里找不到目标、落回内嵌路径：
 
