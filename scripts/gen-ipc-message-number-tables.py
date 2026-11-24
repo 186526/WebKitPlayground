@@ -297,7 +297,9 @@ def resolve_explicit_values(entries: list[Entry], path: Path) -> list[Entry]:
     with it. Resolving the explicit right-hand sides without re-basing that count
     leaves every later implicit entry one too high, which is exactly what the
     unconditional `LastAsynchronous = FirstSynchronous - 1` in the newer
-    enumeration would do to all 250 entries that follow it.
+    enumeration would do to all 251 entries that follow it: the 249 implicit
+    ones and the two explicit sentinels, `Invalid = Count` and `Last = Count - 1`,
+    which derive from `Count` and so inherit its shift.
 
     The generated headers only use explicit values for sentinels, and only in
     the forms `Count - 1`, `FirstSynchronous - 1` and a bare enumerator name,
