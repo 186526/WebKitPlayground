@@ -1,0 +1,583 @@
+# 16.1 UI 进程与 18.3 helper 的消息编号转换层设计
+
+本文回答四个问题：18.3 的 `Encoder.cpp` 在 Xcode iOS device 构建里由哪一步编译进产物；新增一个翻译源文件要改哪些构建清单；把函数塞进既有文件能否完全不动构建系统；以及这条跨版本连接在 18.3 源码里的唯一创建点、以及如何只让它生效。
+
+所有源码行号取自 18.3.1 tag `releases/Apple/Safari-18.3.1-iOS-18.3.2`（提交 `1b670a0c038dd7c909cca0c46346670f43c6334d`）。取证方式是用 `git` 对该 tag 做 `--filter=blob:none` 的稀疏克隆，再 `git show HEAD:<path>` 逐文件读出；正文里的行号可以用同一条 `git show HEAD:<path> | cat -n` 复核。16.1 的编号取自 tag `Safari-614.1.9`。
+
+本任务只产出设计文档，不产出代码或补丁。
+
+## 1. 结论
+
+**A.** `Platform/IPC/Encoder.cpp` 与 `Decoder.cpp` 不是由 Xcode 直接编译的单个文件。它们先被 `Source/WebKit/Scripts/generate-unified-sources.sh` 聚合进生成的 `PlatformUnifiedSourceN.cpp`，这些聚合文件只属于 `WebKitPlatform` 这个静态库 target，产出 `libWebKitPlatform.a`；`WebKit` target 再把该静态库链接进 `WebKit.framework`。所以 `project.pbxproj` 里没有 `Encoder.cpp in Sources`，只有 `PBXFileReference` 与 `PBXGroup` 两条，是正常的：进编译阶段的是聚合出来的 `.cpp`。
+
+**B.** 新增 `Source/WebKit/Platform/IPC/MessageNumberTranslation.cpp` 只需要在 `Source/WebKit/Platform/Sources.txt` 加一行。不需要改 `project.pbxproj`、不需要改顶层 `Sources.txt`、不需要改 cmake 与 `UnifiedSources-output.xcfilelist`。聚合包数当前正好等于上限 5 包，还剩 5 个文件的余量（第 3.1 节）。如果同时新增头文件，则该头文件必须登记进 `project.pbxproj`（路径见 B 节第 3.2 条）。
+
+**C.** 把两个查找函数的定义放进已在清单里的 `Encoder.cpp`、头文件只放声明，就不再需要改 `Platform/Sources.txt`。构建系统侧仍有一处必须改：新头文件要在 `project.pbxproj` 里登记 `PBXFileReference` 与 `PBXBuildFile`（加入 `WebKit` target 的 Headers 阶段），否则 `#include "MessageNumberTranslation.h"` 找不到。**「完全不需要改构建系统」不成立**，但改动量从「清单加一行 + 头文件登记」降为「仅头文件登记」。
+
+`IPCUtilities.cpp` 不能作为落点：它的全部内容在 `#if ENABLE(IPC_TESTING_API)` 里，该宏在 Release 构建（`NDEBUG` 已定义、无 ASAN）为 0，文件编出来是空的，放进去的表会被整段编掉（第 4.3 节）。
+
+**D.** 唯一的跨版本 `IPC::Connection` 是 `Source/WebKit/Shared/AuxiliaryProcess.cpp:108` 创建的 `m_connection`：三个 helper（WebContent、GPU、Networking）都继承 `AuxiliaryProcess` 并共用这一行，所以这一行对三者语义一致，都是「我到 UI 进程的连接」。标志在那里置真，不在 `Connection::createClientConnection` 工厂内部置真，因为该工厂有 7 个调用点，其余 6 个两端都是 18.3。翻译落点是 `Connection::sendMessageImpl`（发方向）与 `Connection::receiveSourceEventHandler`（收方向，必须在 `:545` 的 `InitializeConnection` 比较之前）。GPU 与 Networking 之间、WebContent 与 Networking 之间的连接用同一个工厂但走别的调用点，标志保持假，字节不动。
+
+还有一个必须先说清的前提：**编号只在 helper 到 UI 进程这一条连接上跨版本，其余连接两端同为 18.3。** 无条件翻译会把这些连接的自洽编号翻成对方不认的值，等于自己破坏自己，所以 D 不是可选优化，是正确性要求。
+
+## 2. 问题 A：Encoder.cpp 由哪一步编译进 WebKit.framework
+
+### 2.1 检索链（可逐步复现）
+
+以下命令都在 18.3.1 的稀疏克隆里执行（克隆方式见文末「取证环境」）。
+
+第一步，确认顶层 `Sources.txt` 里没有 `Encoder.cpp`、`Decoder.cpp`、`Connection.cpp`：
+
+```
+$ git show HEAD:Source/WebKit/Sources.txt | grep -c 'Platform/IPC/'
+1
+$ git show HEAD:Source/WebKit/Sources.txt | grep 'Platform/IPC/'
+216:Platform/IPC/DaemonCoders.cpp
+$ git show HEAD:Source/WebKit/Sources.txt | grep -E 'Platform/IPC/(Encoder|Decoder|Connection)\.cpp'
+（无输出）
+```
+
+顶层清单里确实有一条 `Platform/IPC/` 路径，是 `Platform/IPC/DaemonCoders.cpp`（`:216`），它不在本文关心的三个文件里。所以更准确的说法是：顶层 `Sources.txt` 不含 `Encoder.cpp`、`Decoder.cpp`、`Connection.cpp`，而不是「不含任何 IPC 源文件」。这三者的条目在另一份清单里，见第二步。
+
+第二步，找到真正列出 IPC 源文件的清单：
+
+```
+$ git show HEAD:Source/WebKit/Platform/Sources.txt | grep -n 'IPC/'
+5:Platform/IPC/ArgumentCoders.cpp
+6:Platform/IPC/Connection.cpp
+7:Platform/IPC/DaemonConnection.cpp
+8:Platform/IPC/DaemonDecoder.cpp
+9:Platform/IPC/DaemonEncoder.cpp
+10:Platform/IPC/Decoder.cpp
+11:Platform/IPC/Encoder.cpp
+12:Platform/IPC/IPCUtilities.cpp
+13:Platform/IPC/JSIPCBinding.cpp
+14:Platform/IPC/MessageReceiveQueueMap.cpp
+15:Platform/IPC/MessageReceiverMap.cpp
+16:Platform/IPC/MessageSender.cpp
+17:Platform/IPC/SharedBufferReference.cpp
+18:Platform/IPC/StreamClientConnection.cpp
+19:Platform/IPC/StreamConnectionBuffer.cpp
+20:Platform/IPC/StreamConnectionWorkQueue.cpp
+21:Platform/IPC/SharedFileHandle.cpp
+22:Platform/IPC/StreamServerConnection.cpp
+```
+
+`Encoder.cpp` 在 `Platform/Sources.txt:11`，`Decoder.cpp` 在 `:10`。`Connection.cpp` 在 `:6`。同目录的 `Platform/SourcesCocoa.txt:14` 是 `Platform/IPC/cocoa/ConnectionCocoa.mm`，`:16` 是 `Platform/IPC/cocoa/MachMessage.cpp`，这两个 `.mm`/`.cpp` 走同一套聚合机制。
+
+第三步，确认这两个清单被谁读取：
+
+```
+$ git show HEAD:Source/WebKit/Scripts/generate-unified-sources.sh | grep -n 'generate-unified-source-bundles\|bundle-filename-prefix'
+25:/usr/bin/env ruby "${BUILD_SCRIPTS_DIR}/generate-unified-source-bundles.rb" ... Sources.txt SourcesCocoa.txt "${ARGS[@]}" > /dev/null
+31:/usr/bin/env ruby "${BUILD_SCRIPTS_DIR}/generate-unified-source-bundles.rb" ... --bundle-filename-prefix Platform Platform/Sources.txt Platform/SourcesCocoa.txt "${ARGS[@]}" > /dev/null
+```
+
+第 31 行是第二次调用，参数前缀是 `Platform`，清单是 `Platform/Sources.txt` 与 `Platform/SourcesCocoa.txt`。同脚本第 21-23 行把 `UnifiedSourceCppFileCount` 设为 130 供第一次调用用，第 27-29 行改为 5/0/3 供第二次调用用，所以 `Platform` 前缀的聚合文件数量上限是 5 个 `.cpp` 与 3 个 `.mm`。
+
+聚合脚本本身是 `Source/WTF/Scripts/generate-unified-source-bundles.rb`（不在 `Source/WebKit/Scripts/` 下，`generate-unified-sources.sh:25` 里的 `${BUILD_SCRIPTS_DIR}` 指向 wtf 的脚本目录）。它的 `BundleManager#addFile`（`:272`）把每个源文件写成一行 `#include "<path>"`，`bundleFileName` 用 `#{$bundleFilenamePrefix}UnifiedSource#{id}.#{extension}` 生成文件名，这就是 `PlatformUnifiedSource1.cpp` 这类名字的来源。当聚合数超过 `--max-cpp-bundle-count` 时它 `raise`（`:378`），提示「Please add … to Xcode then update UnifiedSourceCppFileCount」。
+
+第四步，确认聚合的产物清单：
+
+```
+$ git show HEAD:Source/WebKit/UnifiedSources-output.xcfilelist | grep 'PlatformUnifiedSource'
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource1-mm.mm
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource1.cpp
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource2-mm.mm
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource2.cpp
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource3-mm.mm
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource3.cpp
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource4.cpp
+$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/unified-sources/PlatformUnifiedSource5.cpp
+```
+
+共 8 个（5 个 `.cpp` 加 3 个 `.mm`），与第三步的计数上限一致。
+
+第五步，确认哪个 Xcode 阶段跑这个脚本：
+
+```
+$ grep -n '2D7DEBDF21269C9F00B9F73C /\* Generate Unified Sources \*/ = {' WebKit.xcodeproj/project.pbxproj
+18420:  2D7DEBDF21269C9F00B9F73C /* Generate Unified Sources */ = {
+```
+
+该阶段（`:18420-18444`）是 `PBXShellScriptBuildPhase`，`shellScript` 为 `Scripts/generate-unified-sources.sh`，`inputPaths` 里明确列了 `$(SRCROOT)/Platform/Sources.txt`（`:18431`）与 `$(SRCROOT)/Platform/SourcesCocoa.txt`（`:18432`），`outputFileListPaths` 是 `$(SRCROOT)/UnifiedSources-output.xcfilelist`（`:18437`）。脚本跑在 `PBXAggregateTarget` 里（`:2D7DEBD821269C6B00B9F73C`，`:35-45`），不是跑在某个编译 target 内部。
+
+### 2.2 比「unified source 拼接」多出来的一跳
+
+任务背景假设拼接后直接进 `WebKit.framework`。核对 `project.pbxproj` 后发现中间还有一个静态库 target，这一步不写清楚会把 A 答错。
+
+`WebKitPlatform` target（`:18031-18050`）是 `com.apple.product-type.library.static`，产物是 `libWebKitPlatform.a`（`:18048`）。它的 Sources 阶段（`:19470-19513`）共 39 个成员，其中 8 个是 `PlatformUnifiedSource*`：
+
+```
+$ python3 - <<'PY'   # 见文末「取证环境」里 phase_files 的实现
+... phase('7B9FC59A28A28F87007570E7 /* Sources */ = {')
+WebKitPlatform Sources phase entries: 39
+  PlatformUnifiedSource: 8
+```
+
+`WebKit` target 的 Sources 阶段（`:19516-20092`）共 572 个成员，其中 `PlatformUnifiedSource*` 是 **0 个**，`Encoder`/`Decoder` 也是 0 个：
+
+```
+WebKit target Sources phase entries: 572
+  PlatformUnifiedSource in WebKit Sources phase: 0
+  Encoder/Decoder: []
+```
+
+统计时只数阶段内以 `/* … in Sources */,` 结尾的成员行；`isa`、`buildActionMask`、`files = (` 这类行不计。
+
+两者通过链接关系连起来：`WebKit` target 的 Frameworks 阶段（`8DC2EF560486A6940098B216`，`:8465-8478`）里有 `libWebKitPlatform.a in Frameworks`（`:8472`），并且 `WebKit` target 的依赖列表里有 `target = 7B9FC59C28A28F87007570E7 /* WebKitPlatform */`（`:18088` 的 `7B9FC5BD28A5233B007570E7`）。`WebKitPlatform` 自己又依赖 `Generate Unified Sources`（`target = 2D7DEBD821269C6B00B9F73C`）。
+
+所以完整链路是三跳：
+
+```
+generate-unified-sources.sh          (PBXAggregateTarget "Generate Unified Sources")
+  → Platform/Sources.txt + Platform/SourcesCocoa.txt
+  → DerivedSources/WebKit/unified-sources/PlatformUnifiedSource1..5.cpp、1..3-mm.mm
+  → 编进 PBXNativeTarget "WebKitPlatform"（static library）
+  → libWebKitPlatform.a
+  → 作为 Framework 链入 PBXNativeTarget "WebKit"
+  → WebKit.framework
+```
+
+这也解释了为什么 `Encoder.cpp` 在 pbxproj 里只有两条：
+
+```
+$ grep -n '/\* Encoder.cpp \*/' WebKit.xcodeproj/project.pbxproj
+7337:  BC032D9F10F437D10058C15A /* Encoder.cpp */ = {isa = PBXFileReference; ... path = Encoder.cpp; ...};
+9710:  BC032D9F10F437D10058C15A /* Encoder.cpp */,
+```
+
+`Encoder.h` 则有 `BC032DA810F437D10058C15A /* Encoder.h in Headers */`（`:2116`），并且出现在 `WebKit` target 的 Headers 阶段（`8DC2EF500486A6940098B216`，成员行 `:16432`）。头文件走 Headers 阶段，源文件走聚合，两者机制不同，这也是 C 节结论的依据。
+
+### 2.3 复现这套聚合的最小方法
+
+`generate-unified-source-bundles.rb` 需要 ruby。本机没有安装 ruby，所以不能在本机端到端跑一遍脚本，只能用脚本源码与 `UnifiedSources-output.xcfilelist` 交叉验证：
+
+```
+$ command -v ruby || echo "ruby: not installed"
+ruby: not installed
+```
+
+在有 ruby 的机器上可以直接复现聚合结果（路径按本机检出替换）：
+
+```
+ruby Source/WTF/Scripts/generate-unified-source-bundles.rb \
+  --derived-sources-path /tmp/ub \
+  --source-tree-path "$PWD/Source/WebKit" \
+  --max-cpp-bundle-count 5 --max-c-bundle-count 0 --max-obj-c-bundle-count 3 \
+  --bundle-filename-prefix Platform \
+  Platform/Sources.txt Platform/SourcesCocoa.txt
+ls /tmp/ub/unified-sources/
+```
+
+该命令应产出与 `UnifiedSources-output.xcfilelist` 相同的 8 个文件，且 `PlatformUnifiedSource1.cpp` 里含一行 `#include "Platform/IPC/Decoder.cpp"` 之类的字符串。这一条是「聚合确实发生」的直接证据，本机因缺 ruby 未执行。
+
+### 2.4 另一处需要一并纠正的口径
+
+`Source/WebKit/Configurations/WebKitPlatform.xcconfig` 里 `PRODUCT_NAME = WebKitPlatform; SKIP_INSTALL = YES; GCC_SYMBOLS_PRIVATE_EXTERN = YES;`。`SKIP_INSTALL = YES` 意味着该静态库不单独安装到 SDK，只作为 `WebKit.framework` 的中间产物存在。这与「`Platform/IPC` 的代码最终在 `WebKit.framework` 二进制里」并不矛盾，但不能说「`Encoder.cpp` 由 `WebKit` target 编译」。
+
+## 3. 问题 B：新增 MessageNumberTranslation.cpp 要改哪些文件
+
+### 3.1 只新增 .cpp
+
+需要在 `Source/WebKit/Platform/Sources.txt` 加一行，位置在 `Platform/IPC/` 段内（`:5-22`）。这是唯一必须改的清单。
+
+为什么仅此一处：
+
+- 聚合阶段读的就是这个文件（第 2.1 节第三步，`generate-unified-sources.sh:31`），加一行即进入下次聚合。
+- `project.pbxproj` 不需要改：它引用的是 `PlatformUnifiedSource1..5.cpp` 这些**生成文件**，不是单个源文件。新增源文件只是让已有聚合文件的内容变多。
+- `UnifiedSources-output.xcfilelist` 也不需要改，它列的是聚合产物名。
+
+**但聚合包数已经顶到上限，这一点必须说清。** `Platform/Sources.txt` 列出 21 个 `.cpp`，`Platform/SourcesCocoa.txt` 列出 7 个 `.cpp` 与 10 个 `.mm`，其中 `.cpp` 一侧的 `MessageNames.cpp` 已被列在 `Platform/SourcesCocoa.txt:26`（`// Derived sources.` 之后），所以进入 `.cpp` 聚合的是 21+7=**28 个**，不是 29 个。按 `generate-unified-source-bundles.rb` 的分包规则（`SourceFile#<=>` 先比目录、同一清单内再比文件名，`BundleManager#addFile` 在顶层目录切换或包满 `$maxBundleSize=8` 时 `flush`）仿真，当前正好是 5 包，与限额 `UnifiedSourceCppFileCount=5` 相等：
+
+```
+bundles: 5
+  1  1  MessageNames.cpp
+  2  8  Platform/LogInitialization.cpp ... Platform/IPC/DaemonEncoder.cpp
+  3  8  Platform/IPC/Decoder.cpp ... Platform/IPC/SharedBufferReference.cpp
+  4  8  Platform/IPC/SharedFileHandle.cpp ... Platform/IPC/darwin/IPCSemaphoreDarwin.cpp
+  5  3  Platform/cf/ModuleCF.cpp ... Platform/unix/EnvironmentUtilities.cpp
+```
+
+`.mm` 一侧 10 个文件按同一规则只分成 2 包（8 + 2），但脚本末尾对每个 manager 调 `flushToMax`（`:372`）把包数补齐到 `--max-obj-c-bundle-count`，所以磁盘上仍有 3 个 `.mm` 聚合文件（第 3 个为空），这正是 `UnifiedSources-output.xcfilelist` 里 3 个 `-mm` 路径的来源。`.cpp` 一侧自然分包数已等于限额 5，`flushToMax` 不再补包。
+
+第 5 包只装了 3 个文件，所以还能再塞 5 个而不新增包（新增文件落在 `Platform/IPC/` 下，排序位置在第 3 包内，会把后续文件顺推）：
+
+```
++0 -> 5 bundles, 第 5 包 3 个
++1 -> 5 bundles, 第 5 包 4 个
++2 -> 5 bundles, 第 5 包 5 个
++3 -> 5 bundles, 第 5 包 6 个
++4 -> 5 bundles, 第 5 包 7 个
++5 -> 5 bundles, 第 5 包 8 个
++6 -> 6 bundles（触发上限，对应 generate-unified-source-bundles.rb:378 的 raise）
+```
+
+也就是说，加一行不会触发 `generate-unified-source-bundles.rb:378` 的 `raise`，但余量只有 5 个文件，第 6 个就溢出。这条仿真基于 `<=>` 与 `addFile` 的源码逻辑，不是实跑脚本（本机无 ruby，见第 2.3 节），所以在「未验证项」里列出。
+
+### 3.2 新增 .cpp 且新增头文件
+
+除上面那一行外，新头文件必须登记进 `project.pbxproj`，三处：
+
+1. `PBXFileReference`：新增一条 `path = MessageNumberTranslation.h; sourceTree = "<group>";`，写法参照 `Encoder.h` 的 `BC032DA010F437D10058C15A`（`:7338`）。
+2. `PBXGroup`：把 id 加进 `Platform/IPC` 那个 group 的成员列表，参照 `Encoder.h` 在 `:9711` 的写法。
+3. `PBXBuildFile` + Headers 阶段：新增 `PBXBuildFile`（参照 `BC032DA810F437D10058C15A /* Encoder.h in Headers */`，`:2116`），再把该 id 加进 `WebKit` target 的 Headers 阶段（`8DC2EF500486A6940098B216`，成员表在 `:16432` 附近）。
+
+第 3 条为什么必要，有本机统计支撑。我把 `Platform/Sources.txt` 与 `Platform/SourcesCocoa.txt` 里全部 38 个被编译的 `.cpp`/`.mm` 的 `#include "X.h"` 与 `#import "X.h"` 一并抽出来（`.mm` 用 `#import`，两种写法在头映射解析上等价），按解析规则分类：
+
+```
+same-directory includes whose header is NOT registered in pbxproj: 0
+basename includes resolved by same-directory rule: 54
+basename includes from another dir, header registered in pbxproj: 70
+basename includes from another dir, NOT registered: 3
+```
+
+54 处同目录 include 的目标头文件**全部**在 pbxproj 里有 `PBXFileReference`；70 处跨目录 include 的目标头文件也全部登记过。唯一 3 处未登记的（`ArgumentCodersUnix.h`、`ArgumentCodersWin.h`、`UnixMessage.h`）都包在 `#if USE(UNIX_DOMAIN_SOCKETS)` / `#if OS(WINDOWS)` 里（`Connection.cpp:53-60`），本机按 iOS 构建不参与编译，所以不被头映射解析是安全的。
+
+这条统计说明：在 WebKit 的 Xcode 构建里，「头文件登记进 pbxproj」是 `#include "X.h"` 能被解析的实际前提，不是可选项。新头文件不登记，编译会在 include 阶段失败。
+
+解析机制的推断依据：`BaseTarget.xcconfig:43` 的 `HEADER_SEARCH_PATHS` 只含 `$(SRCROOT)` 与几个生成目录，不含 `$(SRCROOT)/Platform/IPC`，所以跨目录的 `#include "Encoder.h"` 不可能靠 `-I` 找到；`project.pbxproj:18742` 与 `:19048` 又把 `$(CPP_HEADERMAP_PRODUCT_HEADERS_VFS_FILE)` 列为 build phase 的 `inputPaths`，说明 headermap 参与构建。因此 basename include 是靠 headermap 按 `PBXBuildFile` 里登记的 basename 解析的，未登记就没有对应条目。这一条是推断，本机没有打开 `USE_HEADERMAP` 的显式设置（xcconfig 与 pbxproj 里都搜不到该键），依赖 Xcode 的默认值。
+
+### 3.3 不需要改的东西
+
+逐个列出，避免后来者重复排查：
+
+- `Source/WebKit/Sources.txt`：只给 `WebKit` target 的非 Platform 源文件用，`Platform/IPC/` 不在这里。
+- `Source/WebKit/SourcesCocoa.txt`：同理，只列 `.mm` 与 Cocoa 专有文件。
+- `Source/WebKit/CMakeLists.txt`：`:128`、`:130` 的 `WebKit_UNIFIED_SOURCE_LIST_FILES` 已含 `"Sources.txt"` 与 `"Platform/Sources.txt"`，是同一批清单的 cmake 视图，加行即同步生效。Xcode 构建不读它。
+- `UnifiedSources-output.xcfilelist`：列聚合产物名，不列单个源文件。
+- `Configurations/WebKitPlatform.xcconfig` / `Configurations/WebKit.xcconfig`：与源文件清单无关。
+
+### 3.4 链接能否成功
+
+新 `.cpp` 编进 `libWebKitPlatform.a` 后，只要符号被引用就会进 `WebKit.framework`。查找函数在两个调用点被引用（`Encoder`、`Connection` 侧），属于 `WebKitPlatform` 内部引用，静态库内链接即可解析，不涉及 `-force_load`。本机已核对 `WebKit.xcconfig` 与 `BaseTarget.xcconfig` 里没有 `-all_load` / `-force_load` 的特殊设置，所以符号保留依赖正常的引用关系，这一条在「未验证项」里列出待实测。
+
+## 4. 问题 C：把函数塞进既有文件能否不动构建系统
+
+结论：**能省掉 `Platform/Sources.txt`，省不掉头文件登记。**「完全不需要改构建系统」不成立，证据如下。
+
+### 4.1 省掉的是什么
+
+把 `lookup16to18(uint16_t)` 与 `lookup18to16(uint16_t)` 的定义写进 `Encoder.cpp`（已在 `Platform/Sources.txt:11`），则这个编译单元在下次构建时必然被编译，函数随 `PlatformUnifiedSourceN.cpp` 进 `libWebKitPlatform.a`，再随静态库进 `WebKit.framework`。`Platform/Sources.txt` 一行都不用改。
+
+### 4.2 省不掉的是什么
+
+如果头文件只放声明，那么两件互相独立的改动仍然发生：
+
+1. 新头文件要在 `project.pbxproj` 登记（第 3.2 节的三处）。不登记则 `#include "MessageNumberTranslation.h"` 解析失败。本机统计里 124 处活跃 include 的目标头文件 100% 已登记（54 处同目录 + 70 处跨目录），没有未登记还参与 iOS 编译的先例。
+2. 登记了头文件，但只在 `Encoder.cpp` 里定义、在 `Connection.cpp` 与 `ConnectionCocoa.mm` 里声明使用，还需要这些文件 `#include` 该头文件。这不需要改构建清单，只需要改源码里的 include，不属于构建系统改动。
+
+### 4.3 落点选择：为什么是 Encoder.cpp 而不是 IPCUtilities.cpp
+
+支持把函数与表放进 `Encoder.cpp` 的证据：
+
+- 不需要新增编译单元，不改变 `Platform/Sources.txt` 与聚合包数。
+- 查找函数只被 IPC 层自己使用，放 `Encoder.cpp` 不引入新的公共头依赖面。
+- 与既有风格一致：`Encoder.cpp:42` 的 `defaultMessageFlags`、`:44` 的 `allocBuffer`、`:141` 的 `roundUpToAlignment` 都是 `static` 或文件内辅助函数，同类放法已有先例。
+
+**否决 `IPCUtilities.cpp` 的依据：它在 Release 构建里是空翻译单元。** 该文件全部有效内容包在 `#if ENABLE(IPC_TESTING_API)` 里（`IPCUtilities.cpp:33-52`），而该宏只在 ASAN 或非 `NDEBUG` 构建下为 1：
+
+```cpp
+// Source/WTF/wtf/PlatformEnable.h:307-312
+#if !defined(ENABLE_IPC_TESTING_API)
+/* Enable IPC testing on all ASAN builds and debug builds. */
+#if (ASAN_ENABLED || !defined(NDEBUG)) && PLATFORM(COCOA)
+#define ENABLE_IPC_TESTING_API 1
+#endif
+#endif
+```
+
+CI 走 `xcodebuild -configuration Release`，`NDEBUG` 已定义、`ASAN_ENABLED` 为 0，所以 `ENABLE_IPC_TESTING_API` 为 0，`IPCUtilities.cpp` 编出来是空的。把 2807 条 `case` 放进去会被整段编掉，链接期找不到定义。另外它现有的三个函数（`isTestingIPC`、`startTestingIPC`、`stopTestingIPC`）都只为 IPC 测试服务，文件名里的 utilties 覆盖的是测试辅助，不是通用 IPC 工具。
+
+第 4.3 节曾经把「职责划分」当作反对把函数放 `Encoder.cpp` 的理由，这个理由被否决：职责划分的收益不足以抵消「把函数放进一个 Release 构建下会被编掉的翻译单元」这一确定失败。
+
+保留但降级的一条反对意见：把查表函数放在 `Encoder.cpp` 与 `Encoder` 类职责不同，按项目规则「一个方法承担一项职责」，理想的落点是独立实现单元（即第 3 节的 `MessageNumberTranslation.cpp`）。如果实现阶段愿意改 `Platform/Sources.txt` 一行（第 3.1 节已证明余量足够），那个方案在职责划分上更干净。两者都不改 `project.pbxproj` 的源文件部分，都需要登记新头文件。
+
+查表的并发安全：两张表都是 `static constexpr`（第 5.3 节），只读，无锁即可。
+
+## 5. 问题 D：哪条连接跨版本，怎么只让它生效
+
+### 5.1 这条连接的唯一创建点
+
+helper 侧的连接都在 `AuxiliaryProcess::initialize` 里建立。18.3 的 `Source/WebKit/Shared/AuxiliaryProcess.cpp:79-111`：
+
+```cpp
+void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters& parameters)
+{
+    ...
+    m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);   // :108
+    initializeConnection(m_connection.get());                                                  // :109
+    m_connection->open(*this);                                                                 // :110
+}
+```
+
+`WebProcess`、`GPUProcess`、`NetworkProcess`（以及 `ModelProcess`）都继承 `AuxiliaryProcess`，`initialize` 是基类实现，共用同一段代码，所以 `:108` 的 `m_connection` 对每个 helper 都是「我到 UI 进程的连接」。`initializeConnection` 是虚函数（`AuxiliaryProcess.h:124`），两个子类覆写都只转调基类：
+
+```
+Source/WebKit/WebProcess/WebProcess.cpp:381:    AuxiliaryProcess::initializeConnection(connection);
+Source/WebKit/NetworkProcess/NetworkProcess.cpp:377:    AuxiliaryProcess::initializeConnection(connection);
+```
+
+基类实现是空函数（`AuxiliaryProcess.cpp:129-131`），没有别的地方在 `:108` 之后给这条连接加标记。
+
+**三个 helper 全部跨版本，不是只有 WebContent。** 部署方式决定了这一点：`scripts/install-webkit-override.sh` 的 `prune_xpc_services`（`:235-251`）删除覆盖目录里的 `XPCServices`，于是 WebContent、GPU、Networking 三个 helper 都由系统自带的 16.1 `.xpc` 桩启动，再由 `DYLD_FRAMEWORK_PATH` 加载覆盖目录里的 18.3 framework。三个 helper 的对端都是未打补丁的 16.1 UI 进程，三条连接都需要翻译。所以标志在 `:108` 之后无条件置真，不按进程类型分支。
+
+### 5.2 为什么不能放在 createClientConnection 内部
+
+`Connection::createClientConnection` 在 `Source/WebKit` 下共 7 个调用点：
+
+```
+$ grep -rn 'createClientConnection' Source/WebKit | grep -v 'Connection\.\(h\|cpp\):'
+Source/WebKit/WebProcess/Network/NetworkProcessConnection.cpp:84
+Source/WebKit/WebProcess/Inspector/WebInspector.cpp:95
+Source/WebKit/Shared/IPCConnectionTester.cpp:44
+Source/WebKit/Shared/AuxiliaryProcess.cpp:108
+Source/WebKit/Platform/IPC/StreamServerConnection.cpp:42
+Source/WebKit/ModelProcess/ModelConnectionToWebProcess.cpp:66
+Source/WebKit/GPUProcess/GPUConnectionToWebProcess.cpp:280
+```
+
+其中 `:108` 是唯一的 helper 到 UI 进程连接。其余 6 个的两端都是 18.3：
+
+- `NetworkProcessConnection.cpp:84`：WebContent 到 Networking，两端都是 18.3 framework。
+- `GPUConnectionToWebProcess.cpp:280`：GPU 侧的 `GPUConnectionToWebProcess`，对端是 WebContent，两端都是 18.3。
+- `WebInspector.cpp:95`：WebContent 到 Inspector 前端，两端都是 18.3。
+- `StreamServerConnection.cpp:42`、`ModelConnectionToWebProcess.cpp:66`、`IPCConnectionTester.cpp:44`：同为两端 18.3 的内部连接。
+
+如果标志在工厂内部置真，这 6 条也会被翻译，两端同为 18.3 的连接会把编号翻成对方不认的值，互相破坏。所以置真必须发生在外层调用点。
+
+生产端侧不受影响：`AuxiliaryProcessProxy::didFinishLaunching` 在 UI 进程里调 `createServerConnection`，而 UI 进程是未打补丁的 16.1，本设计不修改它。
+
+### 5.3 实现方式
+
+给 `IPC::Connection` 加一个私有 `bool` 成员和一个 setter：
+
+```cpp
+// Connection.h，与 m_isServer 同区域（:583 附近）
+void setTranslatesLegacyMessageNumbers() { m_translatesLegacyMessageNumbers = true; }
+bool translatesLegacyMessageNumbers() const { return m_translatesLegacyMessageNumbers; }
+...
+bool m_translatesLegacyMessageNumbers { false };
+```
+
+在 `AuxiliaryProcess.cpp:108` 之后、`:110` 的 `open` 之前调用：
+
+```cpp
+m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
+m_connection->setTranslatesLegacyMessageNumbers();
+initializeConnection(m_connection.get());
+m_connection->open(*this);
+```
+
+放在 `open` 之前是必须的：`open` 会走 `platformOpen`，在 client 分支里立刻构造并发出 `InitializeConnection`（`ConnectionCocoa.mm:186-192`）。如果标志在 `open` 之后才置真，第一条消息就已经带着未翻译的编号出去了。
+
+为什么选 setter 而不是给工厂加默认参数：`createClientConnection(Identifier)` 是 public 静态工厂（`Connection.h:300`），加默认参数会让另外 6 个调用点静默获得新能力，读代码看不出差别。setter 在调用点显式，且不影响已有 7 个调用点的签名。
+
+为什么不把标志并进 `Identifier`：`Identifier` 同时用于 server 侧（`createServerConnection`），并且 `Connection::identifier()`（`ConnectionCocoa.mm:583-586`）按 `m_isServer` 从两个端口里挑一个来构造它，加字段会改变结构体宽度与比较语义。
+
+### 5.4 发方向的落点
+
+`Connection::sendMessageImpl`（`Connection.cpp:599`）是发方向上所有路径的汇聚点：`sendMessage`（`:590`）、`sendMessageWithAsyncReply`（`:716`）、`sendSyncReply`（`:749`）、`sendSyncMessage`（`:915`）都调它。翻译放在这里，放在入队之前：
+
+```cpp
+Error Connection::sendMessageImpl(UniqueRef<Encoder>&& encoder, OptionSet<SendOption> sendOptions, std::optional<Thread::QOS> qos)
+{
+    if (!isValid())
+        return Error::InvalidConnection;
+    ...
+```
+
+在 `:653` 的 `Locker locker { m_outgoingMessagesLock };` 之前、`m_outgoingMessages.append(WTFMove(encoder))` 之前重写编码器缓冲区。
+
+为什么必须重写缓冲区而不是改 `Encoder` 成员：`Encoder::encodeHeader`（`Encoder.cpp:162-167`）在构造函数（`:67-72`）里就把三项写进缓冲区，之后再改 `m_messageName` 成员不影响已写入的字节。这一点是硬约束。
+
+因此更稳妥的做法是在 `Encoder` 上加一个 `void setEncodedMessageName(MessageName)`，由它按 `alignof` 推导偏移并重写缓冲区，而不是在 `Connection` 里手写 `+2`。理由见第 5.5 节。
+
+关于 `:618` 的 `WrappedAsyncMessageForTesting` 分支：该分支把原 encoder 整体包进一条新的同步消息（`wrapForTesting`，`Encoder.cpp:126-139`，用 `*this << original->span()` 把原字节作为一块 span 拷进去），再递归调 `sendSyncMessage` 发出去。翻译放在这个分支**之前**，则被包裹的那条内层消息的编号在包裹前已翻译，外层 `WrappedAsyncMessageForTesting` 的编号由随后递归进入 `sendMessageImpl` 的那次调用翻译，两层都正确。放在之后则漏掉内层。所以顺序是：先翻译，再判断是否包裹。
+
+这条分支只在 `isMainRunLoop() && m_inDispatchMessageMarkedToUseFullySynchronousModeForTesting` 时触发（`Connection.cpp:618`），并且要求 `m_fullySynchronousModeIsAllowedForTesting`（`:1426`），属于测试路径。生产路径不会进入，但顺序仍然按正确性要求排。
+
+### 5.5 收方向的落点
+
+收方向有一个容易踩错的位置。`InitializeConnection` 的判断不在 `Connection::processIncomingMessage`（`Connection.cpp:1034`）里，而在 `ConnectionCocoa.mm` 的 `Connection::receiveSourceEventHandler`：
+
+```
+$ grep -n 'createMessageDecoder(header\|messageName() == MessageName::InitializeConnection' Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm
+537:    std::unique_ptr<Decoder> decoder = createMessageDecoder(header, buffer.size());
+545:    if (decoder->messageName() == MessageName::InitializeConnection) {
+```
+
+`:545` 这个分支决定 `m_isConnected` 与 `m_sendPort` 是否被设置，也就是本次要修的那个握手。如果翻译放在 `processIncomingMessage`（`:1034`），那条消息在 `:545` 就已经用 16.1 的编号比较过一次，分支照样跳过，等于没修。
+
+**正确落点：`ConnectionCocoa.mm:537` 的 `createMessageDecoder` 之后、`:545` 的比较之前。** 这个位置同时拿得到 `this`（`Connection` 成员函数）与 `decoder`，是收方向上唯一既能看到连接身份又能改消息名的位置。
+
+`Decoder` 由自由函数 `createMessageDecoder(mach_msg_header_t*, size_t)`（`ConnectionCocoa.mm:379`）构造，该函数拿不到 `Connection`，三个返回点（`:397` 简单消息、`:445` OOL、`:460` 带附件）都是 `Decoder::create(...)`。所以「在 Decoder 构造函数里无条件翻译」是错误实现，会把 GPU 与 Networking 连接的消息一起翻。
+
+`Decoder::messageName()` 是 `const`（`Decoder.h:89`），`m_messageName` 私有（`Decoder.h:181`），需要新增一个能改名的入口，例如：
+
+```cpp
+// Decoder.h，public 区
+void setMessageName(MessageName name) { m_messageName = name; }
+```
+
+`Decoder.cpp:89-92` 是读入 `m_messageName` 的位置，可以在这里保留原值不动，由 `receiveSourceEventHandler` 按标志决定是否覆盖。这样「解码器原样反映线上的字节，翻译是连接层的决定」这个职责划分是清楚的。
+
+### 5.6 编号布局与为什么不能写死偏移
+
+`Encoder::encodeHeader` 写三项（`Encoder.cpp:162-167`）：
+
+```cpp
+*this << defaultMessageFlags;   // static constexpr uint8_t = 0，Encoder.cpp:42
+*this << m_messageName;         // MessageName : uint16_t
+*this << m_destinationID;       // uint64_t
+```
+
+`uint8_t` 与 `uint16_t` 走 `ArgumentCoder` 的 `std::is_arithmetic_v` 分支（`Source/WTF/wtf/ArgumentCoder.h:58-61`），调 `Encoder::encodeObject`（`Encoder.h:132-137`），后者调 `encodeSpan`（`Encoder.h:121-130`），后者用 `grow(alignof(T), size)`；`grow`（`Encoder.cpp:181-191`）先 `roundUpToAlignment(m_bufferSize, alignment)` 再 `memsetSpan` 填零补齐。
+
+由此推出布局：
+
+| 字段 | 类型 | 对齐 | 偏移 |
+| --- | --- | --- | --- |
+| `defaultMessageFlags` | `uint8_t` | 1 | 0 |
+| 补齐 | — | — | 1 |
+| `m_messageName` | `uint16_t` | 2 | 2–3 |
+| 补齐 | — | — | 4–7 |
+| `m_destinationID` | `uint64_t` | 8 | 8–15 |
+
+收方向对称：`Decoder::decodeSpan`（`Decoder.h:210-217`）用 `roundUpToMultipleOf<alignof(T)>` 算同一个位置。
+
+要强调的是这张表是**由 `alignof` 与 `grow` 的补齐规则推导出来的，没有在设备上实测**。实现时应写成按 `alignof(MessageName)` 推导偏移的形式，不写死字面量 2，这样即使将来头部字段顺序或类型变化，偏移仍然正确。
+
+`msgh_id` 不需要参与：`ConnectionCocoa.mm:295` 写 `header->msgh_id = messageBodyIsOOL ? outOfLineBodyMessageID : inlineBodyMessageID;`，这两个都是常量（`inlineBodyMessageID`/`outOfLineBodyMessageID`），与消息名无关。
+
+### 5.7 翻译为什么不改变载荷
+
+`MessageName` 只出现在头部第 2–3 字节。载荷编码由 `ArgumentCoder` 对具体参数类型做序列化，不引用 `MessageName`。因此改写这两个字节不影响载荷偏移。
+
+唯一耦合点是消息体里显式编码了 `MessageName` 的字段，18.3 的 `WrappedAsyncMessageForTesting` 属于这一类但它是外层消息名（第 5.4 节已处理）。`SyncRequestID` 与 `destinationID` 是独立字段，不受影响。
+
+## 6. 转换层与载荷层的关系
+
+### 6.1 两层各自解决什么
+
+编号层只解决「这条消息叫什么」。载荷层解决「这条消息里的参数怎么解码」，两者是串联关系，不是替代关系。
+
+编号翻译修好的是 `Connection::m_isConnected` 与 `m_sendPort` 的建立（第 5.5 节），以及让 `ReceiverName` 正确归位：`Decoder::messageReceiverName()` 由 `receiverName(m_messageName)` 推导（`Decoder.h:88`），`processIncomingMessage` 开头就断言 `message->messageReceiverName() != ReceiverName::Invalid`（`Connection.cpp:1036`）。
+
+编号对齐之后，消息才会被派发到正确的 `MessageReceiver`，然后才轮到载荷层：那一步要解参数，参数类型是 16.1 与 18.3 各自编译出来的结构体布局。两层都通过，一条消息才算真正被处理。
+
+### 6.2 编号层通过后立刻暴露的载荷层问题
+
+编号对齐保证了「消息被送到正确的接收者」，但 16.1 的接收者会按 16.1 的序列化格式读参数。两版之间的参数类型不兼容处会导致解码失败、字段错位或值被误读。这些属于载荷层，本文不处理，但要指出一个已经量化的点：
+
+**同步/异步分区位置在两版不同，并且有 19 条同名消息的性质在两版之间翻转。** 16.1 的判定是 `return name >= MessageName::GPUConnectionToWebProcess_EnsureAudioSession;`（`Names16_correct.h:3369-3372`），阈值 2899；18.3 用 `FirstSynchronous`（`Names18_correct.h:5785-5788`），阈值 3838。把两张表对齐后逐条比较：
+
+```
+flips 19
+  RemoteAudioDestinationManager_CreateAudioDestination     18async->16sync
+  RemoteBuffer_MapAsync                                    18async->16sync
+  RemoteDevice_CreateComputePipelineAsync                  18async->16sync
+  RemoteDevice_CreateRenderPipelineAsync                   18async->16sync
+  RemoteDevice_PopErrorScope                               18async->16sync
+  RemoteGraphicsContextGL_CreateBuffer                     18async->16sync
+  RemoteGraphicsContextGL_CreateFramebuffer                18async->16sync
+  RemoteGraphicsContextGL_CreateProgram                    18async->16sync
+  RemoteGraphicsContextGL_CreateQuery                      18async->16sync
+  RemoteGraphicsContextGL_CreateRenderbuffer               18async->16sync
+  RemoteGraphicsContextGL_CreateSampler                    18async->16sync
+  RemoteGraphicsContextGL_CreateShader                     18async->16sync
+  RemoteGraphicsContextGL_CreateTexture                    18async->16sync
+  RemoteGraphicsContextGL_CreateTransformFeedback          18async->16sync
+  RemoteGraphicsContextGL_CreateVertexArray                18async->16sync
+  RemoteQueue_OnSubmittedWorkDone                          18async->16sync
+  RemoteRenderingBackend_MarkSurfacesVolatile              18async->16sync
+  RemoteShaderModule_CompilationInfo                       18async->16sync
+  WebPageProxy_ShowPDFContextMenu                          18async->16sync  g18=ENABLE(PDF_PLUGIN) && PLATFORM(MAC)
+```
+
+这 19 条在 18.3 是异步消息，翻成 16.1 编号后落在 16.1 的同步区，16.1 会把它们当同步消息处理（`Connection::dispatchMessage` 在 `Connection.cpp:1448-1451` 按 `message->isSyncMessage()` 分流到 `dispatchSyncMessage`，后者 `:1239` 起，第一步就解 `SyncRequestID`），而消息体里没有这个字段，解码失败。前 18 条的接收者是 `Remote*`（GPU 与 Networking 侧），最后一条 `WebPageProxy_ShowPDFContextMenu` 在 18.3 里被 `ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 包住（`Names18_correct.h` 该条目上方），iOS 构建不包含它，因此实际只有 18 条在 iOS 上成立。
+
+这个结果是编号层单独无法解决的：即使编号对齐，这 18 条消息仍会因为同步性质误判而被判非法并发回 `didReceiveInvalidMessage`。处理方式是载荷层的一部分（在编号表里为这类消息单独标注同步性质，或干脆不翻译这几条并在发送侧降级），本文不展开。
+
+### 6.3 范围内不需要转换的那一类
+
+helper 之间的连接（WebContent 到 GPU、WebContent 到 Networking）两端都是 18.3，编号自洽，标志为假，字节原样传输（第 5.2 节）。这条边界是编号层与载荷层共同的前提：只有 helper→UI 这条连接同时需要两层，其余连接两层都不需要。
+
+## 7. 未验证项
+
+**消息编号的真实编译值没有取到。** 本文 18.3 的所有编号都是把 `MessageNames.h` 当平坦下标读出来的，而 18.3 的生成器会输出 `#if` 条件（`Names18_correct.h` 共 703 个 `#if`），被条件剔除的条目会让后续编号前移。举一个本机算过的例子：`InitializeConnection` 在 18.3 的平坦下标是 3076，但它被 `#if PLATFORM(COCOA)` 包住（`Names18_correct.h:4405-4407`），且它之前有大量位于 `PLATFORM(MAC)`、`PLATFORM(GTK)`、`OS(LINUX)` 等 iOS 上为假的分支，iOS 编译后的真实编号小于 3076。
+
+按本机一份近似求值（未知宏按真/假两种极端各算一遍）得到的区间是：总条目 3416–3972，`InitializeConnection` 2555–2988。这个区间只用来说明「平坦下标不等于编译值」，不是可用编号。
+
+把已知在 iOS 上为假的守卫（`OS(LINUX)`、`PLATFORM(MAC)`、`PLATFORM(GTK)`、`PLATFORM(WPE)`、`OS(WINDOWS)`、`USE(LIBWPE)`、`ENABLE(PDF_PLUGIN) && PLATFORM(MAC)`）一律当作剔除、其余未知宏当作保留，重算得到：具名条目 4023 个，`InitializeConnection` 3026，`GPUConnectionToWebProcess_EnsureAudioSession` 3780。这三个数同样不是可用编号（未知宏按「保留」处理会高估条目数），但它们说明 3076 这个平坦下标在 iOS 上至少前移 50 位，也说明第 7 节下文那条「5 条同号」的白名单在真实构建里就失效了 2 条。这些数字一并留作实现阶段的交叉校验参考。
+
+因此实现必须遵守一条：18.3 侧一律用 `MessageName::` 符号常量，由编译器赋值，不写任何字面量。表里 18.3 一侧的值应当是符号，16.1 一侧是真实数字（16.1 的生成器不输出 `#if`，`Names16_correct.h` 里 `#if` 数为 0，平坦下标就是编译值）。
+
+要拿到 18.3 在 iOS 上的确切编号，只有两条路：读真实构建产物里的 `MessageNames.h`，或用设备上已安装的 18.3 framework 反查。现有工作流的 `Upload diagnostics` 只上传 `diagnostics/` 目录，不含 `MessageName` 枚举，所以当前构建拿不到这份数据。
+
+**同号条目不能省，但「同号」要先按 iOS 编译值校正。** 用两份枚举的平坦下标算，同名消息 2807 条，其中下标相同的仅 5 条：
+
+```
+AudioSessionRoutingArbitratorProxy_BeginRoutingArbitrationWithCategory   0
+AudioSessionRoutingArbitratorProxy_EndRoutingArbitration                 1
+AuthenticationManager_CompleteAuthenticationChallenge                    2
+AuxiliaryProcess_DidReceiveMemoryPressureEvent                           3
+AuxiliaryProcess_MainThreadPing                                          4
+```
+
+这 5 条里只有前 3 条的同号在 iOS 上成立。第 4 条 `AuxiliaryProcess_DidReceiveMemoryPressureEvent` 在 18.3 被 `#if OS(LINUX)` 包住（`Names18_correct.h:254-256`），iOS 构建把它剔除，于是它之后的条目整体前移一位：`AuxiliaryProcess_MainThreadPing` 在 16.1 是 4，在 iOS 上的 18.3 编译值是 3；`AuxiliaryProcess_DidReceiveMemoryPressureEvent` 本身在 iOS 上根本不存在。这与第 5 节「18.3 平坦下标不等于编译值」是同一个问题的具体实例，也正是不能把上表当成「同号可跳过」白名单的原因。
+
+**表项一条都不能省。** 表按 `MessageName::` 符号生成，不按数字生成。省掉所谓同号条目会让翻译逻辑里出现「同号免翻译」的特例分支；而上面这 5 条里已有 2 条在 iOS 上不再同号（一条被剔除、一条前移一位），说明这类特例随时会和真实编译值脱节。表项全部保留，翻译结果与原值相同即可，特例一个也不要写。
+
+**枚举必须由 `DerivedSources.make` 的 `MESSAGE_RECEIVERS` 生成。** 用 `Source/WebKit/**/*.messages.in` 通配会把 `Scripts/webkit/tests/` 下的测试接收者与几个未参与 iOS 构建的接收者算进去。本机先前的通配结果是 16.1 多 3 个文件、18.3 多 4 个文件，把 `InitializeConnection` 推后 4 位（2448 对 2444）。改动枚举生成方式后，全部数字都要重算。
+
+**两张表的规模与性质（用修正后的枚举）。** 18.3→16.1 与 16.1→18.3 各 2807 行；两侧键唯一、值唯一；往返映射零不匹配；键各自升序，但值**不单调**：18.3→16.1 有 10 处逆序（例如 `{738,2921}` 之后是 `{739,588}`），16.1→18.3 有 6 处。所以查找必须按 key 排序后二分，不能按下标推测，也不能假设「编号大致同增」。
+
+**聚合脚本本机未端到端执行。** 本机没有 ruby（第 2.3 节），聚合结果由脚本源码与 `UnifiedSources-output.xcfilelist` 交叉验证推出，没有实跑。第 3.1 节的「5 包、余量 5 个文件」是把 `SourceFile#<=>` 与 `BundleManager#addFile` 的分包规则重写成 python 后仿真得到的，同样没有实跑。
+
+**`libWebKitPlatform.a` 的符号是否全量进 `WebKit.framework` 未实测。** 本文只核对了链接关系（`:8472`）与没有 `-all_load`/`-force_load`（第 3.4 节）。如果实际构建里出现「函数已定义但链接后找不到」，需要用 `nm -gU WebKit.framework/WebKit | grep MessageNumberTranslation` 之类的命令确认，这一条留给实现阶段。
+
+**字节偏移未实测。** 第 5.6 节的偏移表由 `alignof` 与 `grow` 补齐规则推导。核对方法：在设备上让 helper 发一条已知消息，把消息体前 16 字节 dump 出来，确认第 0 字节是 flags、第 1 字节为 0、第 2–3 字节等于翻译后的消息号、第 8–15 字节是 `destinationID`。
+
+**19 条同步性质翻转里 `WebPageProxy_ShowPDFContextMenu` 在 iOS 上不成立这一判断**依据是它的 `#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 守卫（第 6.2 节），没有在真实 iOS 构建上核对这份枚举被剔除后的确切编号。
+
+## 取证环境
+
+18.3.1 的稀疏克隆（本机执行过，用于取本文全部行号）：
+
+```sh
+mkdir -p /tmp/wk183 && cd /tmp/wk183
+git init -q .
+git remote add origin https://github.com/WebKit/WebKit.git
+git config core.sparseCheckout true
+git config extensions.partialClone origin
+git config remote.origin.promisor true
+git config remote.origin.partialclonefilter blob:none
+printf '/Source/WebKit/Platform/\n/Source/WebKit/Sources.txt\n/Source/WebKit/SourcesCocoa.txt\n/Source/WebKit/Scripts/\n/Source/WebKit/Shared/AuxiliaryProcess.cpp\n/Source/WebKit/Shared/AuxiliaryProcess.h\n/Source/WebKit/WebProcess/WebProcess.cpp\n/Source/WebKit/NetworkProcess/NetworkProcess.cpp\n/Source/WebKit/GPUProcess/GPUConnectionToWebProcess.cpp\n/Source/WebKit/WebProcess/Network/NetworkProcessConnection.cpp\n/Source/WebKit/Shared/IPCConnectionTester.cpp\n/Source/WebKit/WebProcess/Inspector/WebInspector.cpp\n/Source/WebKit/ModelProcess/ModelConnectionToWebProcess.cpp\n/Source/WebKit/Configurations/WebKit.xcconfig\n/Source/WebKit/Configurations/WebKitPlatform.xcconfig\n/Source/WebKit/WebKit.xcodeproj/project.pbxproj\n' > .git/info/sparse-checkout
+git fetch --depth 1 --filter=blob:none origin 'refs/tags/releases/Apple/Safari-18.3.1-iOS-18.3.2'
+git checkout -f FETCH_HEAD
+git rev-parse HEAD   # 1b670a0c038dd7c909cca0c46346670f43c6334d
+```
+
+`project.pbxproj` 的相位统计用下面这段（`phase()` 返回某个 build phase 的成员行）：
+
+```python
+lines = open('WebKit.xcodeproj/project.pbxproj').read().split('\n')
+def phase(marker):
+    i = [k for k, l in enumerate(lines) if marker in l][0]
+    out = []
+    for j in range(i + 1, len(lines)):
+        if ');' in lines[j]:
+            break
+        out.append(lines[j].strip())
+    return out
+phase('7B9FC59A28A28F87007570E7 /* Sources */ = {')   # WebKitPlatform Sources
+phase('8DC2EF540486A6940098B216 /* Sources */ = {')   # WebKit Sources
+phase('8DC2EF560486A6940098B216 /* Frameworks */ = {')# WebKit Frameworks
+```
+
+头文件登记统计用同一份 pbxproj 加 `git show HEAD:<path>` 读每个被编译源文件的 `#include "X.h"`，按「同目录是否存在」「是否出现在 `PBXFileReference`」分类，结果见第 3.2 节。
+
+16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的枚举体里还有四个非消息名条目：`FirstSynchronous`（占 3838，故 0–4085 里唯一的空洞是 3838）、`LastAsynchronous = FirstSynchronous - 1`、`Count = 4087`、`Last = Count - 1`。本文第 5 节与第 6、7 节的全部计数都取自这两份文件。
+
+**口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3140 个消息名」「2807 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3141 条、4087 条（18.3 侧把 `Last` 计入）、同名 2808 条。两套口径的差值恰好是这一个别名，`only16`/`only18` 与其余结论完全一致。tower 早先给的 3141 / 4087 / 2808 就是含别名的口径，本文统一用排除别名的口径，因为映射表里不会给别名单独建项。
