@@ -16,8 +16,8 @@
 # dereferences a null bundle and takes the host process down with
 # EXC_BAD_ACCESS at 0x8. That was the crash in WeChat-2026-11-24-212444.ips.
 #
-# XPCServices/ is deliberately excluded from WebKit.framework, so exactly one
-# copy of each .xpc bundle exists on the device: the one the deb installed.
+# XPCServices/ is deliberately excluded from WebKit.framework, so /var/jb carries
+# one copy of each .xpc bundle, the deb's; the system's own stays in /System.
 # The reason often given for that, that launchd resolves the helpers through
 # DYLD_FRAMEWORK_PATH and would therefore launch a copied stub, is an
 # UNVERIFIED premise: the transfer of DYLD_* to an XPC service under the
@@ -257,7 +257,7 @@ copy_framework_tree() {
 }
 
 prune_xpc_services() {
-    # Keep one copy of each .xpc bundle on the device: the one the deb
+    # Keep one copy of each .xpc bundle under /var/jb: the one the deb
     # installed. The commonly cited reason, that launchd resolves the helpers
     # through DYLD_FRAMEWORK_PATH and would launch a copied stub, is an
     # unverified premise: where launchd and xpcproxy apply the __XPC_ prefix

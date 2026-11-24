@@ -1,6 +1,6 @@
 # helper 的 framework 路径与覆盖目录：三处路径事实、dyld 的判定顺序、以及合并成一份的方案
 
-本文回答一个问题：`.xpc` 自身携带的 `LC_DYLD_ENVIRONMENT` 指向一个目录、basebin 的 `__XPC_DYLD_FRAMEWORK_PATH` 指向另一个目录时，一个 WebKit helper 进程实际加载哪一份 `WebKit`，以及要让任何进程都只加载一份需要改哪些文件。
+本文回答一个问题：`.xpc` 自身携带的 `LC_DYLD_ENVIRONMENT` 指向一个目录、basebin 的 `__XPC_DYLD_FRAMEWORK_PATH` 指向另一个目录时，一个 WebKit helper 进程实际加载哪一份 `WebKit`，以及要让同一进程树里的 UI 进程与 helper 读到同一份需要改哪些文件。
 
 它对应 `docs/ios16-all-18.3-xpc-endpoint-audit.md` 第五节表格的第 10 行。审计文档那一行只记录结论，机制与实现理由写在本文。
 
@@ -10,30 +10,33 @@
 
 ## 一、三处路径事实
 
-改动前，磁盘上有三处各自声明了一个目录，其中两处互相矛盾。
+磁盘上有三处各自声明了一个目录。下面是本分支当前的取值，改动前的取值在每处末尾注出。
 
-**第一处，`.xpc` 二进制内嵌的搜索目录。** `patches/ios18-public-sdk-xpc-main.patch` 第 12 行（改动前）给 `Source/WebKit/Configurations/BaseXPCService.xcconfig` 增加：
-
-```
-WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=/var/jb/usr/lib;
-```
-
-该变量经 `OTHER_LDFLAGS` 进入链接命令行，链接器把两条 `-dyld_env` 写成 `.xpc` 主可执行文件的 `LC_DYLD_ENVIRONMENT` 加载命令。它是链接期常量，产物在 CI 上生成，设备侧无法改写，只有重新链接才能改。
-
-**第二处，deb 的安装位置。** `scripts/package-webkit-device-deb.sh:168` 定义 `INSTALL_FRAMEWORKS_DIR="${PREFIX}/Library/Frameworks"`，同文件 `:155` 在 rootless 模式下把 `PREFIX` 设为 `/var/jb`。所以 deb 把五个 framework 装进 `/var/jb/Library/Frameworks`，与第一处**是同一个目录**。只安装 deb、不跑覆盖脚本时，这两处并不矛盾。
-
-**第三处，覆盖脚本建立并复制到的目录。** `scripts/install-webkit-override.sh` 改动前的 `:50`、`:51`、`:52`、`:53`：
+**第一处，`.xpc` 二进制内嵌的搜索目录。** `patches/ios18-public-sdk-xpc-main.patch:16` 给 `Source/WebKit/Configurations/BaseXPCService.xcconfig` 增加一个持路径的变量，`:22` 的两条 `-dyld_env` 都引用它：
 
 ```
+WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride;
+
+WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib;
+```
+
+该变量经 `OTHER_LDFLAGS` 进入链接命令行，链接器把两条 `-dyld_env` 写成 `.xpc` 主可执行文件的 `LC_DYLD_ENVIRONMENT` 加载命令。它是链接期常量，产物在 CI 上生成，设备侧无法改写，只有重新链接才能改。**改动前**这一行是同文件第 12 行的 `-Wl,-dyld_env,DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=/var/jb/usr/lib`，只有 deb 安装目录，没有覆盖目录这一项。
+
+**第二处，deb 的安装位置。** `scripts/package-webkit-device-deb.sh:168` 定义 `INSTALL_FRAMEWORKS_DIR="${PREFIX}/Library/Frameworks"`，同文件 `:155` 在 rootless 模式下把 `PREFIX` 设为 `/var/jb`。deb 把五个 framework 装进 `/var/jb/Library/Frameworks`。这一处没有改动。它与第一处的关系变了：**改动前**第一处也是这个目录，两者相同；**改动后**第一处把 `/var/jb/Library/WebKitOverride` 放在首位、本处退为该搜索列表的第二项（见第三节）。
+
+**第三处，覆盖脚本建立并复制到的目录。** `scripts/install-webkit-override.sh:66` 写成整条字面量，`:75` 到 `:77` 由它派生，`scripts/check-webkit-override.sh:27` 用同一字面量：
+
+```
+OVERRIDE_ROOT=/var/jb/Library/WebKitOverride
+
 SOURCE_FRAMEWORKS=${JBROOT}/Library/Frameworks
 SOURCE_LIBRARIES=${JBROOT}/usr/lib
-OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride
 OVERRIDE_LIBRARIES=${OVERRIDE_ROOT}/usr/lib
 ```
 
-它从第二处那份复制出第二份副本，放进 `/var/jb/Library/WebKitOverride`。basebin 的搜索路径补丁 `dopamine-basebin/0001-systemhook-set-search-paths.patch:92`、`:93` 把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 指向这个目录。
+它从第二处那份复制出第二份副本。basebin 的搜索路径补丁 `dopamine-basebin/0001-systemhook-set-search-paths.patch:92`、`:93` 把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 指向这个目录。**改动前**这一处写作 `OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride`（当时的 `:52`），与第一处的 `/var/jb/Library/Frameworks` 不是同一个目录。
 
-**矛盾在这里产生。** 装了 deb 又跑了覆盖脚本之后，五个 framework 在磁盘上有两份副本：`/var/jb/Library/Frameworks`（deb 装的原件）与 `/var/jb/Library/WebKitOverride`（复制件）。`.xpc` 内嵌的是前者，basebin 给 app 进程的是后者。哪一份被加载取决于下面第二节的判定顺序，而不取决于哪一份更新。
+**改动前的矛盾，以及它现在在哪里。** 装了 deb 又跑了覆盖脚本之后，五个 framework 在磁盘上有两份副本：`/var/jb/Library/Frameworks`（deb 装的原件）与 `/var/jb/Library/WebKitOverride`（复制件）。改动前 `.xpc` 内嵌列表只有前者，basebin 给 app 进程的只有后者，所以两侧各读一份，哪一份被加载取决于第二节的判定顺序而不取决于哪一份更新。改动后 `.xpc` 内嵌列表以覆盖目录开头、deb 目录作后备，与 basebin 指向同一份，两侧读同一份。
 
 ---
 
@@ -71,7 +74,7 @@ for (const char* list : { list1, list2 }) {
 
 ### 第一个命中的候选即胜出
 
-`dyld/Loader.cpp` 的 `getLoader` 对每个候选做一次磁盘查找，覆盖目录与原始路径都在同一条候选链上。测中时执行 `result = ldr; stop = true;`（`:574` 与相邻的 `:577` 打印 `found:` 行），不再尝试后面的候选。原始路径（例如 `/System/Library/Frameworks/WebKit.framework/WebKit`）排在搜索目录之后，所以只要搜索目录里存在同名镜像，磁盘副本就顶替原始路径。
+`dyld/Loader.cpp` 的 `getLoader` 对每个候选做一次磁盘查找，覆盖目录与原始路径都在同一条候选链上。测中时执行 `result = ldr; stop = true;`：对已加载的同路径镜像在 `:574`，对这次新加载的命中在 `:737-740`。两处都表示第一条命中的候选即终止搜索，不再尝试后面的候选。原始路径（例如 `/System/Library/Frameworks/WebKit.framework/WebKit`）排在搜索目录之后，所以只要搜索目录里存在同名镜像，磁盘副本就顶替原始路径。
 
 ### 这套机制在本机上是否算已验证
 
@@ -103,19 +106,19 @@ WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride;
 WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib;
 ```
 
-覆盖目录在首位，并且第二节已确认「第一命中的候选胜出」，所以只要覆盖目录里存在这五个 framework，任何进程对每个 framework 都只会解析到覆盖目录里那一份。`install-webkit-override.sh` 的 `preflight_sources` 在缺少任何一个 framework 时直接退出，所以「覆盖目录存在」与「五个 framework 齐全」是同一件事。
+覆盖目录在首位，并且第二节已确认「第一命中的候选胜出」，所以只要覆盖目录里存在这五个 framework，拿到覆盖目录的进程对每个 framework 都只会解析到那一份。`install-webkit-override.sh` 的 `preflight_sources` 在缺少任何一个 framework 时直接退出，所以「覆盖目录存在」与「五个 framework 齐全」是同一件事。哪些进程拿得到覆盖目录，见下面这条结论的限定。
 
 后备项不是妥协，它保留两个覆盖目录**故意不含**的文件：`/var/jb/usr/lib/systemhook.dylib`（basebin 注入进程的库，`docs/dopamine-basebin-webkit-override.md:342` 记录设备实测里它的 `found:` 就落在这一条）与 `CydiaSubstrate`、`AltList` 这类别的包的 framework。它们不与共享缓存重名，dyld 的 `isOverridablePath` 不会把它们当成替换项，所以后备项不会把系统库换掉。
 
-结论可以写成一条不依赖覆盖目录在不在的性质：**对五个 WebKit framework，无论覆盖目录在不在，任何进程只解析到一个绝对路径**。覆盖目录在时是 `/var/jb/Library/WebKitOverride/...`，不在时是 `/var/jb/Library/Frameworks/...`，不会出现两份同时被加载。
+结论可以写成：**`.xpc` 进程无论覆盖目录在不在都只解析到一个 `/var/jb` 下的绝对路径** — 在时是 `/var/jb/Library/WebKitOverride/...`，不在时是 `/var/jb/Library/Frameworks/...`。后者成立是因为 dyld 对不存在的候选跳过并继续（`dyld-1042.1` 的 `Loader.cpp:688-689` 注释「if possiblePath not a file and not in dyld cache, skip to next possible path」，以及 `DyldProcessConfig.cpp:1694-1716` 走完第一条列表后继续第二条），所以首项不存在只是落空，不是加载失败。app 进程只有 basebin 给的那一个目录（见下面要求二），覆盖目录不在时它没有 `/var/jb` 下的候选，加载的是共享缓存里那一份，也就是 16.1 而不是 deb 装的 18.3。所以「只装 deb、不跑覆盖脚本」不是一种 UI 与 helper 同代的配置；本改动支持的配置是 deb 加覆盖目录，那一配置下两个进程树都读覆盖目录里的同一份。
 
-磁盘上仍有两份副本。deb 安装的那份是覆盖目录的来源，`install-webkit-override.sh` 从它复制并保留它不动。要求限制的是「被任何进程加载」，不是「磁盘上只存在一份」；删掉 deb 那份会让覆盖目录失去来源，也会让无覆盖目录时的回退失效。
+磁盘上仍有两份副本。deb 安装的那份是覆盖目录的来源，`install-webkit-override.sh` 从它复制并保留它不动。要求限制的是「同一份被哪个进程读到」，不是「磁盘上只存在一份」；删掉 deb 那份会让覆盖目录失去来源，也会让无覆盖目录时 `.xpc` 的第二项失去着落。
 
 ### 要求二：替换范围仍限制在越狱环境内
 
 三条事实共同保证这一点。
 
-搜索路径里只有越狱根下的两个目录，没有任何 `/System` 路径。系统进程不带这两个变量：`systemhook` 只在 `spawn_exec_hook_common` 里写入（`dopamine-basebin/0001-systemhook-set-search-paths.patch` 的表在 `:100-104`），而它只 hook `posix_spawn` 与 `execve`。即使某个进程拿到了这两个变量，dyld 还要通过 `isOverridablePath` 才会用磁盘副本顶替共享缓存项，那道判定由本仓的 dyldhook 补丁提供，不装它时磁盘副本只在共享缓存没有该镜像时才被加载。
+搜索路径里只有越狱根下的两个目录，没有任何 `/System` 路径。这两个变量的写入点在 `systemhook` 的 `spawn_exec_hook_common`（`dopamine-basebin/0001-systemhook-set-search-paths.patch` 的表在 `:100-104`），而它只 hook `posix_spawn` 与 `execve`，所以非越狱派生的系统进程拿不到它们。拿到它们的进程仍然受第二道门限制：dyld 要通过 `isOverridablePath` 才会用磁盘副本顶替共享缓存项，那道判定由本仓的 dyldhook 补丁提供，不装它时磁盘副本只在共享缓存没有该镜像时才被加载。
 
 覆盖目录的内容是五个 WebKit framework 与两个 WebKit 自己的 dylib，没有系统库。`/var/jb/usr/lib` 里与共享缓存重名的 `liblzma.5.dylib` 与 `libmrc.dylib` 仍然在 library 搜索路径上（后备项），但同理需要 `isOverridablePath` 放行才会顶替缓存项，而这两个文件没有放进覆盖目录。
 
