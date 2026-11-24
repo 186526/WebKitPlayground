@@ -520,20 +520,49 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 编号层只解决消息路由：它决定一条消息落到哪个 `MessageReceiver`。载荷层是另一件事，决定这条消息的参数能不能按对端的布局解出来。两版的参数签名差距是成规模的，不是个别例外。
 
-按 receiver 聚合全树比对 16.1 与 18.3 的消息，结果是：仅 16.1 有 340 条、仅 18.3 有 777 条、同名但参数签名实质变化 572 条。也就是说，即便编号翻译让每一条消息都落到正确的接收者，绝大多数消息的参数仍按另一套结构体布局编码。
+按 receiver 聚合全树比对 16.1 与 18.3 的消息，结果是：仅 16.1 有 285 条、仅 18.3 有 924 条。也就是说，即便编号翻译让每一条消息都落到正确的接收者，两版各自独有的大批消息在对面没有接收者，参数布局更无从对上。
 
 按接收者拆开看几个主要通道：
 
 | 接收者 | 16.1 消息数 | 18.3 消息数 | 共同 | 仅 16.1 | 仅 18.3 |
 | --- | --- | --- | --- | --- | --- |
 | `WebPage` | 402 | 492 | 370 | 32 | 122 |
-| `WebPageProxy` | 343 | 306 | 261 | 82 | 45 |
-| `DrawingArea` | 11 | 13 | — | 3 | 5 |
-| `EventDispatcher` | 7 | 6 | — | 2 | 1 |
+| `WebPageProxy` | 343 | 358 | 307 | 36 | 51 |
+| `DrawingArea` | 11 | 13 | 8 | 3 | 5 |
+| `DrawingAreaProxy` | 8 | 6 | 6 | 2 | 0 |
+| `EventDispatcher` | 7 | 6 | 5 | 2 | 1 |
 
-参数签名的实质变化条数未列入本表：按不同口径（是否比较返回值、是否比较属性、是否把编译条件差异计入）会得到不同结果，本文未取得一组可复现的单一口径值。上表五列由 `messages -> Receiver [: Base | Modifier*]` 解析全部 `.messages.in` 得出，可逐项复现。
+**本表的计数口径。** 一个接收者的「消息」是该接收者在生成枚举里的声明，不含生成器为异步带回复消息补出来的 `<Name>Reply` 条目：`Source/WebKit/Scripts/webkit/model.py:116-124` 的 `generate_global_model` 对每条 `reply_parameters` 非空且非 `Synchronous` 的消息追加一条 `Message(name='%s_%sReply' % (receiver.name, message.name), ...)`。判定某个 `<Name>Reply` 是合成条目的条件是「去掉 `Reply` 后的 `<Name>` 仍是同一接收者的另一条消息」，与源码一一对应；只按 `Reply` 后缀删会误删真实声明（18.3 的 `WebPageProxy` 里 `HandleMessageWithAsyncReply` 与 `SendMessageToWebViewWithReply` 就是两条真实声明）。从枚举头文件按此规则重算的命令：
 
-`WebPage` 与 `WebPageProxy` 是主文档通道，两条合计仅 16.1 有 114 条、仅 18.3 有 167 条。这两条通道上的消息几乎覆盖页面加载与渲染的全部往返，载荷层不解决它们，页面就没有内容。
+```sh
+python3 - <<'PY'
+def names(p):
+    t = open(p).read(); s = t[t.index('enum class MessageName'):]; s = s[:s.index('\n};')]
+    out = []
+    for l in s.splitlines()[1:]:
+        l = l.split('//')[0].strip().lstrip(',').strip().rstrip(',').strip()
+        if l and not l.startswith('#'): out.append(l.split('=')[0].strip())
+    return [x for x in out if x not in {'FirstSynchronous','LastAsynchronous','Count','Invalid','Last'}]
+def recv(p):
+    d = {}
+    for x in names(p):
+        if '_' in x: r, m = x.split('_', 1); d.setdefault(r, set()).add(m)
+    return {r: {m for m in v if not (m.endswith('Reply') and m[:-5] in v)} for r, v in d.items()}
+a, b = recv('/tmp/Names16_correct.h'), recv('/tmp/Names18_correct.h')
+for r in ('WebPage','WebPageProxy','DrawingArea','DrawingAreaProxy','EventDispatcher'):
+    x, y = a.get(r,set()), b.get(r,set()); c = len(x & y)
+    print(r, len(x), len(y), c, len(x)-c, len(y)-c)
+A = {r + '_' + m for r, v in a.items() for m in v}
+B = {r + '_' + m for r, v in b.items() for m in v}
+print('全树', len(A - B), len(B - A))
+PY
+```
+
+这条规则用 Apple 自带的 `Source/WebKit/Scripts/webkit/parser.py` 解析 `DerivedSources.make` 列出的全部 211 个 `.messages.in` 逐项校验过：每个接收者解析出的声明集与按上表规则从枚举头文件得到的集合完全相等（211 个接收者全匹配，无一例外）。每行都满足「共同 + 仅 16.1 = 16.1 消息数」与「共同 + 仅 18.3 = 18.3 消息数」。
+
+参数签名的实质变化条数未列入本表：按不同口径（是否比较返回值、是否比较属性、是否把编译条件差异计入）会得到不同结果，本文未取得一组可复现的单一口径值。
+
+`WebPage` 与 `WebPageProxy` 是主文档通道，两条合计仅 16.1 有 68 条、仅 18.3 有 173 条。这两条通道上的消息几乎覆盖页面加载与渲染的全部往返，载荷层不解决它们，页面就没有内容。
 
 两个具体的形态差异，说明这类差距不是「字段加减」可以吸收的：
 
@@ -617,7 +646,7 @@ AuxiliaryProcess_MainThreadPing                                          4
 
 **19 条同步性质翻转里 `WebPageProxy_ShowPDFContextMenu` 在 iOS 上不成立这一判断**依据是它的 `#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 守卫（第 6.3 节），没有在真实 iOS 构建上核对这份枚举被剔除后的确切编号。
 
-**第 6.2 节的计数来自 M64 的 survey，本文未独立重算。** 其中「实质签名变化」一列因无法统一口径已从表格移除，`574` 与 `37` 两个数字按 reviewer-t1b 的复现分别更正为 `572` 与 `40`。
+**第 6.2 节的计数本轮由本文按第 6.2 节给出的规则从两份枚举头文件重算，并用 Apple 自带的 `parser.py` 解析全部 211 个 `.messages.in` 逐项校验过（211 个接收者全匹配）。** 早先版本取自 M64 的 survey；上一轮的 `574` 与 `37` 分别更正为 `572` 与 `40`，本轮的重新计算取代了这两个数字所在的段落：「实质签名变化」一列因无法统一口径已从表格移除，全树合计改为仅 16.1 有 285 条、仅 18.3 有 924 条。
 
 ## 取证环境
 
@@ -656,6 +685,6 @@ phase('8DC2EF560486A6940098B216 /* Frameworks */ = {')# WebKit Frameworks
 
 头文件登记统计用同一份 pbxproj 加 `git show HEAD:<path>` 读每个被编译源文件的 `#include "X.h"`，按「同目录是否存在」「是否出现在 `PBXFileReference`」分类，结果见第 3.2 节。
 
-16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4085。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，因此 0–4085 连续无空洞。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（值 4086，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4086` 与「最大编号 4085」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 7 节的枚举计数与第 6.3 节的 19 条翻转取自这两份文件；第 6.2 节的计数来源见 `:620`，第 5 节的调用点数取自源码检索。
+16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4085。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，因此 0–4085 连续无空洞。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（值 4086，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4086` 与「最大编号 4085」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 7 节的枚举计数与第 6.3 节的 19 条翻转取自这两份文件；第 6.2 节同样从这两份文件按第 6.2 节给出的规则重算，第 5 节的调用点数取自源码检索。
 
 **口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3140 个消息名」「2807 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3141 条、4087 条（18.3 侧把 `Last` 计入）、同名 2808 条。两套口径的差值恰好是这一个别名，`only16`/`only18` 与其余结论完全一致。tower 早先给的 3141 / 4087 / 2808 就是含别名的口径，本文统一用排除别名的口径，因为映射表里不会给别名单独建项。
