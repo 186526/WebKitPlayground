@@ -121,7 +121,7 @@ M63 的实测与 `AGENTS.md` 记过设备缺哪些工具：没有 `plutil`、`st
 
 ## 六、局限
 
-- **脚本从未在真机上跑过。** 设备在本轮编写期间不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：26 个场景、112 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形域缺失中止，以及崩溃排除的五条路径（读不出正文、after 列表失败、before 列表失败因而没有基线、读窗口外的报告只记不拦、读窗口内缺基线时连 A 也不给），外加两个理由的优先级（缺基线而 after 成功时取基线那一条，同一步 before 与 after 都失败时取另一条），每条断言检查退出码或日志里的关键行。
+- **脚本从未在真机上跑过。** 设备在本轮编写期间不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：26 个场景、115 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形域缺失中止，以及崩溃排除的五条路径（读不出正文、after 列表失败、before 列表失败因而没有基线、读窗口外的报告只记不拦、读窗口内缺基线时连 A 也不给），外加两个理由的优先级（缺基线而 after 成功时取基线那一条，同一步 before 与 after 都失败时取另一条），每条断言检查退出码或日志里的关键行。
 - `bash -n` 通过。`shellcheck` 在本机不可用（`which shellcheck` 无输出），**没有跑**，所以本节不声称它通过。
 - 因此下列事实只有 `AGENTS.md` 的间接依据，没有实测：`ps -Ao pid,ppid,comm` 在 iPadOS 16.1 上是否接受 ppid 列；`sudo lldb` 附着 helper 是否被允许；`image list -o -f` 的实际行格式（脚本按「路径是行末字段、可含空格」解析）。
 - 一个 helper 也可能在 lldb 附着前就退出。此时 framework 路径读不到，A 与 B 都不可达，脚本会给出对应的 `..._no_helper_framework_path_read` 而不是猜。
