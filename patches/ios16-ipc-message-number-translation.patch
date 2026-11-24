@@ -7146,3 +7146,39 @@ index 30487740bb..406748b661 100644
      initializeConnection(m_connection.get());
      m_connection->open(*this);
  }
+diff --git a/Source/WebKit/WebKit.xcodeproj/project.pbxproj b/Source/WebKit/WebKit.xcodeproj/project.pbxproj
+index e0202a335c..9da7258988 100644
+--- a/Source/WebKit/WebKit.xcodeproj/project.pbxproj
++++ b/Source/WebKit/WebKit.xcodeproj/project.pbxproj
+@@ -351,6 +351,7 @@
+ 		1AC1338618590C4600F3EC05 /* RemoteObjectRegistryMessages.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AC1338418590C4600F3EC05 /* RemoteObjectRegistryMessages.h */; };
+ 		1AC1415118AC47EE006C602C /* WKWebViewConfigurationPrivate.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AC1415018AC47EE006C602C /* WKWebViewConfigurationPrivate.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		1AC4C82916B876A90069DCCD /* MessageFlags.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AC4C82816B876A90069DCCD /* MessageFlags.h */; };
++		A1B2C3D42C00000100000002 /* MessageNumberTranslation.h in Headers */ = {isa = PBXBuildFile; fileRef = A1B2C3D42C00000100000001 /* MessageNumberTranslation.h */; };
+ 		1AC7537C183A9FDB0072CB15 /* PageLoadState.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AC7537A183A9FDB0072CB15 /* PageLoadState.h */; };
+ 		1AC75A1B1B3368270056745B /* HangDetectionDisabler.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AC75A1A1B3368270056745B /* HangDetectionDisabler.h */; };
+ 		1ACC50F21CBC381D003C7D03 /* WKOpenPanelParameters.h in Headers */ = {isa = PBXBuildFile; fileRef = 1ACC50F01CBC381D003C7D03 /* WKOpenPanelParameters.h */; settings = {ATTRIBUTES = (Public, ); }; };
+@@ -3660,6 +3661,7 @@
+ 		1AC1338418590C4600F3EC05 /* RemoteObjectRegistryMessages.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = RemoteObjectRegistryMessages.h; sourceTree = "<group>"; };
+ 		1AC1415018AC47EE006C602C /* WKWebViewConfigurationPrivate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WKWebViewConfigurationPrivate.h; sourceTree = "<group>"; };
+ 		1AC4C82816B876A90069DCCD /* MessageFlags.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MessageFlags.h; sourceTree = "<group>"; };
++		A1B2C3D42C00000100000001 /* MessageNumberTranslation.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MessageNumberTranslation.h; sourceTree = "<group>"; };
+ 		1AC75379183A9FDA0072CB15 /* PageLoadState.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = PageLoadState.cpp; sourceTree = "<group>"; };
+ 		1AC7537A183A9FDB0072CB15 /* PageLoadState.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PageLoadState.h; sourceTree = "<group>"; };
+ 		1AC75A1A1B3368270056745B /* HangDetectionDisabler.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HangDetectionDisabler.h; sourceTree = "<group>"; };
+@@ -9722,6 +9724,7 @@
+ 				9B47908E253151CC00EC11AB /* JSIPCBinding.h */,
+ 				9B47908C25314D8300EC11AB /* MessageArgumentDescriptions.h */,
+ 				1AC4C82816B876A90069DCCD /* MessageFlags.h */,
++				A1B2C3D42C00000100000001 /* MessageNumberTranslation.h */,
+ 				2DAF90242B553FD20081E921 /* MessageFlags.serialization.in */,
+ 				7BDD9DDA28D205C6004CDF48 /* MessageObserver.h */,
+ 				7B483F1C25CDDA9B00120486 /* MessageReceiveQueue.h */,
+@@ -16592,6 +16595,7 @@
+ 				51933DEF1965EB31008AC3EA /* MenuUtilities.h in Headers */,
+ 				9B47908D25314D8300EC11AB /* MessageArgumentDescriptions.h in Headers */,
+ 				1AC4C82916B876A90069DCCD /* MessageFlags.h in Headers */,
++				A1B2C3D42C00000100000002 /* MessageNumberTranslation.h in Headers */,
+ 				7BDD9DDC28D205C6004CDF48 /* MessageObserver.h in Headers */,
+ 				7B483F2025CDDA9C00120486 /* MessageReceiveQueue.h in Headers */,
+ 				7B483F1F25CDDA9C00120486 /* MessageReceiveQueueMap.h in Headers */,

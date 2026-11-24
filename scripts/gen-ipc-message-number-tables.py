@@ -22,7 +22,7 @@ each group in `#if <condition>`; there are 703 such blocks in the generated
 header. A position counted in the file is therefore *not* the value the
 compiler assigns: a configuration removes the entries it excludes and every
 later entry shifts down by that many. For `InitializeConnection` the flat
-position is 3064, while the value an iOS build assigns is smaller by the number
+position is 3076, while the value an iOS build assigns is smaller by the number
 of preceding entries that build compiles out.
 
 So the 18.3 side never appears as a number. Each case names the enumerator -
@@ -30,13 +30,19 @@ So the 18.3 side never appears as a number. Each case names the enumerator -
 conditionals are in force. The 16.1 side is an integer literal, which is
 correct precisely because that generator emits no conditionals.
 
+For scale, measured from the two generated headers: the 16.1 enumeration has
+3140 messages with the synchronous section starting at 2899; the 18.3
+enumeration has 4086 messages, its synchronous section starts at 3838, and its
+whole enumeration is wrapped in 703 `#if` blocks, of which 636 fall on messages
+that exist in both trees. 2807 messages are shared.
+
 Two consequences follow, and the script enforces both:
 
 * Every case whose 18.3 enumerator sits under an `#if` is emitted under that
   same `#if`. Reusing the guard verbatim makes the case exist exactly when the
   enumerator it names exists, so a configuration that drops a message drops its
   case too instead of failing to compile.
-* Both directions switch over the same 2813 names, so the two functions are
+* Both directions switch over the same 2807 names, so the two functions are
   mutual inverses by construction. The script checks it anyway.
 
 The output is two complete function bodies rather than arrays: a `switch` lets
