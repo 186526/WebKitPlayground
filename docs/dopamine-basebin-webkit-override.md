@@ -339,7 +339,7 @@ DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride
 
 `DYLD_PRINT_SEARCHING` 默认写到 stderr；`DYLD_PRINT_TO_FILE=/path` 需要 `allowEnvVarsSharedCache`（bit 2，`0xff` 同样置起，见 `DyldProcessConfig.cpp:776-783`），因此也可用。Safari 这类 GUI 进程的 stderr 不进终端，用 `DYLD_PRINT_TO_FILE` 或 Console.app 取。
 
-**在 `.xpc` 上看候选行时要先分清来源。** 这类进程自身带 4 条 `LC_DYLD_ENVIRONMENT`（十一·七），所以即使 M40 关闭也有候选行，只是目录不同：内嵌那对给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`，M40 给出 `/var/jb/Library/WebKitOverride/...`。要确认 M40 生效，看候选路径落在哪个目录，而不是看候选行有没有出现。设备上直接跑 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1`，总计 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，其中包含 `.../WebContent.xpc/../systemhook.dylib`（不存在）与 `/var/jb/usr/lib/systemhook.dylib`（`found:` 落在这里）。
+**在 `.xpc` 上看候选行时要先分清来源。** 这类进程自身带 4 条 `LC_DYLD_ENVIRONMENT`（十一·七），所以即使 M40 关闭也有候选行。**改动前**两侧目录不同：内嵌那对给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`，M40 给出 `/var/jb/Library/WebKitOverride/...`，要确认 M40 生效看候选路径落在哪个目录。改动后 `patches/ios18-public-sdk-xpc-main.patch:22` 把覆盖目录放进内嵌那一对，两个来源都指向覆盖目录，判别依据变为候选行出现的次数，见十一·九。设备上直接跑 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1`，总计 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，其中包含 `.../WebContent.xpc/../systemhook.dylib`（不存在）与 `/var/jb/usr/lib/systemhook.dylib`（`found:` 落在这里），这是改动前二进制的读数。
 
 app 进程本身没有 `LC_DYLD_ENVIRONMENT`，所以对它们「候选行出现与否」才是 M40 是否生效的判据。
 
@@ -705,7 +705,7 @@ DYLD_LIBRARY_PATH=/var/jb/usr/lib
 
 **M40 与内嵌那对叠加时是什么关系。** 不是「内嵌那对不够用」，而是「内嵌那对不可关闭，M40 可关闭」：内嵌变量要重新链接才能去掉，M40 有 `DisableJBFrameworkPath` 运行期开关（十一·八）。两者现在指向同一组目录：内嵌那条也是 `/var/jb/Library/WebKitOverride` 在首位（见 `docs/ios16-override-path-alignment.md`），所以 M40 开着还是关着，`.xpc` 解析到的都是覆盖目录里那一份。M40 对 `.xpc` 因此不再是「双保险」式的第二来源，而是逐字重复了内嵌那条；保留它的理由是 app 进程只能靠它，而 app 进程没有 `LC_DYLD_ENVIRONMENT`。`WebKitOverride` 目录不存在时两条来源的候选都 `stat` 失败，dyld 落回内嵌那对的第二个目录也就是 `/var/jb/Library/Frameworks`，行为与只装 deb 时相同。
 
-**新增风险：内嵌的 `DYLD_LIBRARY_PATH=/var/jb/usr/lib` 不受 M40 开关控制。** 它会把 `/var/jb/usr/lib` 下 157 个条目（其中 137 个 `.dylib`）全部加进每个 `.xpc` 进程的 library 搜索路径。M39 的 `isOverridablePath` 生效后，与共享缓存重名的 `liblzma.5.dylib`（190560 字节）与 `libmrc.dylib`（150928 字节）会在这类进程里被 jbroot 的磁盘副本替换，替换对象是与 WebKit 无关的系统库。十一·二 把 M40 的 library 路径挪到 `/var/jb/Library/WebKitOverride/usr/lib` 正是为了避开这件事，而内嵌那条躲不开，因为它只能靠重新链接去掉。本 mission 不改它：删掉 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 会让 `.xpc` 完全押在 `__XPC_DYLD_FRAMEWORK_PATH` 的转交行为上（见下），而那个行为尚未验证。
+**新增风险：内嵌 library 列表里的 `/var/jb/usr/lib` 那一项不受 M40 开关控制。** 改动后内嵌的 `DYLD_LIBRARY_PATH` 是 `$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib`，覆盖目录在前、`/var/jb/usr/lib` 在后，两者都进每个 `.xpc` 进程的 library 搜索路径。`/var/jb/usr/lib` 下有 157 个条目（其中 137 个 `.dylib`）。M39 的 `isOverridablePath` 生效后，与共享缓存重名的 `liblzma.5.dylib`（190560 字节）与 `libmrc.dylib`（150928 字节）会在这类进程里被 jbroot 的磁盘副本替换，替换对象是与 WebKit 无关的系统库：覆盖目录里没有这两个文件，所以候选会落到后备的 `/var/jb/usr/lib` 上。十一·二 把 M40 的 library 路径挪到 `/var/jb/Library/WebKitOverride/usr/lib` 正是为了避开这件事，而内嵌那条躲不开，因为它只能靠重新链接去掉。本 mission 不改它：删掉 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 会让 `.xpc` 完全押在 `__XPC_DYLD_FRAMEWORK_PATH` 的转交行为上（见下），而那个行为尚未验证。
 
 裸名与 `__XPC_` 版本两两成对，因为 dyld 对两者的归约逻辑完全相同，区别只在 dyld 从哪个变量读到目录。
 
@@ -750,11 +750,11 @@ DYLD_PRINT_SEARCHING=1 /var/jb/usr/bin/ls /nonexistent-k2
 
 出现哪一条取决于该进程要加载哪些镜像。`/var/jb/usr/bin/ls` 依赖 `libiosexec.1.dylib`，它的 install name 是 `/usr/lib/libiosexec.1.dylib`，归约同样失败，所以 `ls` 打印的是 library 那条候选（设备实测输出为 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/libiosexec.1.dylib"`，目录换成本节的专用目录即可）。要看 framework 那条候选，用真的加载 `WebKit.framework` 的 app 进程，例如 Safari；要看 `libwebrtc.dylib` 那条，用 `WebContent` 或 `com.apple.WebKit.Networking`。有候选行说明 systemhook 把目录交给了 dyld 且 dyld 采纳；若后面还跟着 `found: dylib-from-disk-to-override-cache: "..."`，说明 M39 那一半也在起作用。缺 systemhook 这一半时候选行不出现；缺 dyldhook 那一半时候选行出现但不被采用——两种情况可以直接区分。
 
-**在 `.xpc` 上看候选行时要先分清来源。** 这类进程自身带 4 条 `LC_DYLD_ENVIRONMENT`（十一·七），所以即使 M40 关闭也有候选行，只是目录不同：内嵌那对给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`，M40 给出 `/var/jb/Library/WebKitOverride/...`。要确认 M40 生效，看候选路径落在哪个目录，而不是看候选行有没有出现。设备上直接跑 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1`，总计 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行。
+**在 `.xpc` 上看候选行时要先分清来源。** 这类进程自身带 4 条 `LC_DYLD_ENVIRONMENT`（十一·七），所以即使 M40 关闭也有候选行。**改动前**两侧目录不同：内嵌那对给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`，M40 给出 `/var/jb/Library/WebKitOverride/...`，靠候选路径落在哪个目录就能区分 M40 是否生效。改动后 `patches/ios18-public-sdk-xpc-main.patch:22` 把覆盖目录放进内嵌那一对：framework 列表变成覆盖目录在前、`/var/jb/Library/Frameworks` 在后，library 列表变成覆盖目录 `/usr/lib` 在前、`/var/jb/usr/lib` 在后。两个来源因此都指向覆盖目录，「候选路径落在哪个目录」不再能区分 M40，开着还是关着 `.xpc` 都解析到覆盖目录里那一份。现在剩的判别依据是同一个目录在候选行里出现几次：覆盖目录出现两次说明进程环境与加载命令都供了它（M40 起效且 `__XPC_` 转交成立），只出现一次说明只有加载命令供了它，这一次无法再区分「M40 关闭」与「M40 开启但转交不成立」——后者本就是 `docs/ios16-override-path-alignment.md` 第六节第 3 项列出的未验证前提。设备上直接跑 `com.apple.WebKit.WebContent` 置 `DYLD_PRINT_SEARCHING=1` 得到 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，这是改动前二进制的读数，改动后的二进制约需重新构建才能产生新的读数。
 
 app 进程本身没有 `LC_DYLD_ENVIRONMENT`，所以对它们「候选行出现与否」才是 M40 是否生效的判据。
 
-`typeName` 对 framework 与 library 两类变量返回同一个字符串 `DYLD_FRAMEWORK/LIBRARY_PATH`，所以打印里看不出是哪一个变量供的目录，只能从候选路径落在哪个目录反推。
+`typeName` 对 framework 与 library 两类变量返回同一个字符串 `DYLD_FRAMEWORK/LIBRARY_PATH`，所以打印行本身看不出是哪一个变量供的目录。**改动前**两侧目录不同，可以从候选路径落在哪个目录反推；改动后两个来源都指向覆盖目录，反推失效，只剩候选行出现的次数可用（见上一段）。
 
 GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searching.log` 收；`WebContent` 的日志落在系统日志里，用 `Console.app` 取。
 

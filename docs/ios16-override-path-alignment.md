@@ -196,7 +196,11 @@ grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/uninstall-webkit-override.sh | sed 's/.*=
 /var/jb/Library/WebKitOverride
 ```
 
-三个脚本都在 `/var/jb` 之外的 `JBROOT` 下改写成 `${JBROOT}/Library/WebKitOverride`，所以上面四条命令只在默认设备路径上成立；scratch 重放时四处同样同步改写，判定依据仍是四条输出一致。
+四个文件分两类，判据在两类情形下不同。
+
+补丁那一条没有 `JBROOT` 机制。全树没有任何脚本、`sed`、构建参数改写 `WK_ROOTLESS_FRAMEWORKS_ROOT`：`grep -rn 'WK_ROOTLESS_FRAMEWORKS_ROOT' --include='*.sh' --include='*.py' --include='*.yml'` 的三条命中全在注释里。它是链接期常量，产物在构建机上生成，所以在任何重放里都停在 `/var/jb/Library/WebKitOverride`。三个脚本则各有 `JBROOT`：`JBROOT` 不等于 `/var/jb` 时把 `OVERRIDE_ROOT` 改写成 `${JBROOT}/Library/WebKitOverride`（`install:71-72`、`check:28-29`、`uninstall:38-39`）。
+
+因此在默认设备路径（`JBROOT` 为默认值的 `/var/jb`）上，判据是四条输出相同，就是上面那一段。做 scratch 重放（把 `JBROOT` 指向别的根）时，判据拆成两条：一是三个脚本彼此相同，都等于 `${JBROOT}/Library/WebKitOverride`；二是补丁那一条仍等于设备字面量 `/var/jb/Library/WebKitOverride`。这两条同时成立才算对齐，此时四条输出本来就不该相同，不相同不是缺陷。实测这个重放：把三个脚本的 `OVERRIDE_ROOT` 改成 `/tmp/scratchjb/Library/WebKitOverride` 后，补丁那条仍输出 `/var/jb/Library/WebKitOverride`，三个脚本各输出 `/tmp/scratchjb/Library/WebKitOverride`。用「四条输出相同」去判重放会得到「对齐坏了」的错误结论。
 
 ---
 
