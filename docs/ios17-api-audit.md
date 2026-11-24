@@ -11,12 +11,22 @@
 
 proxy 那条采用的是正文「must-fix 一」的「修法」里第三条：`NetworkSessionCocoa::applyProxyConfigurationToSessionConfiguration` 在函数入口用 `respondsToSelector:NSSelectorFromString(@"setProxyConfigurations:")` 早返回。
 
-两处都只是源码层修复。设备上现装的产物仍是修复前的二进制，二进制复验要等下一次构建装到设备之后进行。届时的判据是下面两条命令都从 2 变成 0：
+两处都只是源码层修复，设备上现装的产物仍是修复前的二进制。复验要等下一次构建装到设备之后进行。
+
+trait 那条补丁把 iOS 17 的发送点整段编译掉，选择器名与桩随代码一起从产物里消失。对象是设备上的 `/var/jb/Library/Frameworks/WebCore.framework/WebCore`（也可以把这个文件取回本机后对副本执行），下面这条输出从 2 变成 0：
 
 ```sh
-grep -ac traitCollectionByModifyingTraits WebCore.framework/WebCore
-grep -ac setProxyConfigurations WebKit.framework/WebKit
+strings -a /var/jb/Library/Frameworks/WebCore.framework/WebCore | grep -c traitCollectionByModifyingTraits
 ```
+
+proxy 那条在 iOS 17 分支保留原样赋值，`_objc_msgSend$setProxyConfigurations:` 桩与引用它的选择器名都留在产物里。对 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 做同样的字符串计数，现装产物为 3，修复后仍不为 0，这条不能靠二进制计数判定。判据是源码层检查器，在 WebKitPlayground 仓库根目录执行（源码检出在 `WebKit/` 下）：
+
+```sh
+python3 scripts/check-network-session-proxy-configurations.py \
+  --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
+```
+
+`.github/workflows/build-webkit.yml` 在打包后用同一条命令把关。
 
 这份文档回答一个问题：除已修的 `-[UITraitCollection traitCollectionByModifyingTraits:]` 之外，`webkit-rootless.deb` 这批产物在 iPadOS 16.1 上还有没有别的地方会因为 objc 消息转发而 abort。
 
