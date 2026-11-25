@@ -267,6 +267,22 @@ basename includes from another dir, NOT registered: 3
 1. 新头文件要在 `project.pbxproj` 登记（第 3.2 节的三处）。不登记则 `#include "MessageNumberTranslation.h"` 解析失败。本机统计里 124 处活跃 include 的目标头文件 100% 已登记（54 处同目录 + 70 处跨目录），没有未登记还参与 iOS 编译的先例。
 2. 登记了头文件，但只在 `Encoder.cpp` 里定义、在 `Connection.cpp` 与 `ConnectionCocoa.mm` 里声明使用，还需要这些文件 `#include` 该头文件。这不需要改构建清单，只需要改源码里的 include，不属于构建系统改动。
 
+### 4.2.1 工作流对补丁落盘结果的三条断言
+
+第 3.2 节与 4.2 节讲的是补丁**应当**带来什么。`.github/workflows/build-webkit.yml` 的 `Apply worktree patch` 步骤另外检查补丁**实际**带来了什么，因为 `git apply` 的退出码 0 证明不了这些：
+
+| 断言 | 检查什么 | 失败输出 |
+| --- | --- | --- |
+| `new file mode` 落盘 | 从 `patches/*.patch` 自身读出每条 `new file mode` 对应的路径，逐个要求 `WebKit/<path>` 存在 | `PATCH NEW FILE MISSING: <path> (declared by <patch>)` |
+| 新增 include 可解析 | 对每条已应用的补丁，抽出其新增的 `#include "X.h"` / `#import "X.h"`，要求 `X.h` 能在 `WebKit/Source/` 下找到同名文件 | `PATCH INCLUDE UNRESOLVED:` 后逐行列出名字与来源补丁 |
+| 翻译补丁有效果 | `ios16-ipc-message-number-translation.patch` 应用后 `Encoder.cpp` 里必须出现 `translateOutgoingMessageName` | `PATCH APPLIED BUT HAS NO EFFECT: <patch>` |
+
+第二条断言的可解析集合由两部分组成：`WebKit/Source/` 下现存的所有文件（用文件系统扫描而不是 `git ls-files`，因为补丁刚创建的头文件尚未被 git 跟踪），以及 `WebKit/Source/*/DerivedSources-output.xcfilelist` 里列出的派生源产物。`MessageNames.h` 属于后者：18.3.1 的 `Source/WebKit/DerivedSources-output.xcfilelist` 第 137 行列了 `$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/MessageNames.h`，16.1 的同一文件第 84 行同样列了它。集合按树自身构建，生成器以后新增产物不需要改这一步。
+
+三条断言覆盖的故障各不相同，一条也省不掉。`git apply` 的退出码说明 hunk 落到了目标行，不说明补丁声明的文件在磁盘上。第一条断言抓「声明了却没落盘」。实测它的触发条件是文件在检查之前又消失了：同一次循环里靠前的补丁删掉了靠后补丁声明的路径，或 `new file mode 120000` 的符号链接目标不存在（`test -f` 跟随链接，悬空链接读作不存在）。`git apply` 本身不会把声明过的普通文件写丢——拿一段路径与 `+++` 不一致的 `new file mode` 试过，`git apply` 直接拒绝，退出 128；用同一份补丁先建后删同名文件，退出 0 且文件留下。第二条断言抓「include 指向不存在的文件」，它是删掉 `MessageNumberTranslation.h` 整段后真正拦下故障的那一条。第三条断言抓「hunk 改对了行但没带来新代码」。三者都要等到编译才暴露就是几小时之后的事，所以都放在应用补丁这一步。
+
+用未删减的 `patches/ios16-ipc-message-number-translation.patch` 在本机 18.3.1 树上跑过一次全部 25 个补丁，三条断言通过，25 个补丁里 23 个应用、2 个 `webkit_iOS_16.*` 按设计跳过。删掉该补丁里 `MessageNumberTranslation.h` 整段后（10 个 `diff --git`、0 个 `new file mode`），第一条断言没有可检查的对象，第二条以 `PATCH INCLUDE UNRESOLVED: MessageNumberTranslation.h (added by patches/ios16-ipc-message-number-translation.patch)` 失败、退出 1。把该文件从应用后的树上删掉再跑第一条断言的同一段代码，输出 `PATCH NEW FILE MISSING: Source/WebKit/Platform/IPC/MessageNumberTranslation.h`、退出 1。
+
 ### 4.3 落点选择：为什么是 Encoder.cpp 而不是 IPCUtilities.cpp
 
 支持把函数与表放进 `Encoder.cpp` 的证据：
