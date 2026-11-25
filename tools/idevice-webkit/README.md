@@ -24,9 +24,22 @@ The entry image was 18.3; the dependency it bound was 16.1. `src/load_chain.c`
 loads all seven in the measured order (JavaScriptCore first, WebKit last), each
 by explicit `/var/jb` path with `RTLD_NOW|RTLD_GLOBAL`, and stops at the first
 failure so the report names the step rather than the last image that happened to
-be tried. `RTLD_NOW` turns a missing symbol into a failed step instead of a fault
-at first call; `RTLD_GLOBAL` puts each image's exports where the next load
-resolves against them.
+be tried.
+
+The order is `build-state.md` 第八轮's measurement: with
+JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy → WebGPU →
+WebKit the duplicate-image count fell from 31 to 0 and all seven loaded; any
+other order made WebCore fail with `Symbol not found:
+__ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...`. JavaScriptCore is first
+because it exports the WTF symbols the rest bind, and WebKit is last because it
+reexports WebKitLegacy and loads JavaScriptCore.
+
+`RTLD_NOW` turns a missing symbol into a failed step instead of a fault at first
+call. `RTLD_GLOBAL` is the flag whose absence the device recorded as `0x0001`:
+without it each image is a separate scope, and WebCore's `LC_LOAD_WEAK_DYLIB`
+bindings to `libwebrtc`, `libANGLE-shared` and `WebGPU` resolve against the
+global scope, so those two must be GLOBAL for the measured order to mean
+anything.
 
 The paths name `/var/jb/Library/WebKit18`, which `rewrite-payload.py` produces and
 repairs the signature of. Without that rewrite the seven keep their system install

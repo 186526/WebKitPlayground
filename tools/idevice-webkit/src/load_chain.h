@@ -63,7 +63,17 @@
    resolves against them. Without it each image is a separate island and a
    sibling's lookup does not see it. This is the flag whose absence the device
    telemetry records, and it is what makes the 18.3 JavaScriptCore's exports
-   reachable by the 18.3 WebCore and WebKit that follow it. */
+   reachable by the 18.3 WebCore and WebKit that follow it.
+
+   The concrete case is WebCore's two weak dependencies. WebCore carries
+   LC_LOAD_WEAK_DYLIB on libwebrtc and on libANGLE-shared, so it loads without
+   either of them and its references to their symbols are left unresolved. Those
+   two are loaded before WebCore for exactly this reason, and they have to be
+   GLOBAL rather than merely resident: a symbol reached through a weak import is
+   resolved against the global scope, so a libwebrtc loaded LOCAL leaves WebCore
+   binding the system copy or binding nothing. The measured order in
+   build-state.md 第八轮 is what took the duplicate count from 31 to 0, and the
+   global scope is what lets that order mean anything. */
 
 #define load_mode_now 2
 #define load_mode_global 8
