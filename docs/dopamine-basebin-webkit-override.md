@@ -843,26 +843,30 @@ $(TARGET): $(wildcard src/*.m src/*.c src/jbserver/*.c ../systemhook/src/common/
 
 所以 `launchdhook` 与 `systemhook` 编译的是同一份 `common.c`，`0001-systemhook-set-search-paths.patch` 的改动同时进入两个 dylib。设备上的 `launchdhook` 是原版，因此只在 `systemhook` 那一侧生效过；换成打过补丁的那份即可，不需要新补丁。
 
-### 十二·三 为什么 app 只拿到 `__XPC_` 拼写
+### 十二·三 为什么 app 进程里没有任何 dyld 认识的搜索路径
 
-`launchd` 自己的 `environ` 里只有 `__XPC_DYLD_FRAMEWORK_PATH` / `__XPC_DYLD_LIBRARY_PATH`（`launchctl getenv` 读到，值来自构建期的 launchd 环境）。app 的 `envp` 原样继承这两个名字。dyld 只读裸名：`dyld-1042` 的 `ProcessConfig::PathOverrides::addEnvVar`（`P.cpp:1614`，由 `P.cpp:1414` 逐条调用）用 `strncmp` 比对九个规范名，`forEachEnvVar`（`P.cpp:1574-1585`）里没有 `__XPC_` 形式，`gen/dyld` 的字符串表里 `__XPC_DYLD_FRAMEWORK_PATH` 出现 0 次。原版 `launchdhook` 一个裸名都不写，所以 app 进程里没有任何 dyld 认识的搜索路径，WebKit 从共享缓存取，UUID 保持 16.1 的 `743EAFB4`。
+`launchd` 的 `envp` 里没有任何 DYLD 搜索路径变量：2026-11-26 以 `mobile` 身份对 `DYLD_FRAMEWORK_PATH`、`__XPC_DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`__XPC_DYLD_LIBRARY_PATH` 逐个 `launchctl getenv`，四个都读回空值；`launchd` pid 1 的 `launchctl print` 也不含 `environment` 段落。设备上当前的 app 只带 `DYLD_INSERT_LIBRARIES`：同一时刻 `Chrome`（pid 16085）与 `MobileSafari`（pid 15609）的 `ps -E` 输出分别是 10 个与 11 个变量，`DYLD` 类只有 `DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib` 这一条，连 `__XPC_` 拼写都没有。这两个进程属主是 `mobile`，`ps -E` 对它们完整打印，不是 `:978` 说的那种 root 进程读不到的情况；同一输出里 `XPC_SERVICE_NAME` 保留了前缀，说明这个读数没有剥掉 `__XPC_`。
 
-XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUID `787DFAB1`）。
+早先读数里 app 带 `__XPC_DYLD_FRAMEWORK_PATH` / `__XPC_DYLD_LIBRARY_PATH`，那是 root 域里一次 `launchctl setenv` 的残留，2026-11-26 01:00:29 CST 重启后已消失。它属于实验污染，不是 launchd 的固有环境，不能据此推出「app 继承这两个名字」。
+
+dyld 只读裸名：`dyld-1042` 的 `ProcessConfig::PathOverrides::addEnvVar`（`P.cpp:1614`，由 `P.cpp:1414` 逐条调用）用 `strncmp` 比对九个规范名，`forEachEnvVar`（`P.cpp:1574-1585`）里没有 `__XPC_` 形式，`gen/dyld` 的字符串表里 `__XPC_DYLD_FRAMEWORK_PATH` 出现 0 次。原版 `launchdhook` 一个裸名都不写，所以 `WebKit` 从共享缓存取，UUID 保持 16.1 的 `743EAFB4`。
+
+XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下覆盖目录里的那一代。这一代不绑定某个 UUID：判据是这份 `WebKit` 能在 16.1 上加载（`LC_BUILD_VERSION` 的 `minos` 不高于 16.1，且不链接 `BrowserEngineKit`）。`787DFAB1` 是 2026-11-25 那次读数里出现的一代，不是常量。
 
 ### 十二·四 补丁写进 app 的 envp 到底是哪些条目
 
 判断依据是 `common.c:153-157` 的 `envbuf_variable_matches`：它用 `strcmp` 比**值**，不只是名字。`get_jbroot()` 返回 `/var/jb`（该路径是指向 preboot 的符号链接），所以补丁要写的值是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/WebKitOverride/usr/lib`。
 
-`launchd` 传给 app 的 `envp` 里有继承来的 `__XPC_` 两个名字，值为构建期那一对目录，与补丁要写的值不同，因此 `present[1]`、`present[3]` 为 `false`，`allPresent` 为 `false`：
+app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因此 `present` 四项全为 `false`，`allPresent` 为 `false`，补丁四个都写：
 
-| 变量 | 继承自 launchd | `present` | 补丁动作 |
+| 变量 | app 的 `envp` 里有 | `present` | 补丁动作 |
 | --- | --- | --- | --- |
 | `DYLD_FRAMEWORK_PATH` | 无 | false | 写入 `/var/jb/Library/WebKitOverride` |
-| `__XPC_DYLD_FRAMEWORK_PATH` | 有，旧值 | false（值不等） | 覆盖成新值 |
+| `__XPC_DYLD_FRAMEWORK_PATH` | 无 | false | 写入同一目录 |
 | `DYLD_LIBRARY_PATH` | 无 | false | 写入 `/var/jb/Library/WebKitOverride/usr/lib` |
-| `__XPC_DYLD_LIBRARY_PATH` | 有，旧值 | false（值不等） | 覆盖成新值 |
+| `__XPC_DYLD_LIBRARY_PATH` | 无 | false | 写入同一目录 |
 
-结论：app 换完之后同时有裸名与 `__XPC_` 两套，且四个值都指向同一对目录。dyld 读裸名，所以覆盖生效；`__XPC_` 保留不影响任何东西。
+结论：app 换完之后四个变量都在，值是同一对目录的两套拼写。dyld 读裸名，所以覆盖生效；`__XPC_` 两个是 `xpcproxy` 那条链的备用入口，在本设备上不起作用（`gen/dyld` 里该拼写出现 0 次），保留不影响任何东西。
 
 `DYLD_INSERT_LIBRARIES` 也会被改写：`envp` 里此时是 launchdhook 的路径，`systemHookAlreadyInserted` 为 0，于是按 `common.c:429-435` 换成 `/usr/lib/systemhook.dylib`。这正是 app 今天已经在用的值。
 
@@ -870,7 +874,7 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 ### 十二·五 对已经正常的 helper 进程没有影响
 
-`WebContent`、`Networking` 今天的 `envp` 已经有四个值正确的变量，`present` 四项全为 true，`allPresent` 为 true，走 `common.c:417-420` 那条快速路径，`envp` 原样传给 `posix_spawn`。它们继续加载 `787DFAB1`。`launchdhook` 与 `systemhook` 编译同一份源码，改的是同一段代码，`systemhook` 侧的行为不因为这份二进制同时存在于 launchdhook 而改变。
+`WebContent`、`Networking` 今天的 `envp` 已经有四个值正确的变量，`present` 四项全为 true，`allPresent` 为 true，走 `common.c:417-420` 那条快速路径，`envp` 原样传给 `posix_spawn`。它们继续加载覆盖目录当前那一代，不做替换。`launchdhook` 与 `systemhook` 编译同一份源码，改的是同一段代码，`systemhook` 侧的行为不因为这份二进制同时存在于 launchdhook 而改变。
 
 混合形态（helper 可执行文件仍是 `/System` 的 16.1，`Library/Frameworks` 来自 `/var/jb`）由这次改动保持：补丁只增加搜索目录，不改变可执行文件的解析顺序。
 
@@ -945,7 +949,15 @@ cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m
 
 其余**五个** `dyldhook_merge` 成员取 CI 构建：`arm64e.iOS15`、`arm64.iOS15`、`arm64.iOS16-17`、`arm64e.iOS18+`、`arm64.iOS18+`。`verify-dyldhook-merge.sh` 要求每个切片都带两个 override hook，设备自带 tar 里这五个是原版、不带。这台设备只用 `arm64e.iOS16-17`，其余五个不会被加载，替换它们只影响校验结果，不影响运行。
 
-**安装前的前置条件是覆盖目录存在且内容是 18.3。** `docs/ios16-override-path-alignment.md:127` 记录：app 进程除 basebin 给的目录外没有别的 `/var/jb` 候选；`build-state.md:232` 记录覆盖目录不存在时 dyld 打印的 `found:` 是 `dylib-from-cache`，即回落到共享缓存里的 16.1。所以只装这个 tar 而不建覆盖目录，app 只会拿到一个不存在的搜索目录并回落到 16.1，这一改动不产生任何可见变化。覆盖目录里 `WebKit.framework/WebKit` 必须是 18.3 那份（UUID `787DFAB1`），`install-webkit-override.sh` 的 `preflight_sources` 在缺任何一个 framework 时直接退出。
+**安装前的前置条件是覆盖目录里放着一代能在 16.1 上加载的 `WebKit`。** `docs/ios16-override-path-alignment.md:127` 记录：app 进程除 basebin 给的目录外没有别的 `/var/jb` 候选；`build-state.md:232` 记录覆盖目录不存在时 dyld 打印的 `found:` 是 `dylib-from-cache`，即回落到共享缓存里的 16.1。所以只装这个 tar 而不建覆盖目录，app 只会拿到一个不存在的搜索目录并回落到 16.1，这一改动不产生任何可见变化。
+
+「能在 16.1 上加载」由两条性质决定，不是由 UUID 决定。`dyld` 拒绝 `minos` 高于当前系统的镜像（`safari-injection-plan.md:1348` 记着 `built for iOS 18.5 which is newer than running OS` 这条原话），并且镜像链接的每一个 framework 都必须在设备上存在。所以判据是：`LC_BUILD_VERSION` 的 `minos` 不高于 16.1，且不链接 `BrowserEngineKit`（该 framework 在 `/System/Library/Frameworks` 下不存在）。
+
+**设备当前这一条不满足。** 2026-11-26 只读实测：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 是 51654688 字节、`sha256 a5eadac56c8155ce…`、`LC_UUID 7e97b496-db02-3e46-9799-c4bdec869e8e`、`LC_BUILD_VERSION minos 18.5.0 sdk 18.5.0`，`BrowserEngineKit` 引用 5 处（其中绝对路径 2 处）；`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 与它是同一个 inode（60588），即同一份字节。这份镜像在本设备上加载不了，`minos 18.5.0` 已高于 16.1。这是装前必须换成 `minos ≤ 16.1` 那一代的一件事，与本次 tar 无关。
+
+`install-webkit-override.sh` 的 `preflight_sources` 只检查各 framework 的二进制与 `Info.plist` 是否存在，不读 `minos`，也不查 `BrowserEngineKit`，所以这一条要手工核，脚本不会拦。
+
+**对照：两个不同的 UUID 都能加载。** 本机 `/tmp/p30deb/g3/WebKit` 是 `787dfab1-4de3-3568-9923-c9409791b728`、`minos 16.1.0`、50758784 字节；`/tmp/p30deb/g4/WebKit` 是 `84054cd9-a324-3759-b82c-6eaa5f157ce3`、`minos 16.1.0`、50797584 字节。两者 `BrowserEngineKit` 引用都是 0。UUID 不同、都能在 16.1 上加载，所以 UUID 不是判据，`minos` 与依赖才是。
 
 安装命令（**尚未执行**，`jbctl update basebin` 会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出）：
 
@@ -965,9 +977,9 @@ ssh -t mobile@192.168.2.136 'echo "<password>" | sudo -S -p "" /var/jb/basebin/j
 
 **不要用 `uiopen` 启动 `MobileSafari` 来验收。** 塔台 2026-11-26 02:27–02:34 CST 实测：`uiopen` 启动 `MobileSafari` 一律失败（进程不出现、无崩溃日志），把过滤器四个 plist 全部改名禁用后仍失败，把 deb 回滚到 `620.2.4-20261120204509` 后仍失败。这是 SpringBoard 侧状态，与 WebKit 无关。也不要拿 `ps -E` 当主读数：它读的是初始栈 `envp`，对 root 拥有的 pid 一律打印 0 条变量，曾经的「`runningboardd` 零 DYLD 变量」就是这条权限假象。
 
-1. **覆盖目录与内容先查。** `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 必须存在且 UUID 为 `787DFAB1`。这一条排在最前，因为覆盖目录不在时后面两条必然失败，原因与本次改动无关。
-2. **app 进程里 WebKit 的实际来源。** 两个读数互验：一个用带 `DYLD_PRINT_LIBRARIES=1` 的直接 exec 看 dyld 打印的解析路径，一个用 `lldb -p <pid> -o "image list"` 看活进程的镜像表。只取前者会得到假阳性：塔台实测打印里出现了 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），而同一进程的 `image list` 里查该 UUID 命中 0 次。判据是活进程镜像表里 `WebKit.framework/WebKit` 的路径在 `/var/jb` 下、UUID 为 `787DFAB1`；打印里多出一份不算数。
-3. **helper 不回退。** `WebContent`、`Networking` 的 `image list` 里 `WebKit.framework/WebKit` 仍是 `787DFAB1`。
+1. **覆盖目录与内容先查。** 三条同时成立才算这一步通过：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 存在；它的 `LC_BUILD_VERSION` 的 `minos` 不高于 16.1（高于 16.1 时 dyld 直接拒绝，与被覆盖的对象无关）；它的 `sha256` 与 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 相同，说明覆盖目录放的就是这一代而不是别的拷贝。UUID 只作记录，写进下表说明本次装的是哪一代，不写成常量断言。这一条排在最前，因为覆盖目录不在时后面两条必然失败，原因与本次改动无关。
+2. **app 进程里 WebKit 的实际来源。** 两个读数互验：一个用带 `DYLD_PRINT_LIBRARIES=1` 的直接 exec 看 dyld 打印的解析路径，一个用 `lldb -p <pid> -o "image list"` 看活进程的镜像表。只取前者会得到假阳性：塔台实测打印里出现了 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），而同一进程的 `image list` 里查该 UUID 命中 0 次。判据是活进程镜像表里 `WebKit.framework/WebKit` 的路径在 `/var/jb` 下，且该镜像的 `minos` 不高于 16.1；UUID 记下实际值是哪一代，不与某个常量比对。打印里多出一份不算数。
+3. **helper 不回退。** `WebContent`、`Networking` 的 `image list` 里 `WebKit.framework/WebKit` 仍在 `/var/jb` 下、`minos` 不高于 16.1，与第 1 条读到的是同一代。这项读数源自 2026-11-25 那次记录（当时该代是 `787DFAB1`），不是常量；若装后读到别的 UUID，先按第 1 条的两条性质判定它能不能加载，再判断是否回退。
 
 验收用的命令：
 
@@ -1042,7 +1054,7 @@ print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
 
 ### 十二·九 为什么改写必须在 dyld 路径解析阶段从进程内部发生
 
-一句话判据：**平台签名进程对 `DYLD_FRAMEWORK_PATH` 不生效，构造函数里的 `dlopen` 只会映射出第二份，两者都不能把 app 的 `WebKit` 换成 18.3。** 能让 app 换库的只有一条路：在 dyld 完成路径解析之前，由 `posix_spawn` 那一刻交给子进程的 `envp` 把搜索目录送进去。这就是本分支改 `launchdhook` 而不是改过滤器的原因。
+一句话判据：**平台签名进程对 `DYLD_FRAMEWORK_PATH` 不生效，构造函数里的 `dlopen` 只会映射出第二份，两者都不能把 app 的 `WebKit` 换成 `/var/jb` 那一代。** 能让 app 换库的只有一条路：在 dyld 完成路径解析之前，由 `posix_spawn` 那一刻交给子进程的 `envp` 把搜索目录送进去。这就是本分支改 `launchdhook` 而不是改过滤器的原因。
 
 第一条实测：直接 exec，环境变量给到 `/var/jb/Library/Frameworks`。
 
@@ -1051,10 +1063,10 @@ print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
 | 启动方式 | `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks DYLD_PRINT_LIBRARIES=1 /Applications/MobileSafari.app/MobileSafari` |
 | `WebKit.framework/WebKit` 解析位置 | `/System/Library/Frameworks/WebKit.framework/WebKit`，镜像 **#51**，UUID `743EAFB4-D052-3C44-9307-9246B559B7C0` |
 | `WebCore` 解析位置 | `/System/Library/Frameworks/WebCore.framework/WebCore`，镜像 **#416** |
-| `/var/jb` 那份 `WebKit` 的 UUID | `7E97B496-DB02-3E46-9799-C4BDEC869E8E`，出现在 `DYLD_PRINT_LIBRARIES` 打印里 |
-| 对活进程 `lldb -p <pid> -o "image list"` 查 `7E97B496` | 命中 **0 次** |
+| `/var/jb` 份 `WebKit` 的 UUID（2026-11-26 只读实测，该目录当时是 18.5-minos 那一代） | `7E97B496-DB02-3E46-9799-C4BDEC869E8E`，`minos 18.5.0`，出现在 `DYLD_PRINT_LIBRARIES` 打印里 |
+| 对活进程 `lldb -p <pid> -o "image list"` 查该 UUID | 命中 **0 次** |
 
-打印里有、活进程镜像表里没有，这一对读数说明打印不能单独作为判据。同一时刻活进程的 `WebKit.framework/WebKit` 只有 #51 那份 16.1。
+打印里有、活进程镜像表里没有，这一对读数说明打印不能单独作为判据。该镜像进不了进程的原因是 `minos 18.5.0` 高于 16.1，`safari-injection-plan.md:1348` 里同一 UUID 的 `dlopen` 记录报的是 `built for iOS 18.5 which is newer than running OS`，随后又因 `BrowserEngineKit` 缺失而失败。打印里那一行为什么出现，本文没有单独测过，所以它不能当作映射成功的证据。同一时刻活进程的 `WebKit.framework/WebKit` 只有 #51 那份 16.1。
 
 第二条实测：过滤器 dlopen 路线。
 
