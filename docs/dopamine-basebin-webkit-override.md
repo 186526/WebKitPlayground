@@ -142,9 +142,9 @@ _MACHOMERGER_HOOK___fcntl
 
 两个 hook 解除的是「dyld 愿不愿意去磁盘找」。要找到，还得有目录被放进搜索路径。
 
-本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 内，且都是 `DYLD_INSERT_LIBRARIES`：`:333` 在 `shouldInsertJBEnv` 真分支内，`:358` 在其 else 分支内。全文没有 `DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`，也没有 `DYLD_ROOT_PATH`。本机 `/var/jb/basebin/` 下的二进制 `grep -a -l DYLD_FRAMEWORK_PATH` 同样无命中。
+本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 内，且都是 `DYLD_INSERT_LIBRARIES`：`:333` 在 `shouldInsertJBEnv` 真分支内，`:358` 在其 else 分支内。全文没有 `DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`，也没有 `DYLD_ROOT_PATH`。本机 `/var/jb/basebin/` 下的二进制 `grep -a -l DYLD_FRAMEWORK_PATH` 同样无命中。本段与下一段的行号都指官方原文件，不是打完补丁的版本。
 
-所以需要单独改的一处是：`spawn_exec_hook_common` 里 `shouldInsertJBEnv` 为真的分支（`common.c:325` 起的 `if (shouldInsertJBEnv) { ... }`），在那里追加 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH`（各带一个 `__XPC_` 版本），分别指向两个专用目录。
+所以需要单独改的一处是：`spawn_exec_hook_common` 里 `shouldInsertJBEnv` 为真的分支（`common.c:325` 起的 `if (shouldInsertJBEnv) { ... }`，官方原行号；打完补丁后在 `:427`），在那里追加 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH`（各带一个 `__XPC_` 版本），分别指向两个专用目录。
 
 这一处曾不在本 mission 范围内：第五、六、九节讲 dyldhook 那一半，第十一节交付实际补丁（四个变量，framework 两个指向 `/var/jb/Library/WebKitOverride`，library 两个指向 `/var/jb/Library/WebKitOverride/usr/lib`）。本节保留作为背景：它说明 dyld 为什么读这些变量，以及为什么单靠环境变量到不了 WebContent。
 
@@ -283,7 +283,7 @@ ssh -t mobile@192.168.2.136 'sudo /var/jb/basebin/jbctl update basebin /var/mobi
 
 同样会触发用户空间重启，重启后 `gen/dyld` 由 `dyld.orig` 加上旧版 `dyldhook_merge.arm64e.iOS16-17.dylib` 重建，两个新 hook 消失。
 
-如果更新后设备进不了正常状态，Dopamine.app 的「启用 Tweak」开关关闭会写 `/var/jb/basebin/.safe_mode`（`Application/Dopamine/Jailbreak/DOJailbreaker.m:646`），`systemhook` 见到 `_SafeMode` 与 `.safe_mode` 后不再注入（`systemhook/src/common/common.c:208-231`）。这只能挡住注入，挡不住已经替换的 `gen/dyld`；要让 `gen/dyld` 复原，仍需用旧 `basebin.tar` 再更新一次，或从 TrollStore 重装 Dopamine.app（它会带自己的 `basebin.tar`）。
+如果更新后设备进不了正常状态，Dopamine.app 的「启用 Tweak」开关关闭会写 `/var/jb/basebin/.safe_mode`（`Application/Dopamine/Jailbreak/DOJailbreaker.m:646`），`systemhook` 见到 `_SafeMode` 与 `.safe_mode` 后不再注入（`systemhook/src/common/common.c:309-332`，打完补丁后的行号；官方原文件里是 `:208-231`）。这只能挡住注入，挡不住已经替换的 `gen/dyld`；要让 `gen/dyld` 复原，仍需用旧 `basebin.tar` 再更新一次，或从 TrollStore 重装 Dopamine.app（它会带自己的 `basebin.tar`）。
 
 ## 九、风险
 
@@ -824,7 +824,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
    (user/501/UIKitApplication:com.google.chrome.ios[7fd1][rb-legacy] [38495]) <Notice>: Successfully spawned Chrome[38495] because launch job demand
    ```
 
-2. app 的 `envp` 里是 `DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib`。整个越狱里只有一处写这个值：`BaseBin/systemhook/src/common/common.h:7` 的 `HOOK_DYLIB_PATH`，写入点是 `common.c:327-333`。所以写入方是一个 spawn hook。
+2. app 的 `envp` 里是 `DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib`。整个越狱里只有一处写这个值：`BaseBin/systemhook/src/common/common.h:7` 的 `HOOK_DYLIB_PATH`，写入点是 `common.c:429-435`（打完补丁后的行号，官方原文件里是 `:327-333`）。所以写入方是一个 spawn hook。
 3. app 不可能只是继承了 launchd 的环境：`BaseBin/launchdhook/src/main.m:187` 给 launchd 自己的 `environ` 设的是 `JBROOT_PATH("/basebin/launchdhook.dylib")`，不是 systemhook。app 显示的是 systemhook，说明这个值被 hook 换掉了。
 
 `runningboardd` 从不调用 `posix_spawn`，它里面的 `systemhook` 一个变量也写不出去。所以写值的只能是 `BaseBin/launchdhook/src/spawn_hook.c:197` 装的 `__posix_spawn_hook`，也就是运行在 launchd 里的那份 `launchdhook`。上游在同处写明了这一点：`BaseBin/libjailbreak/src/util.c:856`「it has DYLD_INSERT_LIBRARIES set to launchdhook」。
@@ -849,7 +849,7 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 ### 十二·四 补丁写进 app 的 envp 到底是哪些条目
 
-判断依据是 `common.c:153-211` 的 `envbuf_variable_matches`：它用 `strcmp` 比**值**，不只是名字。`get_jbroot()` 返回 `/var/jb`（该路径是指向 preboot 的符号链接），所以补丁要写的值是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/WebKitOverride/usr/lib`。
+判断依据是 `common.c:153-157` 的 `envbuf_variable_matches`：它用 `strcmp` 比**值**，不只是名字。`get_jbroot()` 返回 `/var/jb`（该路径是指向 preboot 的符号链接），所以补丁要写的值是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/WebKitOverride/usr/lib`。
 
 `launchd` 传给 app 的 `envp` 里有继承来的 `__XPC_` 两个名字，值为构建期那一对目录，与补丁要写的值不同，因此 `present[1]`、`present[3]` 为 `false`，`allPresent` 为 `false`：
 
@@ -862,13 +862,13 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 结论：app 换完之后同时有裸名与 `__XPC_` 两套，且四个值都指向同一对目录。dyld 读裸名，所以覆盖生效；`__XPC_` 保留不影响任何东西。
 
-`DYLD_INSERT_LIBRARIES` 也会被改写：`envp` 里此时是 launchdhook 的路径，`systemHookAlreadyInserted` 为 0，于是按 `common.c:327-333` 换成 `/usr/lib/systemhook.dylib`。这正是 app 今天已经在用的值。
+`DYLD_INSERT_LIBRARIES` 也会被改写：`envp` 里此时是 launchdhook 的路径，`systemHookAlreadyInserted` 为 0，于是按 `common.c:429-435` 换成 `/usr/lib/systemhook.dylib`。这正是 app 今天已经在用的值。
 
 `jbuserconfig_get_value` 在这个进程里可用：它读 `JBROOT_PATH("/basebin/config.plist")`（`common.c:99`），只查 `DisableJBFrameworkPath` 一个键，文件不存在或读不到时返回 NULL，搜索路径保持开启。
 
 ### 十二·五 对已经正常的 helper 进程没有影响
 
-`WebContent`、`Networking` 今天的 `envp` 已经有四个值正确的变量，`present` 四项全为 true，`allPresent` 为 true，走 `common.c:440` 那条快速路径，`envp` 原样传给 `posix_spawn`。它们继续加载 `787DFAB1`。`launchdhook` 与 `systemhook` 编译同一份源码，改的是同一段代码，`systemhook` 侧的行为不因为这份二进制同时存在于 launchdhook 而改变。
+`WebContent`、`Networking` 今天的 `envp` 已经有四个值正确的变量，`present` 四项全为 true，`allPresent` 为 true，走 `common.c:417-420` 那条快速路径，`envp` 原样传给 `posix_spawn`。它们继续加载 `787DFAB1`。`launchdhook` 与 `systemhook` 编译同一份源码，改的是同一段代码，`systemhook` 侧的行为不因为这份二进制同时存在于 launchdhook 而改变。
 
 混合形态（helper 可执行文件仍是 `/System` 的 16.1，`Library/Frameworks` 来自 `/var/jb`）由这次改动保持：补丁只增加搜索目录，不改变可执行文件的解析顺序。
 
