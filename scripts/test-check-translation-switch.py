@@ -20,10 +20,13 @@ cases are the ways the switch can come back and the ways the check could pass by
   a read site that stops asking the member must fail, in either of the two shapes a bypass takes (a
   bare `{` and the deployment macro), because the setter call is only one of the switch's three
   sites;
-  an assignment to the member outside the setter must fail, because it reaches the same state
-  without a call the check could see;
+  an assignment to the member outside the setter must fail, including the compound `|=` and the
+  parenthesised `(member) =` forms, because both compile and both turn the flag on;
   a setter call folded across two lines must fail, because the check has to read statements and not
-  lines.
+  lines;
+  a translation call added to a third file, or to an exempt file outside a declaration, must fail,
+  because the guard is a property of every call rather than of the two files that first had one,
+  while a correctly guarded one-line call must pass.
 
 The "as committed" case reads the real patch, so a patch edited without updating this check fails
 here rather than in the build. Two further passes read the real patch too: every rationale needle
@@ -149,6 +152,47 @@ READ_SITE_CASES = (
         "+    {\n+        auto translated = translateIncomingMessageName(decoder->messageName());\n",
         "the receive path that rewrites an incoming message number",
     ),
+)
+
+# Round 6's P2-1: two assignment shapes that compile, turn the flag on, and used to pass because the
+# regex demanded whitespace then a single `=`. Each must land on exit 1.
+ASSIGNMENT_CASES = (
+    (
+        "a patch that compound-assigns the member fails",
+        SEND_GUARD,
+        "+    m_shouldTranslateMessageNames |= true;\n" + SEND_GUARD,
+        "assigns m_shouldTranslateMessageNames outside the setter",
+    ),
+    (
+        "a patch that assigns through parentheses around the member fails",
+        SEND_GUARD,
+        "+    (m_shouldTranslateMessageNames) = true;\n" + SEND_GUARD,
+        "assigns m_shouldTranslateMessageNames outside the setter",
+    ),
+    (
+        "a patch that compares the member is not read as an assignment",
+        SEND_GUARD,
+        "+    if (m_shouldTranslateMessageNames == true) { return; }\n" + SEND_GUARD,
+        None,
+    ),
+)
+
+# Round 6's P2-2: the guard is a property of every translation call, not of the two files that held
+# the read sites. A caller added to a third file, or to an exempt file but not in a declaration, must
+# fail; a correctly guarded one-line caller must pass, so the rule is not merely strict.
+THIRD_FILE_CALL = (
+    "diff --git a/Source/WebKit/Platform/IPC/Connection.h b/Source/WebKit/Platform/IPC/Connection.h\n"
+    "+void unrelated() { encoder->setMessageName(translateOutgoingMessageName(encoder->messageName())); }\n"
+    "diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp\n"
+    "+void bad() {\n+    translateIncomingMessageName(x);\n+}\n"
+)
+GUARDED_INLINE_CALL = (
+    "diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp\n"
+    "+void ok() { if (m_shouldTranslateMessageNames) { translateOutgoingMessageName(x); } }\n"
+)
+GUARD_CLOSED_INLINE_CALL = (
+    "diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp\n"
+    "+void bad() { if (m_shouldTranslateMessageNames) { } translateOutgoingMessageName(x); }\n"
 )
 
 # Appended rather than substituted: the committed patch carries no setter call, so there is nothing to
@@ -301,6 +345,40 @@ CASES += (
         BASE + FOLDED_CALL,
         1,
         "calls setShouldTranslateMessageNames",
+    ),
+)
+
+for description, old_text, new_text, expected_message in ASSIGNMENT_CASES:
+    if expected_message is None:
+        # A comparison is not an assignment: exit 0 this rule, so the fixture must still pass overall.
+        CASES += ((description, BASE.replace(old_text, new_text, 1), 0, None),)
+    else:
+        CASES += ((description, BASE.replace(old_text, new_text, 1), 1, expected_message),)
+
+CASES += (
+    (
+        "a translation call added to a third file fails",
+        BASE + THIRD_FILE_CALL,
+        1,
+        "calls the translation outside the member's guard",
+    ),
+    (
+        "a translation call in an exempt file but outside a declaration fails",
+        BASE + THIRD_FILE_CALL,
+        1,
+        "Source/WebKit/Platform/IPC/Encoder.cpp",
+    ),
+    (
+        "a correctly guarded one-line translation call passes",
+        BASE + GUARDED_INLINE_CALL,
+        0,
+        None,
+    ),
+    (
+        "a one-line call after the guard block has closed fails",
+        BASE + GUARD_CLOSED_INLINE_CALL,
+        1,
+        "calls the translation outside the member's guard",
     ),
 )
 

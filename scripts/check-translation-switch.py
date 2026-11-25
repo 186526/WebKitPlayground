@@ -42,12 +42,20 @@ What it refuses, and why each combination is a defect rather than a preference:
     read from the tables themselves and pinned because they are the neighbours of the pairs the prose
     does name, and a silent rename would move them instead.
 
-  - A read site that stops asking the member. The flag is a setter call and two reads; guarding only
-    the call leaves the reads, and a read is the cheapest place to make translation unconditional.
-    The two reads must stay `if (m_shouldTranslateMessageNames)`: a bare `{` runs the block always,
-    and `IOS_16_MESSAGE_NUMBER_TRANSLATION` is 1 in this build because the deployment target is 16.1,
-    so substituting the macro is the same as a bare brace with a reassuring name. The member may only
-    be assigned from the setter's own parameter, so a direct `= true` is refused.
+  - A translation call that does not sit under the member. The flag is a setter call and two reads;
+    guarding only the call leaves the reads, and a read is the cheapest place to make translation
+    unconditional. Every added statement that calls `translateOutgoingMessageName` or
+    `translateIncomingMessageName` must have `if (m_shouldTranslateMessageNames) {` open the block it
+    sits in. A bare `{` runs the block always, and `IOS_16_MESSAGE_NUMBER_TRANSLATION` is 1 in this
+    build because the deployment target is 16.1, so substituting the macro is the same as a bare brace
+    with a reassuring name. A caller added to a third file is checked too, because the rule is a
+    property of the call and not a list of the two files that first had one; only the two functions'
+    own definitions and their header declarations are exempt, and that is decided by the file plus the
+    declaration, so a new caller inside an exempt file still has to be guarded.
+
+  - An assignment to the member outside the setter. It may only be written from the setter's own
+    parameter. `= true`, a compound `|=`, and a parenthesised `(member) =` all compile and all turn
+    the flag on; each is refused, while `==` stays a comparison.
 
 The script reads the patch file, not a checkout, so it runs before the build has a tree and cannot
 be satisfied by a tree that happens to be patched differently from the deb.
@@ -158,8 +166,10 @@ def added_code_lines(patch: str) -> list[str]:
 # sit on different lines, and a check that reads one line at a time misses the call the moment it is
 # wrapped. The added code is joined back into statements with the usual continuation shapes: an
 # unclosed parenthesis, a trailing comma or arrow, or a next line that opens with a call or member
-# access. This set was measured against the committed patch: it joins two lines there, both of them
-# benign (a licence header and a project.pbxproj list), and it never joins a table `case` label.
+# access. Measured against the committed patch: 7670 added lines become 7662 statements, so 8 joins,
+# and all 8 fall in two places — the licence header (7) and a project.pbxproj list (1). None of the
+# 5953 `case` statements is joined into its neighbour, which is what keeps a correct patch from being
+# read as a violation.
 CONTINUES_AFTER = (",", "\\", "&&", "||", "->", ".", "=")
 CONTINUES_BEFORE = ("(", ".", "->", ",")
 FILE_HEADER = re.compile(r"^diff --git a/(\S+) b/")
@@ -191,6 +201,15 @@ def added_code_statements(patch: str) -> list[tuple[str, str]]:
             statements.append((current_path, current))
             current, depth = "", 0
         current_path = line_path
+        # A preprocessor directive is one line by definition, and the line after it is a statement of
+        # its own even when it opens with `(`. Joining across that boundary would report an assignment
+        # as part of the enclosing `#if` and could hide which statement actually carried it.
+        if code.startswith("#"):
+            if current:
+                statements.append((current_path, current))
+                current, depth = "", 0
+            statements.append((line_path, code))
+            continue
         current = code if not current else current + " " + code
         depth = max(0, depth + code.count("(") - code.count(")"))
         following = per_file[index + 1][1] if index + 1 < len(per_file) and per_file[index + 1][0] == line_path else ""
@@ -234,8 +253,33 @@ READ_SITES = (
 
 # The member may be written from one place only: the setter's own body, from its parameter. Any other
 # assignment reaches the same state without a call, which is the path check_no_setter_call cannot see.
-ASSIGNMENT = re.compile(r"\bm_shouldTranslateMessageNames\s*=(?!=)\s*([^=;]+);")
+#
+# The left side is optional parentheses around the member, and the operator is a plain or compound
+# assignment. Both exist because the shapes compile and turn the flag on just as surely as `= true`
+# does: `(m_shouldTranslateMessageNames) = true` and `m_shouldTranslateMessageNames |= true` both
+# compile under g++ -std=c++17 and leave the flag set. `(?<![=!<>+\-*/%&|^])` keeps `==` a comparison
+# and refuses to read `<=`/`>=`/`!=` as an assignment to a member named on the right of them.
+ASSIGNMENT = re.compile(
+    r"\(?\s*\bm_shouldTranslateMessageNames\s*\)?\s*"
+    r"(?<![=!<>+\-*/%&|^])(?:[|&^+\-*/%]|<<|>>)?=(?!=)\s*([^=;]+);"
+)
 SETTER_BODY = "void setShouldTranslateMessageNames(bool shouldTranslate)"
+
+# The two functions are declared in MessageNumberTranslation.h and defined in Encoder.cpp. Inside
+# them the call is the translation rather than a use of it, and the header's two lines declare them,
+# so those statements are the only ones whose enclosing block does not have to be the guard. The test
+# is the file plus the declaration shape, with the return type required: a bare `translateX(name);`
+# at the head of a statement has no `MessageName` in front of it and is therefore still a call. Adding
+# a caller in either file still has to be guarded; a list of call sites would have the hole this check
+# was rewritten to close.
+TRANSLATION_DEFINITION = re.compile(
+    r"^MessageName\s+translate(?:Outgoing|Incoming)MessageName\s*\([^)]*\)\s*[;{]?$")
+DEFINITION_FILES = (
+    "Source/WebKit/Platform/IPC/MessageNumberTranslation.h",
+    "Source/WebKit/Platform/IPC/MessageNumberTranslation.cpp",
+    "Source/WebKit/Platform/IPC/Encoder.cpp",
+)
+TRANSLATE_CALL = re.compile(r"\btranslate(?:Outgoing|Incoming)MessageName\s*\(")
 
 
 def enclosing_blocks(statements: list[tuple[str, str]]) -> list[str | None]:
@@ -264,10 +308,70 @@ def enclosing_blocks(statements: list[tuple[str, str]]) -> list[str | None]:
     return blocks
 
 
+def inline_guard_covers(statement: str, call_start: int) -> bool:
+    """True when `if (m_shouldTranslateMessageNames) {` opens a block still open at `call_start`.
+
+    A one-line form such as `void f() { if (m_shouldTranslateMessageNames) { call(x); } }` is a
+    correctly guarded call, but it is a single statement, so the brace stack has no enclosing block to
+    report. Counting depth from the guard's `{` to the call keeps that case passing without accepting
+    `if (m_shouldTranslateMessageNames) { } call(x);`, where the block has already closed.
+    """
+    guard = "if (m_shouldTranslateMessageNames) {"
+    offset = statement.find(guard)
+    while offset >= 0:
+        brace = offset + len(guard) - 1
+        if brace < call_start:
+            depth = 0
+            for character in statement[brace:call_start]:
+                if character == "{":
+                    depth += 1
+                elif character == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            if depth > 0:
+                return True
+        offset = statement.find(guard, offset + 1)
+    return False
+
+
 def check_read_sites(patch: str) -> list[Violation]:
     statements = added_code_statements(patch)
     blocks = enclosing_blocks(statements)
     violations = []
+
+    def is_exempt(path: str, statement: str) -> bool:
+        """True for the translation's own definition and for the header's declarations.
+
+        These are the statements where the call is the translation rather than a use of it. The test
+        is the file plus the declaration shape, so adding a caller in either file still has to be
+        guarded; a list of call sites would have the hole this check was rewritten to close.
+        """
+        return path in DEFINITION_FILES and bool(TRANSLATION_DEFINITION.match(statement))
+
+    # Every added statement that calls the translation has to sit under the member, not just the two
+    # files that were the read sites when this check was written. The per-file assertion below keeps
+    # those two from moving or disappearing; this loop keeps a third caller from being invisible.
+    for index, (path, statement) in enumerate(statements):
+        call = TRANSLATE_CALL.search(statement)
+        if not call:
+            continue
+        if is_exempt(path, statement):
+            continue
+        guard = blocks[index]
+        if guard == "if (m_shouldTranslateMessageNames) {":
+            continue
+        if inline_guard_covers(statement, call.start()):
+            continue
+        found = "no enclosing block" if guard is None else "`%s`" % guard
+        violations.append(
+            Violation(
+                "the patch calls the translation outside the member's guard",
+                "expected `if (m_shouldTranslateMessageNames) {` to open the block holding `%s` in %s, "
+                "found %s; a translation call anywhere else runs on every message, which is the switch "
+                "turned on without anyone flipping it" % (statement.strip(), path, found),
+            )
+        )
 
     def guards_for(path: str, call: str) -> list[str | None]:
         """The enclosing block of every statement in `path` that calls `call`.
