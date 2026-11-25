@@ -617,11 +617,11 @@ WebCore   LOAD_WEAK    /System/Library/PrivateFrameworks/WebCore.framework/Frame
 
 四次 `pmap_mark_page_as_ppl_page_internal` 的 `pa` 各不相同，不是同一个固定页。五次的内核都是 `Darwin Kernel Version 22.1.0`、`OS version: 20B82`。下面的步骤保留下来作为「装了什么、怎么退」的记录，不是待执行的清单。
 
-**触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar，这一点必须读。** 触发它们的是 2026-11-26 00:50:43 的 `jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar`：6103040 字节、`sha256 d5bd3ef3…`、27 个成员。本节第 3 步用的是 `/var/mobile/Documents/basebin.tar`：6144000 字节、`sha256 7fd37934…`，即 GitHub Actions run `45237030318` 的 CI 产物（`webkit-install-runbook.md:255`）。两份都是 27 个成员、文件名列表同构（`docs/dopamine-basebin-webkit-override.md` 第十二·一节逐条比对过），`d5bd3ef3…` 那份是在设备 tar 上再换掉 `launchdhook.dylib` 得到的。
+**触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar，这一点必须读。** 触发它们的是 2026-11-26 00:50:43 的 `jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar`：6103040 字节、`sha256 d5bd3ef3…`、27 个成员。本节第 3 步用的是 `/var/mobile/Documents/basebin.tar`：6144000 字节、`sha256 7fd37934…`，即 GitHub Actions run `45237030318` 的 CI 产物（`webkit-install-runbook.md:255`）。两份都是 27 个成员、文件名同构（`docs/dopamine-basebin-webkit-override.md` 第十二·一节逐条比对过）。`d5bd3ef3…` 由设备那份 `basebin-hybrid.tar`（6092800）换掉 `launchdhook.dylib` 得到；它与 CI 产物之间除补丁成员外还有 19 个成员不同（同一节第十二·二节），所以两份 tar 的差异不止 `launchdhook` 一处。
 
 **两者在 `basebin/launchdhook.dylib` 上不同，这一处差别决定了 panic 的归因边界。** `d5bd3ef3…` 里是打了补丁的 330144 字节 `sha256 150270a5…`；`7fd37934…` 里是原版 312848 字节 `sha256 449a9606…`，因为那份产物早于把 `launchdhook` 纳入 gate 的提交 `64f8834`（2026-11-26 00:47:13），该提交自己的说明写着此前的 tar「carrying the stock launchdhook printed Result: PASS」。所以本节第 3 步那份 tar 装上去时 `launchdhook` 是原版，它不会给 app 进程写搜索路径变量，而这正是 4.3 节 app 进程留在 16.1 的原因之一。
 
-本节第 3 步那份 tar 也装过一次（2026-11-25 23:53），到 00:34 复测时设备可登录、读数为补丁态；五次 panic 的起点是 00:51:11，晚于那次安装 58 分钟。这份读数只能说明「原版 `launchdhook` 的安装之后 58 分钟内没有 panic」，不能说明 §6 那三步在 panic 面前可退；它也不能把 panic 归给补丁版 `launchdhook` 这一个成员，因为两份 tar 之间还隔着设备 tar 与 CI 产物那 19 个成员（`docs/dopamine-basebin-webkit-override.md` 第十二·二节），`d5bd3ef3…` 并非「本节那份 tar 加一个 `launchdhook`」。分离出 `launchdhook` 的作用需要一次只换一个成员的安装，那次没有做。在分离出这个变量之前，本节步骤不执行。
+本节第 3 步那份 tar 也装过一次（2026-11-25 23:53），到 00:34 复测时设备可登录、读数为补丁态；五次 panic 的起点是 00:51:11，晚于那次安装 58 分钟。这份读数只能说明「原版 `launchdhook` 的安装之后 58 分钟内没有 panic」，不能说明 §6 那三步在 panic 面前可退；它也不能把 panic 归给补丁版 `launchdhook` 这一个成员：两份 tar 的成员内容差异不止 `launchdhook` 一处，`d5bd3ef3…` 并非「本节那份 tar 加一个 `launchdhook`」。分离出 `launchdhook` 的作用需要一次只换一个成员的安装，那次没有做。在分离出这个变量之前，本节步骤不执行。
 
 前提：备份必须在改动之前完成，且备份与校验和都落到设备的 `/var/mobile/Documents` 下（`mobile` 可写）。全部步骤改动的是 `/var/jb/basebin` 下两个库文件（由 tar 解包写入）与 `/var/jb/Library` 下一个新建目录——五个 `*.framework` 链接加一个 `usr`，`usr` 在设备上是真目录而非链接，见第 2 步的形态表——不碰 `/System`、不改 seal、不写 `/usr`。
 
