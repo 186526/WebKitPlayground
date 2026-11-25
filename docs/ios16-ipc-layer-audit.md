@@ -49,6 +49,8 @@ helper 被终止的链路有四步，缺一步都不成立，四步都在本文�
 
 所以答案不是「能降级」，也不是「消息被静默丢弃」。**18.3 helper 在连上 UI 进程后收到的第一条消息处理完，就被 UI 进程主动 kill 掉。**
 
+这一节描述的是 CoreIPC 阶段。按两版 tag 原文求值，这组错配更早就在 XPC bootstrap 阶段中止，CoreIPC 根本不会建立，见第 9 节；第 9 节末段说明本工程产物删掉宽度断言后才会走到这里。
+
 还有一条独立成立的次要结论：即使第 3、4 步不发生终止，UI 进程的发送通道也从未建立。`Connection::canSendOutgoingMessages()` 要求 `m_isConnected` 为真（`Connection.cpp:941-944`），而 server 侧的 `m_isConnected` 只在 `InitializeConnection` 分支里被置真。既然该分支被跳过，`InitializeWebProcess` 以及其后所有 UI→helper 消息都只堆在 `m_outgoingMessages` 里，一条也发不出去。
 
 这条次要结论让答案对第 4 步的细节不敏感。第 4 步有两种可能：3076 在 16.1 是合法编号（`RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged`），则 helper 在第一条消息上被终止；3076 被判非法，则消息在 `ConnectionCocoa.mm:554-556` 处被丢弃、连接进入半开状态，helper 活着但收不到 UI 进程的任何指令，随后在页面超时或进程监视下被清理。两种情形的共同点是**这套组合无法工作**，差别只是终止发生得多快、由谁触发。第 6.2 节说明了本机按源码推得的是第一种。
@@ -59,7 +61,7 @@ helper 被终止的链路有四步，缺一步都不成立，四步都在本文�
 
 任务背景写「18.3 `getClientSDKAlignedBehaviors` 在 `behaviorData.empty()` 时 `return false`，调用方据此 `exitProcess(EXIT_FAILURE)`」。18.3.1 的代码不是这样。
 
-`Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm:87-97`：
+18.3.1 tag 原文的 `Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm:87-97`：
 
 ```cpp
 bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehaviors& behaviors)
@@ -75,6 +77,8 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 }
 ```
 
+上面这段是 **18.3.1 tag 原文**，`RELEASE_ASSERT(length == behaviors.storageLengthInBytes())` 是它的第 93 行。本工程产物不是这样：`patches/ios16-xpc-bootstrap-compat.patch` 删掉了这条断言，换成三分支判据——数据块与本地位图等宽时 `memcpy` 并返回真，更窄时丢弃负载、位图保持全零并返回真，更宽时丢弃并返回假，两条不等宽分支各记一条 `RELEASE_LOG_ERROR`。下文凡引用这条断言，都标明是 tag 原文还是产物。
+
 调用点在 `Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h:130-141`，**返回值被丢弃**：
 
 ```cpp
@@ -87,19 +91,19 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
         exitProcess(EXIT_FAILURE);
 ```
 
-同一个函数里的其他 delegate 调用（`getConnectionIdentifier`、`getClientIdentifier`、`getProcessIdentifier`、`getClientProcessName`）都以 `if (!...) exitProcess(EXIT_FAILURE);` 收尾，只有 `getClientSDKAlignedBehaviors` 这一条没有。所以这条路径的失效方式不是「返回 false 然后退出」，而是**断言中止**：键缺失或长度为 0 时函数返回 false、位集留零、helper 继续启动；键存在但长度不等于 12 时 `EPM18:93` 的 `RELEASE_ASSERT` 直接终止进程。
+同一个函数里的其他 delegate 调用（`getConnectionIdentifier`、`getClientIdentifier`、`getProcessIdentifier`、`getClientProcessName`）都以 `if (!...) exitProcess(EXIT_FAILURE);` 收尾，只有 `getClientSDKAlignedBehaviors` 这一条没有。这一点在 18.3.1 tag 原文里成立：这条调用点不会因为返回 false 而退出。函数自己的两条出口因此是——键缺失或长度为 0 时返回 false、位集留零、helper 继续启动；键存在但长度不等于 12 时 `EPM18:93` 的 `RELEASE_ASSERT` 直接终止进程。
 
-第二种才是两版 tag 之间实际发生的组合。16.1 UI 进程**发送**这个键，长度为 8（`PL16:209`，见第 2 节与 `ios16-bootstrap-contract.md`），不等于 18.3 helper 期望的 12。所以按两版 tag 原文求值，16.1 UI 配 18.3 helper 不是「位集留零、行为全不启用」，而是 helper 在 `XPCServiceInitializer` 内中止。本工程产物改写了这个函数（见 `ios16-bootstrap-contract.md` 的「修补补丁的现状与缺口」一节）：断言删除，8 字节负载走窄支，记一条日志、位图保持全零、返回真，进程继续初始化。
+上面两条出口里，第二条才是两版 tag 之间实际发生的组合。16.1 UI 进程**发送**这个键，长度为 8（`PL16:209`，见第 2 节与 `ios16-bootstrap-contract.md`），不等于 18.3 helper 期望的 12。所以按两版 tag 原文求值，16.1 UI 配 18.3 helper 不是「位集留零、行为全不启用」，而是 helper 在 `XPCServiceInitializer` 内中止。本工程产物改写了这个函数（见 `ios16-bootstrap-contract.md` 的「修补补丁的现状与缺口」一节）：断言删除，8 字节负载走窄支，记一条日志、位图保持全零、返回真，进程继续初始化。
 
-真正会终止进程的是长度这一条，而不是键缺失。`RELEASE_ASSERT` 在发布构建里也生效（18.3.1 的 `Source/WTF/wtf/Assertions.h:732`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`；同一 `#define` 在发货 16.1 上是 `:662`，在 `Safari-614.1.9` 上是 `:656`）。位集宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
+上面两条出口里，终止进程的是第二条长度断言，不是第一条键缺失。`RELEASE_ASSERT` 在发布构建里也生效（18.3.1 的 `Source/WTF/wtf/Assertions.h:732`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`；同一 `#define` 在发货 16.1 上是 `:662`，在 `Safari-614.1.9` 上是 `:656`）。12 字节这个宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
 
 ```cpp
 using SDKAlignedBehaviors = WTF::BitSet<static_cast<size_t>(SDKAlignedBehavior::NumberOfBehaviors), uint32_t>;
 ```
 
-同一 tag 的枚举有 94 个行为项，`BitSet<94, uint32_t>` 占 3 个 32 位字，`storageLengthInBytes()` 返回 12（`Source/WTF/wtf/BitSet.h:142`）。这个数字由编译进 helper 的枚举项数量决定，16.1 侧无法预知。
+上面这段同样是 18.3.1 tag 原文。同一 tag 的枚举有 94 个行为项，`BitSet<94, uint32_t>` 占 3 个 32 位字，`storageLengthInBytes()` 返回 12（`Source/WTF/wtf/BitSet.h:142`）。发货 16.1 的对应类型是 `Bitmap<63, uint32_t>`（`RuntimeApplicationChecksCocoa.h:102`），占 2 个字，返回 8（`Source/WTF/wtf/Bitmap.h:145`）。这个数字由编译进 helper 的枚举项数量决定，UI 进程无法预知对端 helper 的值。
 
-这一节的意义是确定终止发生的阶段：这组错配在 XPC 启动阶段就终止，比 CoreIPC 更早。16.1 UI 进程发送的 `client-sdk-aligned-behaviors` 是 8 字节，18.3 helper 断言 12 字节，所以 helper 在 `XPCServiceInitializer` 内被中止。第 6 节描述的 CoreIPC 终止是另一条不经过这个断言的路径。
+这一节的意义是确定终止发生的阶段：按两版 tag 原文求值，这组错配在 XPC 启动阶段就终止，比 CoreIPC 更早。16.1 UI 进程发送的 `client-sdk-aligned-behaviors` 是 8 字节，18.3 helper 断言 12 字节，所以 helper 在 `XPCServiceInitializer` 内被中止。本工程产物删掉该断言后不再中止，见第 9 节末段。第 6 节描述的 CoreIPC 终止是另一条不经过这个断言的路径。
 
 ## 3. 消息号是消息名字符串排序的连续序号
 
@@ -454,7 +458,7 @@ arm64 iOS 上 `size_t` 是 8 字节，`Vector` 的计数宽度两版相同。`Ha
 
 ## 9. 启动阶段：XPC 引导字典
 
-这一节在 CoreIPC 之前。结论是**启动阶段本身就已经终止**：宽度断言在 `XPCServiceInitializer` 内中止 helper，所以它比 CoreIPC 更早，不能用来说明 CoreIPC 之后的进程消失。
+这一节在 CoreIPC 之前。按两版 tag 原文求值，结论是**启动阶段本身就已经终止**：宽度断言在 `XPCServiceInitializer` 内中止 helper，所以它比 CoreIPC 更早，不能用来说明 CoreIPC 之后的进程消失。本工程产物删掉该断言后不再中止，见本节末段。
 
 16.1 `Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:192-216` 的 bootstrap 字典键：
 
@@ -497,7 +501,7 @@ client-sdk-aligned-behaviors, extra-initialization-data
 1. **版本协商字段**：`Encoder::encodeHeader()` 只写 flags、messageName、destinationID（16.1 `Encoder.cpp:159-164`，18.3 `:162-167`），没有版本字段。`InitializeConnection` 的消息体只有 mach 端口（16.1 `ConnectionCocoa.mm:217-223`，18.3 `:181-192`）。不存在协商点。
 2. **消息号映射**：`MessageName` 是编译期枚举，分发靠 `Messages::X::Y::name()` 常量比对（16.1 `messages.py:586-603`，18.3 `:673-698`），没有运行时查表或别名。
 3. **参数向后兼容读取**：`Decoder::decode<T>()` 失败时置 invalid 并返回 `nullopt`（16.1 `Decoder.h:120-135`），没有「跳过未知字段」的能力；生成式 serialization 也不支持带默认值的可选字段跳过。
-4. **未识别消息的容错**：生成器在 `didReceiveMessage` 末尾写的是 `ASSERT_NOT_REACHED_WITH_MESSAGE`（16.1 `messages.py:1177`，18.3 `:1432`），该宏展开成 `ASSERT_WITH_MESSAGE`（`Source/WTF/wtf/Assertions.h:434`），在 `!ASSERT_ENABLED` 时是 `((void)0)`（`:422`）。发布构建里未识别消息确实不触发断言，但这是「丢弃」，不是「兼容」。
+4. **未识别消息的容错**：生成器在 `didReceiveMessage` 末尾写的是 `ASSERT_NOT_REACHED_WITH_MESSAGE`（16.1 `messages.py:1177`，18.3 `:1432`）。该宏展开成 `ASSERT_WITH_MESSAGE`，两个宏各自在 `!ASSERT_ENABLED` 下都退化为空语句：`ASSERT_NOT_REACHED_WITH_MESSAGE` 在 `Source/WTF/wtf/Assertions.h` 里 16.1 是 `:440`、18.3.1 是 `:498`；它展开到的 `ASSERT_WITH_MESSAGE` 的 `((void)0)` 分支在 16.1 是 `:428`、18.3.1 是 `:485`。发布构建里未识别消息确实不触发断言，但这是「丢弃」，不是「兼容」。
 5. **进程级容错**：`WebProcessProxy::didReceiveInvalidMessage` 的选择是 `terminate()`，没有重试、没有降级到旧协议的分支（`WebProcessProxy.cpp:963-978`）。
 
 结论：没有降级路径。而且这次连「丢弃后继续跑」都不成立——第 6 节的终止发生在第一条消息上。
@@ -572,7 +576,7 @@ client-sdk-aligned-behaviors, extra-initialization-data
 - `Source/WTF/wtf/ArgumentCoder.h:73-91`
 - `Source/WTF/wtf/PlatformUse.h:241-243`
 - `Source/WTF/wtf/HashMap.h:697-713`
-- `Source/WTF/wtf/Assertions.h:78-79`、`:422`、`:434`、`:732`
+- `Source/WTF/wtf/Assertions.h:77-78`、`:485`、`:498`、`:732`
 - `Source/WTF/wtf/BitSet.h:142`
 - `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133`
 - `Source/WebKit/UIProcess/AuxiliaryProcessProxy.cpp:185-200`、`:329-352`
