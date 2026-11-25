@@ -850,7 +850,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 ### 十二·二 这份 tar 通不过仓库自己的六个名字的 gate，原因与可接受范围
 
-**事实先写**：本 tar 在 `dopamine-basebin/verify-basebin-tar.sh` 上有 **6 条断言失败**，退出 1。失败全部落在 `verify-dyldhook-merge.sh` 那一组，逐条是：
+**事实先写**：本 tar 在 `dopamine-basebin/verify-basebin-tar.sh` 上退出 1。输出里 `^FAIL` 开头的行共 **7** 行，由 **6 条具体断言**加 **1 条汇总行**（`shipped dyldhook dylibs violate verify-dyldhook-merge.sh`）组成。6 条具体断言全部落在 `verify-dyldhook-merge.sh` 那一组，逐条是：
 
 | 失败的断言 | 涉及成员 |
 | --- | --- |
@@ -1085,7 +1085,7 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 三个成员的依赖加载命令逐切片比对 | **已执行**（本机），逐条相同 |
 | 三个成员的未定义符号比对 | **已执行**（本机）：`launchdhook` 275/275、hook dylib 0/0、`systemhook` 134→135（新增 `__xpc_type_bool`） |
 | `basebin.tc` 的 28 条 cdhash 核对 | **已执行**（本机） |
-| 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1，6 条断言失败，见十二·二 |
+| 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：6 条具体断言失败 + 1 条汇总行，见十二·二 |
 | 把 tar 送到设备 | **未执行** |
 | `jbctl update basebin` | **未执行** |
 | 用户空间重启 | **未执行** |
