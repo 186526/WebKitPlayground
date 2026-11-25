@@ -5,6 +5,8 @@
 > 本文判定路线 A 为 no-go。塔的裁定是后续按路线 B 推进，因此本文作为决策记录保留，**不作为构建许可**：它记的是「哪几条必须为真」，不是「可以开始构建」。第二节已写明本文的 go 判定针对路线 B，路线 A 保持记录但不再作为候选推进。
 >
 > 正文有两条引用已不在读者会看到的行上。一、第 5.2 节第 3 条的 `build-state.md:336`（GPU `.xpc` 的 `procPath`）在调查所用的 `a792cca` 上正确，该段落在外层仓库 `c7ccc3c` 上移到 `:299`，经 M95 与 M97 的合并后现为 `:336`，正文已按 `:336` 改写。二、第 5.2 节第 3 条末尾引的 `docs/ios16-launchd-xpc-resolution-gap.md:237-244` 指的是该文档讨论「反证二」的那一条，它在本仓库的第 234 行；237-244 是紧随其后的「因此本文能给定论的部分」。正文其余 `build-state.md` 行号原先按 `c7ccc3c` 写成 405-414、478-491、513-533、535-548、907、937-939，现在按当前文件统一为 442-450、515-528、550-570、572-585、954、984-986。
+>
+> **2026-11-25 补记。** 本文此后按当天在设备 `192.168.2.136`（iPadOS 16.1 / Dopamine 3.0.13 rootless，`AGENTS.md` 记的是 `192.168.2.135`）上取到的读数做了更正：改动落在第一节的路线 B 判定、第五节全部小节（含新增的 5.4 节）、第六节的最小改动清单与第九节的未验证项。这些更正之后本文不再与调查产物逐字节相同。
 
 本文回答一个问题：**在触发下一次 4 小时 42 分的 WebKit 构建之前，哪几条必须为真，以及现在判定为 go 还是 no-go。**
 
@@ -21,11 +23,15 @@
 2. 在翻译层之前，helper 已经死在 XPC 入口。16.1 UI 发的 `client-sdk-aligned-behaviors` 是 8 字节，18.3 helper 要求 12 字节，`RELEASE_ASSERT` 在 `NDEBUG` 下展开为 `CRASH_WITH_INFO`。这是 helper 的第一条 bootstrap 消息，排在 `initializeWebProcess` 之前。
 3. 即使前两条都修好，编号翻译只改消息号，不改载荷。两版共享消息名 2998 条，其中 494 条载荷参数变了；31 条在 18.3 新增了 reply，塔把这 31 条按「参数是否同时变」分成 17 + 14。这 14 条里有 `WebPageProxy.DecidePolicyForNavigationActionAsync`：16.1 收 13 个参数，18.3 发 1 个参数加一个回复。我抽查了三条，其中两条不该在本组（见 4.3 节），所以真实条数在 12 上下。
 
-**路线 B：no-go 的判据只剩一条未测项，且它不是构建能解决的。**
+**路线 B：no-go 的判据是一条已被否证的前置条件，它不是构建能解决的。**
 
-dyld hook 这一半已经齐了：补丁在仓库里，构建产物里在，设备上的 `gen/dyld` 里也在。18.3 的五个 framework 已装在 `/var/jb/Library/Frameworks`，`LC_BUILD_VERSION` 为 `minos=16.1.0 sdk=18.5.0`，说明带 iOS 16 补丁。剩下的唯一未知是 **launchd 会不会为 UI 进程从覆盖目录解析那四个 WebKit 服务名**。这一项需要在设备上测，而设备当前不可达。
+dyld 这一层今天没有生效。补丁在仓库里，构建产物里也有，但设备上正在用的那份 `gen/dyld` 里没有这两个新 hook：`/var/jb/basebin/gen/dyld` 974016 字节，判定 (b) 在这份文件上读 **`1 0 0 1`**（第 2、3 位为 0，即 `isOverridablePath` 与 `isAlwaysOverridablePath` 两个新 hook 都不在；打上补丁的形态是 `1 1 1 1`）；会被合进去的那个 `dyldhook_merge.arm64e.iOS16-17.dylib` 是原版 **74352** 字节（`basebin.tar` 里打补丁的那份是 75952 字节）。`systemhook.dylib` 233520 字节，是官方原版，六个字符串计数为 `0 0 0 0 0 2`，`DYLD_FRAMEWORK_PATH` 出现 0 次，所以搜索路径注入也没有发生。于是覆盖目录里的二进制**根本没有被选中**，这不需要推断：2026-11-25 装好覆盖目录后，Safari UI 进程的三份 framework 全部来自 `/System`，它的 `launchctl print pid/<PID>` 的 `environment` 段落里没有任何 `DYLD_*` 变量（读数与方法见 5.1、5.4 节）。
 
-**因此对「触发下一次构建」的判定是 no-go。** 理由不是构建太贵，而是构建买不到判定所需的那一个读数：路线 B 的决定性测量用设备上现装的产物就能做，不需要新构建；路线 A 已被三条确证失败堵住，新构建只会把同样的失败再跑一遍。
+**判定 (b) 要用 runbook 那个 token 过滤后的数法，不要用裸子串计数。** 裸子串 `isOverridablePath` 的计数在任何一份 dyld 上都不为零（设备上 `7 1 1 2`），区分不了装没装；`MACHOMERGER` 出现 38 次也全是原带的 `dlopen_from` 与 `__fcntl`。这两点见 5.1 节的「四个陷阱」。
+
+**launchd 会不会从覆盖目录解析四个服务名，因此仍未测，而它现在排在第二项。** 这个读数要求运行时真的采用了覆盖目录，前置条件今天不成立，所以今天取不到它。**因此对「触发下一次构建」的判定仍然是 no-go**，理由不是构建太贵，而是构建买不到任何一个现在缺的读数：要补的是 basebin 层的重装与重测，不是新构建。路线 A 已被三条确证失败堵住，新构建只会把同样的失败再跑一遍。
+
+**也就是说，路线 B 的当前状态是「第一步未成立」，不是「只差一个读数」。** 把这一步写成「只差 launchd」，会让下一个会话去测一个测不出结果的配置。
 
 ## 二、本文假定的路线与翻译补丁的位置
 
@@ -41,7 +47,7 @@ dyld hook 这一半已经齐了：补丁在仓库里，构建产物里在，设�
 
 ## 三、本文不使用的证据
 
-- **`build-state.md` 第三轮的旧 A/B 表全部作废。** 撤回声明在 `build-state.md:442-450`：设备上没有 `pkill`，`pgrep` 也没有，脚本里的终止命令静默失败，每次测的都是同一个旧进程。任何以「放进 `WebKit.framework` 就让端点归零」为论据的推论都作废。
+- **`build-state.md` 第三轮的旧 A/B 表全部作废。** 撤回声明在 `build-state.md:442-450`：设备上没有 `pkill`，`pgrep` 也没有，脚本里的终止命令静默失败，每次测的都是同一个旧进程。任何以「放进 `WebKit.framework` 就让端点归零」为论据的推论都作废。**2026-11-25 本轮又遇到同一类缺陷的另一种形态**：设备上的 `measure_override.sh` 用 `open -b` 与 `uiopen <url>` 启动 Safari，两条都启动不了 Safari（前者返回 7，后者打开 Chrome），它的历次 `safari pid after launch: NONE` 同样作废，读数与正确写法见 5.4.1 节。
 - **翻译补丁里 2807 条映射不能作为任一方向的证据。** 该表由 `Safari-614.1.9` 生成，不是设备在跑的 16.1。`InitializeConnection` 在前者是 2444、在后者是 2478，所以设备发出的握手消息被翻成一条无关消息。M87 重生成该表。本文的全部结论都不依赖这张表，路线 A 的 no-go 判据也不依赖它：第 4.1 条只用「键从未被写过」这一个事实，与表无关。
 - **16.1 的消息计数一律取出货树。** 见第七节的口径。
 
@@ -229,13 +235,17 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/UIProcess/RemoteLayerTree/
 
 **这是 no-go 的完整理由：已确证的三条失败加上一处未被界定的适配面。** 不是因为工作量大，而是因为「把编号翻译层补完就能渲染」这个命题已被 4.1 与 4.2 直接否证，而补完之后的剩余面没有读数支撑它可达。
 
-## 五、路线 B 为什么只差一个读数
+## 五、路线 B 为什么第一步未成立
 
-### 5.1 dyld hook 这一半已经齐了（已确证，三层证据）
+本文此前把这一节写成「路线 B 为什么只差一个读数」，并把那个读数记为 launchd 的解析行为。**2026-11-25 的实测把顺序改了**：dyld 这一层在设备上没有生效，覆盖目录里的二进制没有被选中，所以 launchd 那个读数还轮不到。本节按新顺序重写，5.4 节单独记录测量方法与读数。
 
-**补丁在仓库里。** `dopamine-basebin/0001-dyldhook-allow-framework-override.patch:42-43` 定义 `ORIG`/`HOOK` 对，无条件返回 true；`:68-73` 给 MachOMerger 提供 `ORIG` 与 `HOOKTRAMPOLINE` 符号。
+### 5.1 dyld hook 的三层证据里，前两层成立，第三层今天不成立（2026-11-25 更正）
 
-**在构建产物里。** run `45347498837`（`gh run view` 确认 success，2 分 50 秒）的 artifact `basebin-tar`（id `14899365667`，head sha `6d23c0c`）解包后：
+本文原先写的是「dyld hook 这一半已经齐了（已确证，三层证据）」。三层是：补丁在仓库里、产物在构建里、读数在设备的 `gen/dyld` 里。**前两层仍然成立，第三层今天不成立。** 下面按层分开写，改的只有第三层。
+
+**第一层，补丁在仓库里（仍成立）。** `dopamine-basebin/0001-dyldhook-allow-framework-override.patch:42-43` 定义 `ORIG`/`HOOK` 对，无条件返回 true；`:68-73` 给 MachOMerger 提供 `ORIG` 与 `HOOKTRAMPOLINE` 符号。
+
+**第二层，在构建产物里（仍成立）。** run `45347498837`（`gh run view` 确认 success，2 分 50 秒）的 artifact `basebin-tar`（id `14899365667`，head sha `6d23c0c`）解包后：
 
 | 检查 | 读数 |
 | --- | --- |
@@ -244,16 +254,37 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/UIProcess/RemoteLayerTree/
 | `dyldhook_merge.arm64e.iOS16-17.dylib` | `isOverridablePath`、`isAlwaysOverridablePath`、`_fcntl` 三组 `HOOK`/`ORIG`/`HOOKTRAMPOLINE` 符号都在 |
 | `dyldhook_merge.arm64e.iOS15.dylib` | 两个 dyld 判定符号均为 0，只有 `_fcntl`，符合补丁的 `#if IOS >= 16` |
 
-**在设备的 dyld 里。** `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记录 2026-11-25 只读实测：`/var/jb/basebin/gen/dyld` 974608 字节、`Nov 24 08:44`，`isOverridablePath` = 1、`isAlwaysOverridablePath` = 1、`dlopen_from` = 1、`__fcntl` = 1；同目录 `dyld.old` 974016 / `Nov 18 10:08`、`dyld.orig` 926240 / `Oct 19 2022`。该读数**不可用 `strings | grep -c` 复现**，设备上没有 `strings`，会得到假 0。
+**第三层，在设备的 dyld 里（今天不成立）。** 2026-11-25 在同一台设备上直接读：
 
-同一份读数还给出另两条路线 B 的前置条件：
+| 读数 | 值 | 出处与判据 |
+| --- | --- | --- |
+| `/var/jb/basebin/gen/dyld` 字节数 | **974016** | `webkit-install-runbook.md:113` 的表：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」；同行 `:114` 的 `974608` 才是更新后的值 |
+| 判定 (b) 四个计数（token 过滤后） | **`1 0 0 1`** | 命令在 `webkit-install-runbook.md:669-677`：先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token，再按四个名字分别计数。**第 2、3 位才是判据**：`isOverridablePath` 与 `isAlwaysOverridablePath` 为 0 即「新 hook 没进 `gen/dyld`」，见同文件 `:679`。打上补丁的形态是 `1 1 1 1`，对照在 `:691-692` |
+| 会被合进 `gen/dyld` 的那个 hook dylib | `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` **74352** 字节，同一判据 `1 0 0 1` | 这是**原版**那份；`basebin.tar` 里打上补丁的那份是 **75952** 字节、判据 `1 1 1 1`。两个字节数与 `webkit-install-runbook.md:691-692` 的表逐字一致（`75952` =「装完之后那份」，`74352` =「装之前那份」） |
+| `/var/jb/basebin/systemhook.dylib` 字节数 | **233520** | `webkit-install-runbook.md:892` 的表：`233520` =「旧，搜索路径这一半未生效」；`:893` 的 `234336` 才是打上补丁的那份 |
+| 同一文件里六个字符串的计数 | **`0 0 0 0 0 2`** | 命令在 `webkit-install-runbook.md:876-883`，判据在 `:892`（旧那份四个变量计数为 `0 0 0 0`）。末尾那个 `2` 是 `DYLD_INSERT_LIBRARIES`，原版就有 |
 
-- `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 已注入 UI 进程，`launchctl print pid/69370` 的 `environment` 段落可见，指向 `.../procursus/Library/WebKitOverride`。
-- 覆盖目录不存在时，Safari 域的 `services = {` 是**六条**，四个 WebKit 服务正常注册。
+**四个陷阱，写在这里避免下一轮重复踩。**
 
-于是「dyld 不肯用磁盘副本」这一条（`docs/webkit-ios16-viability.md` 称为唯一真正的阻断）**已关闭**。
+1. **判定 (b) 的数法要用 token 过滤，不要用裸子串计数。** `1 0 0 1` 是先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token、再按四个名字分别计数得到的结果。裸子串 `isOverridablePath` 的计数是另一回事（设备上 `7 1 1 2`），那个数在任何一份 dyld 上都不为零，不能当判据。`webkit-install-runbook.md:696` 已写明「也不要数裸字符串」。
+2. **「`gen/dyld` 里有几个 `_MACHOMERGER_HOOK__` 符号」不是判据。** 它有 **2** 个，分别是原带的 `dlopen_from` 与 `__fcntl` 各一个。为零的不是全部符号，而是**两个 override hook** 这两个名字——这正是判定 (b) 第 2、3 位的含义。
+3. **不要用 `MACHOMERGER` 的出现次数当判据。** `gen/dyld` 里 `MACHOMERGER` 出现 **38** 次，全部是原带两组的 trampoline/orig 符号。
+4. **不要用 mtime 推断「刚装过所以补丁在」。** `gen/` 与 `gen/dyld` 的 mtime 都是当天的 10:37（`Nov 3 01:04` 是原生安装时间），而内容仍是原版。
 
-### 5.2 之前看起来在反驳路线 B 的读数，要按崩溃类型拆开
+**本文此前引的那份 974608 读数已被今天的读数取代，原因是文件变了，不是读法变了。** `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`；按当时的状态那是成立的。今天同一文件是 974016、判定 (b) 是 `1 0 0 1`，两次用的是同一个数法，可以直接对照。**能区分的是 hook dylib 的字节数 74352 对 75952，以及判定 (b) 第 2、3 位的 `0 0` 对 `1 1`。** 今天这两项都指向「原版」。
+
+**这份对判据的说明经过一次反复，记在这里。** 2026-11-25 13:00Z 塔发来一条更正，说 `1 0 0 1` 是裸字符串计数、应当改用带前缀的完整符号名；13:03Z 塔撤回该更正，理由是它测的是另一个量（裸子串），而 runbook 的判定 (b) 从来就用 token 过滤形式。本节的最终形态按撤回后的说法，即 `1 0 0 1` 是正确读数、补丁形态是 `1 1 1 1`。撤回消息里仍然成立的部分已并入上表：hook dylib 的 74352 对 75952、`systemhook.dylib` 的 233520 对 234336，以及 `MACHOMERGER` 次数与 mtime 两个陷阱。
+
+**结论只改一层：** dyld 愿意用磁盘副本这条判定（`docs/webkit-ios16-viability.md` 称为唯一真正的阻断）在**装了新 hook 的配置下**已被关掉；**这台设备当前不在那个配置下**，所以「这条阻断已关闭」不能当成今天的事实引用。补丁与产物两层不受影响。
+
+同一份 11-25 inbox 记录还给出两条路线 B 的前置条件，它们也都要求运行时采用覆盖目录，今天同样不成立（读数与判定见 5.4 节）：
+
+- 它记 `launchctl print pid/69370` 的 `environment` 段落里有 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH`。今天对 Safari pid 2628 跑同一条命令，该段落全文只有 `PATH`、`CFFIXED_USER_HOME`、`HOME`、`TMPDIR`。
+- 它记覆盖目录不存在时 Safari 域的 `services = {` 是**六条**。今天的同一读数按行数得 8 行、按去重后的基础服务名得 4 个（5.4 节）。两个数都对，口径不同，不能混用。
+
+### 5.2 之前看起来在反驳路线 B 的读数，要按崩溃类型拆开（三处读数所属配置与本轮不同）
+
+**先写清这份读数属于哪个配置。** 本节下面引的三组读数都取自「覆盖目录已建立、并且运行时确实采用了它」的配置：边缘上 UI 进程里出现 `/System/...` 与 `JB/Library/WebKitOverride/...` 两份 `WebKit` 并存（`build-state.md:515-528`），说明那次运行的 dyld 已经把覆盖目录里的二进制选了进去。**2026-11-25 本轮测的不是那个配置。** 本轮装好覆盖目录后 UI 进程只加载 `/System`，端点仍是 8（5.4 节）。两个配置的差别是 dyld 那一层在不在，所以本节的读数**不能**拿本轮的读数当对照，反过来也不能用本节去描述今天的状态。
 
 `build-state.md:550-570` 那张表确实显示「放进 `WebKit` 二进制，端点从 8 归零」。但同一节的崩溃报告给出了原因：
 
@@ -269,34 +300,158 @@ reasons: Symbol not found: _WTFSignpostIndirectLoggingEnabled
 补上自建 `JavaScriptCore` 之后 dyld 中止消失（`build-state.md:572-585`）：进程活着，但端点仍是 0，`failed lookup: com.apple.WebKit.Networking` 累计 271 次。**这条才是对「launchd 会否解析」有意义的读数，它指向「不会」。** 但它有三处限定，任何把它当定论的做法都不成立：
 
 1. 那次运行时覆盖目录里**有** `XPCServices`（`prune_xpc_services` 到 2026-11-25 00:20 的提交 `5b5099e` 才加进 `scripts/install-webkit-override.sh`，此前 `cp -a` 整目录复制会带上）。所以那次测的是「有 `XPCServices` 仍不解析」。
-2. `_CodeSignature` 缺失从未被排除过影响。`build-state.md:984-986` 明确写着这一点。
-3. 有一处记录与「索引外一律查不到」相冲突：`build-state.md:336` 的 `procPath` 指向过 `/var/jb/.../XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU`。`docs/ios16-launchd-xpc-resolution-gap.md:237-244` 把它列为该文档机制假设的反证之一，未定案。
+2. `_CodeSignature` 缺失从未被排除过影响。`build-state.md:984-986` 明确写着这一点（第三轮那条「代码签名因复制到新路径失效」的排除只比对了二进制内嵌的 `LC_CODE_SIGNATURE` 偏移与大小，没覆盖 bundle 里没有 `_CodeSignature` 目录这种情况）。
+3. 有一处记录与「索引外一律查不到」相冲突：`build-state.md:336` 的 `procPath` 指向过 `/var/jb/.../XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU`（该条的归因已在第六轮被推翻，但 `procPath` 这条读数本身不变）。`docs/ios16-launchd-xpc-resolution-gap.md` 把这条 `procPath` 列为该文档机制假设的反证之一，未定案。
 
-另一个方向的读数也在：`build-state.md:515-528` 记录放进二进制后 Chrome 进程里两份 `WebKit` 并存（`/System/...` 与 `JB/Library/WebKitOverride/...`），主线程停在 `mach_msg`，不崩，只是不再请求 WebKit 服务。这是 UI 进程**确实加载了我们那份二进制**的直接证据，路线 B 想要的加载行为已经发生。
+**第二处限定在本轮有了新形态，要单独说。** 本节要判的是「运行时采用了覆盖目录后，launchd 解析不解析」。它有两个必要前提，本轮测得两个都不成立：
+
+- 覆盖目录里的 `WebKit` 真的被 dyld 选中。本轮没有：`lldb image list` 里 `WebKit`、`WebCore`、`JavaScriptCore` 三份全在 `/System` 下（5.4 节测量三）。
+- UI 进程拿到覆盖路径。本轮没有：`launchctl print pid/2628` 的 `environment` 段落没有 `DYLD_*`，`systemhook.dylib` 里 `DYLD_FRAMEWORK_PATH` 计数为 0（5.1 节）。
+
+所以本轮那 8 个端点**不是**「采用覆盖目录后 launchd 仍解析」的读数，也不是「launchd 不解析」的读数。它测的是「覆盖目录在磁盘上，但 dyld 那一层没生效」这一个第三配置，端点数与无覆盖目录时相同恰好说明覆盖目录没有参与解析。**别把它登记成路线 B 的正面证据。**
+
+另一个方向的读数也在：`build-state.md:515-528` 记录放进二进制后 Chrome 进程里两份 `WebKit` 并存（`/System/...` 与 `JB/Library/WebKitOverride/...`），主线程停在 `mach_msg`，不崩，只是不再请求 WebKit 服务。这是 UI 进程**确实加载了我们那份二进制**的直接证据——但那是 18.3 的 `WebKit` 经 tweak 的 `dlopen` 进入，不是 dyld 从覆盖目录选中的，两者不能互相替代。
 
 ### 5.3 路线 B 的判定
 
-dyld hook、搜索路径注入、18.3 框架安装、UI 进程加载证据，四项都成立。唯一未知是 **launchd 为 UI 进程从覆盖目录解析四个服务名的行为**，而这一项：
+**路线 B 的第一项前置条件是 dyld 层生效，今天不成立。** 逐项核对本文原先列的四个「都成立」：
 
-- 不能由构建改变（它是 launchd 行为，仓库侧无代码可改）；
-- 设备上现装的产物已足以测（18.3 的五个 framework 已装，`minos=16.1.0 sdk=18.5.0`）；
-- 已有一次指向「不解析」的读数，但带三处未排除的限定，且有一处记录与之冲突。
+| 项 | 今天的读数 | 状态 |
+| --- | --- | --- |
+| dyld hook | `gen/dyld` 974016；hook dylib 是原版 74352（补丁版 75952）；判定 (b) 读 `1 0 0 1`，补丁形态是 `1 1 1 1` | **不成立**（5.1 节第三层） |
+| 搜索路径注入 | `systemhook.dylib` 233520，`DYLD_FRAMEWORK_PATH` 计数 0；UI 进程环境无 `DYLD_*` | **不成立**（5.1、5.4 节） |
+| 18.3 框架安装 | 五个 framework 已装，`minos=16.1.0 sdk=18.5.0` | 成立 |
+| UI 进程加载了我们那份二进制 | 本轮 UI 进程三份 framework 全在 `/System` | **不成立**（5.4 节测量三） |
 
-**所以路线 B 是 no-go 的唯一理由就是「未测」，而不是「已否证」。**
+**所以拦住路线 B 的是 dyld 这一层，不是 launchd。** 具体形态是：重装带两个新 hook 的 basebin，让 `dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且判定 (b) 变成 `1 1 1 1`、`gen/dyld` 变成 974608、`systemhook.dylib` 变成 234336 且六字符串计数为 `4 2 4 2 4 2`；然后重测 UI 进程的 `environment` 段落与 `lldb image list`。**只有这一步通过之后，launchd 解析四个服务名那一个读数才有意义。** 它现在仍未测，因为前置条件不成立，不是因为已经测出「不解析」。
+
+这件事的顺序不能颠倒，理由是它决定哪一层在报错：dyld 没选中覆盖目录时，端点数与无覆盖目录时相同，这个读数对 launchd 一句话也没说。本文此前把这一项记为「唯一未知」，会让下一个会话在一个测不出结论的配置上取数。
+
+**所以路线 B 是 no-go 的理由是「第一项未成立」，而不是「只差一个未测的读数」。** 重装 basebin 不是构建，这一点与原先的结论一致：下一次 WebKit 构建对路线 B 仍然买不到任何读数。
+
+### 5.4 本轮测量的方法与读数（2026-11-25 20:46–20:48 CST，只读）
+
+这一节单独成篇，因为**方法错了会得到与结论相反的数**。下面按「怎么启动进程」「怎么数端点」「怎么判加载」三段写，每段给出命令与实测值。本节记录的观测步骤全部只读；设备上另有一次写操作，即跑 `sh /var/mobile/install-webkit-override.sh` 建了一个覆盖目录（退出码 0，见 5.4.3），该目录在收尾时已删除，设备恢复为 Safari 进程加 22 个 helper。本轮没有重装 basebin，也没有改动其他设备配置。
+
+#### 5.4.1 启动 Safari 的正确方式（本节最重要的一条）
+
+这台设备上有三条看起来都行的启动命令，只有第一条真的启动 Safari：
+
+| 命令 | 实测结果 |
+| --- | --- |
+| `uiopen --path /Applications/MobileSafari.app` | **启动 Safari**，pid 2511 / 2628 |
+| `open -b com.apple.mobilesafari` | 返回 `Couldn't open application: -b. Reason: 7, application not found`。设备上的 `open` 只接受 `open com.application.identifier` 一种写法 |
+| `uiopen <url>` | 打开的是**系统默认浏览器**，这台设备是 Chrome（`com.google.chrome.ios`），不是 Safari |
+
+设备上那份 `measure_override.sh` 用的正是后两条。**所以它历次跑出的 `safari pid after launch: NONE` 是测量无效，不是 Safari 起不来。** 任何引用这个脚本得出的「Safari 无法启动」的结论都作废，`build-state.md:442-450` 记的同类问题（终止命令静默失败）是同一类缺陷的另一种形态。
+
+这条也决定了端点读数的有效性：端点是在 UI 进程的 per-pid 域里注册的，进程没起来就没有域可读，而 `NONE` 会被误读成「0 个端点」。
+
+#### 5.4.2 端点的两种数法，不能混用
+
+```sh
+launchctl print pid/<PID> | sed -n '/services = {/,/}/p' \
+  | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+```
+
+按行 `grep -c` 数出来的是**按行数**，带 UUID 后缀的按实例条目也各占一行，所以同一条基础服务名下会有多行。基线读数（Safari pid 2511）：
+
+```
+com.apple.WebKit.Networking.78D7D3C6-…       2516
+com.apple.WebKit.WebContent                  0
+com.apple.WebKit.GPU                         0
+com.apple.WebKit.Networking                  0
+com.apple.WebKit.WebContent.C2969B10-…       2522
+com.apple.WebKit.WebContent.02CE8614-…       2513
+com.apple.WebKit.GPU.2E55884D-…              2517
+com.apple.WebKit.WebContent.CaptivePortal    0
+```
+
+- 按行 `grep -c` = **8**；
+- 按去重后的基础服务名 = **4**（`WebContent`、`Networking`、`GPU`、`WebContent.CaptivePortal`）。
+
+第四行 `WebContent.CaptivePortal` 也匹配上文那条正则，所以它计入 8 与 4。**8 不是常量**：它随该域里已实例化的 `WebContent` / `GPU` / `Networking` 个数浮动，多一个页面实例就多一行。所以判「端点全失」时要用去重后的基础服务名（4 个），不要用行数（本轮 8 个）。这与 `AGENTS.md` 记的「无覆盖目录时该值是 7 到 8」是同一件事，只是把口径写明。
+
+#### 5.4.3 装上覆盖目录之后的读数
+
+安装脚本 `sh /var/mobile/install-webkit-override.sh` 退出码 0。五个 framework 全部 `arm64e`，五个 `Info.plist` 齐全，`WebKit.framework/` 下含 `XPCServices`（设备上那份是 11-24 版本，用 `cp -a` 整目录复制，不剔除）。
+
+`killall -9 MobileSafari` 之后用 5.4.1 那条正确命令启动，Safari pid 2628 正常起来：
+
+- 端点按行 `grep -c` = **8**，去重 = **4**，**没有归零**；
+- `launchd.log` 增量 632 行，`Successfully spawned` = 8，`failed lookup` = 1（`PurplePPTServer`，与 WebKit 无关），**`WebKitOverride` 命中 = 0**；
+- 崩溃报告数从 97 到 97，**无新增**。
+
+四个 helper 的 spawn 记录（这一步证明 helper 是 launchd 真拉起来的，不是残留）：
+
+```
+MobileSafari[2628]          because launch job demand
+WebContent[2630]            because ipc (mach)
+Networking[2632]            because ipc (mach)
+GPU[2633]                   because ipc (mach)
+WebContent[2634]            because ipc (mach)
+```
+
+`WebKitOverride` 命中 0 是本轮的**核心读数**：整段新增日志里 launchd 一次都没有提到覆盖目录。这与 5.4.4 的路径读数互相印证。
+
+#### 5.4.4 决定性读数：Safari UI 进程实际加载了哪份 WebKit
+
+```sh
+lldb -b -o "process attach --pid 2628" -o "image list -o -f" -o detach -o quit 2>/dev/null \
+  | grep -E "WebKit.framework/WebKit$|WebCore.framework/WebCore$|JavaScriptCore.framework/JavaScriptCore$"
+```
+
+```
+[ 36] 0x00000000035c0000 /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+[ 51] 0x00000000035c0000 /System/Library/Frameworks/WebKit.framework/WebKit
+[416] 0x00000000035c0000 /System/Library/PrivateFrameworks/WebCore.framework/WebCore
+```
+
+三份全部来自 `/System`，**没有任何一份来自 `/var/jb/Library/WebKitOverride`**。这是「覆盖目录里的二进制根本没被选中」的直接证据，不需要任何推断。
+
+同一进程的 `launchctl print pid/2628` 的 `environment` 段落全文只有四个变量：
+
+```
+PATH
+CFFIXED_USER_HOME
+HOME
+TMPDIR
+```
+
+**没有任何 `DYLD_*`。** 所以搜索路径注入没发生，dyld 也就没有目录可找。这条与 5.4.3 的 `WebKitOverride` 命中 0 是同一件事的两侧：一侧是日志里没提，另一侧是进程环境里没设。
+
+#### 5.4.5 两条原因，都在设备上直接读数
+
+1. `systemhook.dylib` **233520** 字节（原版；打过补丁那份是 234336），里面 `DYLD_FRAMEWORK_PATH` 出现 **0** 次。所以搜索路径注入没发生。判据表在 `webkit-install-runbook.md:892`。
+2. `/var/jb/basebin/gen/dyld` **974016** 字节，判定 (b) 读 **`1 0 0 1`**（第 2、3 位为 0）。按 runbook 自己的表（`webkit-install-runbook.md:113-114`），974016 =「只有 Dopamine 原带的两个 hook，basebin 层未更新」。两条独立证据支撑这个判定：**一、** 判定 (b) 本身，`1 0 0 1` 对打上补丁的 `1 1 1 1`（`webkit-install-runbook.md:691-692`）；**二、** 会被合进去的 `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` 是原版 **74352** 字节（`basebin.tar` 里打补丁的那份是 **75952** 字节，两个数与 `:691-692` 的表逐字一致）。
+
+**这一条的数值细节要写清，否则会被误读成「`gen/dyld` 里没有 MACHOMERGER 符号」。** `gen/dyld` 里有 **2** 个 `_MACHOMERGER_HOOK__` 符号，分别是原带的 `dlopen_from` 与 `__fcntl`；为零的是**两个 override hook 那两个名字**，这正是 `1 0 0 1` 第 2、3 位的含义。另外两个数不能用：裸子串 `isOverridablePath` 的计数在任何一份 dyld 上都不为零（设备上 `7 1 1 2`）；`MACHOMERGER` 出现 **38** 次，全部是原带两组的 trampoline/orig 符号。**也不能用 mtime**：`gen/` 与 `gen/dyld` 的 mtime 都是当天 10:37，而内容仍是原版。
+
+两条合起来就是 5.1 节第三层的读数。它们互相独立：第一条决定「dyld 有没有目录可找」，第二条决定「dyld 找到之后肯不肯用」，缺任何一条都不会让覆盖目录生效。
+
+#### 5.4.6 这一轮的读数和旧记录的关系
+
+本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（先按 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤 token 再按名字计数，`webkit-install-runbook.md:669-677`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六字符串计数为 `4 2 4 2 4 2`。
+
+**本节这一段在 2026-11-25 13:00–13:03Z 之间被改错过一次，现已按撤回恢复。** 塔先发更正称 `1 0 0 1` 是裸子串计数、应改用带前缀的完整符号名，三分钟后撤回，理由是那个说法测的是另一个量（裸子串），而 runbook 的判定 (b) 从来就用 token 过滤形式。最终形态是 `1 0 0 1` 为正确读数、`1 1 1 1` 为补丁形态。撤回消息里仍成立的部分（hook dylib 74352 对 75952、`systemhook.dylib` 233520 对 234336、`MACHOMERGER` 次数与 mtime 两个陷阱）已并入 5.1 节与本节。
+
+**本轮不重装 basebin、不动其他设备配置。** 本轮对设备的唯一写操作是跑 `sh /var/mobile/install-webkit-override.sh` 建覆盖目录（退出码 0，见 5.4.3），收尾时已删除。删除后按 `AGENTS.md` 的恢复标准核对三条：覆盖目录已删、`ps` 里三个 helper 有进程、对其中一个跑 `lldb image list` 确认加载的是 `/System` 的 `WebCore`/`WebKit`。三条都成立。
 
 ## 六、使判定转为 go 所需的最小改动清单
 
-按依赖顺序，前五条全部是设备侧测量，不需要任何构建。
+按依赖顺序，全部是设备侧操作，不需要任何构建。
 
 | # | 动作 | 判据 | 为何是必需 |
 | --- | --- | --- | --- |
-| 1 | 恢复设备可达（`192.168.2.135` 或 `172.20.10.1`） | `ssh` 成功 | 一切测量的前提；本轮实测两个地址都不可达 |
-| 2 | 建覆盖目录并跑 CrashReporter 差分，确认 UI 进程不再因 `DYLD` 中止 | 目标应用无新增 `termination.namespace = DYLD` 报告 | 归零读数有两种成因，不排除 dyld 中止就无法归因 |
-| 3 | 在同一次运行里取端点读数：应用带 URL 启动、`killall` 清干净、读 `launchctl print pid/<PID>` 的 `services = {` 段落 | 若仍为 0 且 UI 进程存活、无新增 UI 崩溃报告，则判 (B) | 这是路线 B 唯一未知项 |
-| 4 | 若判 (B)，测「覆盖目录里不放 `XPCServices`」与「放系统 16.1 的 `XPCServices`」两种配置 | 两次读数与第 3 步对照 | `prune_xpc_services` 现在会删掉它，而此前把它当候选来源的论证都未测 |
-| 5 | 若 (B) 成立，判定「让 UI 进程自己注册端点」的可行性 | 判据是源码：`Source/WebKit/UIProcess/` 下 `XPC_CONNECTION_MACH_SERVICE_LISTENER` 命中 0 | 代码缺失比权限更快否决；这段代码不存在，要写得新增一个子系统 |
+| 1 | 确认设备可达 | `ssh mobile@192.168.2.136` 成功（11-25 本轮就是在这个地址上取的读数；`AGENTS.md` 记的 `192.168.2.135` 与 `172.20.10.1` 是另外两种接法） | 一切测量的前提。本文原先记「两个地址都不可达」是更早一轮的状态，已不必再跑一遍 |
+| 2 | **重装带两个新 hook 的 basebin，让 dyld 层生效** | `gen/dyld` 变成 974608；判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`；`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`；`systemhook.dylib` 变成 234336 且六字符串计数为 `4 2 4 2 4 2`（`webkit-install-runbook.md:113-114`、`:691-692`、`:892-893`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 5.1 节「四个陷阱」 | **这一步是本轮新增的第一项。** 5.1 节第三层今天不成立，后面每一条的前提都是它成立。本条是持久性加破坏性操作：命令为 `jbctl update basebin`，会触发 `reboot3(RB2_USERREBOOT)` 且所有应用退出，须用户确认；回退用 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑同一条命令 |
+| 3 | 重测 UI 进程是否拿到覆盖路径并加载覆盖目录的二进制 | `launchctl print pid/<PID>` 的 `environment` 段落出现 `DYLD_FRAMEWORK_PATH` 且指向 `...WebKitOverride`；`lldb image list` 里 `WebKit`、`WebCore`、`JavaScriptCore` 三份的前缀含 `WebKitOverride` | 第 3 步的读数是「dyld 层真的生效」的判据。它不成立时，端点读数对 launchd 一句话也没说 |
+| 4 | 建覆盖目录并跑 CrashReporter 差分，确认 UI 进程不再因 `DYLD` 中止 | 目标应用无新增 `termination.namespace = DYLD` 报告 | 归零读数有两种成因，不排除 dyld 中止就无法归因 |
+| 5 | 在同一次运行里取端点读数：用 5.4.1 的正确启动命令、`killall` 清干净、读 `launchctl print pid/<PID>` 的 `services = {` 段落，**按去重后的基础服务名计数** | 若基础服务名仍为 0 或显著少于 4，且 UI 进程存活、无新增 UI 崩溃报告，则判 (B)。**不要用按行 `grep -c` 的 8 当基线**，它不是常量（5.4.2 节） | 这是路线 B 这一层要判的那一项，且只有在第 2、3 步通过后才有效 |
+| 6 | 若判 (B)，测「覆盖目录里不放 `XPCServices`」与「放系统 16.1 的 `XPCServices`」两种配置 | 两次读数与第 5 步对照 | `prune_xpc_services` 现在会删掉它，而此前把它当候选来源的论证都未测 |
+| 7 | 若 (B) 成立，判定「让 UI 进程自己注册端点」的可行性 | 判据是源码：`Source/WebKit/UIProcess/` 下 `XPC_CONNECTION_MACH_SERVICE_LISTENER` 命中 0 | 代码缺失比权限更快否决；这段代码不存在，要写得新增一个子系统 |
 
-**第 3 步判 (A) 时的最小改动清单是另一组**，按路线 A 的 4.1 到 4.4：
+**第 5 步判 (A) 时的最小改动清单是另一组**，按路线 A 的 4.1 到 4.4：
 
 1. 把 `ios16-xpc-bootstrap-compat.patch` 的 fallback 判据从「键缺失」改为「长度为 8」，让 16.1 的 8 字节数据块可达（M85 已在做）。
 2. 把翻译开关从运行期判据改为编译期常量（M85 的方向）。**注意第二节的风险：路线 B 定案前不应合入。**
@@ -340,12 +495,13 @@ dyld hook、搜索路径注入、18.3 框架安装、UI 进程加载证据，四
 
 **四条没有一条作用在路线 B 上。** 它们在路线 B 下自动消失，因为不存在代际边界。这一点决定了替代路线与 1.2 节的关系：**路线 B 与之相容，不是因为它绕过了四条，而是因为它让四条的前提不存在。**
 
-1.2 节末尾的结构性理由是「16.1 那一侧是系统二进制，无法打补丁」。路线 B 正面回应了这一条，而不是绕开：它不打 16.1 的二进制，而是让 16.1 的系统 `WebKit.framework` **不再被加载**，由同代的 18.3 替代。这就是 dyld hook 的作用。这条理由在路线 B 下不再成立，前提是 5.3 节那一个读数判 (A)。
+1.2 节末尾的结构性理由是「16.1 那一侧是系统二进制，无法打补丁」。路线 B 正面回应了这一条，而不是绕开：它不打 16.1 的二进制，而是让 16.1 的系统 `WebKit.framework` **不再被加载**，由同代的 18.3 替代。这就是 dyld hook 的作用。这条理由在路线 B 下不再成立，前提是 dyld 层真的生效并且 5.3 节那个端点读数判 (A)；**今天第一个前提就不成立**（5.1、5.4 节）。
 
 ## 九、未验证项
 
-1. **launchd 的解析行为**（第五节）。本文全部 go/no-go 判定中唯一的未测项，需要设备。
-2. **`_CodeSignature` 缺失的影响**。覆盖目录版 `WebKit.framework` 没有 `_CodeSignature`（`build-state.md:954`），从未实测排除。
-3. **`__XPC_DYLD_FRAMEWORK_PATH` 的转交行为**。系统桩没有 `LC_DYLD_ENVIRONMENT`，它加载哪份 `WebKit` 只能靠这个转交；launchd、libxpc、xpcproxy 三处都查不到实现。
-4. **494 条载荷变更没有被按方向分类**。本文只对 31 条 reply 变更与 `CommitLayerTree` 做了方向判定。
-5. **路线 A 的 `WebProcessCreationParameters` 字段缺项没有逐条核对**。两版结构体互不可读已记录在 `docs/ios16-webprocess-creation-parameters-diff.md`，但「哪些字段可以被默认值替代、哪些是承载性的」没有结论。
+1. **dyld 层在这台设备上生效**（5.1 节第三层、5.4 节）。这是路线 B 现在的第一项，`gen/dyld` 974016、hook dylib 是原版 74352、判定 (b) 是 `1 0 0 1`（第 2、3 位为 0），三项都说明它不成立。验证方式是重装带两个新 hook 的 basebin 后复跑 runbook 第五阶段判定 (a)、(b) 与第六阶段，正确读数是 hook dylib 75952 且判定 (b) 回到 `1 1 1 1`、`gen/dyld` 974608、`systemhook.dylib` 234336 且六字符串计数 `4 2 4 2 4 2`。**不要用裸子串计数当复现判据**（5.1 节「四个陷阱」）。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。
+2. **launchd 的解析行为**（5.3 节）。仍未测，但它现在排在 dyld 层之后：dyld 没选中覆盖目录时，端点数与无覆盖目录时相同，这个读数对 launchd 一句话也没说。本文原先把它记为「唯一的未测项」，那一句已作废。
+3. **`_CodeSignature` 缺失的影响**。覆盖目录版 `WebKit.framework` 没有 `_CodeSignature`（`build-state.md:954`），从未实测排除。
+4. **`__XPC_DYLD_FRAMEWORK_PATH` 的转交行为**。系统桩没有 `LC_DYLD_ENVIRONMENT`，它加载哪份 `WebKit` 只能靠这个转交；launchd、libxpc、xpcproxy 三处都查不到实现。
+5. **494 条载荷变更没有被按方向分类**。本文只对 31 条 reply 变更与 `CommitLayerTree` 做了方向判定。
+6. **路线 A 的 `WebProcessCreationParameters` 字段缺项没有逐条核对**。两版结构体互不可读已记录在 `docs/ios16-webprocess-creation-parameters-diff.md`，但「哪些字段可以被默认值替代、哪些是承载性的」没有结论。

@@ -8,7 +8,9 @@
 
 `build-state.md` 会随其它分支继续加长，所以本文对它的引用一律写成「外层仓库 `build-state.md` 的〈小节标题〉一节」加一句在该节里逐字出现的原文，行号不作定位手段。核对方式是拿那句原文在 `build-state.md` 里 `grep -c`，命中数必须为 1。源码引用按内层仓库相对路径。
 
-**一条把整篇读法固定下来的前提。** UI 与 helper 走的是两条不同的到达路径，这件事本身不是缺陷：`dopamine-basebin/0001-systemhook-set-search-paths.patch:86-89` 明确说明为何不用共享目录。两条路径的第一项现在都是 `/var/jb/Library/WebKitOverride`（3.1 节），但 `.xpc` 那条的搜索列表还有 `/var/jb/Library/Frameworks` 作后备。真正没被验证的是 helper 能不能拿到覆盖路径：途径只有它自己的 `LC_DYLD_ENVIRONMENT`（`/var/jb` 的 `.xpc` 有，系统桩没有）与 `__XPC_DYLD_FRAMEWORK_PATH` 的转交（机制未验证、basebin 已设变量）（见 2.3 节）。在这一环定案之前，任何「路径已经对上了」的判断都缺一环，launchd 能否解析服务名是它之后的事。
+**一条把整篇读法固定下来的前提。** UI 与 helper 走的是两条不同的到达路径，这件事本身不是缺陷：`dopamine-basebin/0001-systemhook-set-search-paths.patch:86-89` 明确说明为何不用共享目录。两条路径的第一项现在都是 `/var/jb/Library/WebKitOverride`（3.1 节），但 `.xpc` 那条的搜索列表还有 `/var/jb/Library/Frameworks` 作后备。真正没被验证的是 helper 能不能拿到覆盖路径：途径只有它自己的 `LC_DYLD_ENVIRONMENT`（`/var/jb` 的 `.xpc` 有，系统桩没有）与 `__XPC_DYLD_FRAMEWORK_PATH` 的转交（机制未验证）（见 2.3 节）。在这一环定案之前，任何「路径已经对上了」的判断都缺一环，launchd 能否解析服务名是它之后的事。
+
+**在本节之前还有一项，2026-11-25 实测它不成立，读本文时先读这一条。** 上述所有路径对齐都要求 dyld 那两层在设备上生效：`dyldhook` 让 dyld 肯用磁盘副本，`systemhook` 让进程有目录可找。今天设备上 `gen/dyld` 是 974016 字节，会被合进去的 `dyldhook_merge.arm64e.iOS16-17.dylib` 是原版 **74352** 字节（打补丁那份 75952），判定 (b) 在这份 `gen/dyld` 上读 **`1 0 0 1`**，第 2、3 位为 0 即两个新 hook 都不在（补丁形态是 `1 1 1 1`）；`systemhook.dylib` 是 233520 字节的原版（六字符串计数 `0 0 0 0 0 2`，`DYLD_FRAMEWORK_PATH` 出现 0 次）。于是覆盖目录里的二进制**没有被选中**：本轮装好覆盖目录后，Safari UI 进程的 `WebKit`、`WebCore`、`JavaScriptCore` 三份全部来自 `/System`，它的 `environment` 段落没有 `DYLD_*`。**读数为附录 B 的 B.1 与 B.7，判据的数法与四个陷阱见 B.1。** 所以本文第四节的步骤在重装 basebin 之后才能给出可归因的读数；在那之前，`image list` 出现 `/System` 只说明 dyld 层没生效，不能读成路径不对齐。
 
 ---
 
@@ -103,8 +105,8 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 | --- | --- | --- | --- |
 | 一 | 三个 framework 同代，且 UI 进程与每一个 helper 同代 | 已满足一半。`scripts/package-webkit-device-deb.sh:198-204` 的 `required_items` 把 `WebKit.framework`、`WebCore.framework`、`WebKitLegacy.framework`、`JavaScriptCore.framework` 列为必需，缺一个就 `exit 1`；但「UI 与 helper 同时换」不由任何脚本保证 | 已满足一半。`/var/jb/Library/Frameworks` 下五个 framework 来自同一次构建（`WebKit` 50758784 字节、2026-11-24 18:06、`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；外层仓库 `build-state.md` 的「设备上没有 `strings`，也没有这一组诊断与启动工具」一节早前记的 50758752 是 07:39 的上一版，原文「两处二进制 `WebCore` 93318960 字节、`WebKit` 50758752 字节」）；但 UI 与 helper 从未同时换成 18.3，这正是 PAC 崩溃的成因；方向只能从 22:39 那批推定，且那批的覆盖目录内容与 helper 的 `WebKit` 路径都没有记录（见 1.1 节） |
 | 二 | 三个 framework 的路径唯一，不同时存在系统副本与 `/var/jb` 副本 | **未满足**。`install-webkit-override.sh` 的 `OVERRIDE_ROOT` 把第二份复制到 `/var/jb/Library/WebKitOverride`，与 `/var/jb/Library/Frameworks` 同时可被 dyld 选中 | **未满足**。系统的 `/System/Library/Frameworks` 与 `/var/jb/Library/Frameworks` 两份都在；`/var/jb/Library/WebKitOverride` 当前不存在 |
-| 三 | helper 拿到覆盖路径。途径只有两条：它自己的 `LC_DYLD_ENVIRONMENT`，或 `__XPC_DYLD_FRAMEWORK_PATH` 的转交 | `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 给那五个 `.xpc` 写入了内嵌路径，第一项是 `WK_ROOTLESS_FRAMEWORKS_ROOT`（= `/var/jb/Library/WebKitOverride`），后备项是 `/var/jb/Library/Frameworks`；系统桩零条。basebin 四个变量都设了（`0001-systemhook-set-search-paths.patch:100-103`），但 `__XPC_` 版本的转交行为无实现可查 | **未测**。不仅「是否转交」未测，「转交与内嵌谁优先」也未测：两者第一项现在同为 `/var/jb/Library/WebKitOverride`，但内嵌那串还有 `/var/jb/Library/Frameworks` 作后备，最终命中哪一项没有读数。全部 16 份 `.ips` 中 `usedImages` 含 `/var/jb` 家族 `WebKit`/`WebCore`/`JavaScriptCore` 的为 **0** 份，但 `usedImages` 只收录栈帧引用到的镜像，这个 0 既不证明没加载也不给出路径。判据是第 3b 步的 `lldb image list` 与第 3d 步的 `DYLD_PRINT_SEARCHING` |
-| 四 | launchd 能从该目录为 UI 进程解析出四个服务名 | 无代码可改，这是 launchd 的行为 | **未测**。从未取得一次不含 `DYLD`/`PAC_EXCEPTION` 崩溃的读数；且第 0 步的 `gui/501` 图形域自 M65 起未恢复，任何新读数都还取不到 |
+| 三 | helper 拿到覆盖路径。途径只有两条：它自己的 `LC_DYLD_ENVIRONMENT`，或 `__XPC_DYLD_FRAMEWORK_PATH` 的转交 | `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 给那五个 `.xpc` 写入了内嵌路径，第一项是 `WK_ROOTLESS_FRAMEWORKS_ROOT`（= `/var/jb/Library/WebKitOverride`），后备项是 `/var/jb/Library/Frameworks`；系统桩零条。basebin 的补丁里有四个变量（`0001-systemhook-set-search-paths.patch:100-103`），但设备上那份 `systemhook.dylib` 是 233520 字节的原版、里面 `DYLD_FRAMEWORK_PATH` 出现 0 次，所以**变量没有设上**；`__XPC_` 版本的转交行为无实现可查 | **不成立**（2026-11-25 实测）。两件事依次卡住：先是 `systemhook` 没设变量，再是 dyld 没被放行用磁盘副本（`gen/dyld` 974016，两个 override hook 为 0）。本轮 UI 进程的 `environment` 段落只有 `PATH`/`CFFIXED_USER_HOME`/`HOME`/`TMPDIR`，`lldb image list` 里三份 framework 全在 `/System`。读数见附录 B 的 B.1 与 B.7。「转交与内嵌谁优先」在变量设上之前无从谈起 |
+| 四 | launchd 能从该目录为 UI 进程解析出四个服务名 | 无代码可改，这是 launchd 的行为 | **未测**。它排在第三条之后：第三条今天不成立，所以即使取到端点读数也不能归因。另外这一行原先写的「`gui/501` 图形域未恢复，任何新读数都取不到」不成立——同日设备健康运行时 `gui/501` 也是 0 行（附录 B 的 B.5） |
 
 ### 2.1 第一条：三个 framework 同代，且 UI 与每一个 helper 同代
 
@@ -143,9 +145,11 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 
 1. `xpcproxy` 会把环境变量转交给 `.xpc` 进程——**未验证**。`__XPC_` 前缀的转交位置在 `/usr/libexec/xpcproxy` 的字符串表、`/sbin/launchd`、共享缓存三处都查不到，`xpcproxy` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md:712`）；
 2. 转交的是 `__XPC_` 前缀版本、不是裸名——**这是按 Lessica 分支的既有实现推断的**，不是本机验证过的结论（同文件 `:714`）；
-3. 有谁设了 `__XPC_` 前缀版本——**成立**。`dopamine-basebin/0001-systemhook-set-search-paths.patch:100-103` 的 `searchPathVariables` 四个变量都在：`DYLD_FRAMEWORK_PATH`、`__XPC_DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`__XPC_DYLD_LIBRARY_PATH`。补丁自己的注释（`:139`）写着「Both spellings are set: where an XPC service's `__XPC_` copy is forwarded from is not verified」。
+3. 有谁设了 `__XPC_` 前缀版本——**补丁里有，设备上没生效**。`dopamine-basebin/0001-systemhook-set-search-paths.patch:100-103` 的 `searchPathVariables` 四个变量都在：`DYLD_FRAMEWORK_PATH`、`__XPC_DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`__XPC_DYLD_LIBRARY_PATH`。补丁自己的注释（`:139`）写着「Both spellings are set: where an XPC service's `__XPC_` copy is forwarded from is not verified」。**但这条答的是补丁的形态，不是设备的形态**：2026-11-25 实测设备上 `/var/jb/basebin/systemhook.dylib` 是 233520 字节的原版，里面 `DYLD_FRAMEWORK_PATH` 出现 0 次（读数与判据见附录 B 的 B.1）。打上补丁的那份是 234336 字节。
 
-所以前置条件齐备，缺的只有一个转交行为。**若转交不成立，helper 加载系统 16.1 的 `WebKit`，UI 进程加载 18.3，1.1 节那条跨进程 PAC 崩溃就是必然而不是可能。**
+因此这一节的三条前置条件今天只有第二条未定、第三条不成立。**「前置条件齐备，缺的只有一个转交行为」这句话在本轮不成立**：连「有谁设了变量」这一条都没落地。转交行为仍未测，但它现在排在重装 basebin 之后（附录 B 的 B.9）。
+
+**若转交不成立，helper 加载系统 16.1 的 `WebKit`，UI 进程加载 18.3，1.1 节那条跨进程 PAC 崩溃就是必然而不是可能。** 今天连变量都没设，所以两侧都只命中系统 16.1，那条崩溃不会出现——这与附录 B 的 B.7（UI 进程三份 framework 全在 `/System`）一致。
 
 **还有一处叠加冲突，同样没有实测。** 两条来源的第一项现在相同：basebin 的 `__XPC_DYLD_FRAMEWORK_PATH` 指向 `/var/jb/Library/WebKitOverride`，`.xpc` 自己的 `LC_DYLD_ENVIRONMENT` 也以 `/var/jb/Library/WebKitOverride` 开头，后备项才是 `/var/jb/Library/Frameworks`。`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节现在记的是两者指向同一组目录，原文「两者现在指向同一组目录：内嵌那条也是 `/var/jb/Library/WebKitOverride` 在首位」；该节同时写明覆盖目录不存在时 dyld 落回 `/var/jb/Library/Frameworks`。**这两句都是 app 进程的读数与静态推演，`.xpc` 上「谁来读、哪一阶段生效」没有实测**，两条来源在不同进程之间的合并顺序、以及后备项会不会被走到，都仍未定。
 
@@ -164,6 +168,16 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 2. 进程活着，launchd 不为它解析该目录下的服务。
 
 M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 `WebKit` 二进制端点归零」都是在 `JavaScriptCore` 已补上的前提下取得的，那时进程不崩，dyld 中止解释不了它。**所以「归零」这个观察本身至今没有被归因。**
+
+**2026-11-25 补上第三种情形，它排在上面两种之前。** 那两次配置都要求 dyld 那两层在设备上生效；今天它们不在，于是端点读数与无覆盖目录时相同（按行 8、去重 4），这个数既不是「launchd 解析」也不是「launchd 不解析」。三种情形按发生顺序是：
+
+1. **dyld 层没生效，覆盖目录里的二进制根本没被选中。** 读数判据：`lldb image list` 里三份 framework 全在 `/System`，且 UI 进程 `environment` 段落没有 `DYLD_*`。**这是今天的状态**（附录 B 的 B.1 与 B.7）。
+2. 进程在注册端点之前被 dyld 中止（`termination.namespace = DYLD`，符号缺失）。
+3. 进程活着，dyld 选中了覆盖目录，launchd 不为它解析该目录下的服务。
+
+**只有第 3 种情形成立时，端点读数才对「launchd 解不解析」有含义。** 判第 3 种之前，先要排除第 1 种：这正是 `lldb image list` 与 `environment` 段落这两条读数的用处。本文 2.4 节原先只列了两种，漏掉的第 1 种恰是今天唯一成立的。
+
+**另外一句要撤回，并且已经改掉。** 本节与第 0 步此前把「`gui/501` 为空」当作「任何应用都无法启动」，据此说新读数取不到。同日设备健康运行时 `launchctl print gui/501` 也是空输出、`exit=125`，图形会话落在 `user/501`（`launchctl print user/501` 含 `SpringBoard` 与 `backboardd`，Safari 与 Chrome 都在运行，23 个 helper）。**所以「`gui/501` 为空」是这个系统的常态，不是故障。** 第 0 步已改成「`launchctl print user/501` 含 `SpringBoard`」加「有应用进程活着」两条判据，本节也已在上面补上第 1 种情形。读数见附录 B 的 B.5。
 
 ---
 
@@ -223,17 +237,17 @@ M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 
 
 按顺序执行。每一步给出命令、预期读数、以及「读数不成立」的判据。前一步不通过时不要进入下一步，否则后一步的数字无法归因。**本节全部步骤待设备回网后执行**：写作时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时，因此本文第四节没有任何一条是按本节命令新取的读数。
 
-### 第 0 步：确认图形域存在
+### 第 0 步：确认设备能拉起应用（不再以 `gui/501` 是否非空为准）
 
-M65 记录的 `gui/501` 域丢失至今没有恢复。今天实测 `launchctl print gui/501` 返回 0 行，`launchctl print user/501` 返回 2056 行。这个状态下任何应用都无法启动，也就取不到任何端点读数。
+**这一步的判据在 2026-11-25 改掉了，原因写在下面。** 原先的写法是「`gui/501` 为 0 行则图形域丢失、任何应用都无法启动」，据此把这一步当整节的门。实测那个前提不成立：设备健康运行时 `launchctl print gui/501` 也是空输出、`exit=125`，而 Safari pid 622、Chrome pid 626、23 个 WebKit helper 全都在跑，且都是开机后启动的。`launchctl print system` 的域列表里只有 `user/501`，`launchctl print user/501` 含 `SpringBoard` 与 `backboardd`。**iOS 16.1 这台设备的图形会话落在 `user/501`，`gui/501` 为空是常态而不是故障。**
 
 ```sh
-launchctl print gui/501 2>&1 | wc -l
-launchctl print user/501 2>&1 | wc -l
+launchctl print user/501 2>/dev/null | grep -cE 'com\.apple\.springboard|SpringBoard'
+ps -Ao comm | grep -cE '^/Applications/(MobileSafari|Chrome)'
 ```
 
-**预期：** 第一条远大于 0（正常状态是数千行），第二条同样非零。
-**不成立时：** `gui/501` 为 0 说明图形域仍未重建。已试过并无效的手段见 M65 的 mission 记录（`sbreload` 报 `Operation not permitted`、`kickstart system/com.apple.runningboardd` 成功但域未恢复、`bootstrap gui/501` 报 `125: Domain does not support specified action`）。**只有一次正常重启能重建这个域。** 在这一条通过之前，第四节其余步骤一条都不要执行。
+**通过判据：** 第一条大于 0（`user/501` 里有 `SpringBoard`），第二条大于 0（有应用进程活着）。两条任一为 0 时，再去看 `launchctl print gui/501` 与 M65 的手段记录。
+**不要再用「`gui/501` 是否非空」当门。** 那条门在这台设备上恒不过，照它执行会让第四节的所有读数都取不到，而设备实际上是健康的。本轮已经开始执行第四节式的测量并成功取到读数（附录 B 的 B.4、B.6、B.7），可作为这条门被撤掉的依据。
 
 ### 第 1 步：清掉残留 helper，确认真实基线
 
@@ -635,7 +649,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 按重要性排列。每一条写明验证方式与预期结果。**第四节全部步骤待设备回网后执行**：本文收尾时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时。
 
 1. **helper 是否拿到覆盖路径。** 这是起点，排在 launchd 解析之前。三种可能（转交生效、只有内嵌生效、都不生效），判据是第四节第 3d-1 至 3d-3 步的候选行与 `image list`，配合 `DisableJBFrameworkPath` 的检查。三者任一结果都直接决定 helper 加载哪一份 `WebKit`，也就直接决定「全 18.3」是否只差 launchd 解析这一步。
-2. **`__XPC_` 前缀版本的转交是否发生。** 机制在 `/usr/libexec/xpcproxy`、`/sbin/launchd`、共享缓存里都查不到实现，`libxpc` 与 `xpcproxy` 源码不公开（`docs/dopamine-basebin-webkit-override.md:712`）。「只透传前缀版本」是按 Lessica 分支推断的（同文件 `:714`）。basebin 四个变量都设了，所以这一条是唯一的空格。第四节第 3d-3 步靠加载结果反推它；直接跑 `.xpc` 的 3d-1 测不到它，因为从 shell 起的进程不经过 `xpcproxy`。
+2. **`__XPC_` 前缀版本的转交是否发生。** 机制在 `/usr/libexec/xpcproxy`、`/sbin/launchd`、共享缓存里都查不到实现，`libxpc` 与 `xpcproxy` 源码不公开（`docs/dopamine-basebin-webkit-override.md:712`）。「只透传前缀版本」是按 Lessica 分支推断的（同文件 `:714`）。**这一项原先写「basebin 四个变量都设了，所以这一条是唯一的空格」，那句在 2026-11-25 不成立**：设备上 `systemhook.dylib` 是 233520 字节的原版，`DYLD_FRAMEWORK_PATH` 出现 0 次，四个变量一个都没设（附录 B 的 B.1）。所以转交问题现在排在「重装 basebin」之后。第四节第 3d-3 步靠加载结果反推它；直接跑 `.xpc` 的 3d-1 测不到它，因为从 shell 起的进程不经过 `xpcproxy`。
 3. **转交与 `.xpc` 内嵌路径谁优先。** 两者第一项现在同为 `/var/jb/Library/WebKitOverride`，差别只在 `.xpc` 那条还带 `/var/jb/Library/Frameworks` 作后备。`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节记的是 app 进程的读数（原文「两者现在指向同一组目录：内嵌那条也是 `/var/jb/Library/WebKitOverride` 在首位」），`.xpc` 上是否成立没有实测。第四节第 3d-2 步直接读 3d-1 日志里的 `found:` 落点，能给出直接运行下的答案；`xpcproxy` 拉起时的优先级仍要靠 3d-3。
 4. **launchd 能否为索引外的 `XPCServices` 目录解析服务。** 第四节第 5 步。预期 (A) 四条以上，(B) 两条以内。这一条是终点：在 1 至 3 通过之前，它的读数无法归因。
 5. **「端点归零」的成因。** 外层仓库 `build-state.md` 的「端点数目表（目标应用 Chrome，每次 `killall` 后重新 `uiopen <url>`）」一节（该表首行是「| 覆盖目录内容 | 端点 | spawn | lookup 失败 |」）的每一次「0」都没有记录崩溃报告字段，因此无法区分「dyld 中止」与「launchd 不解析」。第四节第 2 步的差分是为了补上这个缺口。
@@ -647,12 +661,12 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 
 ---
 
-## 附录：本文引用的实测读数（2026-11-25，192.168.2.135，只读）
+## 附录 A：本文引用的实测读数（2026-11-25，192.168.2.135，只读）
 
-- `launchctl print gui/501` 为 0 行；`launchctl print user/501` 为 2056 行。
+- `launchctl print gui/501` 为 0 行；`launchctl print user/501` 为 2056 行。**这一条不能用来判断设备是否健康**：同日另一轮实测（附录 B 的 B.5）在设备正常运行时（Safari pid 622、Chrome pid 626、23 个 WebKit helper）也读到 `gui/501` 为 0 行、`launchctl print system` 的域列表里只有 `user/501`。图形会话落在这台设备的 `user/501` 域。**本文第 0 步与 2.4 节里「`gui/501` 为空则任何应用都无法启动」这句因此不成立**；那两处的改写属于另一组改动（端点探针与 `docs/ios16-launchd-xpc-resolution-gap.md` 的同一处更正），在它落地之前，GUI 域这一条以附录 B 的 B.5 为准。
 - `/var/jb/Library/WebKitOverride` 不存在。
 - `/var/jb` 是 `/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus` 的符号链接。
-- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`，974608 字节，`Nov 24 08:44`。
+- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`，**本条读数已过期**：当时读的是 974608 字节、`Nov 24 08:44`，同日另一轮（附录 B 的 B.1）读到 974016 字节。**现行状态取附录 B。** 两个值在 `../../webkit-install-runbook.md:113-114` 的表里含义相反：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」，`974608` =「已合入两个新 hook」。**注意附录 A 这一条当初的旁证（两个 hook 计数为 `1`）是裸字符串计数，测不出装没装**：那个 `1` 在任何一份 dyld 上都是 1，理由见 B.1 的第 1 个陷阱；同一份记录里的 974608 与今天的 974016 差的是文件，不是数法。
 - `/var/jb/Library/Frameworks` 含 `AltList.framework`、`CydiaSubstrate.framework`、`JavaScriptCore.framework`、`WebCore.framework`、`WebGPU.framework`、`WebKit.framework`、`WebKitLegacy.framework`、`adattributiond`、`webpushd`。
 - `ps -Ao comm` 里有 3 个 WebKit helper（70750、70751、70753），`ppid` 全为 1，全部来自 `/System/Library/Frameworks/WebKit.framework/XPCServices/...`，没有宿主进程。
 - 对 70753 跑 `lldb image list -o -f`：`[86] /System/Library/Frameworks/WebKit.framework/WebKit`、`[113] /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`、`[115] /System/Library/PrivateFrameworks/WebCore.framework/WebCore`。
@@ -663,3 +677,138 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 - `/System/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.Networking.xpc/com.apple.WebKit.Networking`：70368 字节，`LC_DYLD_ENVIRONMENT` 零条。
 - `install-webkit-override.sh` 的符号位置（出货树上即对齐后的坐标，一律按符号名定位）：`JBROOT` `:57-58`、`OVERRIDE_ROOT` 字面量 `:66`、`JBROOT` 不等于 `/var/jb` 时的改写 `:72`、`SOURCE_FRAMEWORKS` `:75`、`FRAMEWORK_NAMES` `:79`、`LIBRARY_NAMES` `:80`、`prune_xpc_services` 起于 `:259`。对齐之前的坐标是 `JBROOT` `:47`、`SOURCE_FRAMEWORKS` `:50`、`OVERRIDE_ROOT=${JBROOT}/Library/WebKitOverride` `:52`、`FRAMEWORK_NAMES`/`LIBRARY_NAMES` `:55-56`、`prune_xpc_services` 起于 `:235`，只作历史对照。
 - `dopamine-basebin/0001-systemhook-set-search-paths.patch:86-89` 为注释（说明为何不用共享目录）、`:92-93` 为两个路径常量、`:99-104` 为四个环境变量名（裸名与 `__XPC_` 前缀各一对）、`:106-116` 为 `DisableJBFrameworkPath` 开关、`:139` 为「两种拼写都设，前缀版本的转交位置未验证」这条注释。
+
+---
+
+## 附录 B：2026-11-25 本轮读数（`192.168.2.136`，只读）
+
+这一轮的读数改写了附录 A 里两条，并把第 0 步与 2.4 节的两个前提改成可成立的形式。附录 B 记录的观测步骤全部只读；设备上另有一次写操作，即跑 `sh /var/mobile/install-webkit-override.sh` 建了一个覆盖目录（退出码 0，见 B.6），该目录在收尾时已删除，设备恢复为 Safari 进程加 22 个 helper。本轮没有重装 basebin。
+
+### B.1 basebin 层今天没有生效（改写附录 A 的 `gen/dyld` 一条）
+
+| 读数 | 值 | 出处与判据 |
+| --- | --- | --- |
+| `/var/jb/basebin/gen/dyld` 字节数 | **974016** | `../../webkit-install-runbook.md:113` 的表：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」；`:114` 的 `974608` 才是更新后的值 |
+| `gen/dyld` 里判定 (b) 的四个计数 | **`1 0 0 1`** | 命令在 `../../webkit-install-runbook.md:669-677`：先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token，再按四个名字分别计数。**第 2、3 位为 0 即判据**：`isOverridablePath` 与 `isAlwaysOverridablePath` 这两个新 hook 不在。文件里并非没有 `_MACHOMERGER_HOOK__` 符号，原带的 `dlopen_from` 与 `__fcntl` 各一个仍在，见下面第 2 个陷阱 |
+| 会被合进 `gen/dyld` 的那个 hook dylib | `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` **74352** 字节，同一判据 `1 0 0 1` | 这是**原版**那份；`basebin.tar` 里打补丁的那份是 **75952** 字节、判据 `1 1 1 1`。两个字节数与 `../../webkit-install-runbook.md:691-692` 的表逐字一致（`75952` =「装完之后那份」，`74352` =「装之前那份」） |
+| `/var/jb/basebin/systemhook.dylib` 字节数 | **233520** | `../../webkit-install-runbook.md:892` 的表：`233520` =「旧，搜索路径这一半未生效」；`:893` 的 `234336` 才是打上补丁的那份 |
+| 同一文件里六个字符串的计数 | **`0 0 0 0 0 2`** | 命令在 `../../webkit-install-runbook.md:876-883`，判据在 `:892`（旧那份四个变量计数为 `0 0 0 0`）。末尾那个 `2` 是 `DYLD_INSERT_LIBRARIES`，原版就有 |
+
+**四个陷阱，写在这里避免下一轮重复踩。**
+
+1. **判定 (b) 的数法要用 token 过滤，不要用裸子串计数。** `1 0 0 1` 是先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token、再按四个名字分别计数得到的结果。裸子串 `isOverridablePath` 的计数是另一回事，设备上是 `7 1 1 2`（`dlopen_from 7`、`isOverridablePath 1`、`isAlwaysOverridablePath 1`、`__fcntl 2`），那个数在任何一份 dyld 上都不为零，不能当判据。`../../webkit-install-runbook.md:696` 已写明这一点。
+2. **「`gen/dyld` 里有几个 `_MACHOMERGER_HOOK__` 符号」不是判据。** 它有 **2** 个，分别是原带的 `dlopen_from` 与 `__fcntl` 各一个。为零的不是全部符号，而是**两个 override hook** 这两个名字——这正是判定 (b) 第 2、3 位的含义。
+3. **不要用 `MACHOMERGER` 的出现次数当判据。** `gen/dyld` 里它出现 **38** 次，全部是原带的 `dlopen_from` 与 `__fcntl` 两组 hook 及其 trampoline/orig 符号。
+4. **也不要用 mtime 推断「刚装过所以补丁在」。** 今天 `gen/` 与 `gen/dyld` 的 mtime 都是当天的 10:37（`Nov 3 01:04` 是原生安装时间），而内容仍是原版。
+
+**这条与附录 A 的 974608 冲突，但两份读数用的是同一个数法，差别在文件。** 附录 A 那份记录了两个 hook 计数为 `1`，按当时的状态那是成立的；今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。**真正能区分的是 hook dylib 的 74352 对 75952，以及判定 (b) 第 2、3 位的 `0 0` 对 `1 1`。** 今天这两项都指向原版。重装 basebin 之后的正确复现读数是 hook dylib 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608。
+
+**这条对本文的影响是全篇性的。** 第 2.3、3.1、3.2 节与第四节全部步骤的隐含前提是「dyld 愿意用磁盘副本」，而那个前提来自装了新 hook 的配置。**今天不在那个配置下。** 所以本文第四节的步骤在重装 basebin 之后才能给出可归因的读数；在那之前，任何 `image list` 出现 `/System` 的读数都只能说明 dyld 层没生效，不能说明路径对齐失败。
+
+### B.2 dyld hook 的三层证据：前两层成立，第三层今天不成立
+
+补丁在仓库里（`dopamine-basebin/0001-dyldhook-allow-framework-override.patch:42-43`、`:68-73`）与产物在构建里（run `45347498837` 的 `basebin-tar`，id `14899365667`，`dyldhook_merge.arm64e.iOS16-17.dylib` 三个符号齐备）这两层不受本轮读数影响。**只有第三层（设备上的 `gen/dyld`）不成立**，读数见 B.1。因此「dyld 不肯用磁盘副本这条阻断已关闭」不能当今天的事实引用。
+
+### B.3 启动 Safari 的正确方式（测量方法，先读这一条）
+
+本文 2.3、第四节第 3d-3 步与第 5 步都写「要测 Safari 用 `uiopen --path /Applications/MobileSafari.app`」，这一条是对的。本轮补充两条**会得到假数据**的写法：
+
+| 命令 | 实测结果 |
+| --- | --- |
+| `uiopen --path /Applications/MobileSafari.app` | **启动 Safari**，本轮 pid 2511 与 2628 |
+| `open -b com.apple.mobilesafari` | 返回 `Couldn't open application: -b. Reason: 7, application not found`。设备上的 `open` 只接受 `open com.application.identifier` |
+| `uiopen <url>` | 打开系统默认浏览器 Chrome（`com.google.chrome.ios`），不是 Safari |
+
+设备上那份 `measure_override.sh` 用的是后两条，**所以它历次跑出的 `safari pid after launch: NONE` 是测量无效，不是 Safari 起不来**。任何引用该脚本得出「Safari 无法启动」的结论都作废。
+
+### B.4 端点计数：8 是按行数，4 是去重后的基础服务名
+
+```sh
+launchctl print pid/<PID> | sed -n '/services = {/,/}/p' \
+  | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+```
+
+基线读数（Safari pid 2511，无覆盖目录）：
+
+```
+com.apple.WebKit.Networking.78D7D3C6-…       2516
+com.apple.WebKit.WebContent                  0
+com.apple.WebKit.GPU                         0
+com.apple.WebKit.Networking                  0
+com.apple.WebKit.WebContent.C2969B10-…       2522
+com.apple.WebKit.WebContent.02CE8614-…       2513
+com.apple.WebKit.GPU.2E55884D-…              2517
+com.apple.WebKit.WebContent.CaptivePortal    0
+```
+
+- 按行 `grep -c` = **8**；
+- 按去重后的基础服务名 = **4**（`WebContent`、`Networking`、`GPU`、`WebContent.CaptivePortal`）。
+
+第四行 `WebContent.CaptivePortal` 也匹配上文那条正则，所以它计入 8 与 4。**8 不是常量**：它随该域里已实例化的实例数浮动，多一个页面就多一行。所以第 5 步判「端点全失」时要用去重后的基础服务名（4 个），不要用行数。本文 2.4 节与第 5 步以及 `build-state.md` 的「端点数目表」一节把「无覆盖目录为 8 条」当固定基线，那一处要按这个口径读。
+
+### B.5 GUI 域：`gui/501` 为 0 不是「任何应用都无法启动」
+
+同日另一轮在设备健康运行时读到（Safari pid 622、Chrome pid 626、23 个 WebKit helper，全部是开机后启动的，不是残留）：
+
+- `launchctl print gui/501` 空输出、`exit=125`，提权后同样空输出；
+- `launchctl print system` 的域列表里只有 `user/501`，没有 `gui/501`；
+- `launchctl print user/501` 有 573 个 active 条目，含 `SpringBoard` 与 `backboardd`。
+
+也就是说 iOS 16.1 的图形会话落在这台设备的 `user/501` 域，`gui/501` 本来就恒为 0 行。**所以第 0 步把「`gui/501` 非空」当前置检查，在这台设备上永不过；2.4 节「任何应用都无法启动」这句与实测不符。** 第 0 步已改成两条可成立的判据（`launchctl print user/501` 含 `SpringBoard`；有应用进程活着），2.4 节已补上「dyld 层没生效」这第 1 种情形并把本条撤回。
+
+### B.6 装上覆盖目录后的读数（本轮）
+
+安装脚本 `sh /var/mobile/install-webkit-override.sh` 退出码 0；五个 framework 全部 `arm64e`，五个 `Info.plist` 齐全，`WebKit.framework/` 下含 `XPCServices`（设备上那份是 11-24 版本，`cp -a` 整目录复制，不剔除）。
+
+`killall -9 MobileSafari` 后用 B.3 那条正确命令启动，Safari pid 2628 正常起来：
+
+- 端点按行 `grep -c` = **8**，去重 = **4**，**没有归零**；
+- `launchd.log` 增量 632 行，`Successfully spawned` = 8，`failed lookup` = 1（`PurplePPTServer`，与 WebKit 无关），**`WebKitOverride` 命中 = 0**；
+- 崩溃报告数从 97 到 97，**无新增**。
+
+四个 helper 的 spawn 记录：
+
+```
+MobileSafari[2628]          because launch job demand
+WebContent[2630]            because ipc (mach)
+Networking[2632]            because ipc (mach)
+GPU[2633]                   because ipc (mach)
+WebContent[2634]            because ipc (mach)
+```
+
+### B.7 决定性读数：UI 进程加载的是系统 WebKit
+
+```sh
+lldb -b -o "process attach --pid 2628" -o "image list -o -f" -o detach -o quit 2>/dev/null \
+  | grep -E "WebKit.framework/WebKit$|WebCore.framework/WebCore$|JavaScriptCore.framework/JavaScriptCore$"
+```
+
+```
+[ 36] 0x00000000035c0000 /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+[ 51] 0x00000000035c0000 /System/Library/Frameworks/WebKit.framework/WebKit
+[416] 0x00000000035c0000 /System/Library/PrivateFrameworks/WebCore.framework/WebCore
+```
+
+三份全部来自 `/System`，**没有任何一份来自 `/var/jb/Library/WebKitOverride`**。同一进程的 `launchctl print pid/2628` 的 `environment` 段落全文只有 `PATH`、`CFFIXED_USER_HOME`、`HOME`、`TMPDIR`，**没有任何 `DYLD_*`**。
+
+**这两条合起来说明：覆盖目录里的二进制根本没被选中，第四节的第 3b、3d、第 4、第 5 步今天都取不到可归因的读数。** 本文 3.1 节与 3.2 节写「UI 进程的 `DYLD_FRAMEWORK_PATH` 来自 basebin 注入」是装了新 `systemhook` 的配置下的形态，今天不成立。
+
+### B.8 本轮判断与本文章节的对应
+
+| 本文原先的说法 | 本轮读数 | 处理 |
+| --- | --- | --- |
+| 2.3 节「basebin 四个变量都设了，缺的只有转交行为」 | 变量一个都没注入，`systemhook.dylib` 是 233520 原版 | 已在 2.3 节改写（第三条与「前置条件齐备」那句）；转交行为仍未测，但它现在排在「变量没设」之后 |
+| 2.4 节「端点归零只有两种成因」 | 还有第 1 种：dyld 层没生效 | 已在 2.4 节补上三种情形的顺序 |
+| 必要条件表第三条「basebin 四个变量都设了」 | 设备上是 233520 原版 | 已改为「**不成立**（2026-11-25 实测）」 |
+| 第四节第 5 步「这是第二条必要条件的判定」 | 前置的 dyld 层不成立 | 见 B.9，第 5 步的读数要在 B.1 通过后才可归因 |
+| 第 0 步「`gui/501` 为 0 则任何应用都无法启动」 | 设备健康时 `gui/501` 也是 0 | 已改成两条可成立的判据（B.5） |
+| 附录 A「`gen/dyld` 974608」 | 974016 | 已标注过期并指向 B.1 |
+| 阅读顺序前提（本文第 11 行）「basebin 已设变量」 | 同上，未设 | 已在该处加入「本节之前还有一项」的段落 |
+
+### B.9 使路线 B 往前走的最小改动清单（按下单顺序）
+
+1. 重装带两个新 hook 的 basebin，让 `gen/dyld` 变成 974608、判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`、`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`、`systemhook.dylib` 变成 234336 且六字符串计数为 `4 2 4 2 4 2`（`../../webkit-install-runbook.md:113-114`、`:691-692`、`:892-893`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 B.1 的四个陷阱。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。
+2. 重测 UI 进程的 `environment` 段落与 `lldb image list`（第四节的第 4 步），确认 `DYLD_FRAMEWORK_PATH` 出现且三份 framework 的前缀含 `WebKitOverride`。
+3. 只有前两步通过后才执行第 5 步，用 B.3 的正确启动命令、B.4 的去重计数口径判 launchd 解析不解析。
+
+**不重装 basebin 就不要跑第 5 步。** 在今天的配置下它的读数与无覆盖目录时相同，对 launchd 一句话也没说。
