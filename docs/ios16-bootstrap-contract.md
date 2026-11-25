@@ -139,7 +139,7 @@ releases/Apple/Safari-15.6-iOS-15.6:Source/WebKit/UIProcess/Launcher/cocoa/Proce
 | 字数公式 | `words = (bitmapSize + wordSize - 1) / wordSize`，`Source/WTF/wtf/Bitmap.h:151` | 同名公式，`Source/WTF/wtf/BitSet.h:148` |
 | 字节数 | `(63 + 31) / 32 = 2` 字，`storageLengthInBytes()` 返回 `sizeof(bits)`（`Bitmap.h:145`）→ **8 字节** | `(94 + 31) / 32 = 3` 字，`BitSet.h:142` → **12 字节** |
 
-如果把哨兵也算成一项，读数分别是 64 与 95，套同一个公式仍得 2 字与 3 字，结论不变：**16.1 是 8 字节，18.3 是 12 字节**。
+字节数只由 `NumberOfBehaviors` 的取值决定，而它的取值等于有名行为的个数。`NumberOfBehaviors` 是枚举体的最后一项且不带 `= 值`，因此它的值等于它前面有名项的个数：16.1 上是 63，18.3 上是 94。把 `bitmapSize` 取成「有名数加一」会算错，因为模板实参已经是 `NumberOfBehaviors` 的值，再加一就多算了一项。以 16.2 为例：它有 64 个有名行为，`NumberOfBehaviors` 取 64，`(64 + 31) / 32 = 2` 字、8 字节；若按「64 加哨兵等于 65」去算，会得到 3 字 12 字节，与实际宽度不符。
 
 复算命令：
 
@@ -154,6 +154,38 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
   | grep -E '^\s+[A-Za-z][A-Za-z0-9_]*,?\s*$' | grep -v NumberOfBehaviors | wc -l
 94
 ```
+
+### 宽度只有两档，切换点在 16.4
+
+把每个 iOS tag 的枚举原文抽出来数有名项、套上面的公式，40 个 tag 里只有两档宽度：
+
+| 版本区间 | 有名行为数 | 容器 | 字节数 |
+| --- | --- | --- | --- |
+| 16.0 到 16.1.2 | 63 | `Bitmap` | 8 |
+| 16.2 到 16.3.1 | 64 | `Bitmap` | 8 |
+| 16.4 到 16.5 | 73 | `Bitmap` | 12 |
+| 16.6 到 16.7.2 | 74 | `Bitmap` | 12 |
+| 17.0 到 18.0 | 79 到 93 | `BitSet` | 12 |
+| 18.1 到 18.3.2 | 94 | `BitSet` | 12 |
+
+16.2 与 16.3 增加了一个行为，但 63 与 64 都落在第 2 个字里，所以仍是 8 字节。16.4 跨到第 3 个字，宽度在这里从 8 变成 12；容器类型在 17.0 由 `Bitmap` 换成 `WTF::BitSet`，两条实现里的字数公式相同（`Bitmap.h:151`、`BitSet.h:148`），所以这次替换不改宽度。全表 40 个 tag 逐个数过，宽度变化只出现在 16.4 这一处。
+
+复算方式与上面相同，把 tag 名换掉即可；对 16.2 得到 `64`，对 16.4 得到 `73`。
+
+### 宽度相等不等于两个版本兼容
+
+两版的宽度断言只比较字节数，所以它能把 8 与 12 分开，但分不开「同为 12 字节」的不同版本。16.4 的位图与 18.3 的位图都是 12 字节，16.4 UI 进程配 18.3 helper 时这条断言会通过，位图却被按错误的位序解读。
+
+位序差异的实测（按名字逐项比对，取两版都有的名字看下标是否相同）：
+
+| 对比 | 可比下标数 | 同一名字同一位置 | 同一名字不同位置 | 只在前者存在 |
+| --- | --- | --- | --- | --- |
+| 16.1 对 16.2 | 63 | 13 | 50 | 0 |
+| 16.4 对 18.3.1 | 73 | 3 | 69 | 1 |
+
+16.1 与 16.2 同为 8 字节，位序也只在前 13 项一致，从下标 13 起 `DOMWindowReuseRestriction` 被 `DoesNotAddIntrinsicMarginsToFormControls` 顶开，此后整体错位。16.4 与 18.3.1 同为 12 字节，73 个可比下标里只有 `0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt` 三个指向同一行为。
+
+所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。M85 的长度分支因此按「12 字节走原路径、8 字节丢弃」处理，而这个分支只对 16.1 与 18.3 这一对成立；把 16.4 的 12 字节负载原样交给 18.3，长度检查放行、位序仍然错，需要下标对照表才能解码。这份对照表尚未编写。
 
 ### 发送与接收
 
@@ -221,7 +253,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 94
 ```
 
-按名字逐项比对，**64 个下标里只有 3 个在两版指同一个行为**：`0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt`。有 62 个名字两版都存在，但下标不同。另有名字只在 16.1 存在，例如 `ApplicationCacheDisabledByDefault`（16.1 下标 1）在 18.3.1 的枚举里完全没有。
+按名字逐项比对，**63 个可比下标里只有 3 个在两版指同一个行为**：`0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt`。有 62 个名字两版都存在，其中 59 个下标不同。另有名字只在 16.1 存在，例如 `ApplicationCacheDisabledByDefault`（16.1 下标 1）在 18.3.1 的枚举里完全没有。
 
 结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 的 16.1 分支因此在长度匹配时**丢弃**该负载、让位图保持已知状态，而不是试图解码它。这不是缺陷，是两版位序无关这一事实的必然结果。
 
