@@ -125,7 +125,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | 3 | 16.1 UI 把 `ContainerEnvironmentVariables` 写在 bootstrap 消息上，18.3 helper 从事件字典读，取到 NULL | `XPCServiceMain.mm` | 两个来源各自独立尝试，取到才 `apply` | helper 不再 `Killed: 9`（退出 137）；`launchd.log` 里出现 `Successfully spawned` | 已覆盖，`ios16-xpc-bootstrap-compat.patch` |
 | 4 | 16.1 的 `pre-bootstrap` 消息在 18.3 无分支，落到 `handleXPCEndpointMessage` 被丢弃 | `XPCServiceMain.mm` | 增加 `pre-bootstrap` 分支并存下 `priorityBoostMessage` | helper 存活期间不因 transaction 提前释放而退出 | 已覆盖，同一补丁 |
 | 5 | `InitializerFunction` 参数个数 16.1 为 3、18.3 为 2 | `XPCServiceEntryPoint.h` | 入口签名加默认第三参数 | helper 能走到 `initializeAuxiliaryProcess`，不因函数指针调用而崩 | 已覆盖，同一补丁 |
-| 6 | `getClientSDKAlignedBehaviors` 两版都收位图，但 16.1 发 8 字节、18.3 期望 12 字节，`RELEASE_ASSERT` 相等比较导致 helper 中止 | `XPCServiceEntryPoint.mm` | 删除 `RELEASE_ASSERT`，改为按宽度分三支：等宽时 `memcpy` 并返回真（本包部署的组合两端是同一份 framework，位序相同，这一支正确）；窄于本版时丢弃、位图保持全零、记 `RELEASE_LOG_ERROR`、返回真；宽于本版时丢弃、记另一条日志、返回假 | helper 不再中止，8 字节负载走「窄」那一支取默认值；等宽的 12 字节对端（16.4、17.x、18.0–18.2）仍会被按错位序拷贝（需在 helper 内打点） | M85 已落地（`97cfd79`、`ddfaa5f`、`e657b79`、`30ae1b9` 至 `7295bbb`，其中 `e657b79` 恢复等宽拷贝） |
+| 6 | `getClientSDKAlignedBehaviors` 两版都收位图，但 16.1 发 8 字节、18.3 期望 12 字节，`RELEASE_ASSERT` 相等比较导致 helper 中止 | `XPCServiceEntryPoint.mm` | 删除 `RELEASE_ASSERT`，改为按宽度分三支：等宽时 `memcpy` 并返回真（本包部署的组合两端是同一份 framework，位序相同，这一支正确）；窄于本版时丢弃、位图保持全零、记 `RELEASE_LOG_ERROR`、返回真；宽于本版时丢弃、记另一条日志、返回假。两版位序不可按位置换算，所以 8 字节的负载不被解码 | helper 不再中止，8 字节负载走「窄」那一支取默认值；等宽的 12 字节对端（16.4、17.x、18.0–18.2）仍会被按错位序拷贝（需在 helper 内打点） | M85 已落地（`97cfd79`、`ddfaa5f`、`e657b79`、`30ae1b9` 至 `7295bbb`，其中 `e657b79` 恢复等宽拷贝） |
 | 7 | `xpc_main` 在公开 iOS SDK 上不可用 | `XPCServiceMain.mm` | 用 `xpc_connection_create(nullptr,nullptr)` 复现 `xpc_main` 的接线 | helper 能被拉起并回 `process-finished-launching` | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
 | 8 | helper 需要知道去哪找 18.3 的 framework | `BaseXPCService.xcconfig` | `-Wl,-dyld_env,...` 写进 `.xpc` | `otool -l` 里 `.xpc` 有 `LC_DYLD_ENVIRONMENT`；`lldb image list` 里 helper 的 `WebKit` 路径为 `/var/jb` | 已覆盖；路径已与 install 脚本对齐，设备侧未验证，见第七节 |
 | 9 | **launchd 是否为索引外的 `XPCServices` 现扫** | 无（判定项） | 不改代码 | 第四节的判据命令 | **未知，未测** |
@@ -137,19 +137,20 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 ## 六、两个现有补丁覆盖了哪些改动，逐 hunk 对照
 
-### `patches/ios16-xpc-bootstrap-compat.patch`（293 行，8 个 hunk）
+### `patches/ios16-xpc-bootstrap-compat.patch`（215 行，7 个 hunk）
 
 | hunk 位置 | 内容 | 对应上表 |
 | --- | --- | --- |
 | `XPCServiceEntryPoint.h @@ -93,8 +93,14` | 入口签名加默认第三参数 | 第 5 行 |
-| `XPCServiceEntryPoint.mm @@ -34,6 +34,7` | 头文件引用 | 支撑第 6 行 |
-| `XPCServiceEntryPoint.mm @@ -84,12 +85,137` | `getClientSDKAlignedBehaviors` 去掉 `RELEASE_ASSERT`，改为按宽度分三支：等宽 `memcpy` 返回真，窄于本版丢弃并返回真，宽于本版丢弃并返回假（M85 的 `97cfd79`、`ddfaa5f`、`e657b79`、`30ae1b9` 至 `7295bbb` 这一串提交把它改成这个形状，其中 `e657b79` 恢复等宽拷贝；`client-sdk-version` 回退与版本表已删除） | 第 6 行 |
+| `XPCServiceEntryPoint.mm @@ -90,10 +90,66` | `getClientSDKAlignedBehaviors` 改写后的函数体（`RELEASE_ASSERT` 删除，按数据块宽度分派：等宽 `memcpy` 进位图并返回真，更窄丢弃留全零并返回真，更宽丢弃并返回假；不为 `client-sdk-version` 做回退。这一形态由 `97cfd79`、`ddfaa5f`、`e657b79` 这一串提交确定，其中 `e657b79` 恢复等宽拷贝） | 第 6 行 |
 | `XPCServiceMain.mm @@ -124,6 +124,8` | `InitializerFunction` 改三参数 | 第 5 行 |
 | `XPCServiceMain.mm @@ -152,18 +154,49` | `ContainerEnvironmentVariables` 双来源、`OverrideLanguages` 双来源、`pre-bootstrap` 分支 | 第 3、4 行 |
 | `XPCServiceMain.mm @@ -174,11 +207,21` | `ContainerEnvironmentVariables` 取到才 `apply` | 第 3 行 |
 | `XPCServiceMain.mm @@ -201,7 +244,9`、`@@ -230,11 +275,14` | 调用处传第三参数、配平 | 第 5 行 |
 
 覆盖了第 3、4、5、6 行。**未覆盖**第 2 行（那是另一个补丁的事）、第 8 行（`.xpc` 的加载命令）、第 9、10 行。
+
+`patches/ios16-ipc-message-number-translation.patch` 不再触碰 `XPCServiceEntryPoint.mm`：它曾经在该文件末尾插入一段 `getUIProcessSDKVersion`，两个补丁因此在一个 hunk 的插入位置上相争；现在这段被删除，翻译补丁只改 `Platform/IPC` 下的文件、`AuxiliaryProcess.cpp` 与 `project.pbxproj`，两补丁的 hunk 区间不再有任何交集。
 
 ### `patches/ios18-public-sdk-xpc-main.patch`（87 行，4 个 hunk）
 

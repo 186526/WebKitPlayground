@@ -60,7 +60,7 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 
 同一个函数里的其他 delegate 调用（`getConnectionIdentifier`、`getClientIdentifier`、`getProcessIdentifier`、`getClientProcessName`）都以 `if (!...) exitProcess(EXIT_FAILURE);` 收尾，只有 `getClientSDKAlignedBehaviors` 这一条没有。所以这条路径的失效方式不是「返回 false 然后退出」，而是**断言中止**：键缺失或长度为 0 时函数返回 false、位集留零、helper 继续启动；键存在但长度不等于 12 时 `EPM18:93` 的 `RELEASE_ASSERT` 直接终止进程。
 
-第二种才是实际部署时的路径。16.1 UI 进程**发送**这个键，长度为 8（`PL16:209`，见第 2 节与 `ios16-bootstrap-contract.md`），不等于 18.3 helper 期望的 12。所以 16.1 UI 配 18.3 helper 不是「位集留零、行为全不启用」，而是 helper 在 `XPCServiceInitializer` 内中止。
+第二种才是两版 tag 之间实际发生的组合。16.1 UI 进程**发送**这个键，长度为 8（`PL16:209`，见第 2 节与 `ios16-bootstrap-contract.md`），不等于 18.3 helper 期望的 12。所以按两版 tag 原文求值，16.1 UI 配 18.3 helper 不是「位集留零、行为全不启用」，而是 helper 在 `XPCServiceInitializer` 内中止。本工程产物改写了这个函数（见 `ios16-bootstrap-contract.md` 的「修补补丁的现状与缺口」一节）：断言删除，8 字节负载走窄支，记一条日志、位图保持全零、返回真，进程继续初始化。
 
 真正会终止进程的是长度这一条，而不是键缺失。`RELEASE_ASSERT` 在发布构建里也生效（`Source/WTF/wtf/Assertions.h:654-659`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`）。位集宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
 
@@ -459,7 +459,7 @@ client-sdk-aligned-behaviors, extra-initialization-data
 
 16.1 侧**在 iOS 上不发** `pre-bootstrap`：`shouldLeakBoost` 在 `PLATFORM(IOS_FAMILY)` 分支直接 `return false`（`PL16:82-86`），注释写明 RunningBoard 的进程断言已提供正确优先级。Mac 上才按 GPU/Network 进程类型返回 true。18.3 的 `XPCServiceMain.mm:150-241` 没有对应分支，即使收到也会落到 `handleXPCEndpointMessage`。
 
-所以 XPC 阶段并没有把这组错配放行：宽度断言在 `XPCServiceInitializer` 里就终止了 helper。第 6 节描述的 CoreIPC 终止发生在另一条路径上（该路径不经过这个断言），两者不能混为一谈。
+按两版 tag 原文求值，XPC 阶段并没有把这组错配放行：宽度断言在 `XPCServiceInitializer` 里就终止了 helper。本工程产物删掉了该断言，同样的 8 字节负载在产物里走窄支、只记一条日志、进程继续初始化，不再中止；进程随后是否因别的原因退出是另一个问题，本文未测。第 6 节描述的 CoreIPC 终止发生在另一条路径上（该路径不经过这个断言），两者不能混为一谈。
 
 ## 10. 是否可能降级
 
