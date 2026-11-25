@@ -63,8 +63,15 @@ DECLARATION_HINTS = ("void setShouldTranslateMessageNames", "bool setShouldTrans
 MEMBER = re.compile(r"\bbool\s+m_shouldTranslateMessageNames\s*\{([^}]*)\}")
 
 # Text the patch must keep. Each entry is a claim a reader relies on to judge a future change; the
-# substrings are short so that rewrapping a comment does not fail the check, and specific enough that
-# deleting the fact does.
+# needles are short so that rewrapping a comment does not fail the check, and specific enough that
+# deleting or altering the fact does.
+#
+# They are matched against the patch's added comment prose only, never against its code. Several of
+# the numbers below are also real case labels in the tables (`case 3135:`, `return 946`), so a
+# search over the whole patch would match them whatever the prose said, and a count that drifted
+# back to a wrong value would still find a match in the code. For the same reason the counts carry
+# the words around them rather than standing alone: `946` on its own still occurs inside the
+# device anchor `2946`, which is a different claim.
 #
 # Every 16.1 mention in the patch is qualified, because the tables are NOT built on shipped 16.1:
 # they come from the 614.1.9 snapshot, which is the iOS 16.0 generation. The entries below pin both
@@ -73,16 +80,19 @@ MEMBER = re.compile(r"\bbool\s+m_shouldTranslateMessageNames\s*\{([^}]*)\}")
 REQUIRED_RATIONALE = (
     ("InitializeConnection is 3076 in this tree", "3076"),
     ("the 614.1.9 number for InitializeConnection", "2444 and Last 3139"),
-    ("the message 3076 silently becomes, per the 614.1.9 basis", "WebPageProxy_RootViewToAccessibilityScreen"),
-    ("the message 3076 would become against shipped 16.1", "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
+    ("the message 3076 silently becomes, per the 614.1.9 basis",
+     "case 3076 with MessageName::WebPageProxy_RootViewToAccessibilityScreen"),
+    ("the message 3076 would become against shipped 16.1",
+     "names MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
     ("the handshake comparison that then never fires",
      "decoder->messageName() == MessageName::InitializeConnection"),
     ("the same-name count of the index comparison", "5 land on a message"),
     ("the different-message count against shipped 16.1", "3180"),
-    ("the beyond-range count against shipped 16.1", "901"),
-    ("the different-message count against the 614.1.9 basis", "3135"),
-    ("the beyond-range count against the 614.1.9 basis", "946"),
-    ("the tree's own size", "4086"),
+    ("the beyond-range count against shipped 16.1", "and 901 fall off"),
+    ("the net growth over the 614.1.9 snapshot", "946 more entries"),
+    ("the different-message and beyond-range counts against the 614.1.9 basis",
+     "5, 3135 and 946. Both readings"),
+    ("the tree's own size", "4086 numbers"),
     ("the shipped 16.1 enumeration's size", "3185"),
     ("the tag the tables were generated from", "Safari-614.1.9"),
     ("the statement that the tables are a 16.0-generation snapshot", "16.0-generation snapshot"),
@@ -168,10 +178,32 @@ def check_member_initialiser(patch: str) -> list[Violation]:
     return violations
 
 
+def added_comment_prose(patch: str) -> str:
+    """The comment text the patch adds, as one whitespace-normalised string for the needles.
+
+    Code is left out on purpose: `case 3135:` and `return 946` are real table entries, so allowing
+    them into the haystack would let every count needle match even after the prose around it had
+    been changed to a wrong value. Line breaks are collapsed too, so a needle that a comment
+    rewrap splits across two lines still matches while its wording stays the same.
+    """
+    prose = []
+    for raw in patch.splitlines():
+        match = ADDED_LINE.match(raw)
+        if not match:
+            continue
+        line = match.group(1)
+        index = line.find("//")
+        if index < 0:
+            continue
+        prose.append(line[index + 2:])
+    return " ".join(" ".join(prose).split())
+
+
 def check_rationale(patch: str) -> list[Violation]:
     violations = []
+    prose = added_comment_prose(patch)
     for description, needle in REQUIRED_RATIONALE:
-        if needle not in patch:
+        if needle not in prose:
             violations.append(
                 Violation(
                     "the patch no longer records %s" % description,

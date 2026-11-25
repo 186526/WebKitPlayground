@@ -39,30 +39,56 @@ sys.modules["check_translation_switch"] = CHECK
 _SPEC.loader.exec_module(CHECK)
 
 # A patch fixture with every anchor the checker requires, so a case that targets one rule is not
-# failed by an unrelated one. The text is the patch's own claim, compressed.
+# failed by an unrelated one. The prose is quoted from the patch itself, line breaks and all, so a
+# needle that only matches the real wording cannot pass here by coincidence.
 BASE = """\
 +bool m_shouldTranslateMessageNames { false };
 +void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }
-+// InitializeConnection is 3076 in this tree, and 2444 in the 614.1.9 snapshot whose
-+// anchor line reads InitializeConnection 2444 and Last 3139, with
-+// firstSynchronousOldMessageNumber 2899.
-+// The incoming table answers case 3076 with
-+// MessageName::WebPageProxy_RootViewToAccessibilityScreen, while against the shipped
-+// 16.1 enumeration it would name
-+// MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged.
-+// decoder->messageName() == MessageName::InitializeConnection
-+// Of the 4086 numbers, 5 land on a message with the same name, 3180 land on a different
-+// message, and 901 fall off the end of an enumeration of 3185; against 614.1.9 the same
-+// reading gives 3135 and 946.
-+// Safari-614.1.9 is a 16.0-generation snapshot, not the tag the device runs.
-+// The device runs releases/Apple/Safari-16.1-iOS-16.1 with 2946, 2478 and 3184,
-+// 45 at Last away from 3139.
++// dense enumeration over every message in the tree, so 946 more entries inserted
++// anywhere before a name reassigns the numbers after them.
++// This tree has 4086 numbers. Read against the shipped 16.1 enumeration
++// (releases/Apple/Safari-16.1-iOS-16.1, 3185 numbers) only 5 land on a message
++// with the same name, 3180 land on a different message, and 901 fall off its end.
++// built on tag Safari-614.1.9, which holds 3140 numbers; see the paragraph on
++// that tag below. Read against 614.1.9 the same measurement gives 5, 3135 and
++// 946. Both readings are here because both matter.
++// basis, so both are named. `InitializeConnection` is number 3076 in this tree.
++// The incoming table switches over the older numbering and answers case 3076
++// with MessageName::WebPageProxy_RootViewToAccessibilityScreen, the message that
++// occupies 3076 in 614.1.9. Against the shipped 16.1 enumeration the same number
++// instead names MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged,
++// which is what a peer running that build would be misread as.
++// ConnectionCocoa.mm's `decoder->messageName() == MessageName::InitializeConnection`
++// then never fires and the connection never completes its handshake.
++// whose anchors are firstSynchronousOldMessageNumber 2899, InitializeConnection
++// 2444 and Last 3139. That is not the 16.1 the device runs. The device runs
++// releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10), which has 3185 numbers and
++// anchors 2946, 2478 and 3184. Every one of those three numbers differs: 45 at
++// Last, 34 at InitializeConnection and 47 at the first synchronous message.
++// So these tables are a 16.0-generation snapshot, not 16.1.
 """
 
 CALL = "+    m_connection->setShouldTranslateMessageNames(true);\n"
 CALL_NO_ARGUMENT = "+    m_connection->setShouldTranslateMessageNames();\n"
 DECLARATION = "+    void setShouldTranslateMessageNames(bool shouldTranslate);\n"
 MACRO_INITIALISER = "+    bool m_shouldTranslateMessageNames { IOS_16_MESSAGE_NUMBER_TRANSLATION };\n"
+
+# The five needles that used to be bare numbers, and the wrong value each must now fail on. Every
+# number here is also a real case label in the tables, which is why a needle that searched the whole
+# patch matched whatever the prose said.
+DRIFTED_COUNTS = (
+    ("the beyond-range count against shipped 16.1", "and 901 fall off", "and 903 fall off"),
+    ("the net growth over the 614.1.9 snapshot", "946 more entries", "948 more entries"),
+    ("the different-message and beyond-range counts against the 614.1.9 basis",
+     "gives 5, 3135 and", "gives 5, 3134 and"),
+)
+
+ROOT_VIEW = "MessageName::WebPageProxy_RootViewToAccessibilityScreen"
+VIDEO_FRAME = "MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"
+SWAPPED_NAMES = (
+    BASE.replace("with " + ROOT_VIEW, "with " + VIDEO_FRAME)
+    .replace("names " + VIDEO_FRAME, "names " + ROOT_VIEW)
+)
 
 
 def run(patch_text: str | None) -> subprocess.CompletedProcess:
@@ -113,6 +139,29 @@ CASES = (
         None,
     ),
     ("a missing patch is reported distinctly", None, 2, None),
+)
+
+# Negative cases for the drift that P2-1 was about: each needle used to be a bare number that also
+# occurs as a case label in the tables, so the check passed however the prose around it read. These
+# cases fail if a needle ever goes back to matching code, and they name the drifted value in the
+# expected message so a partial match cannot pass.
+for description, right, wrong in DRIFTED_COUNTS:
+    CASES += (
+        (
+            "a patch that drifts %s to %s fails" % (description, wrong),
+            BASE.replace(right, wrong),
+            1,
+            "no longer records %s" % description,
+        ),
+    )
+
+CASES += (
+    (
+        "a patch that swaps the two case-3076 message names fails",
+        SWAPPED_NAMES,
+        1,
+        "no longer records",
+    ),
 )
 
 

@@ -729,6 +729,31 @@ jobs:
           rm -f "$resolvable_headers" "$unresolved_includes"
           echo "every include the applied patches add resolves under WebKit/Source"
 
+      - name: Refuse a tree whose translation switch is on
+        if: inputs.apply_patch == 'true'
+        run: |
+          set -euo pipefail
+          # patches/ios16-ipc-message-number-translation.patch compiles two translation tables in
+          # and leaves IPC::Connection::m_shouldTranslateMessageNames at its `{ false }` initialiser.
+          # This deployment loads one WebKit build through scripts/install-webkit-override.sh, so
+          # both sides of the connection already number messages identically; a call to
+          # setShouldTranslateMessageNames(true) makes the tables rewrite numbers that agree, the
+          # InitializeConnection handshake stops matching, and the page renders blank. The patch
+          # applies cleanly with that call in it, and no compiler diagnostic follows from it, so the
+          # switch has to be checked as a contract against the patch file.
+          #
+          # The checker also asserts the patch still records why the switch stays off - the
+          # measured counts against both the shipped 16.1 enumeration and the 614.1.9 snapshot the
+          # tables were generated from - because the comment is the only place those numbers live.
+          # Its own cases run here too, so a checker that has stopped detecting a re-added call
+          # fails this step instead of passing it.
+          python3 scripts/check-translation-switch.py || {
+            echo "::error::the applied translation patch turns message number translation on, or has"
+            echo "::error::lost the rationale that keeps it off. See the reason above."
+            exit 1
+          }
+          python3 scripts/test-check-translation-switch.py
+
       - name: Refuse a build that ships a WebCore which cannot dlopen
         env:
           APPLY_PATCH: ${{ inputs.apply_patch }}

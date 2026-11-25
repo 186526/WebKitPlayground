@@ -7821,10 +7821,10 @@ index 5503dfc842d56..a3af9421b6d54 100644
      void reserve(size_t);
 diff --git a/Source/WebKit/Platform/IPC/MessageNumberTranslation.h b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
 new file mode 100644
-index 0000000000000..55be35f66ad7a
+index 0000000000000..be99a874b6c4e
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,184 @@
 +/*
 + * Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 + *
@@ -7949,8 +7949,10 @@ index 0000000000000..55be35f66ad7a
 +//
 +// scripts/check-translation-switch.py enforces the part a compiler cannot see:
 +// that no call to setShouldTranslateMessageNames exists in the shipped tree, and
-+// that this file still records why. Regenerating the tables for a real route A
-+// has to update that script too.
++// that this file still records why. The workflow runs it after the patch is
++// applied, so a re-added call fails the build instead of waiting for someone to
++// run the script by hand. Regenerating the tables for a real route A has to
++// update that script too.
 +#if PLATFORM(IOS) && defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED < 180000
 +#define IOS_16_MESSAGE_NUMBER_TRANSLATION 1
 +#else
