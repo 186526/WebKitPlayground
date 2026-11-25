@@ -663,10 +663,10 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 
 ## 附录 A：本文引用的实测读数（2026-11-25，192.168.2.135，只读）
 
-- `launchctl print gui/501` 为 0 行；`launchctl print user/501` 为 2056 行。**这一条不能用来判断设备是否健康**：同日另一轮实测（附录 B 的 B.5）在设备正常运行时（Safari pid 622、Chrome pid 626、23 个 WebKit helper）也读到 `gui/501` 为 0 行、`launchctl print system` 的域列表里只有 `user/501`。图形会话落在这台设备的 `user/501` 域。**本文第 0 步与 2.4 节里「`gui/501` 为空则任何应用都无法启动」这句因此不成立**；那两处的改写属于另一组改动（端点探针与 `docs/ios16-launchd-xpc-resolution-gap.md` 的同一处更正），在它落地之前，GUI 域这一条以附录 B 的 B.5 为准。
+- `launchctl print gui/501` 为 0 行；`launchctl print user/501` 为 2056 行。**这一条不能用来判断设备是否健康**：同日另一轮实测（附录 B 的 B.5）在设备正常运行时（Safari pid 622、Chrome pid 626、23 个 WebKit helper）也读到 `gui/501` 为 0 行、`launchctl print system` 的域列表里只有 `user/501`。图形会话落在这台设备的 `user/501` 域。**本文第 0 步与 2.4 节里「`gui/501` 为空则任何应用都无法启动」这句因此不成立**；那两处已在本文改写（第 0 步改成两条可成立的判据，2.4 节加了三种情形的次序，见 B.5），`docs/ios16-launchd-xpc-resolution-gap.md` 的同一处更正属另一组改动。
 - `/var/jb/Library/WebKitOverride` 不存在。
 - `/var/jb` 是 `/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus` 的符号链接。
-- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`，**本条读数已过期**：当时读的是 974608 字节、`Nov 24 08:44`，同日另一轮（附录 B 的 B.1）读到 974016 字节。**现行状态取附录 B。** 两个值在 `../../webkit-install-runbook.md:113-114` 的表里含义相反：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」，`974608` =「已合入两个新 hook」。**注意附录 A 这一条当初的旁证（两个 hook 计数为 `1`）是裸字符串计数，测不出装没装**：那个 `1` 在任何一份 dyld 上都是 1，理由见 B.1 的第 1 个陷阱；同一份记录里的 974608 与今天的 974016 差的是文件，不是数法。
+- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`，**本条读数已过期**：当时读的是 974608 字节、`Nov 24 08:44`，同日另一轮（附录 B 的 B.1）读到 974016 字节。**现行状态取附录 B。** 两个值在 `../../webkit-install-runbook.md:113-114` 的表里含义相反：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」，`974608` =「已合入两个新 hook」。附录 A 这一条当初的旁证（两个 hook 计数为 `1`）与今天用的是同一个数法，差别在文件，见 B.1 末段。
 - `/var/jb/Library/Frameworks` 含 `AltList.framework`、`CydiaSubstrate.framework`、`JavaScriptCore.framework`、`WebCore.framework`、`WebGPU.framework`、`WebKit.framework`、`WebKitLegacy.framework`、`adattributiond`、`webpushd`。
 - `ps -Ao comm` 里有 3 个 WebKit helper（70750、70751、70753），`ppid` 全为 1，全部来自 `/System/Library/Frameworks/WebKit.framework/XPCServices/...`，没有宿主进程。
 - 对 70753 跑 `lldb image list -o -f`：`[86] /System/Library/Frameworks/WebKit.framework/WebKit`、`[113] /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`、`[115] /System/Library/PrivateFrameworks/WebCore.framework/WebCore`。
