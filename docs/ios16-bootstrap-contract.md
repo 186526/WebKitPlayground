@@ -112,7 +112,7 @@ $ git grep -c 'SDKAlignedBehavior' Safari-614.1.9 -- Source | wc -l
 
 16.1 的 UI 进程分三步把信息交给辅助进程（`PL16`）：
 
-1. `launchProcess()` 在 `PL16:117` 建立 `initializationMessage`，放入 `ContainerEnvironmentVariables`（`PL16:123-127` 填 `HOME`、`CFFIXED_USER_HOME`、`TMPDIR`，`PL16:128` 写入），`OverrideLanguages`（`PL16:131-137`），`PL16:143` 调用 `xpc_connection_set_bootstrap` 交给 libxpc。辅助进程侧两个键由两个不同函数读取：`ContainerEnvironmentVariables` 在 `XPCServiceEventHandler`（`:65` 起）里，先 `xpc_copy_bootstrap()` 取字典（`XM16:178`）再取键（`XM16:181-187`）；`OverrideLanguages` 在 `setAppleLanguagesPreference()`（`:44-62`）里，该函数自己也调一次 `xpc_copy_bootstrap()`（`XM16:46`）再取键（`XM16:50`），它由 `XM16:137` 在 `dispatchSync` 块内调用。
+1. `launchProcess()` 在 `PL16:117` 建立 `initializationMessage`，放入 `ContainerEnvironmentVariables`（`PL16:123-127` 填 `HOME`、`CFFIXED_USER_HOME`、`TMPDIR`，`PL16:128` 写入），`OverrideLanguages`（`PL16:131-137`），`PL16:143` 调用 `xpc_connection_set_bootstrap` 交给 libxpc。辅助进程侧两个键由两个不同函数读取：`ContainerEnvironmentVariables` 在 `XPCServiceMain()`（`:166` 起）里，先 `xpc_copy_bootstrap()` 取字典（`XM16:178`）再取键（`XM16:181-187`）；`OverrideLanguages` 在 `setAppleLanguagesPreference()`（`:44-62`）里，该函数自己也调一次 `xpc_copy_bootstrap()`（`XM16:46`）再取键（`XM16:50`），它由 `XM16:137` 在 `dispatchSync` 块内调用。
 2. `shouldLeakBoost()` 在 iOS 上**恒返回 false**（`PL16:82-86`）：`#if PLATFORM(IOS_FAMILY)` 分支直接 `return false`，注释写明 RunningBoard 的进程断言已经提供了正确优先级。所以 `PL16:145-149` 的 `pre-bootstrap` 消息在 iOS 上从不发送。Mac 上才按 GPU/Network 进程类型返回 true。
 3. 在 `PL16:179-216` 组装 `bootstrap` 字典，`PL16:282` 用 `xpc_connection_send_message_with_reply` 发出。辅助进程在 `XM16:93` 进入 `bootstrap` 分支，`XM16:122-124` 先回 `message-name = "process-finished-launching"`，再在 `XM16:134-138` 的 `dispatchSync` 里调用初始化函数（第三个实参传 `priorityBoostMessage`，`XM16:135`）。UI 进程在 `PL16:288` 断言回复里的这个值。
 
@@ -232,7 +232,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 16.1 与 16.2 同为 8 字节，位序也只在前 13 项一致：16.2 在下标 13 插入 `DoesNotAddIntrinsicMarginsToFormControls`，原来在 16.1 下标 13 的 `DOMWindowReuseRestriction` 落到 16.2 的 14。此后 16.1 的下标整体比 16.2 小 1，63 个名字里有 50 个符合这条平移，只有 13 个名字两版仍在同一位置。所以即使宽度相等、只差一个插入项，也不能按下标搬运。16.4 与 18.3.1 同为 12 字节，两版同名的只有 72 个（16.4 的 `ApplicationCacheDisabledByDefault` 在 18.3.1 里没有），这 72 个里只有 `0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt` 三个指向同一行为。
 
-所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。这里正是旧的「12 字节原样通过、8 字节丢弃」规则出错的地方：16.4 的位图与 18.3.1 的位图都是 12 字节，那条规则会放行并按位置 `memcpy`，得到一组看似合法、实际指向无关行为的值。M85 的 `ddfaa5f` 因此删掉了宽度分派，改成任何外来宽度都不拷贝、让位图保持本版默认集合，见上一节。要让 16.4 或 16.1 的位图真正生效，需要一份两版的下标对照表，按名字映射，这份表尚未编写。
+所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。M85 现在按宽度分三支处理（见「修补补丁的现状与缺口」一节）：等宽就按位置 `memcpy` 并返回真，其余宽度丢弃并让位图保持本版默认集合。等宽那一支把上面这条区别固定成了规则本身的代价：16.4 的位图与 18.3.1 的位图都是 12 字节，16.4、17.x、18.0 到 18.2 的对端都会走等宽分支，被按位置拷贝，得到一组看似合法、实际指向无关行为的值。本包部署的组合里 UI 进程通过覆盖加载同一份 18.3.1 framework，两端是同一套位序，所以等宽拷贝在这个组合下正确；换成 16.4 或 17.x 的 UI 进程就会命中这个代价。要让 16.4 或 16.1 的位图真正生效，需要一份两版的下标对照表，按名字映射，这份表尚未编写。
 
 ### 发送与接收
 
@@ -280,17 +280,37 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 
 `patches/ios16-xpc-bootstrap-compat.patch` 早期版本给 `getClientSDKAlignedBehaviors` 加过一条回退路径：当 `!length || !behaviorData` 为真时读 `client-sdk-version` 并据版本号重建位图。这条回退在 mission M85 里已经整个删掉，连同 `setSDKAlignedBehaviorsFromClientSDKVersion()` 与按版本号填位图的表。
 
-删掉的第一个理由：16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支根本不进入，控制直接到 `RELEASE_ASSERT`。第二个理由独立成立：16.1 **不发送** `client-sdk-version`（上文 `git grep` 退出码 1），即使进了分支也取不到字符串。
+删掉的第一个理由：16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支根本不进入，当时控制直接到那条 `RELEASE_ASSERT`。第二个理由独立成立：16.1 **不发送** `client-sdk-version`（上文 `git grep` 退出码 1），即使进了分支也取不到字符串。
 
-M85 现在的规则是**任何外来宽度都不拷贝**，不是「按长度分派到不同解码路径」：
+M85 现在的规则按宽度分三支，等宽的那一支仍然拷贝：
 
-- `RELEASE_ASSERT(length == behaviors.storageLengthInBytes())` 与紧随其后的 `memcpy` 都已删除。外来负载一个字节都不写进本版位图，位图保持函数入口时的零值，也就是「所有 SDK 对齐行为都不启用」的默认集合。
-- 长度不大于本版 `storageLengthInBytes()` 时记一条 `RELEASE_LOG_ERROR` 并返回 true，宽于本版时记另一条日志并返回 false。返回值区分「对端什么都没发」与「发了但被丢弃」，调用方照旧忽略它。
-- 所以 16.1 UI 配 18.3 helper 不再在断言处中止：helper 继续启动，只是全部行为取默认值。
+```c++
+const size_t ownLength = behaviors.storageLengthInBytes();
 
-三个提交是 `97cfd79`（让回退可达并把翻译开关改为常量）、`ddfaa5f`（丢弃任何外来负载，不再只处理 2 字宽）、`30ae1b9`（把宽度表的计数口径写进补丁注释）。按长度分派取代了相等断言这一半已经落地；翻译开关那一半在同一批提交里改过，但路线 B 下同代连接不能翻译，那条开关的最终形态由 M91 决定，本文不对它下结论。
+if (length == ownLength) {
+    memcpy(behaviors.storage(), behaviorData, length);
+    return true;
+}
 
-不拷贝而不是解码的理由见下一节：两版的位序没有可换算的对应关系，按位置 `memcpy` 会把绝大多数比特落到错误的行为上。
+if (length < ownLength)
+    RELEASE_LOG_ERROR(IPC, "… narrower than this build's … so it comes from an older generation; every SDK aligned behavior stays at its default", length, ownLength);
+else
+    RELEASE_LOG_ERROR(IPC, "… wider than this build's … so it comes from a newer generation; every SDK aligned behavior stays at its default", length, ownLength);
+
+return length < ownLength;
+```
+
+- 等宽：`memcpy` 整块写进本版位图并返回 true。这正是本包部署的组合所走的一支——UI 进程通过覆盖加载本版 framework，它写的位图就是本版 `storageLengthInBytes()` 宽、本版位序，所以拷贝正确。
+- 窄于本版：丢弃，位图保持函数入口时的零值，也就是「所有 SDK 对齐行为都不启用」的默认集合，记一条 `RELEASE_LOG_ERROR`，**返回 true**。
+- 宽于本版：同样丢弃、同样保持零值、记另一条日志，**返回 false**。
+- 返回值的含义因此不是「有没有拷贝」，而是「对端比本版旧还是新」：窄返回 true，宽返回 false。调用方照旧忽略它。
+- `RELEASE_ASSERT(length == behaviors.storageLengthInBytes())` 已删除；`memcpy` 没有删除，它现在只在等宽分支里执行。
+
+所以 16.1 UI 配 18.3 helper 不再在断言处中止：helper 继续启动，8 字节负载走「窄」那一支被丢弃，全部行为取默认值。
+
+这一套规则由 `97cfd79`、`ddfaa5f`、`e657b79`、`30ae1b9` 至 `7295bbb` 这一串提交确定：`97cfd79` 让回退可达并把翻译开关改为常量，`ddfaa5f` 让每个外来负载都在断言前被丢弃（不再只处理 2 字宽），`e657b79` 恢复等宽拷贝并保留其余宽度丢弃，`30ae1b9` 把宽度表的计数口径写进补丁注释，`26c25b0` 收起翻译开关并改翻译补丁的注释，`0f342a5` 把位图注释改到与这份拷贝一致，`7295bbb` 修正措辞。翻译开关那一半由同一串提交改过，但路线 B 下同代连接不能翻译，那条开关的最终形态由 M91 决定，本文不对它下结论。
+
+等宽分支按位置拷贝这一支的危险面，正是上一节说的位序问题：它承认宽度相同不代表位序相同。不试图解码其余宽度的理由见下一节：两版的位序没有可换算的对应关系，按位置 `memcpy` 会把绝大多数比特落到错误的行为上。
 
 ### 8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图
 
@@ -307,7 +327,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 按名字逐项比对，**两版同名的 62 个下标里只有 3 个落在同一位置**：`0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt`，其余 59 个名字两版都存在但下标不同。另有名字只在 16.1 存在，例如 `ApplicationCacheDisabledByDefault`（16.1 下标 1）在 18.3.1 的枚举里完全没有；16.1 的 63 个下标因此只有 62 个能在 18.3.1 里找到同名项。
 
-结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 因此对任何外来宽度都**丢弃**该负载、让位图保持本版默认集合，而不是试图解码它，也不是只丢弃 8 字节那一档。这不是缺陷，是两版位序无关这一事实的必然结果。
+结论：8 字节的负载**无法**按位置映射成 12 字节的位图，所以它在本版里必然落到「窄」那一支被丢弃、位图保持本版默认集合，不会被试图解码。这条结论只覆盖 8 与 12 的跨宽度组合。等宽的 12 字节负载不会被丢弃，它按位置 `memcpy` 通过——这是 M85 规则用宽度换方向的代价，16.4、17.x、18.0 到 18.2 的对端都属于这一类，位序与本版不同却照样被拷贝。本包部署的组合里两端是同一份 18.3.1 framework，位序相同，所以等宽拷贝成立；跨世代混配时会得到看似合法、实际指向无关行为的值。
 
 要让 16.1 的位图真正生效，需要一份两版的下标对照表，按名字把 16.1 的每个行为映射到 18.3 的对应项，对 18.3 独有的项取默认值。这份表尚未编写，也不在 M85 范围内。
 
@@ -317,7 +337,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 | 键名 | 类型 | 16.1 发送位置 | 18.3 发送位置 | 16.1 读取位置 | 18.3 读取位置 | 16.1 UI 配 18.3 helper 时的后果 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ContainerEnvironmentVariables` | dictionary | `initializationMessage`，`PL16:128` | `bootstrap` 字典，`PL18:382` | `xpc_copy_bootstrap()` 在 `XM16:178`（`XPCServiceEventHandler`），取键在 `XM16:182` | `bootstrap` 消息本体，取键在 `XM18:177`（`XPCServiceEventHandler`） | 18.3 在消息里取不到，`xpc_dictionary_get_value` 返回 NULL，`XM18:178` 直接把它传给 `xpc_dictionary_apply` 且未判空。`HOME`、`CFFIXED_USER_HOME`、`TMPDIR` 不会被 `setenv`（见「未验证项」） |
+| `ContainerEnvironmentVariables` | dictionary | `initializationMessage`，`PL16:128` | `bootstrap` 字典，`PL18:382` | `xpc_copy_bootstrap()` 在 `XM16:178`（`XPCServiceMain`，`:166` 起），取键在 `XM16:182` | `bootstrap` 消息本体，取键在 `XM18:177`（`XPCServiceEventHandler`） | 18.3 在消息里取不到，`xpc_dictionary_get_value` 返回 NULL，`XM18:178` 直接把它传给 `xpc_dictionary_apply` 且未判空。`HOME`、`CFFIXED_USER_HOME`、`TMPDIR` 不会被 `setenv`（见「未验证项」） |
 | `OverrideLanguages` | array of string | `initializationMessage`，`PL16:137` | `bootstrap` 字典，`PL18:370` | `xpc_copy_bootstrap()` 在 `XM16:46` 与取键同在 `setAppleLanguagesPreference()`（`:44-62`），由 `XM16:137` 调用；取键 `XM16:50` | `bootstrap` 消息本体，在 `XPCServiceEventHandler` 的 `bootstrap` 分支里取键，`XM18:159` | 18.3 取不到，只走 `XM18:170` 的日志，`overrideUserPreferredLanguages` 保持系统值，语言覆盖失效 |
 
 ## `extra-initialization-data` 的子键对照
