@@ -287,7 +287,7 @@ basename includes from another dir, NOT registered: 3
 
 三条断言覆盖的故障各不相同，一条也省不掉。`git apply` 的退出码说明 hunk 落到了目标行，不说明补丁声明的文件在磁盘上。第一条断言抓「声明了却没落盘」。实测它的触发条件是文件在检查之前又消失了：同一次循环里靠前的补丁删掉了靠后补丁声明的路径，或 `new file mode 120000` 的符号链接目标不存在（`test -f` 跟随链接，悬空链接读作不存在）。`git apply` 本身不会把声明过的普通文件写丢——拿一段路径与 `+++` 不一致的 `new file mode` 试过，`git apply` 直接拒绝，退出 128；用同一份补丁先建后删同名文件，退出 0 且文件留下。第二条断言抓「include 指向不存在的文件」，它是删掉 `MessageNumberTranslation.h` 整段后真正拦下故障的那一条。第三条断言抓「hunk 改对了行但没带来新代码」。三者都要等到编译才暴露就是几小时之后的事，所以都放在应用补丁这一步。
 
-用未删减的 `patches/ios16-ipc-message-number-translation.patch` 在本机 18.3.1 树上跑过一次全部 25 个补丁，三条断言通过，25 个补丁里 23 个应用、2 个 `webkit_iOS_16.*` 按设计跳过。删掉该补丁里 `MessageNumberTranslation.h` 整段后（10 个 `diff --git`、0 个 `new file mode`），第一条断言没有可检查的对象，第二条以 `PATCH INCLUDE UNRESOLVED: MessageNumberTranslation.h (added by patches/ios16-ipc-message-number-translation.patch)` 失败、退出 1。把该文件从应用后的树上删掉再跑第一条断言的同一段代码，输出 `PATCH NEW FILE MISSING: Source/WebKit/Platform/IPC/MessageNumberTranslation.h`、退出 1。
+用未删减的 `patches/ios16-ipc-message-number-translation.patch` 在本机 18.3.1 树上跑过一次全部 25 个补丁，三条断言通过，25 个补丁里 23 个应用、2 个 `webkit_iOS_16.*` 按设计跳过。删掉该补丁里 `MessageNumberTranslation.h` 整段后（8 个 `diff --git`、0 个 `new file mode`），第一条断言没有可检查的对象，第二条以 `PATCH INCLUDE UNRESOLVED: MessageNumberTranslation.h (added by patches/ios16-ipc-message-number-translation.patch)` 失败、退出 1。把该文件从应用后的树上删掉再跑第一条断言的同一段代码，输出 `PATCH NEW FILE MISSING: Source/WebKit/Platform/IPC/MessageNumberTranslation.h`、退出 1。
 
 ### 4.3 落点选择：为什么是 Encoder.cpp 而不是 IPCUtilities.cpp
 
