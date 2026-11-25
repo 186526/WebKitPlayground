@@ -21,7 +21,7 @@
 | 翻译补丁 | `patches/ios16-ipc-message-number-translation.patch` |
 | 消息签名导出 | `/tmp/s16.json`（2753 个键）、`/tmp/s18.json`（3416 个键），由 `/tmp/dump_sig2.py` 调用各 tag 自带的 `webkit.parser` 解析全部 `.messages.in` 得到 |
 
-本文所有行号都是这两份源码文本里的行号，换 tag 后会漂移。
+本文所有行号都是这两份源码文本里的行号，换 tag 后会漂移。唯一例外是第 63 行，它同时给出第三棵树发货 `releases/Apple/Safari-16.1-iOS-16.1` 上的读数。
 
 ## 2. 四条阻断逐条核对
 
@@ -254,7 +254,7 @@ InitializeWebProcess(struct WebKit::WebProcessCreationParameters processCreation
 1. **365 条方向一「载荷变了」的消息没有逐条展开。** 只做了计数与按接收者分组。要逐条判断可行性，需要按接收者逐个走查。方向二的 83 条同理。
 2. **18.3 独有的 251 条（方向二）没有逐条核对是否真的会被发送。** 若某条只在特定路径上发送，实际影响面可能小于 251。
 3. **`WebPageCreationParameters` 没有跨版本字段对比文档。** `CreateWebPage` 两版签名相同（`WebProcess.messages.in:27`），差异全在结构体内部：16.1 是手写 `Shared/WebPageCreationParameters.h` 的 `void encode(IPC::Encoder&) const;`，18.3 是生成式 `Shared/WebPageCreationParameters.serialization.in`。本文没有展开这份对比，`docs/` 下也没有对应文档。
-4. **16.1 有两棵不同的树，本文的 3140 是 `Safari-614.1.9` 的读数，不是发货 16.1 的读数。** 两棵都用各 tag 自带的 `Source/WebKit/Scripts/generate-message-receiver.py`，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS` 块，各生成一次 `MessageNames.h` 后数去掉 `Last` 别名的消息名。`Safari-614.1.9` 有 185 个接收者，得 3140 个消息名、编号 0–3139，`GPUConnectionToWebProcess_EnsureAudioSession = 2899`、`WrappedAsyncMessageForTesting = 3139`。发货 `releases/Apple/Safari-16.1-iOS-16.1` 有 181 个接收者，得 3185 个消息名、编号 0–3184，同样两个探测点是 2946 与 3184。两棵树共有 3075 个消息名，发货树独有 110 个、614.1.9 独有 65 个；同一条消息在两棵树上的编号也不同，`WebPage_TouchEvent` 在 614.1.9 是 2124、在发货 16.1 是 2146，所以两套编号不能混用。本文正文第 1 至第 7 节所有 16.1 侧的数字一律取 `Safari-614.1.9` 这一口径。3147 这个数，本文测的 `Safari-614.1.9` 复现不出来（得 3140），发货 16.1 也复现不出来（得 3185），它不来自这两棵树中的任何一棵。补丁的 2807 条 `case` 与 614.1.9 的枚举逐条相同（含 `case 2124: return MessageName::WebPage_TouchEvent`），与发货 16.1 只有 29 条相同，说明补丁是按 614.1.9 生成的。`docs/ios16-ipc-message-number-translation.md` 第 8 节的 3140（`Last = 3139`）同样是 `Safari-614.1.9` 的读数，与该文当前版本一致。
+4. **16.1 有两棵不同的树，本文的 3140 是 `Safari-614.1.9` 的读数，不是发货 16.1 的读数。** 两棵都用各 tag 自带的 `Source/WebKit/Scripts/generate-message-receiver.py`，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS` 块，各生成一次 `MessageNames.h` 后数去掉 `Last` 别名的消息名。`Safari-614.1.9` 有 185 个接收者，得 3140 个消息名、编号 0–3139，`GPUConnectionToWebProcess_EnsureAudioSession = 2899`、`WrappedAsyncMessageForTesting = 3139`。发货 `releases/Apple/Safari-16.1-iOS-16.1` 有 181 个接收者，得 3185 个消息名、编号 0–3184，同样两个探测点是 2946 与 3184。两棵树共有 3075 个消息名，发货树独有 110 个、614.1.9 独有 65 个；同一条消息在两棵树上的编号也不同，`WebPage_TouchEvent` 在 614.1.9 是 2124、在发货 16.1 是 2146，所以两套编号不能混用。本文正文第 1 至第 7 节所有 16.1 侧的数字一律取 `Safari-614.1.9` 这一口径，唯一例外是第 63 行，它同时给出发货 `releases/Apple/Safari-16.1-iOS-16.1` 的读数。3147 这个数，本文测的 `Safari-614.1.9` 复现不出来（得 3140），发货 16.1 也复现不出来（得 3185），它不来自这两棵树中的任何一棵。补丁的 2807 条 `case` 与 614.1.9 的枚举逐条相同（含 `case 2124: return MessageName::WebPage_TouchEvent`），与发货 16.1 只有 29 条相同，说明补丁是按 614.1.9 生成的。`docs/ios16-ipc-message-number-translation.md` 第 8 节的 3140（`Last = 3139`）同样是 `Safari-614.1.9` 的读数，与该文当前版本一致。
 
 ## 9. 需要更正的既有文档表述
 
