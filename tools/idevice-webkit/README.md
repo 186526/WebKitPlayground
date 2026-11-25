@@ -39,14 +39,20 @@ WebCore is why the two dylibs sit where they do. Its load commands carry
 `WebGPU`. The other nine weak commands in that image name system libraries
 (`BrowserEngineCore`, `libxslt.1`, `libAccessibility` and six `libswift*`), so the
 three are the whole of the set this chain relates to. A weak import does not block
-the load. In the payload as shipped the three strings are
-`/System` paths, so a WebCore loaded first bound the resident 16.1 copies and the
-later `/var/jb` load mapped a second copy: that is the 31. In the rewritten tree
-all three strings are `/var/jb/.../WebKit18`, so the System string is gone and
-this import cannot name the system image at all — which is why the rewrite, not
-the ordering alone, is what makes the weak set safe. The ordering is what removes
-the duplicate under the payload's original strings, and `build-state.md` 第八轮
-measured exactly that.
+the load. In the payload as shipped the three strings are `/System` paths, so a
+WebCore loaded first bound the resident 16.1 copies and the later `/var/jb` load
+mapped a second copy. The ordering experiment varied `libwebrtc` and
+`libANGLE-shared` against `WebCore` — steps 2 and 3 against step 4 — and that
+reorder is what took the count to 0. The 31 itself comes from `libwebrtc` alone:
+the count is `Class WK_RTC... is implemented in both` warnings, `libwebrtc` carries
+466 `WK_RTC` strings, `WebGPU` carries none, and `libANGLE-shared` defines no
+classes at all (it has `__objc_classname` and `__objc_classrefs` but no
+`__objc_classlist`), so neither of the other two can enter it. `WebGPU` is the
+third weak dependency and is untested as a variable: it is step 6, after `WebCore`
+at step 4, so no run has moved it. In the rewritten tree all three strings are
+`/var/jb/.../WebKit18`, so the System string is gone and no weak import of the
+three can name the system image — which is why the rewrite, not the ordering
+alone, is what makes the weak set safe.
 
 `RTLD_NOW` turns a missing symbol into a failed step instead of a fault at first
 call, and every step asks for it.

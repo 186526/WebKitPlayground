@@ -356,16 +356,27 @@ def main():
         weak_after = weak_dependencies_of(web_core)
         check("WebCore keeps exactly three weak dependencies on the seven",
               len(weak_after) == len(WEAK_DEPENDENCIES), repr(weak_after))
+        # The two checks below would pass on an empty list, so both state the count
+        # first: a tree whose weak commands were dropped would otherwise report
+        # "every one names /var/jb" over nothing, which is one of the regressions
+        # these four checks exist to catch.
         check("every one of WebCore's three weak dependencies names /var/jb",
+              len(weak_after) == len(WEAK_DEPENDENCIES) and
               all(path.startswith(module.DESTINATION_ROOT) for path in weak_after),
               repr(weak_after))
         check("none of WebCore's weak dependencies still names /System",
+              len(weak_after) == len(WEAK_DEPENDENCIES) and
               not any(path.startswith("/System") for path in weak_after),
               repr(weak_after))
+        # A mapping that is missing one of the three is the state a dropped entry
+        # leaves behind, so the expectation must not index the mapping: a KeyError
+        # here would abort this file's remaining checks instead of failing this one.
+        # The placeholder keeps the comparison ordered and names the unmapped string.
+        expected_weak = sorted(module.SYSTEM_TO_DESTINATION.get(name) or
+                               "<unmapped: %s>" % name for name in WEAK_DEPENDENCIES)
         check("the weak set survived the rewrite unchanged in membership",
-              sorted(weak_after) == sorted(module.SYSTEM_TO_DESTINATION[name]
-                                           for name in WEAK_DEPENDENCIES),
-              repr(sorted(weak_after)))
+              sorted(weak_after) == expected_weak,
+              "%r vs %r" % (sorted(weak_after), expected_weak))
 
         # The capacity guard, exercised in process because the seven real
         # replacements are all strictly shorter than the names they replace: no

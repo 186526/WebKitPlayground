@@ -79,10 +79,14 @@
    libAccessibility, six libswift*). A weak dependency does not stop the load.
    Its target is whichever file the string names: with the payload's original
    /System strings, a WebCore loaded before the two dylibs bound the resident
-   16.1 copies and the later /var/jb dlopen mapped a second copy, which is the
-   duplicate count the reorder removed. In the rewritten tree the three strings
-   are /var/jb/.../WebKit18, so the /System string WebCore used to name is gone
-   and no weak import of the three can reach a 16.1 image.
+   16.1 copies and the later /var/jb dlopen mapped a second copy. The reorder that
+   took the count to 0 moved those two dylibs ahead of WebCore, and the count
+   itself is libwebrtc's duplicate-class warnings alone: libwebrtc carries the
+   WK_RTC names, WebGPU carries none, and libANGLE-shared defines no classes. So
+   WebGPU, the third weak dependency and step 6, is untested as a variable. In the
+   rewritten tree the three strings are /var/jb/.../WebKit18, so the /System string
+   WebCore used to name is gone and no weak import of the three can reach a 16.1
+   image.
 
    WHAT IS MEASURED AND WHAT IS NOT. The order is measured: build-state.md 第八轮
    took the duplicate count from 31 to 0 at 7/7 with this sequence, and recorded
