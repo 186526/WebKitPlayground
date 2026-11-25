@@ -496,23 +496,22 @@ void idevice_webkit_start(void) {
      the copy check, and one that passed it but failed the host check all return
      above, so none of them loads an image.
 
-     What this achieves depends on the host. A host that has not linked WebKit
-     at load time reaches this point before anything asks for WebKit, so the
-     claim wins the dedupe by install name and the host's later request for the
-     system path answers with the /var/jb image. A host that does link WebKit
-     has the system image mapped before this constructor runs; three of the
-     seven then load, four fail with Symbol not found, and that host keeps the
-     system WebKit. claim_images.c records the measurement and the dyld
-     override patch that would be needed instead. The claim stays unconditional
-     among the processes that pass the gates because it is the correct action in
-     the first case and harmless in the second, and its recorded failure is what
-     tells the two apart in the report. */
+     A host that has not linked WebKit at load time reaches this point before
+     anything asks for WebKit, so the claim wins the dedupe by install name and
+     the host's later request for the system path answers with the /var/jb
+     image. A host that does link WebKit has the system image mapped before this
+     constructor runs, and the claim is skipped there rather than attempted:
+     claim_images_run asks claim_system_webkit_present first, and a present
+     system image means the seven loads would map an 18.3 JavaScriptCore beside
+     the 16.1 one the host is running on. claim_images.c records the measured
+     load outcomes of that shape and the dyld override patch it needs instead.
+     The skip is written to the report, so the two host shapes are still told
+     apart without guessing. */
 
   if (filterMatched) {
     claim_result claim;
     claim_images_run(&claim);
-    dylib_report_set_claim(claim.marked, claim.mark_status, claim.mark_error, claim.loaded,
-                           claim.failed_index, claim.failed_path, claim.error);
+    dylib_report_set_claim(&claim);
     report_stage();
   }
 

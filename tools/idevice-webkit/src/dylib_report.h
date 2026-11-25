@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+typedef struct claim_result claim_result;
+
 #define plist_value_capacity 2048
 
 /* How the ellekit filter of this process matched. The filter names a class and
@@ -39,8 +41,7 @@ void dylib_report_set_stage(u32 stage);
    process whose marking failed and an image that would not load are both
    readable from the report. */
 
-void dylib_report_set_claim(bool marked, i32 markStatus, const char *markError, u32 loaded,
-                            u32 failedIndex, const char *failedPath, const char *error);
+void dylib_report_set_claim(const claim_result *claim);
 
 /* Writes the report and answers whether the file was written. */
 

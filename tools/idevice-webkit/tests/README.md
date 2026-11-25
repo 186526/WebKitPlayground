@@ -290,30 +290,67 @@ answers nothing without calling `dlsym`, that a real handle is passed through
 unchanged, and that `library_find` asks for `RTLD_NOLOAD`.
 
 `claim_images_test.c` covers the sequence `test_main.c` stubs out. That file
-replaces `claim_images_run` whole, so the seven paths and their order would go
-unchecked; this binary compiles `src/claim_images.c` itself, renaming `dlopen`,
-`dlerror`, `posix_spawn`, the two spawn-object initialisers, `waitpid`, `getpid`
-and `usleep` to recorders before the include. The seven expected paths are
-written out again rather than read from the array under test, because a test
-that compared the array with itself would pass whatever it held. The cases
-require the order entry by entry, `libwebrtc` and `libANGLE-shared` both ahead
-of `WebCore` (0 duplicate-class warnings in this order, 31 with `WebCore`
-first), `JavaScriptCore` at index 0 and `WebKit` last, and every load made with
-`RTLD_NOW|RTLD_GLOBAL`. The failure cases require the loop to stop at the first
-image that answers nothing, the 1-based position, the path and the `dlerror`
-text to be recorded, and the images after it not to be tried. The marking cases
-require a refused `posix_spawn` to be recorded as its errno, a non-zero child
-exit as its wait status, and a child that never exits not to hold the
-constructor: the wait is polled a bounded number of times and the images are
-still claimed.
+replaces `claim_images_run` whole, so the seven paths, their order and the gate
+would go unchecked; this binary compiles `src/claim_images.c` itself, renaming
+`dlopen`, `dlerror`, `library_find`, `posix_spawn`, the two spawn-object
+initialisers, `waitpid`, `getpid` and `usleep` to recorders before the include.
+The seven expected paths are written out again rather than read from the array
+under test, because a test that compared the array with itself would pass
+whatever it held. The cases require the order entry by entry, `libwebrtc` and
+`libANGLE-shared` both ahead of `WebCore` (0 duplicate-class warnings in this
+order, 31 with `WebCore` first), `JavaScriptCore` at index 0 and `WebKit` last,
+and every load made with `RTLD_NOW|RTLD_GLOBAL`. The failure cases require the
+loop to stop at the first image that answers nothing, the 1-based position, the
+path and the `dlerror` text to be recorded, and the images after it not to be
+tried. The marking cases require a refused `posix_spawn`, a non-zero child exit
+and a child that never exits to be recorded as their own `mark_*` states, with
+the wait status and the errno kept in `mark_error` where they can still be read;
+they also require the states to be distinct and none of them zero, because a
+zero state would read as the success value in any report that printed it.
 
-One case pins the shape of a hard-linked host, where the four later loads fail
-and it reads as a broken order unless the test says otherwise: `JavaScriptCore`,
-`libwebrtc` and `libANGLE` load, `WebCore` fails with
-`_WTFSignpostIndirectLoggingEnabled`, and the case requires `loaded` to be 3 and
-`failed_index` to be 4. That pair is the diagnosis for an application that
-links WebKit at load time; the fix for it is the dyld override patch described
-in `src/claim_images.c`, not a change to this sequence.
+Two cases cover the gate. With `library_find` answering a handle the run has to
+be skipped: `skipped` set, `loaded` and `failed_index` at 0, nothing dlopened
+and no `posix_spawn` attempted. With it answering NULL the run proceeds and
+`skipped` stays false. The `library_find` recorder keeps the path it was asked
+about, and the case requires
+`/System/Library/Frameworks/WebKit.framework/WebKit` — the gate is only worth
+something if it asks about the system image, since a non-NULL answer for any
+path would gate on the wrong question. Two more cases cover the initialisers
+separately: a refused `posix_spawnattr_init` spawns nothing and names that call,
+and a refused `posix_spawn_file_actions_init` destroys the attribute object
+first, leaves the file actions untouched and names its own call. The second is
+what a shared `||` expression used to hide: the first object leaked and the
+message named the wrong call.
+
+The claimed load outcome of a hard-linked host is still pinned, as the shape the
+gate keeps the sequence out of: with the gate answering NULL and `WebCore`
+failing on `_WTFSignpostIndirectLoggingEnabled`, the case requires `loaded` 3 and
+`failed_index` 4. Those numbers are what the device printed when the sequence
+did run there, and they stay useful because they are the reading that decides
+the gate: three of the seven load, the first of them `JavaScriptCore`. The
+sequence no longer reaches that shape, so the case drives the recorder rather
+than the product path. The fix for a hard-linked host is the dyld override patch
+described in `src/claim_images.c`, not a change to this sequence.
+
+`test_main.c` reads the report's claim fields out of the written document rather
+than out of the record: a stub `claim_images_run` fills a `claim_result` with
+the failure shape, the constructor writes it, and the case requires
+`claimSkipped`, `claimMarked`, `claimMarkStatus`, `claimLoaded`,
+`claimFailedIndex`, `claimFailedPath`, `claimError` and `claimMarkError` each to
+carry the stubbed value. Reading them one by one is what caught `mark_status`
+rendering as `0`: a case that only checked `claimMarked` and `claimLoaded` could
+not see the difference between a failed marking and a successful one that
+reports zero.
+
+A saturating case covers the buffer limit. Every free-form field is filled with
+`&`, which the escaper turns into five bytes each, so the document cannot fit
+and the writer stops at `document_capacity - 1`. The case requires the stop to
+happen (the written length is the buffer's limit rather than the record's) and
+then requires the six decision fields to be present with their values: the
+`stage` integer and the five claim state fields, all written immediately after
+the plist header and before any free-form text. That is the property the write
+order exists for, and the case fails if a free-form field ever goes back in
+front of them.
 
 The script builds the test twice: once plainly and once with AddressSanitizer
 and UndefinedBehaviorSanitizer. The second run only counts when its log holds

@@ -37,15 +37,35 @@ static char work_directory[256];
    the sequence itself against recorders. This stub records whether the
    constructor reached the claim, which is what the two cases below read: it
    runs once for a process that passed the host check and never for one that
-   did not. */
+   did not.
+
+   The answer it gives is a whole claim_result, because the report copies every
+   field of it. The default is the success shape; claim_stub_failure switches
+   it to the shape of a run that stopped at WebCore, which is what
+   case_claim_report needs to see all seven fields written rather than their
+   defaults. */
 
 static int claim_runs;
+static int claim_stub_failure;
 
 void claim_images_run(claim_result *result) {
   claim_runs++;
   memset(result, 0, sizeof(*result));
-  result->marked = 1;
-  result->loaded = claim_image_count;
+  if (!claim_stub_failure) {
+    result->marked = 1;
+    result->mark_status = mark_done;
+    result->loaded = claim_image_count;
+    return;
+  }
+  result->marked = 0;
+  result->mark_status = mark_child_nonzero;
+  text_copy(result->mark_error, "jbctl exited with wait status 512", sizeof(result->mark_error));
+  result->loaded = 3;
+  result->failed_index = 4;
+  text_copy(result->failed_path, "/var/jb/Library/Frameworks/WebCore.framework/WebCore",
+            sizeof(result->failed_path));
+  text_copy(result->error, "Symbol not found: _WTFSignpostIndirectLoggingEnabled",
+            sizeof(result->error));
 }
 
 void *library_load(const char *path) {
@@ -233,6 +253,7 @@ static void prepare_keeping_reports(const char *host, const char *self, int with
   fake_class_register("UIApplication");
   stage_reset();
   claim_runs = 0;
+  claim_stub_failure = 0;
 }
 
 /* A case starts a fresh process, so the files of the previous run are
@@ -356,7 +377,58 @@ static void case_host(const char *name, const char *host, const char *manifest,
     expect("  the claim's answer reaches the report",
            found_in(report, "\t<key>claimMarked</key>\n\t<true/>") &&
                found_in(report, "\t<key>claimLoaded</key>\n\t<integer>7</integer>"));
+    expect("  a run that was not skipped says so",
+           found_in(report, "\t<key>claimSkipped</key>\n\t<false/>"));
+    expect("  a marking that succeeded says so with its own state",
+           found_in(report, "\t<key>claimMarkStatus</key>\n\t<integer>1</integer>"));
   }
+}
+
+/* Every field the claim answers with has to reach the report, not only the two
+   that a success happens to fill. This case runs the stub in the failure shape
+   the device measured in a hard-linked host — three loaded, stop at WebCore —
+   and reads each of the eight keys out of the written document. The two long
+   texts are the ones a truncation would cut first, so they are read whole. */
+
+static void case_claim_report(void) {
+  prepare("/Applications/MobileSafari.app/MobileSafari", installed_self, 1);
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  fake_filter_add_class("UIApplication");
+  fake_class_register("UIApplication");
+  fake_filter_add_bundle("com.apple.mobilesafari");
+  fake_bundle_register("com.apple.mobilesafari");
+  claim_stub_failure = 1;
+  idevice_webkit_start();
+  char *report = read_report(idevice_webkit_report_path);
+  expect("a failed claim writes a report", report != NULL);
+  if (report == NULL) {
+    return;
+  }
+  char value[plist_value_capacity];
+  expect("  claimSkipped is false for a run that was attempted",
+         found_in(report, "\t<key>claimSkipped</key>\n\t<false/>"));
+  expect("  claimMarked says the marking failed",
+         found_in(report, "\t<key>claimMarked</key>\n\t<false/>"));
+  expect("  claimMarkStatus carries the state, not a zero",
+         field_value(report, "claimMarkStatus", value, sizeof(value)) &&
+             strcmp(value, "5") == 0);
+  expect("  claimLoaded carries the count reached",
+         field_value(report, "claimLoaded", value, sizeof(value)) && strcmp(value, "3") == 0);
+  expect("  claimFailedIndex carries the position",
+         field_value(report, "claimFailedIndex", value, sizeof(value)) &&
+             strcmp(value, "4") == 0);
+  expect("  claimFailedPath names the image that failed",
+         field_value(report, "claimFailedPath", value, sizeof(value)) &&
+             strcmp(value, "/var/jb/Library/Frameworks/WebCore.framework/WebCore") == 0);
+  expect("  claimError carries the dlerror text",
+         field_value(report, "claimError", value, sizeof(value)) &&
+             strcmp(value, "Symbol not found: _WTFSignpostIndirectLoggingEnabled") == 0);
+  expect("  claimMarkError names the call that failed",
+         field_value(report, "claimMarkError", value, sizeof(value)) &&
+             strcmp(value, "jbctl exited with wait status 512") == 0);
+  expect("  the document is closed", found_in(report, "</dict>\n</plist>\n"));
 }
 
 int main(void) {
@@ -422,6 +494,8 @@ int main(void) {
   case_host("wechat below the bootstrap is a host", wechat_in_bootstrap,
             manifest_path_for("-Applications-WeChat.app-WeChat"), "/Applications/WeChat.app",
             "com.tencent.xin", preboot_self);
+
+  case_claim_report();
 
   char *report = read_report(idevice_webkit_report_path);
   if (report != NULL) {
@@ -997,6 +1071,85 @@ int main(void) {
     expect("  the unrelated app leaves its own report",
            others != NULL && found_in(others, "\t<integer>2</integer>") &&
                found_in(others, "\t<key>matchVia</key>\n\t<string>classes</string>"));
+  }
+
+  /* The number renderer is reached through the report, but its sign handling
+     is easier to read directly. A negative value used to come out as "0" — the
+     value a successful call reports — so a failed call was indistinguishable
+     from one that answered zero. The cases below are the ones the report's
+     integers take: small positive, zero, negative, and both ends of the type. */
+  {
+    char rendered[32];
+    render_number(rendered, sizeof(rendered), 0);
+    expect("a zero renders as \"0\"", strcmp(rendered, "0") == 0);
+    render_number(rendered, sizeof(rendered), 7);
+    expect("a positive renders as its digits", strcmp(rendered, "7") == 0);
+    render_number(rendered, sizeof(rendered), -1);
+    expect("a negative keeps its sign", strcmp(rendered, "-1") == 0);
+    render_number(rendered, sizeof(rendered), 512);
+    expect("a wait status renders as given", strcmp(rendered, "512") == 0);
+    render_number(rendered, sizeof(rendered), -512);
+    expect("a negative wait status keeps its sign", strcmp(rendered, "-512") == 0);
+    render_number(rendered, sizeof(rendered), (i64)0 - (i64)9000000000000000000LL);
+    expect("the most negative magnitude does not overflow",
+           strcmp(rendered, "-9000000000000000000") == 0);
+    render_number(rendered, 4, -1234);
+    expect("a capacity too small truncates without losing the sign",
+           strcmp(rendered, "-12") == 0);
+  }
+
+  /* A saturating record: the free-form fields at their full capacity, each one
+     full of '&' so the escaping multiplies it. The document cannot fit, which
+     is the measured limit of the buffer rather than something the writer can
+     rule out. What must still hold is the part the writer does control: the
+     decision fields are in the prefix, so they are all present and correct
+     even though the text after them is cut. */
+  {
+    static char amplifier[plist_value_capacity];
+    size_t at = 0;
+    while (at + 1 < sizeof(amplifier)) {
+      amplifier[at++] = '&';
+    }
+    amplifier[at] = 0;
+    dylib_report_begin("com.example.saturate");
+    dylib_report_set_dlopen(amplifier, NULL, amplifier);
+    dylib_report_set_image(amplifier, amplifier);
+    dylib_report_set_self(amplifier, false, amplifier);
+    dylib_report_set_stage(3);
+    claim_result saturating;
+    memset(&saturating, 0, sizeof(saturating));
+    saturating.skipped = true;
+    saturating.marked = false;
+    saturating.mark_status = mark_init_failed;
+    saturating.loaded = 0;
+    saturating.failed_index = 0;
+    text_copy(saturating.mark_error, amplifier, sizeof(saturating.mark_error));
+    text_copy(saturating.error, amplifier, sizeof(saturating.error));
+    dylib_report_set_claim(&saturating);
+    char saturate_path[512];
+    snprintf(saturate_path, sizeof(saturate_path), "%s/saturate.plist", work_directory);
+    expect("a saturated record still writes", dylib_report_write(saturate_path));
+    char *report = read_report(saturate_path);
+    expect("  the document is the buffer's length, not more",
+           report != NULL && strlen(report) == maximum_report_size - 1);
+    char value[64];
+    expect("  the stage survives the truncation",
+           report != NULL && field_value(report, "stage", value, sizeof(value)) &&
+               strcmp(value, "3") == 0);
+    expect("  claimSkipped survives the truncation",
+           report != NULL && found_in(report, "\t<key>claimSkipped</key>\n\t<true/>"));
+    expect("  claimMarked survives the truncation",
+           report != NULL && found_in(report, "\t<key>claimMarked</key>\n\t<false/>"));
+    expect("  claimMarkStatus survives as a number that is not zero",
+           report != NULL && field_value(report, "claimMarkStatus", value, sizeof(value)) &&
+               strcmp(value, "6") == 0);
+    expect("  claimLoaded survives the truncation",
+           report != NULL && field_value(report, "claimLoaded", value, sizeof(value)) &&
+               strcmp(value, "0") == 0);
+    expect("  claimFailedIndex survives the truncation",
+           report != NULL && field_value(report, "claimFailedIndex", value, sizeof(value)) &&
+               strcmp(value, "0") == 0);
+    remove(saturate_path);
   }
 
   printf("\nfailures: %d\n", failures);

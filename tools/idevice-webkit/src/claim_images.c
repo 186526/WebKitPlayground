@@ -1,5 +1,6 @@
 #include "claim_images.h"
 
+#include "dyld_lookup.h"
 #include "textkit.h"
 #include "types.h"
 
@@ -31,7 +32,9 @@
    collide with the resident system ones, but WebCore, WebKitLegacy, WebGPU and
    WebKit then fail to bind against the system JavaScriptCore that dyld already
    bound for them. The count of WebKit images stays at 1, and it is the SYSTEM
-   one.
+   one. The probe read load outcomes and that count; it did not read a
+   duplicate-class count for the JavaScriptCore pair, and it did not test
+   whether the process survives with both JavaScriptCores mapped.
 
    So this module does not make a hard-linked host use 18.3, and no change to
    its order, flags or timing can. A constructor cannot run before the main
@@ -43,17 +46,26 @@
    the note at the end of this comment for the device reading that shows it is
    absent.
 
-   The claim is still the right action in the two cases that do apply: a host
-   that lazily dlopen()s WebKit (it wins the dedupe, as measured), and a host
-   whose constructor runs before WebKit is requested. In a hard-linked host it
-   is harmless — it fails, records which images failed, and leaves the process
-   as dyld built it. The failure itself is the diagnosis: four Symbol not found
-   lines with a loaded count of 3 means the host was hard-linked, and the fix is
-   the dyld patch, not this file.
+   The claim runs only in a host that has not mapped WebKit yet, which is the
+   case it was measured in: such a host reaches the constructor before anything
+   asks for WebKit, so the sequence wins the dedupe by install name and loads
+   all seven. The decision is made at run time, not assumed:
+   claim_system_webkit_present() asks dyld for the system WebKit with
+   RTLD_NOLOAD and the sequence is skipped when that answers a handle.
+
+   Skipping is deliberate. In a hard-linked host the constructor runs after the
+   system image is mapped and three of the seven still load — JavaScriptCore,
+   libwebrtc and libANGLE — so the process receives an 18.3 JavaScriptCore with
+   RTLD_GLOBAL beside the 16.1 one it already runs on, and the four that follow
+   fail to bind against it. Whether that duplicate JavaScriptCore produces
+   errors at run time was not measured, and it is a core library rather than a
+   peripheral dylib, so entering the state to find out is not the right trade.
+   The probe's readings for that shape are load outcomes and a WebKit image
+   count of 1; they are not a duplicate-class count and not a survival test.
 
    The three conditions below are still the reason a position is fixed when the
-   claim can work at all. They were measured on the device (iPad14,4 / iPadOS
-   16.1 / Dopamine rootless, mobile@192.168.2.136, uid 501).
+   claim does run. They were measured on the device (iPad14,4 / iPadOS 16.1 /
+   Dopamine rootless, mobile@192.168.2.136, uid 501).
 
    1. libwebrtc and libANGLE must be loaded before WebCore.
 
@@ -259,10 +271,22 @@ static void mark_this_process(claim_result *result) {
   char *const arguments[] = {(char *)jbctl_path, (char *)jbctl_argument, pid_text, NULL};
   spawn_attributes attributes;
   spawn_file_actions actions;
-  if (posix_spawnattr_init(&attributes) != 0 || posix_spawn_file_actions_init(&actions) != 0) {
+  /* The two initialisers are separate calls because they can fail separately,
+     and the message has to name the one that failed. A failure of the second
+     leaves the first object allocated, so that path destroys it before
+     returning. */
+  if (posix_spawnattr_init(&attributes) != 0) {
     result->marked = false;
-    result->mark_status = -1;
-    append(result->mark_error, sizeof(result->mark_error), "posix_spawn attribute init failed");
+    result->mark_status = mark_init_failed;
+    append(result->mark_error, sizeof(result->mark_error), "posix_spawnattr_init failed");
+    return;
+  }
+  if (posix_spawn_file_actions_init(&actions) != 0) {
+    posix_spawnattr_destroy(&attributes);
+    result->marked = false;
+    result->mark_status = mark_init_failed;
+    append(result->mark_error, sizeof(result->mark_error),
+           "posix_spawn_file_actions_init failed");
     return;
   }
   i32 child = 0;
@@ -272,7 +296,7 @@ static void mark_this_process(claim_result *result) {
   posix_spawnattr_destroy(&attributes);
   if (spawned != 0) {
     result->marked = false;
-    result->mark_status = spawned;
+    result->mark_status = mark_spawn_failed;
     append(result->mark_error, sizeof(result->mark_error), "posix_spawn ");
     append(result->mark_error, sizeof(result->mark_error), jbctl_path);
     append(result->mark_error, sizeof(result->mark_error), " returned ");
@@ -292,28 +316,49 @@ static void mark_this_process(claim_result *result) {
   }
   if (waited == 0) {
     result->marked = false;
-    result->mark_status = 0;
+    result->mark_status = mark_child_running;
     append(result->mark_error, sizeof(result->mark_error),
            "jbctl still running after the wait; not waited for");
     return;
   }
   if (waited != child) {
     result->marked = false;
-    result->mark_status = waited;
+    result->mark_status = mark_wait_failed;
     append(result->mark_error, sizeof(result->mark_error), "waitpid returned ");
     append_number(result->mark_error, sizeof(result->mark_error), waited);
     return;
   }
-  result->mark_status = status;
   result->marked = status == 0;
+  result->mark_status = result->marked ? mark_done : mark_child_nonzero;
   if (!result->marked) {
     append(result->mark_error, sizeof(result->mark_error), "jbctl exited with wait status ");
     append_number(result->mark_error, sizeof(result->mark_error), status);
   }
 }
 
+/* RTLD_NOLOAD is the lookup with no side effect: it answers a handle exactly
+   when the image is already in the process, and maps nothing when it is not.
+   The /var/jb WebKit carries the system install name, so dyld answers for the
+   system path from the image already loaded under that name, whichever path it
+   was loaded from; that equality is condition 3 at the top of this file and is
+   what makes this question answerable before the loads. */
+
+bool claim_system_webkit_present(const char *systemWebKitPath) {
+  return library_find(systemWebKitPath) != NULL;
+}
+
 void claim_images_run(claim_result *result) {
   text_set(result, 0, sizeof(*result));
+  /* The hard-linked case: the system image is already mapped, so the loads
+     below would put an 18.3 JavaScriptCore beside the 16.1 one the process is
+     running on. The sequence is skipped rather than entered, and the header
+     comment on this function states what the probe measured and what it did
+     not. A skipped run records itself, so the report says the decision was
+     made and which host shape produced it. */
+  if (claim_system_webkit_present(system_webkit_path)) {
+    result->skipped = true;
+    return;
+  }
   mark_this_process(result);
   for (u32 index = 0; index < claim_image_count; index++) {
     const char *path = claim_image_paths[index];

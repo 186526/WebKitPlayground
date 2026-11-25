@@ -131,11 +131,27 @@ flag or timing change in a constructor can: a constructor runs after the main
 executable's dependencies exist. A loaded count of 3 with `failed_index` 4 is
 this shape rather than a broken order.
 
-The sequence is still the right action in the two hosts it fits. In a host that
-lazily `dlopen`s WebKit it wins the dedupe and loads all seven, which is how the
-7/7 reading was obtained. In a hard-linked host it fails harmlessly and its
-failure is the diagnosis. The path that covers the hard-linked case is the dyld
-layer, not this dylib: the override hooks `isOverridablePath` and
+That reading is what the sequence now refuses to enter. The three that load
+include JavaScriptCore, so running the sequence in a hard-linked host maps an
+18.3 `JavaScriptCore` with `RTLD_GLOBAL` beside the 16.1 one the host is already
+running on, and the four that follow fail to bind against it. The probe read
+load outcomes and a WebKit image count of 1; it did not count duplicate
+JavaScriptCore classes and it did not test whether the host survives with both
+mapped. Because it is a core library rather than a peripheral dylib, the
+sequence does not enter that state to find out.
+
+So `claim_images_run` asks `claim_system_webkit_present` first, which is
+`library_find("/System/Library/Frameworks/WebKit.framework/WebKit")` —
+`dlopen` with `RTLD_NOLOAD`, a lookup that maps nothing and answers a handle
+only when the image is resident. The `/var/jb` WebKit carries the system install
+name, so that one question answers for both: a non-NULL handle means the system
+image is already mapped and the run is skipped, recorded as `claimSkipped` with
+`loaded` 0 and `failedIndex` 0.
+
+In a host that lazily `dlopen`s WebKit the question answers NULL, the sequence
+runs, and it wins the dedupe and loads all seven — the 7/7 reading. The path
+that covers the hard-linked case is the dyld layer, not this dylib: the override
+hooks `isOverridablePath` and
 `isAlwaysOverridablePath` make dyld consult an override directory during
 dependency resolution, before any constructor runs and before the system image
 is mapped. On the device those two hooks are absent — `/var/jb/basebin/gen/dyld`
@@ -169,7 +185,25 @@ Three conditions fix the order and none is visible from the file names:
 
 The claim runs only for a process that passed the filter match, the copy check
 and the host check; a process that failed any of them returns before it loads
-anything.
+anything. Inside such a process the sequence asks the gate first, so a
+hard-linked host is recorded as `claimSkipped` and loads nothing.
+
+The report carries the claim as six decision fields and three texts:
+`stage`, `claimSkipped`, `claimMarked`, `claimMarkStatus`, `claimLoaded` and
+`claimFailedIndex` are written immediately after the plist header, and
+`claimMarkError`, `claimFailedPath` and `claimError` follow the bundle and
+framework fields. `claimMarkStatus` is one of the `mark_*` states in
+`src/claim_images.h` — `1` done, `2` spawn failed, `3` wait failed, `4` child
+left running, `5` non-zero exit, `6` initialiser failed — rather than an errno
+or a wait status, because those are not comparable numbers and a negative one
+would render as the value `0`, which is what the success state used to print.
+The errno and the wait status are kept in `claimMarkError` as text, where they
+can be read without being mistaken for a state.
+
+The document buffer is smaller than the record's fields can add up to, so a
+record with every text at capacity is truncated at `document_capacity`. The
+decision fields are written first for that reason: the prefix they occupy is
+fixed and small, so no free-form text can push them out of the document.
 
 ## Commands
 
