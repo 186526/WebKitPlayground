@@ -22,6 +22,10 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from macho_fixture import build_macho  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 TAR_SCRIPT = HERE / "verify-basebin-tar.sh"
 MERGE_SCRIPT = HERE / "verify-merged-dyld.sh"
@@ -38,6 +42,20 @@ PATCHED = LEGACY + [OVERRIDABLE, ALWAYS_OVERRIDABLE]
 # Upstream guards the dlopen_from hook with `#if IOS < 18` in fakelib_redirect.c,
 # so the iOS 18+ dylib carries the trampoline pair and __fcntl but no hook.
 PATCHED_18 = [DLOPEN_TRAMPOLINE, FCNTL] + [OVERRIDABLE, ALWAYS_OVERRIDABLE]
+
+# launchdhook is built from the same common.c, so a healthy tar carries the same four
+# search-path names and both dedicated directories in it.  The stock binary carries only
+# the insert write and neither directory.
+LAUNCHDHOOK_PATCHED = (
+    "DYLD_FRAMEWORK_PATH",
+    "__XPC_DYLD_FRAMEWORK_PATH",
+    "DYLD_LIBRARY_PATH",
+    "__XPC_DYLD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "/Library/WebKitOverride",
+    "/Library/WebKitOverride/usr/lib",
+)
+LAUNCHDHOOK_STOCK = ("DYLD_INSERT_LIBRARIES",)
 
 ARM64E_15 = "dyldhook_merge.arm64e.iOS15.dylib"
 ARM64E_16 = "dyldhook_merge.arm64e.iOS16-17.dylib"
@@ -94,8 +112,14 @@ def write_symbol_file(path: Path, symbols: list[str], undefined: list[str] | Non
 
 def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True,
               extra: dict[str, str] | None = None,
-              omit: tuple[str, ...] = ()) -> Path:
-    """Write a tar the way BaseBin/Makefile's basebin.tar target lays it out."""
+              omit: tuple[str, ...] = (),
+              launchdhook_strings: tuple[str, ...] | None = None) -> Path:
+    """Write a tar the way BaseBin/Makefile's basebin.tar target lays it out.
+
+    launchdhook.dylib is a real Mach-O because verify-basebin-tar.sh hands it to
+    verify-systemhook-search-paths.py.  Passing None leaves the member out, which is the case
+    for the tars that predate it; a tuple writes a thin image carrying exactly those strings.
+    """
     staging = root / "staging"
     base = staging / "basebin" if prefixed else staging
     base.mkdir(parents=True)
@@ -105,6 +129,8 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
         write_symbol_file(base / name, symbols)
     (base / "basebin.tc").write_text("trustcache\n", encoding="utf-8")
     write_symbol_file(base / "systemhook.dylib", LEGACY)
+    if launchdhook_strings is not None:
+        (base / "launchdhook.dylib").write_bytes(build_macho(launchdhook_strings))
     for rel, content in (extra or {}).items():
         target = base / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -136,14 +162,33 @@ def healthy_dylibs() -> dict[str, list[str]]:
 
 
 def test_tar_script(root: Path, bin_dir: Path) -> None:
-    good = build_tar(root / "good", healthy_dylibs())
+    good = build_tar(root / "good", healthy_dylibs(), launchdhook_strings=LAUNCHDHOOK_PATCHED)
     rc, out = run(TAR_SCRIPT, [str(good)], bin_dir)
     check("tar: a healthy tar passes", rc == 0, out)
     check("tar: healthy tar states gen/dyld is absent by design",
           "jbctl update basebin generates it" in out, out)
+    check("tar: healthy tar reports launchdhook carries the search paths",
+          "launchdhook.dylib carries the four search-path names" in out, out)
+
+    # launchdhook is the one member whose absence leaves every other gate content: it is
+    # built from the same common.c, and the stock build writes only DYLD_INSERT_LIBRARIES.
+    # This is the state the device was actually in, so both directions are pinned.
+    stock_hook = build_tar(root / "stock-launchdhook", healthy_dylibs(),
+                           launchdhook_strings=LAUNCHDHOOK_STOCK)
+    rc, out = run(TAR_SCRIPT, [str(stock_hook)], bin_dir)
+    check("tar: a stock launchdhook fails", rc == 1, out)
+    check("tar: stock launchdhook is explained",
+          "does not set the search paths dyld reads" in out, out)
+
+    missing_hook = build_tar(root / "no-launchdhook", healthy_dylibs())
+    rc, out = run(TAR_SCRIPT, [str(missing_hook)], bin_dir)
+    check("tar: omitting launchdhook fails", rc == 1, out)
+    check("tar: omitting launchdhook names the file",
+          "missing basebin/launchdhook.dylib" in out, out)
 
     for name in ALL_SIX:
-        short = build_tar(root / f"omit-{name}", healthy_dylibs(), omit=(name,))
+        short = build_tar(root / f"omit-{name}", healthy_dylibs(), omit=(name,),
+                          launchdhook_strings=LAUNCHDHOOK_PATCHED)
         rc, out = run(TAR_SCRIPT, [str(short)], bin_dir)
         check(f"tar: omitting {name} fails", rc == 1, out)
         check(f"tar: omitting {name} names the file", f"missing basebin/{name}" in out, out)
@@ -153,7 +198,8 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
     for name in (ARM64E_16, ARM64E_18, ARM64_16, ARM64_18):
         dylibs = healthy_dylibs()
         dylibs[name] = LEGACY
-        lost = build_tar(root / f"lost-hook-{name}", dylibs)
+        lost = build_tar(root / f"lost-hook-{name}", dylibs,
+                         launchdhook_strings=LAUNCHDHOOK_PATCHED)
         rc, out = run(TAR_SCRIPT, [str(lost)], bin_dir)
         check(f"tar: {name} without the new hooks fails", rc == 1, out)
         check(f"tar: {name} names the missing hook", f"does not define {OVERRIDABLE}" in out, out)
@@ -161,17 +207,18 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
     extra_hooks = healthy_dylibs()
     extra_hooks[ARM64E_15] = PATCHED
     extra_hooks[ARM64_15] = PATCHED
-    wrong15 = build_tar(root / "wrong15", extra_hooks)
+    wrong15 = build_tar(root / "wrong15", extra_hooks, launchdhook_strings=LAUNCHDHOOK_PATCHED)
     rc, out = run(TAR_SCRIPT, [str(wrong15)], bin_dir)
     check("tar: hooks on either iOS 15 dylib fail", rc == 1, out)
 
-    undef = healthy_dylibs()
-    baked = build_tar(root / "with-gen", healthy_dylibs(), extra={"gen/dyld": "sym:x\n"})
+    baked = build_tar(root / "with-gen", healthy_dylibs(), extra={"gen/dyld": "sym:x\n"},
+                      launchdhook_strings=LAUNCHDHOOK_PATCHED)
     rc, out = run(TAR_SCRIPT, [str(baked)], bin_dir)
     check("tar: a baked-in gen/dyld fails", rc == 1, out)
     check("tar: baked-in gen/dyld is explained", "belongs to jbctl update basebin" in out, out)
 
-    stripped = build_tar(root / "no-prefix", healthy_dylibs(), prefixed=False)
+    stripped = build_tar(root / "no-prefix", healthy_dylibs(), prefixed=False,
+                         launchdhook_strings=LAUNCHDHOOK_PATCHED)
     rc, out = run(TAR_SCRIPT, [str(stripped)], bin_dir)
     check("tar: a tar without the basebin/ prefix fails", rc == 1, out)
 

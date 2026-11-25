@@ -9,9 +9,12 @@ can override the copy inside the dyld shared cache.
 | `0001-dyldhook-allow-framework-override.patch` | Adds `src/framework_override.c` and its trampoline symbols in `src/main.S`. Applies to tag `3.0.13`. |
 | `verify-dyldhook-merge.sh` | Static assertions on the built `dyldhook_merge.*.dylib` or the merged `gen/dyld`. Needs only `llvm-nm`. |
 | `test-verify-dyldhook-merge.py` | Regression tests for the verifier. Needs only `python3`. |
-| `verify-basebin-tar.sh` | Unpacks a built `basebin.tar` and asserts the six dyldhook dylibs are under the names the device asks for, then re-runs `verify-dyldhook-merge.sh` on the shipped bytes. |
+| `verify-basebin-tar.sh` | Unpacks a built `basebin.tar` and asserts the six dyldhook dylibs are under the names the device asks for, that `systemhook.dylib` and `launchdhook.dylib` both carry the search-path names, then re-runs `verify-dyldhook-merge.sh` on the shipped bytes. |
 | `verify-merged-dyld.sh` | Runs `MachOMerger` the way `jbctl update basebin` does and asserts the merged dyld carries all four hooks. |
 | `test-verify-basebin-artifacts.py` | Regression tests for both new verifiers. Needs only `python3`. |
+| `verify-systemhook-search-paths.py` | Asserts the four search-path names and both dedicated directories in a built `systemhook.dylib`, or in `launchdhook.dylib` with `--kind launchdhook`. |
+| `test-verify-systemhook-search-paths.py` | Regression tests for that verifier, including the stock `launchdhook` that must fail. Needs only `python3`. |
+| `macho_fixture.py` | Builds the minimal Mach-O images both test suites use, so neither needs clang or a device. |
 
 A second patch, `0001-systemhook-set-search-paths.patch`, comes from the
 systemhook work and is applied from the same directory when present. It adds
@@ -19,6 +22,18 @@ systemhook work and is applied from the same directory when present. It adds
 `__XPC_DYLD_LIBRARY_PATH` to every process Dopamine spawns, so dyld knows where
 `/var/jb/Library/WebKitOverride` is. That directory also carries its own
 `verify-systemhook-search-paths.py`.
+
+That patch reaches two binaries, not one. `BaseBin/launchdhook/Makefile` lists
+`../systemhook/src/common/*.[cSm]` as a dependency, so `launchdhook.dylib` compiles
+the same `common.c` and gets the same four variables. `launchdhook` is the
+interposer that runs inside `launchd`, the process that performs an app's final
+exec, which is why it is the binary that decides whether an app launched from the
+home screen sees the override. A stock `launchdhook` writes only
+`DYLD_INSERT_LIBRARIES`, so such an app inherits the `__XPC_` spellings from
+launchd's environment but never a name dyld reads, and its WebKit comes from the
+shared cache. `verify-basebin-tar.sh` therefore asserts the four names in
+`basebin/launchdhook.dylib` as well, through
+`verify-systemhook-search-paths.py --kind launchdhook`.
 
 The rationale, the dyld call sites each hook covers, and the install and
 rollback steps are in `../docs/dopamine-basebin-webkit-override.md`.

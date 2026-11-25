@@ -770,7 +770,8 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 | --- | --- |
 | `dopamine-basebin/0001-systemhook-set-search-paths.patch` | 唯一源码改动，只动 `common.c`，`+111 −1` |
 | `dopamine-basebin/verify-systemhook-search-paths.py` | 对构建出的 `systemhook.dylib` 做静态断言 |
-| `dopamine-basebin/test-verify-systemhook-search-paths.py` | 上面脚本自身的回归测试，25 个用例 |
+| `dopamine-basebin/test-verify-systemhook-search-paths.py` | 上面脚本自身的回归测试，32 个用例（其中 6 个是 `--kind launchdhook`） |
+| `dopamine-basebin/macho_fixture.py` | 两个测试套件共用的 Mach-O fixture 编码器，避免两份实现漂移 |
 | `dopamine-basebin/logic-harness/run.py` | 把补丁里的静态函数抽出来编译运行，44 项断言（32 行为 + 12 源码配对） |
 
 验证脚本自己解析 Mach-O 的 `__cstring`，只用 `python3`，不需要 LLVM、Xcode 或越狱设备。字符串按 NUL 切分后做精确匹配，不是子串匹配——`DYLD_FRAMEWORK_PATH` 是 `__XPC_DYLD_FRAMEWORK_PATH` 的子串，子串匹配会在「裸名变量的那条 hunk 丢了」时仍然通过，这个洞是测试自己抓出来的。
@@ -785,7 +786,7 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 
 ```
 git apply --check 0001-systemhook-set-search-paths.patch             # 对 tag 3.0.13 pristine 源码树，通过
-python3 test-verify-systemhook-search-paths.py                        # 25/25 通过
+python3 test-verify-systemhook-search-paths.py                        # 32/32 通过
 python3 verify-systemhook-search-paths.py <真实编译的四变量 Mach-O>    # 通过（/tmp/k2-macho/new4.dylib，arm64）
 python3 verify-systemhook-search-paths.py <官方 systemhook.dylib>     # 每个切片 6 条失败，共 12 条，退出 1
 python3 logic-harness/run.py <Dopamine tree>                          # 44/44 通过
@@ -808,3 +809,124 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 **未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「**打过本补丁**构建出的 `systemhook.dylib` 带着这四个字符串」没有在真实产物上跑过。本 mission 用四件事替代：脚本对真实编译出的 Mach-O 判定正确，脚本对设备上取回的真实官方 dylib 判失败，补丁行为由 25 个静态用例固定，以及由 44 项逻辑与配对断言固定。
 
 **负向断言补的是 reviewer-k2c 指出的一个洞。** 先前只有正向检查（`EXPECTED_DIRS` 里的两个目录在不在），一个把两个专用目录与 `/Library/Frameworks`、`/usr/lib` 一起塞进去的 Mach-O 会照样通过、退出 0。现在每个切片另查一条 `names no shared search root`：四个共享根作为**整条目**出现即失败。用整条目匹配而不是子串，是因为真实 `__cstring` 里有 `/usr/lib/systemhook.dylib` 这类合法文件路径（官方 dylib 的 29 条绝对路径里就有），子串匹配会误报。回归用例里两条都固定了：塞共享根必须退出 1，塞 `/usr/lib/systemhook.dylib` 必须退出 0。
+
+## 十二、把搜索路径送进 app 进程：launchdhook 这一半
+
+`systemhook` 的四个变量只在进程被 `posix_spawn` 时写入。走 XPC 起的服务进程（`WebContent`、`Networking`）能拿到，走 `runningboardd` 启动的 app 进程拿不到，所以这一节先确认谁真正在启动 app，再看现有补丁是否已经覆盖到那个进程。
+
+### 十二·一 启动 app 的是 launchd，posix_spawn 拦截器在 launchd 里
+
+三条读数把它钉住，都不依赖 `lldb` 是否能 attach pid 1：
+
+1. `launchd.log` 里 app 的启动记录带 `launch job demand`：
+
+   ```
+   (user/501/UIKitApplication:com.google.chrome.ios[7fd1][rb-legacy] [38495]) <Notice>: Successfully spawned Chrome[38495] because launch job demand
+   ```
+
+2. app 的 `envp` 里是 `DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib`。整个越狱里只有一处写这个值：`BaseBin/systemhook/src/common/common.h:7` 的 `HOOK_DYLIB_PATH`，写入点是 `common.c:327-333`。所以写入方是一个 spawn hook。
+3. app 不可能只是继承了 launchd 的环境：`BaseBin/launchdhook/src/main.m:187` 给 launchd 自己的 `environ` 设的是 `JBROOT_PATH("/basebin/launchdhook.dylib")`，不是 systemhook。app 显示的是 systemhook，说明这个值被 hook 换掉了。
+
+`runningboardd` 从不调用 `posix_spawn`，它里面的 `systemhook` 一个变量也写不出去。所以写值的只能是 `BaseBin/launchdhook/src/spawn_hook.c:197` 装的 `__posix_spawn_hook`，也就是运行在 launchd 里的那份 `launchdhook`。上游在同处写明了这一点：`BaseBin/libjailbreak/src/util.c:856`「it has DYLD_INSERT_LIBRARIES set to launchdhook」。
+
+**`lldb attach pid 1` 报 `invalid address` 不能当作「launchdhook 不在 launchd 里」的证据。** 那只说明调试器被 SIP 拒绝，不说明被注入的 dylib 不在。用「仪器看不见」推断「对象不存在」是本项目已经踩过的同一类错误（`env -i` 不能当对照那次）。
+
+### 十二·二 现有补丁已经覆盖 launchdhook，不需要第三个补丁
+
+`BaseBin/launchdhook/Makefile:10` 的依赖行里有 `../systemhook/src/common/*.[cSm]`：
+
+```
+$(TARGET): $(wildcard src/*.m src/*.c src/jbserver/*.c ../systemhook/src/common/*.[cSm] ../systemhook/src/envbuf.c ../_external/modules/litehook/src/*.c)
+```
+
+所以 `launchdhook` 与 `systemhook` 编译的是同一份 `common.c`，`0001-systemhook-set-search-paths.patch` 的改动同时进入两个 dylib。设备上的 `launchdhook` 是原版，因此只在 `systemhook` 那一侧生效过；换成打过补丁的那份即可，不需要新补丁。
+
+### 十二·三 为什么 app 只拿到 `__XPC_` 拼写
+
+`launchd` 自己的 `environ` 里只有 `__XPC_DYLD_FRAMEWORK_PATH` / `__XPC_DYLD_LIBRARY_PATH`（`launchctl getenv` 读到，值来自构建期的 launchd 环境）。app 的 `envp` 原样继承这两个名字。dyld 只读裸名：`dyld-1042` 的 `ProcessConfig::PathOverrides::addEnvVar`（`P.cpp:1614`，由 `P.cpp:1414` 逐条调用）用 `strncmp` 比对九个规范名，`forEachEnvVar`（`P.cpp:1574-1585`）里没有 `__XPC_` 形式，`gen/dyld` 的字符串表里 `__XPC_DYLD_FRAMEWORK_PATH` 出现 0 次。原版 `launchdhook` 一个裸名都不写，所以 app 进程里没有任何 dyld 认识的搜索路径，WebKit 从共享缓存取，UUID 保持 16.1 的 `743EAFB4`。
+
+XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUID `787DFAB1`）。
+
+### 十二·四 补丁写进 app 的 envp 到底是哪些条目
+
+判断依据是 `common.c:153-211` 的 `envbuf_variable_matches`：它用 `strcmp` 比**值**，不只是名字。`get_jbroot()` 返回 `/var/jb`（该路径是指向 preboot 的符号链接），所以补丁要写的值是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/WebKitOverride/usr/lib`。
+
+`launchd` 传给 app 的 `envp` 里有继承来的 `__XPC_` 两个名字，值为构建期那一对目录，与补丁要写的值不同，因此 `present[1]`、`present[3]` 为 `false`，`allPresent` 为 `false`：
+
+| 变量 | 继承自 launchd | `present` | 补丁动作 |
+| --- | --- | --- | --- |
+| `DYLD_FRAMEWORK_PATH` | 无 | false | 写入 `/var/jb/Library/WebKitOverride` |
+| `__XPC_DYLD_FRAMEWORK_PATH` | 有，旧值 | false（值不等） | 覆盖成新值 |
+| `DYLD_LIBRARY_PATH` | 无 | false | 写入 `/var/jb/Library/WebKitOverride/usr/lib` |
+| `__XPC_DYLD_LIBRARY_PATH` | 有，旧值 | false（值不等） | 覆盖成新值 |
+
+结论：app 换完之后同时有裸名与 `__XPC_` 两套，且四个值都指向同一对目录。dyld 读裸名，所以覆盖生效；`__XPC_` 保留不影响任何东西。
+
+`DYLD_INSERT_LIBRARIES` 也会被改写：`envp` 里此时是 launchdhook 的路径，`systemHookAlreadyInserted` 为 0，于是按 `common.c:327-333` 换成 `/usr/lib/systemhook.dylib`。这正是 app 今天已经在用的值。
+
+`jbuserconfig_get_value` 在这个进程里可用：它读 `JBROOT_PATH("/basebin/config.plist")`（`common.c:99`），只查 `DisableJBFrameworkPath` 一个键，文件不存在或读不到时返回 NULL，搜索路径保持开启。
+
+### 十二·五 对已经正常的 helper 进程没有影响
+
+`WebContent`、`Networking` 今天的 `envp` 已经有四个值正确的变量，`present` 四项全为 true，`allPresent` 为 true，走 `common.c:440` 那条快速路径，`envp` 原样传给 `posix_spawn`。它们继续加载 `787DFAB1`。`launchdhook` 与 `systemhook` 编译同一份源码，改的是同一段代码，`systemhook` 侧的行为不因为这份二进制同时存在于 launchdhook 而改变。
+
+混合形态（helper 可执行文件仍是 `/System` 的 16.1，`Library/Frameworks` 来自 `/var/jb`）由这次改动保持：补丁只增加搜索目录，不改变可执行文件的解析顺序。
+
+### 十二·六 校验脚本补的洞
+
+`verify-basebin-tar.sh` 原先只查六个 `dyldhook_merge.*.dylib` 与 `systemhook.dylib`，因此一个 `launchdhook.dylib` 是原版的 tar 会打印 `Result: PASS`。实测用设备自带的 tar 跑旧脚本就是这个结果，而那个 tar 正是设备当前状态。
+
+现在脚本对 `basebin/launchdhook.dylib` 调 `verify-systemhook-search-paths.py --kind launchdhook`，与 `systemhook` 同一套名字和目录断言。`--kind launchdhook` 只放宽一条：`spawn_hook.c:36-37` 对裸 `/usr/lib` 调 `statfs` 判断 fakelib 是否挂载，所以裸根是合法条目，其余三个共享根仍然禁止。
+
+回归用例两个方向都固定了：原版 `launchdhook`（312848 字节，`sha256 449a9606…`，四个名字出现 0 次）必须让脚本退出 1；打过补丁的（330144 字节，`sha256 150270a5…`）必须退出 0。缺成员、`arm64` 侧回退、`/Library/Frameworks` 混入也都各有用例。
+
+### 十二·七 交付物：basebin tar、安装与回滚
+
+tar 以设备自带的 `Dopamine.app/basebin.tar` 为底，只替换需要换的成员，条目数保持 31：
+
+| 字段 | 值 |
+| --- | --- |
+| 交付 tar | `/tmp/m125/basebin-m125-full.tar` |
+| 交付 tar sha256 | `23c8a9506e030e5d221514a9e5c92359b8d1a6da7147802820d3ece130ceebc4` |
+| 交付 tar 大小 | 6113280 字节 |
+| 回滚 tar | 设备自带 `Dopamine.app/basebin.tar` 的原样拷贝 `/tmp/m125/rollback-device-basebin.tar` |
+| 回滚 tar sha256 | `52607d787d01efa34a28815cd522b20b05e7e3d648fe94432171abcac3c9e828` |
+| 回滚 tar 大小 | 6082560 字节 |
+| 设备来源 | `/var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar` |
+
+替换后的成员与三份读数（设备自带 tar、本 tar、设备当前实际文件）：
+
+| 成员 | 设备自带 tar | 本 tar | 设备当前 |
+| --- | --- | --- | --- |
+| `launchdhook.dylib` | `449a96068dbc` | `150270a5f2e6` | `449a96068dbc` |
+| `systemhook.dylib` | `6f16c545abda` | `d7045cd4850e` | `d7045cd4850e` |
+| `dyldhook_merge.arm64e.iOS16-17.dylib` | `1e90c5a38405` | `9fb3b9c0e2ae` | `9fb3b9c0e2ae` |
+| 其余四个 `dyldhook_merge` 成员 | 原版 | CI 构建 | 原版 |
+
+后三行是把设备当前的补丁状态固化进 tar：设备上 `systemhook.dylib` 与 `dyldhook_merge.arm64e.iOS16-17.dylib` 已经是打过补丁的版本，而设备自带的 tar 里是原版。以自带 tar 为底就会把它们换回原版，所以这两份取设备当前的字节。
+
+五个非 arm64e 或 iOS 18 的 `dyldhook_merge` 成员取 CI 构建（`/tmp/m125/cix/basebin`）：`verify-dyldhook-merge.sh` 要求每个切片都带两个 override hook，设备上这五个是原版，不带。这台设备只用 `arm64e.iOS16-17`，其余五个不会被加载，替换它们只影响校验结果，不影响运行。
+
+`basebin.tc` 未改动：它的 28 条 cdhash 只约束 `MachOMerger`、`dopamine`、`forkfix.dylib`、`idownloadd`，这四个成员都保持原样，所以替换 `launchdhook.dylib` 不触动信任缓存。
+
+安装命令（**尚未执行**，`jbctl update basebin` 会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出）：
+
+```sh
+scp /tmp/m125/basebin-m125-full.tar mobile@192.168.2.136:/var/mobile/Documents/basebin.tar
+ssh -t mobile@192.168.2.136 'echo "<password>" | sudo -S -p "" /var/jb/basebin/jbctl update basebin /var/mobile/Documents/basebin.tar'
+```
+
+回滚命令：
+
+```sh
+scp /tmp/m125/rollback-device-basebin.tar mobile@192.168.2.136:/var/mobile/Documents/basebin.tar
+ssh -t mobile@192.168.2.136 'echo "<password>" | sudo -S -p "" /var/jb/basebin/jbctl update basebin /var/mobile/Documents/basebin.tar'
+```
+
+安装后确认三件事：`ps -E` 读新起的 app 的 `DYLD_FRAMEWORK_PATH` 是否出现；`lldb -b -o "process attach --pid <pid>" -o "image list"` 里 `WebKit.framework/WebKit` 的路径是否变成 `/var/jb` 下、UUID 是否从 `743EAFB4` 变成 `787DFAB1`；helper 的 `WebContent` 是否仍为 `787DFAB1`（不能回退）。
+
+### 十二·八 这一节没有做的事
+
+- 没有安装，也没有再对设备发命令。tar 只在本机生成与校验。
+- 没有构建 `launchdhook.dylib`：交付的二进制取自 CI 构建产物 `basebin-tar`（artifact 14849117614，run 45237030318），本机没有 macOS 与 iPhoneOS SDK，无法重建。
+- 没有验证「装完之后 app 真的从 `/var/jb` 取 WebKit」。这需要一次用户空间重启，属于用户确认的动作。

@@ -6,9 +6,13 @@ variables, or when the patch dropped the DYLD_INSERT_LIBRARIES write Dopamine al
 The case that matters most is the stock dylib: it must not pass, because a patch hunk that never
 landed is exactly what a silent pass would hide.
 
-Each case builds its own Mach-O in memory, so nothing here needs clang, LLVM, or a device.  The
-fixtures are written by encoding a minimal but valid 64-bit image: a mach header, one
-__TEXT segment holding a __cstring section, and a symtab-free body.
+Each case builds its own Mach-O in memory via macho_fixture.py, the shared encoder both suites
+use, so nothing here needs clang, LLVM, or a device.
+
+The launchdhook cases exist because that binary is built from the same common.c and is the
+interposer that runs inside launchd, the process that performs an app's final exec.  A tar that
+ships a stock launchdhook passes every other gate and still leaves the device with an app whose
+WebKit comes from the shared cache, so the stock image must fail here.
 
 Usage: python3 dopamine-basebin/test-verify-systemhook-search-paths.py
 """
@@ -16,19 +20,16 @@ from __future__ import annotations
 
 import os
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent / "verify-systemhook-search-paths.py"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-LC_SEGMENT_64 = 0x19
-CPU_TYPE_ARM64 = 0x0100000C
-CPU_SUBTYPE_ARM64E = 2
-MH_EXECUTE_DYLIB = 6
-MH_DYLIB = 6
+from macho_fixture import build_fat, build_macho  # noqa: E402
+
+SCRIPT = Path(__file__).resolve().parent / "verify-systemhook-search-paths.py"
 
 FRAMEWORK_DIR = "/Library/WebKitOverride"
 LIBRARY_DIR = "/Library/WebKitOverride/usr/lib"
@@ -52,86 +53,6 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         return
     failures.append(name)
     print(f"FAIL: {name}" + (f" ({detail})" if detail else ""))
-
-
-def build_macho(strings: tuple[str, ...], arch: str = "arm64e") -> bytes:
-    """Encode a thin 64-bit Mach-O whose __cstring section holds the given strings."""
-    payload = b"\0".join(s.encode() for s in strings) + b"\0"
-    cstring_offset = 0x1000
-    header_size = 32
-    segment_cmdsize = 72 + 80  # segment_command_64 plus one section_64
-    total_file_size = cstring_offset + len(payload)
-
-    cputype = CPU_TYPE_ARM64
-    cpusubtype = CPU_SUBTYPE_ARM64E if arch == "arm64e" else 0
-
-    header = struct.pack(
-        "<IiiIIIII",
-        0xFEEDFACF,  # MH_MAGIC_64 in host byte order, little endian on disk
-        cputype,
-        cpusubtype,
-        MH_DYLIB,
-        1,  # ncmds
-        segment_cmdsize,  # sizeofcmds
-        0,  # flags
-        0,  # reserved
-    )
-    segment = struct.pack(
-        "<II16sQQQQiiII",
-        LC_SEGMENT_64,
-        segment_cmdsize,
-        b"__TEXT",
-        0,  # vmaddr
-        total_file_size,  # vmsize
-        0,  # fileoff
-        total_file_size,  # filesize
-        5,  # maxprot r-x
-        5,  # initprot r-x
-        1,  # nsects
-        0,  # flags
-    )
-    section = struct.pack(
-        "<16s16sQQIIIIIIII",
-        b"__cstring",
-        b"__TEXT",
-        0,  # addr
-        len(payload),  # size
-        cstring_offset,  # offset
-        2,  # align
-        0,  # reloff
-        0,  # nreloc
-        2,  # flags (S_CSTRING_LITERALS)
-        0,
-        0,
-        0,
-    )
-    body = header + segment + section
-    body += b"\0" * (cstring_offset - len(body))
-    return body + payload
-
-
-def build_fat(slices: list[bytes]) -> bytes:
-    """Wrap slices in a fat header so the universal build is exercised too."""
-    alignment = 0x1000
-    header_size = 8 + 20 * len(slices)
-    offsets = []
-    cursor = header_size
-    for slice_bytes in slices:
-        cursor = (cursor + alignment - 1) // alignment * alignment
-        offsets.append(cursor)
-        cursor += len(slice_bytes)
-
-    out = struct.pack(">II", 0xCAFEBABE, len(slices))
-    for slice_bytes, offset in zip(slices, offsets):
-        cputype, cpusubtype = struct.unpack("<ii", slice_bytes[4:12])
-        out += struct.pack(">iiIII", cputype, cpusubtype, offset, len(slice_bytes), 12)
-
-    out += b"\0" * (offsets[0] - len(out))
-    for index, slice_bytes in enumerate(slices):
-        if index:
-            out += b"\0" * (offsets[index] - len(out))
-        out += slice_bytes
-    return out
 
 
 def run_verify(binary: Path, extra: list[str] | None = None) -> tuple[int, str]:
@@ -264,6 +185,55 @@ def main() -> int:
         # --- --self-contained is opt-in; systemhook ships no such rule
         rc, out = run_verify(patched, ["--self-contained"])
         check("--self-contained runs without nm and does not crash", rc in (0, 1), out)
+
+        # --- launchdhook, built from the same common.c and the interposer inside launchd.
+        # The patched image passes, the stock one fails, and the two differ only in the
+        # search-path names, so the gate cannot pass on a tar that ships the stock binary.
+        patched_hook = root / "launchdhook-patched" / "launchdhook.dylib"
+        patched_hook.parent.mkdir(parents=True)
+        patched_hook.write_bytes(build_macho(REQUIRED + LEGACY + VALUES))
+        rc, out = run_verify(patched_hook, ["--kind", "launchdhook"])
+        check("patched launchdhook passes", rc == 0, out)
+        check(
+            "patched launchdhook reports every variable",
+            all(name in out for name in REQUIRED),
+            out,
+        )
+
+        stock_hook = root / "launchdhook-stock" / "launchdhook.dylib"
+        stock_hook.parent.mkdir(parents=True)
+        # The stock launchdhook carries no search-path name at all; that absence is the defect.
+        stock_hook.write_bytes(build_macho(LEGACY))
+        rc, out = run_verify(stock_hook, ["--kind", "launchdhook"])
+        check("stock launchdhook fails the gate", rc == 1, out)
+        check(
+            "stock launchdhook names the missing framework path",
+            "FAIL: arm64e: contains DYLD_FRAMEWORK_PATH" in out,
+            out,
+        )
+
+        # spawn_hook.c:36-37 statfs()es the bare /usr/lib, so launchdhook may carry that entry.
+        hook_statfs = root / "launchdhook-statfs" / "launchdhook.dylib"
+        hook_statfs.parent.mkdir(parents=True)
+        hook_statfs.write_bytes(build_macho(REQUIRED + LEGACY + VALUES + ("/usr/lib",)))
+        rc, out = run_verify(hook_statfs, ["--kind", "launchdhook"])
+        check("launchdhook may carry the bare /usr/lib it statfs()es", rc == 0, out)
+
+        # ...but the broader search roots stay forbidden for it, exactly as for systemhook.
+        hook_broad = root / "launchdhook-broad" / "launchdhook.dylib"
+        hook_broad.parent.mkdir(parents=True)
+        hook_broad.write_bytes(
+            build_macho(REQUIRED + LEGACY + VALUES + ("/usr/lib", "/Library/Frameworks"))
+        )
+        rc, out = run_verify(hook_broad, ["--kind", "launchdhook"])
+        check("launchdhook still may not name /Library/Frameworks", rc == 1, out)
+
+        # --- the excuse is scoped to launchdhook: systemhook may not carry the bare root
+        hook_root = root / "systemhook-root" / "systemhook.dylib"
+        hook_root.parent.mkdir(parents=True)
+        hook_root.write_bytes(build_macho(REQUIRED + LEGACY + VALUES + ("/usr/lib",)))
+        rc, out = run_verify(hook_root)
+        check("systemhook still may not carry the bare /usr/lib", rc == 1, out)
 
     if failures:
         print(f"\n{len(failures)} failure(s)")

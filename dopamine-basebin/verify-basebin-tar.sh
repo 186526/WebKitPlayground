@@ -92,6 +92,32 @@ else
 	fail "tar is missing basebin/systemhook.dylib"
 fi
 
+# launchdhook is the other binary built from systemhook/src/common/common.c: its
+# Makefile lists ../systemhook/src/common/*.[cSm] as a dependency, and
+# spawn_hook.c:197 installs the posix_spawn interposer that runs inside launchd,
+# the process that performs an app's final exec.  A stock launchdhook writes only
+# DYLD_INSERT_LIBRARIES, so an app launched through launchd inherits the __XPC_
+# spellings from launchd's environ but never the plain name dyld reads, and its
+# WebKit comes from the shared cache.  That is the state this device was in, so a
+# tar that ships the stock binary has to fail here rather than on the device.
+if [ -f "$work/basebin/launchdhook.dylib" ]; then
+	pass "tar ships basebin/launchdhook.dylib"
+	if [ -f "$HERE/verify-systemhook-search-paths.py" ]; then
+		if python3 "$HERE/verify-systemhook-search-paths.py" --kind launchdhook \
+			"$work/basebin/launchdhook.dylib" > "$work/verify-launchdhook.txt" 2>&1; then
+			pass "launchdhook.dylib carries the four search-path names"
+			sed -n 's/^/    /p' "$work/verify-launchdhook.txt"
+		else
+			fail "launchdhook.dylib does not set the search paths dyld reads; this tar would leave app processes on the shared-cache WebKit"
+			sed -n 's/^/    /p' "$work/verify-launchdhook.txt"
+		fi
+	else
+		fail "cannot find $HERE/verify-systemhook-search-paths.py to check launchdhook.dylib"
+	fi
+else
+	fail "tar is missing basebin/launchdhook.dylib"
+fi
+
 # The hooks themselves, read from the shipped bytes.  verify-dyldhook-merge.sh
 # asserts both new hooks on the iOS 16-17 and iOS 18+ dylibs, their absence on
 # the iOS 15 dylib, both legacy hooks on all six, and an empty llvm-nm -u.  All
