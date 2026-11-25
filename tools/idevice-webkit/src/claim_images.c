@@ -25,7 +25,8 @@
      Class WK_RTC... is implemented in both ... One of the two will be used.
 
    Loading the two first makes dyld resolve WebCore's weak dependencies to the
-   images already in the process. The measured count in that order is 0.
+   images already in the process. The same 7/7 loads then produce 0 of those
+   lines.
 
    2. The order cannot be reversed after a system WebKit has loaded.
 
@@ -39,22 +40,34 @@
 
    The 18.x WebKit exports a WTF signpost variable that only the 18.x
    JavaScriptCore defines; the 16.1 system JavaScriptCore has no such symbol,
-   and dyld refuses to leave an undefined data symbol. The reverse direction
-   works only because the /var/jb JavaScriptCore is claimed first: WebKit then
-   binds against it, and a later request for the system WebKit is answered with
-   the already loaded image.
+   and dyld refuses to leave an undefined data symbol. This failure is the
+   evidence that the race matters: a system WebKit that loaded first stays, and
+   the 18.3 copy can never replace it. It is not evidence about the two
+   identities. The reverse direction works because the /var/jb JavaScriptCore
+   is claimed first, so WebKit binds against it, and a later request for the
+   system WebKit is answered by the equal install name below.
 
-   3. dyld dedupes by install name, which is what makes the claim hold.
+   3. The dedupe works because the two identities are equal.
 
-   The /var/jb images claim the system install names (that is the rewrite
-   another mission makes in the payload), so after the seven loads a request
+   The /var/jb images already carry the system install names; /var/jb's
+   WebKit names itself /System/Library/Frameworks/WebKit.framework/WebKit.
+   That equality is what makes the claim hold: after the seven loads a request
    for /System/Library/Frameworks/WebKit.framework/WebKit returns the image
    already loaded from /var/jb, not a second one. The probe read
-   `handle equality: SAME` and an image count that did not move, and the
-   after-claim image was the /var/jb one (UUID 787DFAB1).
+   `SAME handle: YES (deduped)` and a WebKit image count that stayed at 1, and
+   the after-claim image was the /var/jb one (UUID 787DFAB1).
+
+   The order's job is therefore to make the image that wins the dedupe the
+   18.3 one, by mapping it before anything asks for the system path. It is not
+   enough on its own: if the two identities differed, dyld would map a second
+   image and the failure text of condition 2 is what follows. A rewrite of
+   LC_ID_DYLIB that gave the /var/jb copy its own identity would turn this
+   working result into that failure, which is why the payload keeps the system
+   names.
 
    So the claim has to run in the constructor, before the host's own code asks
-   for WebKit; a claim made afterwards is the failure text above. */
+   for WebKit; a claim made afterwards loses the dedupe and leaves the system
+   image in the process. */
 
 const char *const claim_image_paths[claim_image_count] = {
     "/var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",

@@ -115,12 +115,21 @@ Two conditions fix the order and neither is visible from the file names:
   _WTFSignpostIndirectLoggingEnabled`, because the 16.1 system
   `JavaScriptCore` does not define the symbol the 18.x `WebKit` needs.
 
-dyld dedupes by install name, so once these seven are in the process a host's
-own request for the system WebKit path returns the `/var/jb` image already
-loaded. The claim therefore has to run in the constructor, before the host's
-code asks for WebKit. It runs only for a process that passed the filter match,
-the copy check and the host check; a process that failed any of them returns
-before it loads anything.
+   dyld dedupes by install name, which is what makes the claim hold.
+
+   The /var/jb images already carry the system install names; /var/jb's
+   WebKit names itself /System/Library/Frameworks/WebKit.framework/WebKit.
+   That equality is what makes the claim hold: once these seven are in the
+   process, a host's own request for the system WebKit path returns the
+   /var/jb image already loaded, not a second one. The order's job is to make
+   the image that wins the dedupe the 18.3 one, by mapping it before anything
+   asks for the system path. It is not enough on its own: if the identities
+   differed, dyld would map a second image and the failure above is what
+   follows, which is why the payload keeps the system names.
+   The claim therefore has to run in the constructor, before the host's code
+   asks for WebKit. It runs only for a process that passed the filter match,
+   the copy check and the host check; a process that failed any of them returns
+   before it loads anything.
 
 ## Commands
 
