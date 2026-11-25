@@ -1009,7 +1009,7 @@ for path in sys.argv[2:]:
 
 同一套取法作用在设备上另外两个 basebin 文件上，`libjailbreak.dylib` 与 `jbctl` 的各两个切片也都命中 `basebin.tc`，所以这套取法本身是对的，不是只会读到「不在」。
 
-**补丁版不在表里这一差别，不足以单独解释 panic。** 有一条独立的实测反例：`systemhook.dylib` 的 234336 字节版本（`d7045cd4…`）同样不在 `basebin.tc` 里，而它在 2026-11-24 已经以那份字节在这台设备上被加载并生效过。`webkit-install-runbook.md` 记录 2026-11-24 05:58Z 设备上是 234336 字节，05:59Z 第六阶段六项读数通过；同一天的 (d-1) 判定输出里，一个由 `python3` 拉起的探针进程拿到了 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): ".../procursus/Library/WebKitOverride/NoSuchX.framework/NoSuchX"` 这一行，而这行只可能由已注入该进程的 `systemhook` 产生——它正是那个「不在表里」的二进制。
+**补丁版不在表里这一差别，不足以单独解释 panic。** 有一条独立的实测反例：`systemhook.dylib` 的 234336 字节版本（`d7045cd4…`）同样不在 `basebin.tc` 里，而它在 2026-11-24 已经以那份字节在这台设备上被加载并生效过。`webkit-install-runbook.md` 第五阶段那条「basebin 层已更新的设备上，(c) 与 (d-2) 仍可能失败」记录 2026-11-24 05:58Z 设备上 `systemhook.dylib` 是 234336 字节且 (d-1) 通过；该二进制自带的六项计数按整条 entry 计是 `2 2 2 2 4 2`，按裸子串计是 `4 2 4 2 4 2`（前四项多出来的那一份来自 `__XPC_DYLD_*` 里嵌的裸名）；这两个读数都是本节在本机 tar `d5bd3ef3…` 的副本上测的。同一天的 (d-1) 判定输出见该文件「第一步 (d-1)」里那段 `2026-11-24 05:58Z 实测输出`，一个由 `python3` 拉起的探针进程拿到了 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): ".../procursus/Library/WebKitOverride/NoSuchX.framework/NoSuchX"` 这一行，而这行只可能由已注入该进程的 `systemhook` 产生——它正是那个「不在表里」的二进制。
 
 2026-11-25T17:2xZ 查设备上现存的内核 panic 报告，只有八份：`Retired/` 下三份 `2026-11-25-1018…`、`1019…`、`1020…`，当前目录五份 `2026-11-26-0051…` 到 `0100…`；2026-11-24 一份都没有。（旧报告的保留期不由本文控制，11-24 缺少记录不等于绝对没发生过；这里只能说现存记录不支持「它 panicked」。）
 
