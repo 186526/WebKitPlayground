@@ -65,10 +65,13 @@ What it refuses, and why each combination is a defect rather than a preference:
     by `} } else if (m) {` is read as the same branch. A guard block ends where its `}` sits, not where
     its line ends: `if (m) { ... return; }` and `if (m) { ... } }` both close the block for the
     statements after them. An identifier that ends in `if` is not a branch head, so `m && notif(x)` is
-    read as the conjunction it is. A caller added to a third file is checked too, because the rule is a
-    property of the call and not a list of the two files that first had one; only the two functions' own
-    definitions and their header declarations are exempt, and that is decided by the file plus the
-    declaration, so a new caller inside an exempt file still has to be guarded.
+    read as the conjunction it is. Comments and literals are read through one lexical view rather than
+    at each site, so a `}` inside `"..."`, `'...'` or a comment does not close a block and a `{` inside
+    one does not hide the closure that follows it; a `//` inside a string does not cut the statement
+    short. A caller added to a third file is checked too, because the rule is a property of the call and
+    not a list of the two files that first had one; only the two functions' own definitions and their
+    header declarations are exempt, and that is decided by the file plus the declaration, so a new
+    caller inside an exempt file still has to be guarded.
 
   - An assignment to the member outside the setter. It may only be written from the setter's own
     parameter. `= true`, a compound `|=`, and a parenthesised `(member) =` all compile and all turn
@@ -91,6 +94,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 DEFAULT_PATCH = Path(__file__).resolve().parent.parent / "patches" / "ios16-ipc-message-number-translation.patch"
 
@@ -160,10 +164,131 @@ class Violation:
     detail: str
 
 
+# The one lexical view every structural decision reads. C++ comments and literals are file-wide rules,
+# and the checks below used to re-derive them at each site: `strip_comment` cut at the first `//` even
+# when it sat inside a string, and the brace counters read a `{` inside a literal as a block. That made
+# every round of review find a new spelling on the same seam. The scan below is the only place that
+# reads a character of the raw statement as lexical structure.
+#
+# The order is the rule, not a preference. A comment is skipped before a literal is looked for, because
+# an apostrophe in ordinary prose — `/* don't */`, `// it's` — would otherwise open a character literal
+# and swallow the rest of the line. A literal is skipped before a `//` or a `/*` inside it is looked for,
+# because `log("http://x")` and `"a /* b"` carry those sequences as data.
+#
+# What a literal's content is replaced with. `?` is not a token the condition grammar knows, not an
+# operator, and not a brace or parenthesis, so a condition that contains a literal stays unreadable to
+# the evaluator and is refused — which is the direction that matters. The quotes go too: leaving `"`
+# in place would let the next literal's opening quote be found inside the replacement.
+LITERAL_SENTINEL = "?"
+# A comment becomes a single space, which is what separates the code on either side of it without
+# joining two tokens into one.
+COMMENT_SENTINEL = " "
+# `R"delimiter(`, with an empty delimiter allowed. Matched at the position the scan is on, so the anchor
+# is the caller's loop rather than `^`.
+RAW_STRING_HEAD = re.compile(r'R"(?P<delimiter>[^()\\\s]{0,16})\(')
+
+
+class LexicalRegion(NamedTuple):
+    """One run of comment or literal text, by raw offset, and whether its delimiter pair closed."""
+
+    kind: str
+    start: int
+    end: int
+    closed: bool
+
+
+def lexical_regions(statement: str) -> list[LexicalRegion]:
+    """The spans of the statement that are comment or literal text.
+
+    A statement is a fragment of a line, so a `/*` with no `*/` runs to the end of the fragment and a
+    quote with no partner does the same; `closed` records which happened, because an unterminated
+    block comment makes the fragment malformed in a way callers still refuse.
+
+    A raw string is read by its own rule — `R"delim( ... )delim"` — and before the plain literal case,
+    because `R"x(})x"` would otherwise be read as `R` followed by the literal `"x(}"`, leaving the `)x"`
+    that follows as code. The delimiter is copied out of the opener, so a quote or a brace between the
+    parentheses is text here exactly as it is text to the compiler.
+    """
+    regions: list[LexicalRegion] = []
+    position = 0
+    length = len(statement)
+    while position < length:
+        if statement.startswith("/*", position):
+            end = statement.find("*/", position + 2)
+            closed = end >= 0
+            end = length if not closed else end + 2
+            regions.append(LexicalRegion("comment", position, end, closed))
+            position = end
+            continue
+        if statement.startswith("//", position):
+            regions.append(LexicalRegion("comment", position, length, True))
+            position = length
+            continue
+        raw = RAW_STRING_HEAD.match(statement, position)
+        if raw:
+            terminator = ")" + raw.group("delimiter") + '"'
+            end = statement.find(terminator, raw.end())
+            closed = end >= 0
+            end = length if not closed else end + len(terminator)
+            regions.append(LexicalRegion("literal", position, end, closed))
+            position = end
+            continue
+        opener = statement[position]
+        if opener in ('"', "'"):
+            cursor = position + 1
+            while cursor < length:
+                if statement[cursor] == "\\":
+                    cursor += 2
+                    continue
+                if statement[cursor] == opener:
+                    cursor += 1
+                    break
+                cursor += 1
+            closed = cursor <= length and cursor > position + 1 and statement[cursor - 1] == opener
+            end = min(cursor, length)
+            regions.append(LexicalRegion("literal", position, end, closed))
+            position = end
+            continue
+        position += 1
+    return regions
+
+
+def code_view(statement: str) -> str:
+    """The statement with comments and literal contents replaced, so structure can be read from it.
+
+    Length is not preserved: a region becomes one sentinel character, which is all the brace counters
+    and the condition evaluator need. The result is what `count_unmatched_closers`, `if_parts`,
+    `condition_implies_member`, `strip_comment` and the condition tokeniser read; none of them look at
+    the raw statement again.
+    """
+    view: list[str] = []
+    cursor = 0
+    for region in lexical_regions(statement):
+        view.append(statement[cursor:region.start])
+        view.append(COMMENT_SENTINEL if region.kind == "comment" else LITERAL_SENTINEL)
+        cursor = region.end
+    view.append(statement[cursor:])
+    return "".join(view)
+
+
+def has_unterminated_block_comment(statement: str) -> bool:
+    """True when a `/*` in the statement has no `*/` before the statement ends."""
+    return any(region.kind == "comment" and not region.closed
+               for region in lexical_regions(statement))
+
+
 def strip_comment(line: str) -> str:
-    """Drop a trailing // comment so a mention in prose is not read as code."""
-    index = line.find("//")
-    return line if index < 0 else line[:index]
+    """Drop a trailing comment so a mention in prose is not read as code.
+
+    Reads the lexical regions rather than searching the raw text, so a `//` inside a string is left
+    alone: `log("http://x")` used to be cut at the `//` and lose the rest of the line, including the
+    brace that closed a guard.
+    """
+    for region in lexical_regions(line):
+        if region.kind == "comment" and line.startswith("//", region.start):
+            return line[:region.start]
+    return line
+
 
 
 def added_code_lines(patch: str) -> list[str]:
@@ -252,9 +377,10 @@ def added_code_statements(patch: str) -> list[tuple[str, str]]:
 def check_no_setter_call(patch: str) -> list[Violation]:
     violations = []
     for path, statement in added_code_statements(patch):
-        if not SETTER.search(statement):
+        view = code_view(statement)
+        if not SETTER.search(view):
             continue
-        if any(hint in statement for hint in DECLARATION_HINTS):
+        if any(hint in view for hint in DECLARATION_HINTS):
             continue
         violations.append(
             Violation(
@@ -324,10 +450,14 @@ def count_unmatched_closers(statement: str) -> int:
     `}`, `} else if (m) {`, `x(); }`, `} }` and `}}` all count, which is the point — the closure of a
     guard block ends a statement wherever the brace sits on the line, and counting only the leading run
     let a guard stay on the stack after `return; }` had closed it.
+
+    The braces are read from the lexical view, so a `{` or `}` that is literal or comment text is not
+    counted. `RELEASE_LOG(IPC, "closing {"); }` closes one block; without the view its string's `{`
+    cancelled the real `}`, the guard stayed on the stack, and the call that followed was accepted.
     """
     unmatched = 0
     opened = 0
-    for character in statement:
+    for character in code_view(statement):
         if character == "{":
             opened += 1
         elif character == "}":
@@ -372,11 +502,11 @@ def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
         blocks.append(list(reversed(stack)))
         for _ in range(min(count_unmatched_closers(statement), len(stack))):
             stack.pop()
-        if statement.endswith("{"):
+        if code_view(statement).endswith("{"):
             opener = statement
             if statement == "{" and index > 0 and statements[index - 1][0] == path:
                 previous = statements[index - 1][1]
-                if SETTER_DEFINITION.match(previous):
+                if SETTER_DEFINITION.match(code_view(previous)):
                     opener = previous
             stack.append(opener)
     return blocks
@@ -398,7 +528,6 @@ THIS_PREFIX = re.compile(r"\bthis\s*->\s*")
 # last of them wins `heads[-1]` and the condition is cut inside the callee's name.
 IF_HEAD = re.compile(r"^(?:else\s+)?if\b")
 IF_BRANCH = re.compile(r"(?:else\s+)?\bif\s*\(")
-BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 # The three wrappers that return their argument's boolean value, so a guard written with one asks the
 # same question as the bare condition and has to be read the same way.
@@ -432,8 +561,15 @@ def if_parts(statement: str) -> tuple[str, str] | None:
     is a braceless guard that a comment happens to follow. `//` comments never reach here: whole-line
     comments are dropped when the patch is read, and a trailing one is cut before statements are
     joined. An unterminated block comment means the statement is malformed and the answer is None.
+
+    Comments and literals are read through `code_view`, so a `}` inside `"..."`, `'...'` or a comment
+    cannot close a branch and a `/*` inside a string cannot be mistaken for a comment. The condition is
+    taken from the raw statement but cut at offsets the view agrees on, because the condition text has
+    to keep its identifiers; a literal in the condition becomes the sentinel, which the evaluator
+    refuses.
     """
-    stripped = statement.strip()
+    view = code_view(statement)
+    stripped = view.strip()
     # A branch that follows a closing brace starts with it: `} else if (m) {` heads the branch it
     # opens, and the leading `}` belongs to the branch above. Dropping it here is what lets the chain
     # read that branch as a guard; `} else {` still fails the head test below.
@@ -453,11 +589,13 @@ def if_parts(statement: str) -> tuple[str, str] | None:
     close = matching_paren(stripped, open_paren)
     if close < 0:
         return None
-    remainder = stripped[close + 1:]
-    stray = remainder.find("/*")
-    if stray >= 0 and "*/" not in remainder[stray:]:
+    remainder = stripped[close + 1:].strip()
+    # A comment region is one space in the view, so ``if (m) /* guard */`` arrives here with an empty
+    # remainder. An unterminated one still has to be refused: the view cannot tell it from no comment
+    # at all, so the raw statement is asked.
+    if has_unterminated_block_comment(statement):
         return None
-    return stripped[open_paren + 1:close], BLOCK_COMMENT.sub("", remainder).strip()
+    return stripped[open_paren + 1:close], remainder
 
 
 def matching_paren(text: str, open_index: int) -> int:
@@ -669,7 +807,7 @@ def chain_has_setter(chain: list[str]) -> bool:
     body opened on its own line to the definition above it, so both spellings arrive here as the same
     chain element.
     """
-    return any(SETTER_DEFINITION.match(block) for block in chain)
+    return any(SETTER_DEFINITION.match(code_view(block)) for block in chain)
 
 
 def assignment_in_setter(chain: list[str], statement: str, value: str) -> bool:
@@ -685,22 +823,25 @@ def assignment_in_setter(chain: list[str], statement: str, value: str) -> bool:
         return False
     if chain_has_setter(chain):
         return True
-    return bool(SETTER_HEADER.match(statement))
+    return bool(SETTER_HEADER.match(code_view(statement)))
 
 
-def inline_guard_covers(statement: str, call_start: int) -> bool:
+def inline_guard_covers(view: str, call_start: int) -> bool:
     """True when a member `if` opens a block that is still open at `call_start`.
 
     A one-line form such as `void f() { if (m_shouldTranslateMessageNames) { call(x); } }` is a
     correctly guarded call, but it is a single statement, so the brace stack has no enclosing block to
     report. Counting depth from the guard's `{` to the call keeps that case passing without accepting
     `if (m_shouldTranslateMessageNames) { } call(x);`, where the block has already closed.
+
+    Both arguments are in `code_view` coordinates: the caller finds the call in the view, so a brace in
+    a literal or a comment is not a depth change here.
     """
-    for offset, block in brace_opens(statement):
+    for offset, block in brace_opens(view):
         if offset >= call_start or not condition_implies_member(block):
             continue
         depth = 0
-        for character in statement[offset:call_start]:
+        for character in view[offset:call_start]:
             if character == "{":
                 depth += 1
             elif character == "}":
@@ -712,24 +853,27 @@ def inline_guard_covers(statement: str, call_start: int) -> bool:
     return False
 
 
-def brace_opens(statement: str) -> list[tuple[int, str]]:
-    """Every `{` in the statement, paired with the clause that opens it.
+def brace_opens(view: str) -> list[tuple[int, str]]:
+    """Every `{` in the view, paired with the clause that opens it.
 
     Nested braces are included: a function written on one line still has its guard's `{` inside the
     function's `{`, and the inner one is the brace that decides whether the call is guarded. The clause
     is the text since the previous `;` or `}` at the same nesting, so a guard that follows another
     statement is read as the `if` rather than as everything before it.
+
+    Takes a `code_view` string, not a raw statement: an offset returned here is compared against call
+    offsets found in the same view, and a brace that is literal text must not open a block.
     """
     opens = []
     clause_starts = [0]
     paren_depth = 0
-    for index, character in enumerate(statement):
+    for index, character in enumerate(view):
         if character == "(":
             paren_depth += 1
         elif character == ")":
             paren_depth = max(0, paren_depth - 1)
         elif character == "{":
-            opens.append((index, statement[clause_starts[-1]:index].strip()))
+            opens.append((index, view[clause_starts[-1]:index].strip()))
             clause_starts.append(index + 1)
         elif character == "}":
             if len(clause_starts) > 1:
@@ -769,29 +913,33 @@ def check_read_sites(patch: str) -> list[Violation]:
     blocks = enclosing_blocks(statements)
     violations = []
 
-    def is_exempt(path: str, statement: str) -> bool:
+    def is_exempt(path: str, view: str) -> bool:
         """True for the translation's own definition and for the header's declarations.
 
         These are the statements where the call is the translation rather than a use of it. The test
         is the file plus the declaration shape, so adding a caller in either file still has to be
         guarded; a list of call sites would have the hole this check was rewritten to close.
         """
-        return path in DEFINITION_FILES and bool(TRANSLATION_DEFINITION.match(statement))
+        return path in DEFINITION_FILES and bool(TRANSLATION_DEFINITION.match(view))
 
     def guarded(index: int, call_start: int) -> bool:
         if chain_has_guard(blocks[index]):
             return True
         if braceless_guard_before(statements, index):
             return True
-        return inline_guard_covers(statements[index][1], call_start)
+        return inline_guard_covers(code_view(statements[index][1]), call_start)
 
     # Every added statement that calls the translation has to sit under the member, not just the two
     # files that were the read sites when this check was written. Every call in a statement is checked,
     # not only the first: two calls on one line would otherwise pass on the strength of one guard.
+    #
+    # The call is found in the lexical view, so a mention of the function inside a string or a comment
+    # is not a call, and the offset it carries is in the same coordinates as `brace_opens`.
     for index, (path, statement) in enumerate(statements):
-        if is_exempt(path, statement):
+        view = code_view(statement)
+        if is_exempt(path, view):
             continue
-        for call in TRANSLATE_CALL.finditer(statement):
+        for call in TRANSLATE_CALL.finditer(view):
             if guarded(index, call.start()):
                 continue
             chain = blocks[index]
@@ -808,7 +956,8 @@ def check_read_sites(patch: str) -> list[Violation]:
     for path, call, description in READ_SITES:
         matches = [(index, found.start(), statement)
                    for index, (line_path, statement) in enumerate(statements)
-                   if line_path == path for found in [TRANSLATE_CALL.search(statement)] if found]
+                   if line_path == path
+                   for found in [TRANSLATE_CALL.search(code_view(statement))] if found]
         if not matches:
             violations.append(
                 Violation(
@@ -834,7 +983,7 @@ def check_read_sites(patch: str) -> list[Violation]:
             )
 
     for index, (path, statement) in enumerate(statements):
-        for found in ASSIGNMENT.finditer(statement):
+        for found in ASSIGNMENT.finditer(code_view(statement)):
             if assignment_in_setter(blocks[index], statement, found.group(1).strip()):
                 continue
             violations.append(

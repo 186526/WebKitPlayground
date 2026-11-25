@@ -482,6 +482,55 @@ IDENTIFIER_ENDING_IN_IF = (
      "if (m_shouldTranslateMessageNames && std::count_if(v.begin(), v.end(), p) > 0) {", 1),
 )
 
+# Round 12: one lexical view for comments and literals. Each entry is a body line and the exit code the
+# whole fixture has when the call is INSIDE the guard. A brace inside a string, a character constant or
+# a comment is text, not structure, so it must not close the guard; the fixture is correct code and each
+# of these exited 1 while the brace counters read the raw statement.
+BRACES_IN_TEXT = (
+    ("a brace in a string literal inside the guard passes",
+     'RELEASE_LOG(IPC, "closing }");', 0),
+    ("a brace in a character constant inside the guard passes",
+     "char c = '}';", 0),
+    ("a brace in a block comment inside the guard passes",
+     "auto x = 1; /* } */", 0),
+    ("an opening brace in a string does not hide a character constant",
+     "log(\"{\"); char c = '}';", 0),
+)
+
+# The other direction: a brace in a string must not cancel the real closure, and a `//` inside a string
+# must not cut the statement before that closure. Both fixtures end the guard inside the string's own
+# line and then call outside it, so the answer is 1 — the call is not guarded.
+BRACES_IN_TEXT_MASKING_CLOSURE = (
+    ("an opening brace in a string does not hide the closure",
+     'RELEASE_LOG(IPC, "closing {"); }', 1),
+    ("a slash pair in a string does not cut the statement before the closure",
+     'log("http://x"); }', 1),
+    ("a closing brace in a string does not close the guard by itself",
+     'log("}");', 0),
+)
+
+# `code_view` itself, on the shapes the tower named. The expected string is exact so a change in the
+# sentinel shows up here rather than in a downstream judgement. A raw string is one literal including
+# its `R"delim(` head; a brace in it is text.
+#
+# The last entries pin the ORDER: a comment is skipped before a literal is looked for. A pass that
+# replaced literals first would find the apostrophe in `/* don't */` and treat it as a character
+# constant's opener, so `/* don't */ log('}');` would leave `/* don` as code and lose the `)` and `;`.
+CODE_VIEW_CASES = (
+    ("Locker l { x };", "Locker l { x };"),
+    ("bool m_x { false };", "bool m_x { false };"),
+    ('R"x(})x"', "?"),
+    ('"\\\\\\""', "?"),
+    ("/* don't */", " "),
+    ("// it's }", " "),
+    ('log(R"x(})x"); }', "log(?); }"),
+    ("x(); /* don't */ }", "x();   }"),
+    ("x(); /* it's { */ }", "x();   }"),
+    ("/* a \"q\" */ }", "  }"),
+    ("/* don't */ log('}');", "  log(?);"),
+    ("x(); /* don't */ log('}'); }", "x();   log(?); }"),
+)
+
 
 MULTILINE_SETTER = (
     "+void setShouldTranslateMessageNames(bool shouldTranslate)\n"
@@ -918,6 +967,33 @@ for description, guard, expected_code in IDENTIFIER_ENDING_IN_IF:
         None if expected_code == 0 else "calls the translation outside the member's guard",
     ),)
 
+for description, body, expected_code in BRACES_IN_TEXT:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void f() {\n"
+        + "+    if (m_shouldTranslateMessageNames) {\n"
+        + "+        " + body + "\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+        expected_code,
+        None if expected_code == 0 else "calls the translation outside the member's guard",
+    ),)
+
+for description, body, expected_code in BRACES_IN_TEXT_MASKING_CLOSURE:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void f() {\n"
+        + "+    if (m_shouldTranslateMessageNames) {\n"
+        + "+        " + body + "\n"
+        + "+    translateOutgoingMessageName(x);\n"
+        + "+}\n",
+        expected_code,
+        None if expected_code == 0 else "calls the translation outside the member's guard",
+    ),)
+
 
 def check_needles_are_unique_and_necessary() -> int:
     """Assert each rationale needle occurs exactly once in the real patch's prose, and is necessary.
@@ -1053,6 +1129,16 @@ def main() -> int:
         return 1
 
     failures += check_needles_are_unique_and_necessary()
+
+    # The lexical view itself, so a change in the sentinel or in where a region ends is reported as
+    # such rather than through a judgement it happens to shift.
+    for statement, expected_view in CODE_VIEW_CASES:
+        actual = CHECK.code_view(statement)
+        if actual != expected_view:
+            failures += 1
+            print("FAIL: code_view(%r) is %r, expected %r" % (statement, actual, expected_view))
+        else:
+            print("ok: code_view(%r) is %r" % (statement, actual))
 
     if failures:
         print("%d case(s) failed" % failures)
