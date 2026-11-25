@@ -10,7 +10,7 @@
 2. 第一个字段 `auxiliaryProcessParameters` 的类型在两版就不同宽：18.3 多一个 `std::unique_ptr<HashSet<String>>` 成员。所以从偏移 0 开始，两版的内存布局与编码宽度都不一致。
 3. 设备上出现同一条 `PAC_EXCEPTION, code 1` 崩溃签名有两种配置，`build-state.md` 记录的是第二种：
    - 配置 A：`WebKit`、`WebCore`、`JavaScriptCore` 都是 18.3 自建版本，端点 5 个，WebContent 收到第一条 IPC 后崩溃。
-   - 配置 B：只有 `WebCore` 与 `JavaScriptCore` 是 18.3，`WebKit.framework` 仍是系统 16.1（`build-state.md:337-352`）。
+   - 配置 B：只有 `WebCore` 与 `JavaScriptCore` 是 18.3，`WebKit.framework` 仍是系统 16.1（`build-state.md:412-420`）。
 
    两种配置下的责任链不同，见第 4 节。在配置 B 下，`InitializeWebProcess` 的发送端（`WebProcessPool`）与接收端（`WebProcess`）都在同一个 16.1 二进制里，编解码用同一份字段表，`decode` 必然自洽，所以第 1 节的字段表差异不是该配置的直接原因。在配置 A 下同理，两端都是 18.3。**两种配置下，结构体字段表差异都不能单独解释这条崩溃**：配置 B 的原因是 WebKit 与 WebCore 跨版本混用导致的共享类型布局不一致，配置 A 的原因本文无法归因。
 4. 无论归因到哪一层，这个结构体的差异都**不能靠 shim 修正**。理由见第 5 节。
@@ -380,7 +380,7 @@ InitializeWebProcess(struct WebKit::WebProcessCreationParameters processCreation
 同一条崩溃签名在两种配置下都出现过：
 
 - 配置 A：`WebKit`、`WebCore`、`JavaScriptCore` 都是 18.3 自建版本（任务背景第 3 条）。
-- 配置 B：只有 `WebCore` 与 `JavaScriptCore` 是 18.3，`WebKit.framework` 仍是系统 16.1（`build-state.md:337-352`）。
+- 配置 B：只有 `WebCore` 与 `JavaScriptCore` 是 18.3，`WebKit.framework` 仍是系统 16.1（`build-state.md:412-420`）。
 
 两种配置的崩溃栈相同：
 
@@ -422,7 +422,7 @@ termination: namespace = PAC_EXCEPTION, code = 1
 
 只有两个可行层次，取舍如下。
 
-**层次一：统一 WebKit 与 WebCore 的来源，让整个三元组来自同一个 tag 编译。** 这是消除问题的办法，不是打补丁的办法。`build-state.md:479-483` 记录的两条硬约束是：换成 18.3 的 `WebKit` 会让 XPC 端点归零；留在 16.1 的 `WebKit`，`WebKit` 与 18.3 `WebCore` 之间会因共享类型布局不一致而崩溃（第 4 节配置 B）。所以这一层要同时解决「18.3 的 `WebKit` 为什么让端点归零」，而不是继续混用。配置 A 说明即使整个三元组都换成 18.3，这条崩溃仍未消失，因此还要另外排查 18.3 与 16.1 系统组件之间的接口假设（第 4 节末段）。
+**层次一：统一 WebKit 与 WebCore 的来源，让整个三元组来自同一个 tag 编译。** 这是消除问题的办法，不是打补丁的办法。`build-state.md:587-590` 记录的两条硬约束是：换成 18.3 的 `WebKit` 会让 XPC 端点归零；留在 16.1 的 `WebKit`，`WebKit` 与 18.3 `WebCore` 之间会因共享类型布局不一致而崩溃（第 4 节配置 B）。所以这一层要同时解决「18.3 的 `WebKit` 为什么让端点归零」，而不是继续混用。配置 A 说明即使整个三元组都换成 18.3，这条崩溃仍未消失，因此还要另外排查 18.3 与 16.1 系统组件之间的接口假设（第 4 节末段）。
 
 **层次二：在 IPC 与 framework 边界上做显式转换。** 若坚持混用，需要改的文件是：
 

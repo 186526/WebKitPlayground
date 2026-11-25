@@ -4,7 +4,7 @@
 >
 > 本文判定路线 A 为 no-go。塔的裁定是后续按路线 B 推进，因此本文作为决策记录保留，**不作为构建许可**：它记的是「哪几条必须为真」，不是「可以开始构建」。第二节已写明本文的 go 判定针对路线 B，路线 A 保持记录但不再作为候选推进。
 >
-> 正文有两条引用已不在读者会看到的行上，正文按本次落盘的要求未改，在此登记实际位置。一、第 5.2 节第 3 条的 `build-state.md:267`（GPU `.xpc` 的 `procPath`）在调查所用的 `a792cca` 上正确，该段落现在位于外层仓库 `c7ccc3c` 的 `build-state.md:299`。二、第 5.2 节第 3 条末尾引的 `docs/ios16-launchd-xpc-resolution-gap.md:237-244` 指的是该文档讨论「反证二」的那一条，它在本仓库的第 234 行；237-244 是紧随其后的「因此本文能给定论的部分」。正文其余 `build-state.md` 行号（405-414、478-491、513-533、535-548、907、937-939）在 `c7ccc3c` 上仍落在原处。
+> 正文有两条引用已不在读者会看到的行上。一、第 5.2 节第 3 条的 `build-state.md:336`（GPU `.xpc` 的 `procPath`）在调查所用的 `a792cca` 上正确，该段落在外层仓库 `c7ccc3c` 上移到 `:299`，经 M95 与 M97 的合并后现为 `:336`，正文已按 `:336` 改写。二、第 5.2 节第 3 条末尾引的 `docs/ios16-launchd-xpc-resolution-gap.md:237-244` 指的是该文档讨论「反证二」的那一条，它在本仓库的第 234 行；237-244 是紧随其后的「因此本文能给定论的部分」。正文其余 `build-state.md` 行号原先按 `c7ccc3c` 写成 405-414、478-491、513-533、535-548、907、937-939，现在按当前文件统一为 442-450、515-528、550-570、572-585、954、984-986。
 
 本文回答一个问题：**在触发下一次 4 小时 42 分的 WebKit 构建之前，哪几条必须为真，以及现在判定为 go 还是 no-go。**
 
@@ -41,7 +41,7 @@ dyld hook 这一半已经齐了：补丁在仓库里，构建产物里在，设�
 
 ## 三、本文不使用的证据
 
-- **`build-state.md` 第三轮的旧 A/B 表全部作废。** 撤回声明在 `build-state.md:405-414`：设备上没有 `pkill`，`pgrep` 也没有，脚本里的终止命令静默失败，每次测的都是同一个旧进程。任何以「放进 `WebKit.framework` 就让端点归零」为论据的推论都作废。
+- **`build-state.md` 第三轮的旧 A/B 表全部作废。** 撤回声明在 `build-state.md:442-450`：设备上没有 `pkill`，`pgrep` 也没有，脚本里的终止命令静默失败，每次测的都是同一个旧进程。任何以「放进 `WebKit.framework` 就让端点归零」为论据的推论都作废。
 - **翻译补丁里 2807 条映射不能作为任一方向的证据。** 该表由 `Safari-614.1.9` 生成，不是设备在跑的 16.1。`InitializeConnection` 在前者是 2444、在后者是 2478，所以设备发出的握手消息被翻成一条无关消息。M87 重生成该表。本文的全部结论都不依赖这张表，路线 A 的 no-go 判据也不依赖它：第 4.1 条只用「键从未被写过」这一个事实，与表无关。
 - **16.1 的消息计数一律取出货树。** 见第七节的口径。
 
@@ -255,7 +255,7 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/UIProcess/RemoteLayerTree/
 
 ### 5.2 之前看起来在反驳路线 B 的读数，要按崩溃类型拆开
 
-`build-state.md:513-533` 那张表确实显示「放进 `WebKit` 二进制，端点从 8 归零」。但同一节的崩溃报告给出了原因：
+`build-state.md:550-570` 那张表确实显示「放进 `WebKit` 二进制，端点从 8 归零」。但同一节的崩溃报告给出了原因：
 
 ```
 termination: namespace = DYLD, indicator = "Symbol missing", code = 4
@@ -266,13 +266,13 @@ reasons: Symbol not found: _WTFSignpostIndirectLoggingEnabled
 
 这是 dyld 在 `dyld4::prepare` 阶段中止了 **UI 进程**，进程没活到注册端点。这张表因此不能用来判断 launchd 会不会解析。
 
-补上自建 `JavaScriptCore` 之后 dyld 中止消失（`build-state.md:535-548`）：进程活着，但端点仍是 0，`failed lookup: com.apple.WebKit.Networking` 累计 271 次。**这条才是对「launchd 会否解析」有意义的读数，它指向「不会」。** 但它有三处限定，任何把它当定论的做法都不成立：
+补上自建 `JavaScriptCore` 之后 dyld 中止消失（`build-state.md:572-585`）：进程活着，但端点仍是 0，`failed lookup: com.apple.WebKit.Networking` 累计 271 次。**这条才是对「launchd 会否解析」有意义的读数，它指向「不会」。** 但它有三处限定，任何把它当定论的做法都不成立：
 
 1. 那次运行时覆盖目录里**有** `XPCServices`（`prune_xpc_services` 到 2026-11-25 00:20 的提交 `5b5099e` 才加进 `scripts/install-webkit-override.sh`，此前 `cp -a` 整目录复制会带上）。所以那次测的是「有 `XPCServices` 仍不解析」。
-2. `_CodeSignature` 缺失从未被排除过影响。`build-state.md:937-939` 明确写着这一点。
-3. 有一处记录与「索引外一律查不到」相冲突：`build-state.md:267` 的 `procPath` 指向过 `/var/jb/.../XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU`。`docs/ios16-launchd-xpc-resolution-gap.md:237-244` 把它列为该文档机制假设的反证之一，未定案。
+2. `_CodeSignature` 缺失从未被排除过影响。`build-state.md:984-986` 明确写着这一点。
+3. 有一处记录与「索引外一律查不到」相冲突：`build-state.md:336` 的 `procPath` 指向过 `/var/jb/.../XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU`。`docs/ios16-launchd-xpc-resolution-gap.md:237-244` 把它列为该文档机制假设的反证之一，未定案。
 
-另一个方向的读数也在：`build-state.md:478-491` 记录放进二进制后 Chrome 进程里两份 `WebKit` 并存（`/System/...` 与 `JB/Library/WebKitOverride/...`），主线程停在 `mach_msg`，不崩，只是不再请求 WebKit 服务。这是 UI 进程**确实加载了我们那份二进制**的直接证据，路线 B 想要的加载行为已经发生。
+另一个方向的读数也在：`build-state.md:515-528` 记录放进二进制后 Chrome 进程里两份 `WebKit` 并存（`/System/...` 与 `JB/Library/WebKitOverride/...`），主线程停在 `mach_msg`，不崩，只是不再请求 WebKit 服务。这是 UI 进程**确实加载了我们那份二进制**的直接证据，路线 B 想要的加载行为已经发生。
 
 ### 5.3 路线 B 的判定
 
@@ -345,7 +345,7 @@ dyld hook、搜索路径注入、18.3 框架安装、UI 进程加载证据，四
 ## 九、未验证项
 
 1. **launchd 的解析行为**（第五节）。本文全部 go/no-go 判定中唯一的未测项，需要设备。
-2. **`_CodeSignature` 缺失的影响**。覆盖目录版 `WebKit.framework` 没有 `_CodeSignature`（`build-state.md:907`），从未实测排除。
+2. **`_CodeSignature` 缺失的影响**。覆盖目录版 `WebKit.framework` 没有 `_CodeSignature`（`build-state.md:954`），从未实测排除。
 3. **`__XPC_DYLD_FRAMEWORK_PATH` 的转交行为**。系统桩没有 `LC_DYLD_ENVIRONMENT`，它加载哪份 `WebKit` 只能靠这个转交；launchd、libxpc、xpcproxy 三处都查不到实现。
 4. **494 条载荷变更没有被按方向分类**。本文只对 31 条 reply 变更与 `CommitLayerTree` 做了方向判定。
 5. **路线 A 的 `WebProcessCreationParameters` 字段缺项没有逐条核对**。两版结构体互不可读已记录在 `docs/ios16-webprocess-creation-parameters-diff.md`，但「哪些字段可以被默认值替代、哪些是承载性的」没有结论。
