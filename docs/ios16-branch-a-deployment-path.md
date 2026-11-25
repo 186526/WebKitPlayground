@@ -305,7 +305,7 @@ ls -t /var/mobile/Library/Logs/CrashReporter/*.ips | head -5
 
 - 条件 1 不成立（计数下降）→ 不是 (A)。若降到 2 或更低且条件 2 成立，是 (B)；若落在中间值（3 之类），判 `UNKNOWN`，重测，不要当倾向证据。
 - 条件 2 不成立 → 本次读数对 (A)/(B) **不作数**，先解决缺失符号或 ABI 问题。`DYLD` 类按第五节第 1 行处理；`PAC_EXCEPTION` 说明两端不同代，按第三节查路径。
-- 条件 3 不成立而条件 1、2 成立 → 端点存在但覆盖没进 helper。这不是 (A)，是另一类故障：`PROBE_REASON=four_services_but_every_new_helper_loaded_the_system_framework`（脚本 `:1049-1051`）。此时先回到第 3 步核 `.xpc` 的路径是否真的被采纳。
+- 条件 3 不成立而条件 1、2 成立 → 端点存在但覆盖没进 helper。这不是 (A)，是另一类故障：`PROBE_REASON=four_services_but_every_new_helper_loaded_the_system_framework`（脚本 `:1391-1393`，1722 行版）。此时先回到第 3 步核 `.xpc` 的路径是否真的被采纳。
 - 本轮完全没有新 helper → 什么都没测到。`PROBE_REASON=no_new_helper_after_launch`。它与「新 helper 全部加载系统 framework」是**不同的事实**，合并两者会让「一次没起出 helper 的启动」被读成「launchd 只认索引内路径」。
 
 ### 第 5 步：确认 UI 进程与 helper 同代（(A) 下应自动成立，但必须证明）
