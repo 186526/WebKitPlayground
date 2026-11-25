@@ -26,7 +26,24 @@ cases are the ways the switch can come back and the ways the check could pass by
   lines;
   a translation call added to a third file, or to an exempt file outside a declaration, must fail,
   because the guard is a property of every call rather than of the two files that first had one,
-  while a correctly guarded one-line call must pass.
+  while a correctly guarded one-line call must pass;
+  a guard whose condition mentions the member but does not imply it must fail — a negation, an
+  equality with `false`, a disjunction with a fallback — because those run the translation exactly
+  when the switch is off, and the boolean structure is evaluated rather than searched for the name;
+  a guard wrapped in `UNLIKELY`, `LIKELY` or `static_cast<bool>` must pass, because those return
+  their argument's value and the send path is the place a future edit would wrap it, while an
+  unrelated call in the same position must still fail;
+  a guard written with its body on the same line — `if (m) { return; }`, `if (m) { }`, `if (m) goto
+  done;` — must fail for the statement after it, because such an `if` is complete and guards nothing;
+  a guard whose own body does not open where the statement ends must fail — `if (m) { } else if (ok)
+  {`, `if (m) { } else {`, `if (m) { x(); } do {` — because the brace belongs to a branch that can
+  run with the member false, while an `else if` on the member itself must pass;
+  a braceless guard followed by a comment must pass, because the comment is not part of the shape.
+
+Open boundary: a call that follows a closed guard block inside the same statement — `if (m) { x();
+} call;` — is currently refused, because the whole statement's block chain is read at the statement's
+start. That is the safe direction (a false reject, not a false accept), and tightening it needs a
+change in how statements are cut.
 
 The "as committed" case reads the real patch, so a patch edited without updating this check fails
 here rather than in the build. Two further passes read the real patch too: every rationale needle
@@ -352,6 +369,46 @@ BRACELESS_BODY_SHAPES = (
     ("a call after a same-line goto body fails", "+    if (m_shouldTranslateMessageNames) goto done;\n"),
     ("a call after a same-line wrapped return body fails",
      "+    if (UNLIKELY(m_shouldTranslateMessageNames)) { return; }\n"),
+)
+
+# Round 10's P2-1: only a statement whose own body opens where the statement ends guards what follows.
+# `if (m) { } else if (ok) {` ends with a brace and looked guarded, but the brace belongs to the `else`
+# branch, which runs when the member is false. Each entry here is a condition that implies the member
+# and a tail that makes the following call unguarded anyway.
+GUARD_TAIL_SHAPES = (
+    ("a call after an else-if branch on another condition fails",
+     "+    if (m_shouldTranslateMessageNames) { } else if (m_ready) {\n"),
+    ("a call after an else branch fails",
+     "+    if (m_shouldTranslateMessageNames) { } else {\n"),
+    ("a call after an else branch of a returning guard fails",
+     "+    if (m_shouldTranslateMessageNames) { return; } else {\n"),
+    ("a call after a do loop that follows the guard fails",
+     "+    if (m_shouldTranslateMessageNames) { m_ready = true; } do {\n"),
+    ("a call after a while loop that follows the guard fails",
+     "+    if (m_shouldTranslateMessageNames) { m_ready = true; } while (false) {\n"),
+)
+
+# Round 10's P2-1, the other direction: an `else if` on the member is a guard for its own body. Reading
+# only the first branch, or refusing any statement that does not start with `if`, called this a bypass.
+ELSE_IF_GUARDS = (
+    ("a call under an else-if on the member passes",
+     "+    if (m_ready) { } else if (m_shouldTranslateMessageNames) {\n"),
+    ("a call under a multi-line else-if on the member passes",
+     "+    if (m_ready) {\n"
+     "+        m_started = true;\n"
+     "+    } else if (m_shouldTranslateMessageNames) {\n"),
+)
+
+# Round 10's P2-2: a block comment between the condition and the body. The comment is not part of the
+# shape, so it is stripped from the remainder before the `""`/`"{"` decision; leaving it in made this
+# correct code fail. `//` was already cut when the patch was read.
+COMMENTED_BRACELESS_GUARDS = (
+    ("a braceless guard followed by a block comment passes",
+     "+    if (m_shouldTranslateMessageNames) /* the switch */\n"
+     "+        encoder->setMessageName(translateOutgoingMessageName(name));\n"),
+    ("a braceless guard followed by a line comment passes",
+     "+    if (m_shouldTranslateMessageNames) // the switch\n"
+     "+        encoder->setMessageName(translateOutgoingMessageName(name));\n"),
 )
 
 # Round 7's P2-4: the setter's body was matched as one literal line, so a body written on its own lines
@@ -716,6 +773,43 @@ for description, guard in BRACELESS_BODY_SHAPES:
         + "+}\n",
         1,
         "calls the translation outside the member's guard",
+    ),)
+
+for description, guard in GUARD_TAIL_SHAPES:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void bad() {\n"
+        + guard
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+        1,
+        "calls the translation outside the member's guard",
+    ),)
+
+for description, guard in ELSE_IF_GUARDS:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + guard
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+        0,
+        None,
+    ),)
+
+for description, guard in COMMENTED_BRACELESS_GUARDS:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + guard
+        + "+}\n",
+        0,
+        None,
     ),)
 
 

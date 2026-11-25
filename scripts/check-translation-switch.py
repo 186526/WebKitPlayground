@@ -55,12 +55,16 @@ What it refuses, and why each combination is a defect rather than a preference:
     transparent: they return their argument's boolean value, and the guard is a hot-path check that a
     future edit would plausibly wrap in one, so they are read as the condition they wrap rather than
     refused. A guard written with its body on the same line — `if (m) { return; }`, `if (m) { }`,
-    `if (m) goto done;` — is a complete statement that guards nothing after it; only an `if` with
-    nothing after its closing parenthesis guards the next statement. A caller added to a third file is
-    checked too, because the rule is a property of the call and not a list of the two files that first
-    had one; only the two functions' own definitions and their header declarations are exempt, and that
-    is decided by the file plus the declaration, so a new caller inside an exempt file still has to be
-    guarded.
+    `if (m) goto done;` — is a complete statement that guards nothing after it, and so is one whose
+    body does not open where the statement ends: `if (m) { } else if (ok) {` and `if (m) { x(); } do {`
+    end with a brace that belongs to a branch which runs with the member false. Only two shapes put
+    the guarded body right after the condition — nothing at all (the next statement is the body) or an
+    opening `{`. A comment between the two is not part of the shape. An `else if (m) {` guards its own
+    branch, and the last branch is the one read, so `if (ready) { } else if (m) {` is correctly
+    guarded. A caller added to a third file is checked too, because the rule is a property of the call
+    and not a list of the two files that first had one; only the two functions' own definitions and
+    their header declarations are exempt, and that is decided by the file plus the declaration, so a
+    new caller inside an exempt file still has to be guarded.
 
   - An assignment to the member outside the setter. It may only be written from the setter's own
     parameter. `= true`, a compound `|=`, and a parenthesised `(member) =` all compile and all turn
@@ -320,6 +324,11 @@ def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
     end with `;`, so a naive brace count would treat the braced initialiser as a block and report the
     wrong guard.
 
+    A statement can do both. `} else if (m) {` closes the branch above it and opens the branch it heads,
+    so the leading `}` is counted and the block is still opened. Treating "starts with `}`" as
+    "closes and opens nothing" left the `else if` body outside any block, so a call inside it read as
+    unguarded.
+
     A body opened on its own line is recorded as its definition, not as the bare `{`: the setter may
     be written as three lines, and the chain would otherwise hold a `{` that says nothing about what
     opens it.
@@ -332,10 +341,9 @@ def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
             stack = []
             current_path = path
         blocks.append(list(reversed(stack)))
-        if statement.startswith("}"):
-            if stack:
-                stack.pop()
-            continue
+        closers = len(statement) - len(statement.lstrip("}"))
+        for _ in range(min(closers, len(stack))):
+            stack.pop()
         if statement.endswith("{"):
             opener = statement
             if statement == "{" and index > 0 and statements[index - 1][0] == path:
@@ -352,7 +360,13 @@ MEMBER_NAME = "m_shouldTranslateMessageNames"
 # parsed. Any other object's member keeps its `->`, which makes the tokeniser fail and the condition
 # be refused, which is the safe answer for a read on some other connection.
 THIS_PREFIX = re.compile(r"\bthis\s*->\s*")
-IF_HEAD = re.compile(r"^if\b")
+# `else if (m) {` guards its own block exactly as `if (m) {` does, so the head accepts both. The
+# pattern matches the head and its opening parenthesis, so `if_parts` can take the last one in the
+# statement: a chain whose last branch is an `else if` on the member is correct code, and it is that
+# branch's condition, not the first one's, that decides whether the call is guarded.
+IF_HEAD = re.compile(r"^(?:else\s+)?if\b")
+IF_BRANCH = re.compile(r"(?:else\s+)?if\s*\(")
+BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 # The three wrappers that return their argument's boolean value, so a guard written with one asks the
 # same question as the bare condition and has to be read the same way.
@@ -370,27 +384,42 @@ CONDITION_TOKEN = re.compile(
 
 
 def if_parts(statement: str) -> tuple[str, str] | None:
-    """The `if`'s condition and the text after its closing parenthesis, or None when it is not an `if`.
+    """The last `if`'s condition and the text after its closing parenthesis, or None.
 
-    The remainder is what separates the two shapes the guard check has to tell apart: a braceless guard
-    is an `if` with nothing after the parenthesis, while `if (m) { return; }` and `if (m) goto done;`
-    carry a body, so they guard nothing that follows them.
+    The remainder is what separates the shapes the guard check has to tell apart: a braceless guard is
+    an `if` with nothing after the parenthesis (`""`), an ordinary block guard is one whose body opens
+    where the statement ends (`"{"`), and anything else — `{ return; }`, `goto done;`, `{ } else if
+    (ok) {`, `{ x(); } do {` — is a complete statement that guards nothing after it.
+
+    The last branch is the one that guards what follows. In `if (ready) { } else if (m) {` the body is
+    that of the `else if`, so it is `m` and not `ready` that has to imply the member. Reading the first
+    branch instead refused this correct code, and reading only "does the statement end with `{`" let
+    the `else` block through.
+
+    Block comments are stripped from the remainder before it is returned, because `if (m) /* guard */`
+    is a braceless guard that a comment happens to follow. `//` comments never reach here: whole-line
+    comments are dropped when the patch is read, and a trailing one is cut before statements are
+    joined. An unterminated block comment means the statement is malformed and the answer is None.
     """
     stripped = statement.strip()
+    # A branch that follows a closing brace starts with it: `} else if (m) {` heads the branch it
+    # opens, and the leading `}` belongs to the branch above. Dropping it here is what lets the chain
+    # read that branch as a guard; `} else {` still fails the head test below.
+    stripped = stripped.lstrip("}").strip()
     if not IF_HEAD.match(stripped):
         return None
-    open_paren = stripped.find("(")
-    if open_paren < 0:
+    heads = list(IF_BRANCH.finditer(stripped))
+    if not heads:
         return None
-    depth = 0
-    for index in range(open_paren, len(stripped)):
-        if stripped[index] == "(":
-            depth += 1
-        elif stripped[index] == ")":
-            depth -= 1
-            if depth == 0:
-                return stripped[open_paren + 1:index], stripped[index + 1:].strip()
-    return None
+    open_paren = heads[-1].end() - 1
+    close = matching_paren(stripped, open_paren)
+    if close < 0:
+        return None
+    remainder = stripped[close + 1:]
+    stray = remainder.find("/*")
+    if stray >= 0 and "*/" not in remainder[stray:]:
+        return None
+    return stripped[open_paren + 1:close], BLOCK_COMMENT.sub("", remainder).strip()
 
 
 def matching_paren(text: str, open_index: int) -> int:
@@ -566,11 +595,20 @@ def condition_implies_member(statement: str) -> bool:
     off. So are `UNLIKELY(m)`, `LIKELY(m)` and `static_cast<bool>(m)`, which are read as the condition
     they wrap. Anything outside the grammar — a comma operator, another object's member, a call where
     the member's value is still needed — is unknown, and an unknown top-level result is refused.
+
+    The statement's shape is checked before its condition, and the condition alone is not enough:
+    `if (m) { } else { call }` has a condition that implies the member, and the call runs when the
+    switch is off all the same. Only two shapes put the statement's own body right after the
+    condition — nothing at all (the following statement is the body) and an opening `{` (the body
+    starts here). `if (m) { } else if (ok) {`, `if (m) { return; } else {` and `if (m) { x(); } do {`
+    all end in a brace and are refused by their remainder.
     """
     parts = if_parts(statement)
     if parts is None:
         return False
-    condition, _remainder = parts
+    condition, remainder = parts
+    if remainder not in ("", "{"):
+        return False
     unwrapped = strip_boolean_wrappers(condition)
     if unwrapped is None:
         return False
