@@ -110,7 +110,7 @@ $ git grep -c 'SDKAlignedBehavior' Safari-614.1.9 -- Source | wc -l
 | `stderr` | fd | `PL16:205`，条件同上 | `PL18:420`，条件同上 | `XM16:130` | `XM18:222` | 同上 |
 | `WebKitBundleVersion` | string | `PL16:141`，写进 `initializationMessage` 而非 `bootstrap` 字典，仅 `PLATFORM(MAC)` | `PL18:361`，直接写进 `bootstrap` 字典，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | `XM16:202`，仅 `PLATFORM(MAC)` | `XM18:115`，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | iOS 两侧都编译掉，无影响 |
 
-上表按两个 tag 的原文求值，不按本工程产物求值。产物在 tag 原文之上应用了 `patches/` 下的整组补丁，其中**一份**改动了本表的读数，所以有一行的读数会不一样：`client-sdk-aligned-behaviors` 的「缺失后果」在产物里不是 `RELEASE_ASSERT` 中止，而是按数据块宽度分派——等宽时 `memcpy` 进位图并返回真，更窄时丢弃该负载、位图保持全零并返回真，更宽时丢弃并返回假，两条不等宽的路径各记一条日志。`client-sdk-version` 这一行不受影响：两版都不发也不读，产物里也没有读取点，bootstrap 补丁只为它留了一句说明为什么不做回退的注释。
+上表按两个 tag 的原文求值，不按本工程产物求值。产物在 tag 原文之上应用了 `patches/` 下的整组补丁，其中**一份**改动了本表的读数，所以有一行的读数会不一样：`client-sdk-aligned-behaviors` 的「缺失后果」在产物里不是 `RELEASE_ASSERT` 中止，而是按数据块宽度分派——等宽时 `memcpy` 进位图并返回真，更窄时丢弃该负载、位图保持全零并返回真，更宽时丢弃并返回假，两条不等宽的路径各记一条日志。`client-sdk-version` 这一行不受影响：两版都不发也不读，产物里也没有读取点，bootstrap 补丁只在函数里留了注释说明为什么不做回退。
 
 `client-sdk-version` 在 16.1 这一版里完全消失，确认命令与输出：
 
