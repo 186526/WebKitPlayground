@@ -23,7 +23,7 @@
 
 **第二，为什么放一个二进制会让情况变坏。** 「放二进制 → 端点从 5 归零」不是候选集问题，是**同一个 framework 的候选条目被替换**：当 UI 进程里那份 `WebKit` 镜像的路径变成索引外路径时，launchd 为该 framework 记录的镜像路径也跟着变，而按旧路径算出的那四个服务名不再与新路径对应，于是这个 framework 贡献的服务集为空。空目录与只含 `Info.plist` 的目录不改变被加载的镜像，所以仍是 5。这一条是**假设**，因为它依赖「`_imagePathToInfo` 以镜像完整路径为键」这个未开源的实现细节，而且现有读数里有一处记录与它冲突（见第五节与第八节）。
 
-**并且有一条必须先写的限定。** 「launchd 只认索引内路径」这个说法本身已被否证两次：Music.app 一次，以及 `build-state.md:267` 记录的一次 `procPath` 指向 `/var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU` 的崩溃报告。后者属于已知有争议的读数（M63 第七节记录它与另一份记录不能同时成立），所以本文不把它当中枢证据，但它足以否定「索引外一律查不到」。
+**并且有一条必须先写的限定。** 「launchd 只认索引内路径」这个说法本身已被否证两次：Music.app 一次，以及 `build-state.md:336` 记录的一次 `procPath` 指向 `/var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU` 的崩溃报告。后者属于已知有争议的读数（M63 第七节记录它与另一份记录不能同时成立），所以本文不把它当中枢证据，但它足以否定「索引外一律查不到」。
 
 ---
 
@@ -62,7 +62,7 @@ xpc_connection_set_bootstrap(m_xpcConnection.get(), initializationMessage.get())
 
 `_CFBundleSetupXPCBootstrap` 在 CoreFoundation 的私有头里有声明（`apple-oss-distributions/CF`, `CFBundlePriv.h:259-260`，`CF_AVAILABLE(10_10, 8_0)`），但 CF 开源树只有 CFLite，**实现不在其中**（`grep -c XPCBootstrap CFBundle.c` = 0）。所以「bootstrap 字典里到底带了哪些 framework 路径」无源码可查。
 
-这一点很重要：launchd 若要从「该 pid 域加载了什么」推算候选集，最直接的通道就是这份握手时提交的 bootstrap 字典。另一条可能的通道是 launchd 在 `dlopen` 时收到 dyld 的通知（dyld 有 `dlopen_from` 一类的回调点，Dopamine 的 dyld 补丁就挂在它上面，`docs/ios16-all-18.3-xpc-endpoint-audit.md:203` 记录过在设备二进制里数到 `dlopen_from` 命中 1 次），所以「launchd 完全不知道进程 dlopen 了什么」这个说法不能成立。两条通道的区别在于时机：bootstrap 字典只在启动时提交一次，dyld 通知则随每次 `dlopen` 发生。
+这一点很重要：launchd 若要从「该 pid 域加载了什么」推算候选集，最直接的通道就是这份握手时提交的 bootstrap 字典。另一条可能的通道是 launchd 在 `dlopen` 时收到 dyld 的通知（dyld 有 `dlopen_from` 一类的回调点，Dopamine 的 dyld 补丁就挂在它上面，`docs/ios16-all-18.3-xpc-endpoint-audit.md:204` 记录过在设备二进制里数到 `dlopen_from` 命中 1 次），所以「launchd 完全不知道进程 dlopen 了什么」这个说法不能成立。两条通道的区别在于时机：bootstrap 字典只在启动时提交一次，dyld 通知则随每次 `dlopen` 发生。
 
 现有读数无法区分这两条通道，但它们对本文结论的影响相同：**两个通道都只在「有镜像被加载」时才带回 framework 路径**。空目录与只含 `Info.plist` 的目录不产生新镜像，两条通道都不触发，于是仍是系统那份 `WebKit` 的条目。
 
@@ -116,14 +116,14 @@ M63 第八节第 5 条把这一项列为「未实测排除」。本节把它拆�
 
 **已由源码排除：`preferences.sb` 缺失无关。** 它是沙箱配置模板，被 `GPUProcess/mac/com.apple.WebKit.GPUProcess.sb.in:25` 等以 `#include` 引用，不参与服务清单；`WebKit.framework` 的 `Source/WebKit/Info.plist` 里没有 `XPCService` 键（16.1 与 18.3 两版 `grep -c XPCService` 都是 0）。
 
-**已由设备读数排除：二进制内嵌签名的完整性。** `build-state.md:338` 记录系统原位置与复制件的 `LC_CODE_SIGNATURE` 偏移（49536）与大小（21856）完全相同。这排除的是「复制二进制破坏内嵌签名」，不是本节的 `_CodeSignature` 目录。
+**已由设备读数排除：二进制内嵌签名的完整性。** `build-state.md:407` 记录系统原位置与复制件的 `LC_CODE_SIGNATURE` 偏移（49536）与大小（21856）完全相同。这排除的是「复制二进制破坏内嵌签名」，不是本节的 `_CodeSignature` 目录。
 
 **仍未测：`_CodeSignature` 目录本身。** 没有任何一份记录测过「同一个 `.xpc`，带与不带 `_CodeSignature` 目录，端点数是否不同」。这是 M63 第八节第 5 条留给本文的那一项，本文接上但不闭合。
 
 关于「若校验失败会不会表现为服务名查不到」，可以给出的结构性判断（**假设**）：
 
 - 若 launchd 在**建映射时**校验签名，失败的表现会是该 bundle 不进映射，也就是「查不到服务名」而不是「签名无效」。这与观察到的 `failed lookup` 形态一致，所以这个机制不能排除。
-- 但有一条反向证据：`build-state.md:409` 记录「系统 16.1 的壳与自建的壳给出同样结果」。系统壳带 `_CodeSignature` 且签名有效，自建壳由 `ldid -S` 临时签名（`package-webkit-device-artifacts.sh:291-292`、`:356-358`；`package-webkit-device-deb.sh:362-415`）。两者结果相同，说明**签名差异不是这两个用例之间的变量**。这条证据强度受限于该读数与第五节讨论的争议读数同源。
+- 但有一条反向证据：`build-state.md:513` 记录「系统 16.1 的壳与自建的壳给出同样结果」。系统壳带 `_CodeSignature` 且签名有效，自建壳由 `ldid -S` 临时签名（`package-webkit-device-artifacts.sh:291-292`、`:356-358`；`package-webkit-device-deb.sh:362-415`）。两者结果相同，说明**签名差异不是这两个用例之间的变量**。这条证据强度受限于该读数与第五节讨论的争议读数同源。
 
 `ldid` 是 ad-hoc 签名，生成的是 `LC_CODE_SIGNATURE`，不产生 `_CodeSignature` 目录，该目录是 `codesign` 的产物。本工程的打包流程只用 `ldid`，所以 `/var/jb` 那份**结构上不可能有** `_CodeSignature` 目录（**有源码支撑**：`package-webkit-device-deb.sh` 全文 `grep codesign` 无命中）。这意味着这一项无法靠改打包脚本「补上」，只能换签名工具，或证明它无关。
 
@@ -180,7 +180,7 @@ GPU 与 Network 两份少 `_HighBitsASLR`，其余相同（`:33-53` 与 `:31-51`
 1. `_AdditionalProperties.RunningBoard`（`Managed` / `Reported`）在 18.3 新增，16.1 没有。
 2. `CFBundleGetInfoString` 的版权年份从 2022 改为 2024，以及若干行首缩进从空格改制表符。
 
-**结论：`.xpc` 的 `Info.plist` 不是变量。** 与 `build-state.md:409` 的读数一致（系统壳与自建壳结果相同）。这一条属于**已确证**（可 `diff` 复现）。
+**结论：`.xpc` 的 `Info.plist` 不是变量。** 与 `build-state.md:513` 的读数一致（系统壳与自建壳结果相同）。这一条属于**已确证**（可 `diff` 复现）。
 
 ### 服务名从哪来
 
@@ -204,16 +204,16 @@ PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
 
 ### 被解释的读数
 
-`build-state.md:465-472`（Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` + `JavaScriptCore` 作固定基数）：
+`build-state.md:500-509`（Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` + `JavaScriptCore` 作固定基数）：
 
 | 覆盖目录内容 | 端点 | 已知缺陷 |
 | --- | --- | --- |
 | 自建 `WebCore` + `JavaScriptCore` | 5 | 无 |
 | 再加空目录 `WebKit.framework` | 5 | 无 |
 | 再加只含 `Info.plist` 的 `WebKit.framework` | 5 | 无 |
-| 再加只含 `WebKit` 二进制的 `WebKit.framework` | **0** | 本行的 **spawn 0** 与 `build-state.md:267` 的 `procPath` 记录冲突，未解（M63 第七节） |
+| 再加只含 `WebKit` 二进制的 `WebKit.framework` | **0** | 本行的 **spawn 0** 与 `build-state.md:336` 的 `procPath` 记录冲突，未解（M63 第七节） |
 
-**本文只使用「端点」这一列，不使用 spawn 与 lookup 计数。** 理由有两个：`lookup` 取决于应用转圈多久（`build-state.md:383` 自己声明）；spawn 那一列有已知未解冲突。端点列是这组读数里唯一在四种配置间被同一命令、同一判据测过的量。
+**本文只使用「端点」这一列，不使用 spawn 与 lookup 计数。** 理由有两个：`lookup` 取决于应用转圈多久（`build-state.md:454` 自己声明）；spawn 那一列有已知未解冲突。端点列是这组读数里唯一在四种配置间被同一命令、同一判据测过的量。
 
 ### 机制假设（标记为假设）
 
@@ -222,7 +222,7 @@ PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
 推演如下：
 
 1. 空目录与只含 `Info.plist` 两种配置下，UI 进程实际加载的 `WebKit` 仍是系统那份（`image list` 里只有 `[20] /System/Library/Frameworks/WebKit.framework/WebKit`）。它的路径在索引内，四个服务名照旧算出，端点 5。
-2. 放进二进制后，dyld 从 `DYLD_FRAMEWORK_PATH` 指向的目录绑定 `WebKit`，UI 进程里出现 `[891] JB/Library/WebKitOverride/WebKit.framework/WebKit`。同一时刻系统那份 `[20]` 仍在（`build-state.md:411-421` 的镜像表证明两份共存）。
+2. 放进二进制后，dyld 从 `DYLD_FRAMEWORK_PATH` 指向的目录绑定 `WebKit`，UI 进程里出现 `[891] JB/Library/WebKitOverride/WebKit.framework/WebKit`。同一时刻系统那份 `[20]` 仍在（`build-state.md:515-525` 的镜像表证明两份共存）。
 3. 若 `_imagePathToInfo` 以镜像完整路径为键，launchd 为「`WebKit.framework` 这个 framework」记录的那条路径被改写成索引外路径；查服务名时用新路径查表未命中，于是这个 framework 贡献 0 条。
 4. 系统那份镜像的条目**不会**作为独立一条留在这里，因为两条记录对应的是同一个 framework 身份（同一 `CFBundleIdentifier`，同一 `WebKit.framework` 后缀），映射里只有一格。
 
@@ -230,8 +230,8 @@ PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
 
 ### 这条假设的反证与限定
 
-- **反证一：`core` 那一行。** `build-state.md:436` 记录 `core` 用例同样有两份 `WebKit` 镜像（系统 + `/var/jb/Library/Frameworks`）而端点仍有 5 个。若「出现第二份镜像就覆盖」，这一行不该是 5。可能的解释有两种，都无法用现有记录区分：(a) `core` 里那份来自 `/var/jb/Library/Frameworks`（tweak 的 `dlopen`，`build-state.md:538`），而不是 `DYLD_FRAMEWORK_PATH` 决定的绑定路径，两者在 dyld 看来是不同的加载来源，launchd 只对后者敏感；(b) `core` 的读数发生在与第四节不同的测量轮次，变量不止一个。**这一条必须在设备上分开测**，命令见第七节第 1 条。
-- **反证二：`build-state.md:267` 的 `procPath`。** 它证明 launchd 至少一次从 `/var/jb/.../XPCServices/...` 起过进程。若成立，则「索引外 ⇒ 查不到」为假，第 3 步的「查表未命中」需要改成更弱的说法（比如「未命中预计算索引，但走了现扫路径」）。该读数与另一份记录冲突，未定案。
+- **反证一：`core` 那一行。** `build-state.md:540` 记录 `core` 用例同样有两份 `WebKit` 镜像（系统 + `/var/jb/Library/Frameworks`）而端点仍有 5 个。若「出现第二份镜像就覆盖」，这一行不该是 5。可能的解释有两种，都无法用现有记录区分：(a) `core` 里那份来自 `/var/jb/Library/Frameworks`（tweak 的 `dlopen`，`build-state.md:642`），而不是 `DYLD_FRAMEWORK_PATH` 决定的绑定路径，两者在 dyld 看来是不同的加载来源，launchd 只对后者敏感；(b) `core` 的读数发生在与第四节不同的测量轮次，变量不止一个。**这一条必须在设备上分开测**，命令见第七节第 1 条。
+- **反证二：`build-state.md:336` 的 `procPath`。** 它证明 launchd 至少一次从 `/var/jb/.../XPCServices/...` 起过进程。若成立，则「索引外 ⇒ 查不到」为假，第 3 步的「查表未命中」需要改成更弱的说法（比如「未命中预计算索引，但走了现扫路径」）。该读数与另一份记录冲突，未定案。
 - **反证三：Music.app。** 已在第二节处理：它是 app 包内目录，与 `/var/jb` 不同类，不构成反证。
 
 ### 因此本文能给定论的部分
@@ -299,7 +299,7 @@ lldb -b -o "process attach --pid $APP" -o "image list -o -f" -o detach -o quit 2
 
 ### 第 2 条：launchd 是否曾经从 `/var/jb` 下的 `XPCServices` 起过进程
 
-这一条检验 `build-state.md:267` 那条有争议的 `procPath`。判据是新增日志里有没有 `/var/jb` 路径的 spawn 记录。
+这一条检验 `build-state.md:336` 那条有争议的 `procPath`。判据是新增日志里有没有 `/var/jb` 路径的 spawn 记录。
 
 ```sh
 L=/var/log/com.apple.xpc.launchd/launchd.log
@@ -349,9 +349,9 @@ ls /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.
 
 **3. `core` 行（两份镜像 + 端点 5）与「只含二进制」行（两份镜像 + 端点 0）为什么不一致。** 这是本文假设最直接的反证，需要第七节第 1 条在同一轮测量里把「镜像条数」与「端点」同时记下来才能分开。现有记录没记 `image list` 与端点的配对，所以无法事后归因。
 
-**4. `build-state.md:267` 的 `procPath` 记录是否成立。** 它与同一文件第三轮的记录冲突（M63 第七节），两份不能同时为真。定案方式：按第七节第 2 条重测，并在触发前后各存一份 `launchd.log` 的差值段落。
+**4. `build-state.md:336` 的 `procPath` 记录是否成立。** 它与同一文件第三轮的记录冲突（M63 第七节），两份不能同时为真。定案方式：按第七节第 2 条重测，并在触发前后各存一份 `launchd.log` 的差值段落。
 
-**不受本文结论影响的部分。** 即使第五节假设成立、端点问题解决，全 18.3 仍要过另外两层：helper 与 UI 的 IPC 消息编号差异（`WebKitPlayground/docs/ios16-ipc-layer-audit.md`），以及 16.1 `WebKit` 与 18.3 `WebCore` 同进程的 PAC 崩溃（`build-state.md:344-355`）。本文只处理「端点为什么是 0」这一层。
+**不受本文结论影响的部分。** 即使第五节假设成立、端点问题解决，全 18.3 仍要过另外两层：helper 与 UI 的 IPC 消息编号差异（`WebKitPlayground/docs/ios16-ipc-layer-audit.md`），以及 16.1 `WebKit` 与 18.3 `WebCore` 同进程的 PAC 崩溃（`build-state.md:410-423`）。本文只处理「端点为什么是 0」这一层。
 
 ---
 
@@ -432,12 +432,12 @@ launchd_flat_mach_namespace = false;
 
 不过真正把名字钉在域内的是**外层那个 `BOOTSTRAP_PROPERTY_XPC_DOMAIN` 判断**，它与 `launchd_flat_mach_namespace` 无关：`core.c:7155` 是 `if (!(jm->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN)) { ... }`，`core.c:6358` 是同一形状的 `if (!(j->mgr->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN)) { ... }`。XPC 域连进这两个 `if` 都进不去，所以不管哪个 launchd 实例、命名空间平不平，XPC 域的 `where2look` 与 `where2put` 都只能是自己。`launchd.c:227-228` 关掉的是「非 XPC 域但走 root 回退」那条路。**这两条合起来，证据强度是已确证。**
 
-**「app 的 manager 就是私有 XPC 域」这一步不同，它是「有源码支撑」，不是已确证。** 没有任何一次读数直接读出域类型字段。先记一条否定：**报告把 `print pid/N` 的应答归到 `job_mig_info` 这个归因没有验证过。** `job_mig_info`（`core.c:9211` 起）在 `core.c:9233-9241` 按 `launchd_flat_mach_namespace` 决定 `jm`，但 Procursus `launchctl`（`v1.2.0`）的 `print.c:65` 走的是 `XPC_ROUTINE_PRINT` / `XPC_ROUTINE_PRINT_SERVICE` 这条 XPC 消息，不是那个 MIG 例程；`protocol_jobmgr.defs:71` 的 `info` 还标着 `skip; /* last used in 10.4 */`。**无法从公开源码确认 `print pid/N` 落到哪个处理函数**，所以不能拿 `job_mig_info` 的分支当证据。
+**「app 的 manager 就是私有 XPC 域」这一步不同，它是「有源码支撑」，不是已确证。** 没有任何一次读数直接读出域类型字段。先记一条否定：**报告把 `print pid/N` 的应答归到 `job_mig_info` 这个归因没有验证过。** `job_mig_info`（`core.c:9211` 起）在 `core.c:9233-9241` 按 `launchd_flat_mach_namespace` 决定 `jm`，但 Procursus `launchctl`（`v1.2.0`，`22906f7`，`print.c` 共 227 行）的 `print.c:61-64` 走的是 `XPC_ROUTINE_PRINT` / `XPC_ROUTINE_PRINT_SERVICE` 这条 XPC 消息（`:62` 是 `XPC_ROUTINE_PRINT_SERVICE`，`:64` 是 `XPC_ROUTINE_PRINT`，按 `name` 是否为空二选一；`:65` 是空行），不是那个 MIG 例程；`protocol_jobmgr.defs:71` 的 `info` 还标着 `skip; /* last used in 10.4 */`。**无法从公开源码确认 `print pid/N` 落到哪个处理函数**，所以不能拿 `job_mig_info` 的分支当证据。
 
 真正支撑这一步的是两条设备读数：
 
-- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:199`），Chrome 基线 8 条（`build-state.md:465`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
-- 四个 WebKit 服务名在 `system`/`user/501`/`gui/501` 三域都查不到（`build-state.md:371`）。
+- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:202`），Chrome 基线 8 条（`build-state.md:502`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
+- 四个 WebKit 服务名在 `system`/`user/501`/`gui/501` 三域都查不到（`build-state.md:408`）。
 
 这两条只说明「`print pid/N` 看到的那个集合很小」，不能单独证明「这个集合来自 XPC 域」，也不能排除「来自某个很小的非 XPC 域」。9.9 第 1 条是能把它定案的读数。
 
@@ -566,7 +566,7 @@ if (!entitlement) {
 
 即客户端自己 attach 到已导入私有域的服务。**plist 声明的任务永远不会有 attach 记录**，所以 launchd 不会为它启用 `xpcproxy`，也不会把 peer 递给 helper。
 
-把 9.2 与这一节合起来：`MachServices` 能让名字出现在某个域里，但既不会让 launchd 把 helper 当 XPC 服务启动，也不会递送 peer。若 helper 因为别的原因被拉起来，它会收到 `ConnectionInvalid` 并按上面那个 block 直接 `exitProcess`（退出码 137）。这与 `build-state.md` 记的「覆盖目录含二进制时 spawn 0」表现同形，但是另一个成因。
+把 9.2 与这一节合起来：`MachServices` 能让名字出现在某个域里，但既不会让 launchd 把 helper 当 XPC 服务启动，也不会递送 peer。若 helper 因为别的原因被拉起来，它会收到 `ConnectionInvalid` 并按上面那个 block 调用 `exitProcess(EXIT_FAILURE)`。`exitProcess` 在非 Windows 平台就是 `exit(status)`（`Source/WTF/wtf/WTFProcess.cpp:41-63`，`#else` 分支在 `:61`），`EXIT_FAILURE` 是 1，所以退出码是 **1**。137 是 `128+9`，来自另一条路径：16.1 的 libxpc 对 `xpc_dictionary_apply(NULL, …)` 直接发 SIGKILL（`build-state.md` 第六轮「设备实测」一节那条独立小程序测到的 `Killed: 9` / `exit=137`），与这里的 `exitProcess` 不是同一回事。这与 `build-state.md` 记的「覆盖目录含二进制时 spawn 0」表现同形，但是另一个成因。
 
 ### 9.4 `/var/jb` 任务的发现路径
 
@@ -642,15 +642,15 @@ if (!strcmp(key, "LaunchDaemons")) {                                     // :38
 1. `_imagePathToInfo` 的键是镜像完整路径还是 framework 目录——仍未定。
 2. `XPCServices` 子目录在什么时机被扫——仍未定。
 3. `core` 行（两份镜像 + 端点 5）与「只含二进制」行（两份镜像 + 端点 0）为什么不一致——仍未定。
-4. `build-state.md:267` 的 `procPath` 记录是否成立——仍未定。
+4. `build-state.md:336` 的 `procPath` 记录是否成立——仍未定。
 
 结论一节的候选集规则（「app 自身包 ∪ 系统索引」）**仍是假设**，本节没有给它增加任何证据。9.2 只是说明：想绕开这条规则、直接把名字放进某个域，唯一的入口要求清单由客户端自己提供，于是问题原路返回到「launchd 如何从已加载 framework 算候选集」，即候选集规则本身。
 
 把本节读成「路线 A 因此成立」是错的。§八 的四项要用第七节的设备读数才能定，设备离线，全部未执行。
 
-### 9.8 `build-state.md:883` 的 125 与本节无关
+### 9.8 `build-state.md:930` 的 125 与本节无关
 
-`build-state.md:883` 记的是「`launchctl bootstrap gui/501 …` 报 `125: Domain does not support specified action`」，位于该文件第七节「gui/501 图形域丢失」的事故记录里。同组读数还有 `build-state.md:878`（`launchctl print gui/501` **0 行输出**，退出码 125，02:05 复核仍是 0 行）与 `:879`（`launchctl print user/501` 正常，service count 499→501）。
+`build-state.md:930` 记的是「`launchctl bootstrap gui/501 …` 报 `125: Domain does not support specified action`」，位于该文件第七节「gui/501 图形域丢失」的事故记录里。同组读数还有 `build-state.md:925`（`launchctl print gui/501` **0 行输出**，退出码 125，02:05 复核仍是 0 行）与 `:926`（`launchctl print user/501` 正常，service count 499→501）。
 
 **这条读数是「`gui/501` 域不存在」的证据**，不是「权限不足」也不是「launchd 拒绝加载 `/var/jb` 任务」的证据：三次独立操作都没能让 `print gui/501` 产出任何一行，而 `user/501` 同时正常，丢的是图形登录域这个对象本身。
 
@@ -663,13 +663,13 @@ if (!strcmp(key, "LaunchDaemons")) {                                     // :38
 | 目标域 | 调用方指定的域（`gui/501` 当时不存在） | `root_jobmgr`，即 system 域 |
 | 前提 | 该域必须已存在 | 无此前提 |
 
-所以 `:883` 那条 125 不能用来否证路线 B。**那句 `Domain does not support specified action` 的确切来源未验证**：在 `launchd-842.1.4`（`d448a1c`）、`launchd-842.92.1`（`49a9c79`）的 `src/` 与 `liblaunch/`，以及 Procursus `launchctl`（`v1.2.0`，`22906f7`）里 grep `does not support` 都零命中（命令见 9.10）。它应当来自 libxpc 的字符串表或更旧的 launchctl，本节不替它编 errno 含义。
+所以 `:930` 那条 125 不能用来否证路线 B。**那句 `Domain does not support specified action` 的确切来源未验证**：在 `launchd-842.1.4`（`d448a1c`）、`launchd-842.92.1`（`49a9c79`）的 `src/` 与 `liblaunch/`，以及 Procursus `launchctl`（`v1.2.0`，`22906f7`）里 grep `does not support` 都零命中（命令见 9.10）。它应当来自 libxpc 的字符串表或更旧的 launchctl，本节不替它编 errno 含义。
 
 ### 9.9 设备读数清单：一次定案本节结论
 
 **这五条里有四条至今未执行；第 1 条的判据命令本身是错的，已在本节修正并实测。** 工具限 `ps`/`launchctl`/`lldb`/`killall`/`uiopen`/`ls`/`grep`/`wc`/`tail`/`sed`/`awk`。
 
-前置检查原先写成「`launchctl print gui/501` 必须非空且退出 0，否则先重启」。这条判据在 iOS 16.1 加 Dopamine 的设备上恒不成立，且设备健康时也不成立：2026-11-25 20:41 CST 实测，开机 10 小时、Safari pid 622 与 Chrome pid 626 均为开机时启动、23 个 WebKit helper 在跑的设备上，`launchctl print gui/501` 返回 `exit=125`、0 行输出、stderr 也为空，加 `sudo` 与不加 `sudo` 同样是 `exit=125`、0 行（五种写法全部如此：`sudo -S -p ""`、`printf` 喂密码、`sudo -i`、root `bash -c`、`sudo -n`）。同一时刻 `launchctl print system` 的域列表只有 `user/501`（第 300 行），没有 `gui/501`；`launchctl print user/501` 返回 `exit=0`、2135 行、`active count = 573`，其中 `com.apple.SpringBoard` pid 345 与 `com.apple.backboardd` pid 380 都在。iOS 的图形会话落在 `user/501`，`gui/501` 本来就不存在。
+前置检查原先写成「`launchctl print gui/501` 必须非空且退出 0，否则先重启」（旧文见 `build-state.md:937-941`）。这条判据在 iOS 16.1 加 Dopamine 的设备上恒不成立，且设备健康时也不成立：2026-11-25 20:41 CST 实测，开机 10 小时、Safari pid 622 与 Chrome pid 626 均为开机时启动、23 个 WebKit helper 在跑的设备上，`launchctl print gui/501` 返回 `exit=125`、0 行输出、stderr 也为空，加 `sudo` 与不加 `sudo` 同样是 `exit=125`、0 行（五种写法全部如此：`sudo -S -p ""`、`printf` 喂密码、`sudo -i`、root `bash -c`、`sudo -n`）。同一时刻 `launchctl print system` 的域列表只有 `user/501`（第 300 行），没有 `gui/501`；`launchctl print user/501` 返回 `exit=0`、2135 行、`active count = 573`，其中 `com.apple.SpringBoard` pid 345 与 `com.apple.backboardd` pid 380 都在。iOS 的图形会话落在 `user/501`，`gui/501` 本来就不存在。
 
 所以前置检查改成读图形会话本身：
 
@@ -733,7 +733,7 @@ tail -n +$((B+1)) $L | grep -c 'failed lookup'
 tail -n +$((B+1)) $L | grep -c 'com.example.machprobe'
 ```
 
-预期：`failed lookup` 随应用转圈增长（曾到 265，`build-state.md:469`），且**不出现** `com.example.machprobe`。必须先记行号再触发，只看差值，否则历史记录会被算进本次结果。
+预期：`failed lookup` 随应用转圈增长（曾到 265，`build-state.md:506`），且**不出现** `com.example.machprobe`。必须先记行号再触发，只看差值，否则历史记录会被算进本次结果。
 
 **第 4 条：闭合「私有域条目由 app 的 libxpc 提供」这一步**（旁证）
 

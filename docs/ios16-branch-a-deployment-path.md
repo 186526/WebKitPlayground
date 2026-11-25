@@ -82,7 +82,7 @@ M63 审计 `:88-94` 原文：
 >
 > 逐个看 `termination.namespace`。若是 `DYLD` / `code 4`，端点归零的原因是进程没起来，与 launchd 是否现扫无关，本次读数对 (A)/(B) **不作数**；只有崩溃报告里没有该类记录、进程确实在跑（`ps ax | grep Chrome`）而端点仍归零时，才是 (B) 的证据。
 
-M66 的整代部署文档（`c6382d0`，第二节 2.4）把排除条件扩到两类崩溃：`DYLD` 与 `PAC_EXCEPTION`。后者对应 `build-state.md:348` 的 `termination: namespace = PAC_EXCEPTION, code = 1`，栈顶 `WebKit::WebProcess::initializeWebProcess`（**已确证**，崩溃签名在 `build-state.md:344-352`）。
+M66 的整代部署文档（`c6382d0`，第二节 2.4）把排除条件扩到两类崩溃：`DYLD` 与 `PAC_EXCEPTION`。后者对应 `build-state.md:417` 的 `termination: namespace = PAC_EXCEPTION, code = 1`，栈顶 `WebKit::WebProcess::initializeWebProcess`（**已确证**，崩溃签名在 `build-state.md:415-420`）。
 
 ### 1.4 三个数字不能互换
 
@@ -91,10 +91,10 @@ M66 的整代部署文档（`c6382d0`，第二节 2.4）把排除条件扩到两
 | 出处 | 应用 | 命令与统计口径 | 无覆盖目录时的读数 |
 | --- | --- | --- | --- |
 | M63 审计 `:85` / 附录 A | Safari（pid 69370） | `services = {` 整段人工计数：全部 6 条，其中 WebKit 名下 4 条 | 「六条或四条」（**已确证**，附录 A 列出六个服务名） |
-| `build-state.md:390`、`:398` | Chrome | 本节 1.1 那条正则，`grep -c` 计行 | 「无覆盖目录时该值是 8」（读数在 `:398`）。**这个 8 是采样值不是常量**：同一条命令 2026-11-25 20:41 CST 在 Chrome pid 626 上得 9，同一段去重后基础名只有 4 个。用行数比较读数会随页面数漂移，改用本表第三行的口径 |
+| `build-state.md:461`、`:502` | Chrome | 本节 1.1 那条正则，`grep -c` 计行 | 「无覆盖目录时该值是 8」（旧读数在 `:502`）。**这个 8 是采样值不是常量**：同一条命令 2026-11-25 20:41 CST 在 Chrome pid 626 上得 9，同一段去重后基础名只有 4 个。用行数比较读数会随页面数漂移，改用本表第三行的口径 |
 | `scripts/probe-webkit-override-endpoints.sh:59-62`（内层分支 `feat/d3-override-endpoint-probe`，提交 `4bad538`） | Safari | 四个完整服务名逐个计数（`WebContent`、`GPU`、`Networking`、`WebContent.CaptivePortal`），按整词匹配 | 不适用：脚本只给 `PROBE_VERDICT` |
 
-Chrome 的 8 与 Safari 的 6 相差两条，`build-state.md:491` 另记「Chrome 的 per-pid 域有 7 个 WebKit 端点」，三处读数互不相同且都出自同一台设备。**本文不解释这个差值的来源，因为没有一份记录保留了当时的 `services = {` 原段**（M63 附录 A 是唯一保留原段的一份，而它只覆盖 Safari）。
+Chrome 的 8 与 Safari 的 6 相差两条，`build-state.md:595` 另记「Chrome 的 per-pid 域有 7 个 WebKit 端点」，三处读数互不相同且都出自同一台设备。**本文不解释这个差值的来源，因为没有一份记录保留了当时的 `services = {` 原段**（M63 附录 A 是唯一保留原段的一份，而它只覆盖 Safari）。
 
 因此本文的步骤**不写绝对数字**，改用「同一条命令、同一个应用、装前装后逐项比较」。这个写法对差值来源不敏感：
 
@@ -107,7 +107,7 @@ Chrome 的 8 与 Safari 的 6 相差两条，`build-state.md:491` 另记「Chrom
 
 既有读数并不都指向 (B)。两批记录互相冲突，而这个冲突没有被解释过。
 
-**指向 (B) 的一批。** `build-state.md:396-405` 的表格（**已确证**，设备读数）里，真正的 (A) 测试是含 `XPCServices` 的那三行：
+**指向 (B) 的一批。** `build-state.md:500-509` 的表格（**已确证**，设备读数）里，真正的 (A) 测试是含 `XPCServices` 的那三行：
 
 | 覆盖目录内容 | 端点 | spawn | lookup 失败 |
 | --- | --- | --- | --- |
@@ -117,7 +117,7 @@ Chrome 的 8 与 Safari 的 6 相差两条，`build-state.md:491` 另记「Chrom
 
 这三行都有 `XPCServices`，都读到 0，与 (A) 的预期相反。M63 审计 `:9` 与 `:39` 对这张表的有效性留了一处限定：那几次读数是在 `JavaScriptCore` 已补上的前提下取得的，所以进程不崩，dyld 中止解释不了归零。
 
-**指向 (A) 的一批，且它更直接。** `build-state.md:264-267` 记录了一次覆盖目录带 `XPCServices/` 后 launchd **从覆盖目录启动 GPU**（**已确证**，有崩溃报告原文）：
+**指向 (A) 的一批，且它更直接。** `build-state.md:333-336` 记录了一次覆盖目录带 `XPCServices/` 后 launchd **从覆盖目录启动 GPU**（**已确证**，有崩溃报告原文）：
 
 ```
 procPath: .../WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU
@@ -127,11 +127,11 @@ exception: EXC_BREAKPOINT (SIGTRAP/BPT trap: 5)
 3 WebKit        WebKit::XPCServiceMain(int, char const**)
 ```
 
-`procPath` 是「launchd 从哪条路径启动了进程」的唯一硬证据（`AGENTS.md:167` 的判读表）。这一条落在 `/var/jb/Library/WebKitOverride` 下，且 `build-state.md:289` 另记同一配置下 GPU「能走到 `Successfully spawned`（21:27:48/49/54 三次）」。**这直接满足 (A) 的第一个条件**：launchd 确实为索引外目录解析并 spawn 了服务。
+`procPath` 是「launchd 从哪条路径启动了进程」的唯一硬证据（`AGENTS.md:167` 的判读表）。这一条落在 `/var/jb/Library/WebKitOverride` 下，且 `build-state.md:358` 另记同一配置下 GPU「能走到 `Successfully spawned`（21:27:48/49/54 三次）」。**这直接满足 (A) 的第一个条件**：launchd 确实为索引外目录解析并 spawn 了服务。
 
-**两批记录不能同时成立**（M63 审计 `:175`）：同一类配置，一批读到 spawn 0 与 `failed lookup` 8908 次，另一批读到三次成功 spawn 且有 `procPath`。第四轮把第三轮的表判为无效，理由是设备没有 `pkill`、测的都是旧进程（`build-state.md:371-390`）；但一个没重启的旧进程不会产生新的 `.ips`，所以那个错因解释不了第二批的崩溃报告。这一点已作为 finding 提交，至今未解。
+**两批记录不能同时成立**（M63 审计 `:175`）：同一类配置，一批读到 spawn 0 与 `failed lookup` 8908 次，另一批读到三次成功 spawn 且有 `procPath`。第四轮把第三轮的表判为无效，理由是设备没有 `pkill`、测的都是旧进程（`build-state.md:442-461`）；但一个没重启的旧进程不会产生新的 `.ips`，所以那个错因解释不了第二批的崩溃报告。这一点已作为 finding 提交，至今未解。
 
-**这对选路的含义**：不能说「没有任何读数支持 (A)」，也不能说「(B) 已成立」。两批读数各自都**不满足**判 (A) 所需的三个条件（见 1.4 与第二节第 4 步）。表格那一批的问题是**排除条件无法确认**：`build-state.md:396-405` 没有记录当时的崩溃报告，所以「读窗口内无 `DYLD`、无 `PAC_EXCEPTION`」这一条既不能证实也不能证伪；`264-267` 那一批有 spawn，但它崩在 `_xpc_api_misuse`，也不是干净读数。所以判据仍未定案，而 `264-267` 那一批的存在说明 **(A) 不是低概率事件**：launchd 已经被观察到从 `/var/jb` 下启动过 WebKit helper。
+**这对选路的含义**：不能说「没有任何读数支持 (A)」，也不能说「(B) 已成立」。两批读数各自都**不满足**判 (A) 所需的三个条件（见 1.4 与第二节第 4 步）。表格那一批的问题是**排除条件无法确认**：`build-state.md:500-509` 没有记录当时的崩溃报告，所以「读窗口内无 `DYLD`、无 `PAC_EXCEPTION`」这一条既不能证实也不能证伪；`333-336` 那一批有 spawn，但它崩在 `_xpc_api_misuse`，也不是干净读数。所以判据仍未定案，而 `333-336` 那一批的存在说明 **(A) 不是低概率事件**：launchd 已经被观察到从 `/var/jb` 下启动过 WebKit helper。
 
 第二批崩溃的那个 `_xpc_api_misuse` 有明确的成因与修法，不属于本文范围：`XPCServiceMain.mm` 无守卫的 `xpc_dictionary_apply(NULL, ...)`，对应最小修改清单第 3 行，已由 `patches/ios16-xpc-bootstrap-compat.patch` 处理（M63 审计 `:125`，**已确证**）。**因此第二批读数是在这项修复之前取得的，用它做 (A) 的正面证据时要注意这一点**；但「launchd 能从该目录 spawn」这个结论不受崩溃成因影响。
 
@@ -205,7 +205,7 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 
 同时这也意味着 `scripts/probe-webkit-override-endpoints.sh` 测的配置**取决于它调用的那份安装脚本**，而两份不同：它调用设备上的 `/var/mobile/install-webkit-override.sh`，实测那版整树 `cp -a`，**保留** `XPCServices`；仓库里的 `scripts/install-webkit-override.sh` 调 `prune_xpc_services`，会剪掉。脚本不按名字推断，第 2 步装完后自己数一次覆盖目录里的 `.xpc` 个数，记进 `OVERRIDE_XPC_SERVICES`，结论文字按这个读数分支。
 
-设备那版产出的是未剪枝目录，所以用探针直接跑就可能落在本步要问的配置上；它的 `PROBE_VERDICT=A` 分支要求「至少一个新 helper 加载 `/var/jb` 的 framework」，并再按 `comm` 区分「launchd 从覆盖目录 `.xpc` 起进程」与「系统桩加 dyld 交接」，前者才是 (A) 的直接证据。若把探针指向仓库那份脚本，覆盖目录会被剪枝，那种情形下 A 只剩系统桩一条路。
+设备那版产出的是未剪枝目录，所以用探针直接跑就可能落在本步要问的配置上；它的 `PROBE_VERDICT=A` 分支要求「至少一个新 helper 加载 `/var/jb` 的 framework」，并再按 `comm` 区分「launchd 从覆盖目录 `.xpc` 起进程」与「系统桩加 dyld 交接」，前者才是 (A) 的直接证据。若把探针指向仓库那份脚本，覆盖目录会被剪枝，那种情形下 A 只剩系统桩一条路，且读数对应 `build-state.md:506`**而不是** (A)/(B) 判据真正要问的配置。
 
 本步仍然显式补回 `XPCServices`，因为要在一个不依赖设备脚本版本的确定目录上判定 (A)。
 
@@ -233,7 +233,7 @@ print(d.get("CFBundleIdentifier"))' \
 **失败判据**：
 
 - 安装脚本退出码非 0，或 `manifest` 行数为 0；
-- `XPCServices` 复制后目录不存在，或少于三个 `.xpc`。`build-state.md:250` 记该目录有五个 `.xpc`（「五个 `.xpc`，含 `WebContent`、`GPU`、`Networking`」），**四个 WebKit 服务名分布在三个 `.xpc` 里**；本文按「至少 `WebContent`、`GPU`、`Networking` 三个目录都在」判断，不按固定总数判断，因为总数在记录里有一处不一致（`:250` 说五个，而 M66 文档 2.3 节只逐条解析过两个）；
+- `XPCServices` 复制后目录不存在，或少于三个 `.xpc`。`build-state.md:319` 记该目录有五个 `.xpc`（「五个 `.xpc`，含 `WebContent`、`GPU`、`Networking`」），**四个 WebKit 服务名分布在三个 `.xpc` 里**；本文按「至少 `WebContent`、`GPU`、`Networking` 三个目录都在」判断，不按固定总数判断，因为总数在记录里有一处不一致（`:319` 说五个，而 M66 文档 2.3 节只逐条解析过两个）；
 - 上面那条 `python3` 读不出 `XPCService` 字典，或 `CFBundleIdentifier` 带 `.Service` 后缀。**带后缀是查不到的**：18.3 在 `sdk=iphone*` 下给 `PRODUCT_BUNDLE_IDENTIFIER` 加了 `.Service`（`Configurations/NetworkService.xcconfig:28`），由 `patches/ios16-xpc-service-bundle-identifier.patch` 处理；M47 的设备实测确认带后缀的名字在 Safari 域里报 `Could not find service`（M63 审计 `:57`，**已确证**）。补回 `XPCServices` 时若从一份未打该补丁的构建里取，这里会立刻暴露。
 
 ### 第 3 步：让 `.xpc` 的内嵌路径与 UI 的目录一致
@@ -261,7 +261,7 @@ print(d.get("CFBundleIdentifier"))' \
 - `patches/ios18-public-sdk-xpc-main.patch` 改后未重建，设备上 `.xpc` 仍带旧值。核对方法：读取三个 `.xpc` 二进制的 `LC_DYLD_ENVIRONMENT`。设备上没有 `otool`，用 `python3` 解析 Mach-O 的 load command，或用 `rabin2 -H`。
 - 两个目录同时存在且都装着 18.3。这是本步要消除的状态，判据见第三节。
 
-**一条必须先知道的旧读数**：`build-state.md:430` 记录过一次「清空覆盖目录、只依赖 `.xpc` 壳内嵌的 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`」的实测，结果是 WebContent 里加载的仍是 `/System/Library/Frameworks/WebKit.framework/WebKit` 与 `/System/Library/PrivateFrameworks/WebCore.framework/WebCore`，即 16.1（**已确证**，设备读数）。同一节写明「内嵌的这两条加载命令在本设备上没有把 helper 切到自建版本」。**所以本步之后，helper 的 framework 路径必须重新测，不能按「内嵌命令已经写了就生效」推断。** 这条读数与 (A) 不矛盾——它测的是系统桩被拉起的配置——但它说明「`.xpc` 里有这条路径」与「这条路径被采纳」是两件事。
+**一条必须先知道的旧读数**：`build-state.md:534` 记录过一次「清空覆盖目录、只依赖 `.xpc` 壳内嵌的 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`」的实测，结果是 WebContent 里加载的仍是 `/System/Library/Frameworks/WebKit.framework/WebKit` 与 `/System/Library/PrivateFrameworks/WebCore.framework/WebCore`，即 16.1（**已确证**，设备读数）。同一节写明「内嵌的这两条加载命令在本设备上没有把 helper 切到自建版本」。**所以本步之后，helper 的 framework 路径必须重新测，不能按「内嵌命令已经写了就生效」推断。** 这条读数与 (A) 不矛盾——它测的是系统桩被拉起的配置——但它说明「`.xpc` 里有这条路径」与「这条路径被采纳」是两件事。
 
 ### 第 4 步：重取读数，判 (A)
 
@@ -345,9 +345,9 @@ sleep 3
 
 **微信与 Safari 的第二轮由用户手动冷启动，不要用 `uiopen --bundleid`。** `docs/safari-injection-plan.md:888-898` 记录了三次实测：`uiopen --bundleid com.apple.mobilesafari` 退出码 0 但 5 秒后 `ps -A` 里没有进程；`launchctl asuser 501 ...` 返回 45，因为设备上没有 `/usr/libexec/launchctl`；结论是「宿主只能由用户手动冷启动」（**已确证**）。`AGENTS.md:94` 另记 `--bundleid` 不能覆盖默认浏览器，实测仍会拉起 Chrome。**所以第 6 步在无人值守时做不完整**：Safari 与微信各需要一次人工点开。
 
-微信的 bundle id 是 `com.tencent.xin`（`tools/idevice-webkit/WebSafeWebKitFilter.plist:15`，**已确证**）。它必须单独测：`build-state.md:171` 记录过「Safari、WeChat、Chrome 三个 app 都无法加载网站」是同一现象的三个样本，而 `:179-180` 记录过 WeChat 的 WebContent `Successfully spawned` 多次、`lldb image list` 确认加载覆盖目录的 `WebKit`，页面**仍然打不开**——**进程活着不等于页面能渲染**，这条在这台设备上已经被打过脸一次。
+微信的 bundle id 是 `com.tencent.xin`（`tools/idevice-webkit/WebSafeWebKitFilter.plist:15`，**已确证**）。它必须单独测：`build-state.md:240` 记录过「Safari、WeChat、Chrome 三个 app 都无法加载网站」是同一现象的三个样本，而 `:248-249` 记录过 WeChat 的 WebContent `Successfully spawned` 多次、`lldb image list` 确认加载覆盖目录的 `WebKit`，页面**仍然打不开**——**进程活着不等于页面能渲染**，这条在这台设备上已经被打过脸一次。
 
-**客观读数（不依赖肉眼）**：跑本地探测页，看特性位。`build-state.md:492` 记录 16.1 的真实能力是 `cssSupportsHas=yes`、`cssNesting=no`、`popover=no`、`textWrapBalance=no`（**已确证**）。18.3 支持 CSS 嵌套与 `popover` 这一点**本文未核源码，标记为假设**；但它有一个更硬的替身判据：`cssNesting=no` 与 `popover=no` 是 16.1 的**已确证**读数，所以出现这两个 `no` 就足以否定「引擎已换成 18.x」，无论 18.3 具体支持什么。据此：
+**客观读数（不依赖肉眼）**：跑本地探测页，看特性位。`build-state.md:596` 记录 16.1 的真实能力是 `cssSupportsHas=yes`、`cssNesting=no`、`popover=no`、`textWrapBalance=no`（**已确证**）。18.3 支持 CSS 嵌套与 `popover` 这一点**本文未核源码，标记为假设**；但它有一个更硬的替身判据：`cssNesting=no` 与 `popover=no` 是 16.1 的**已确证**读数，所以出现这两个 `no` 就足以否定「引擎已换成 18.x」，无论 18.3 具体支持什么。据此：
 
 | 读数 | 含义 |
 | --- | --- |
@@ -378,7 +378,7 @@ sleep 3
 
 **判据**：UI 与每个 helper 的 `WebKit` 完整路径前缀相同（第 5 步）。**同时** `/var/jb/Library/Frameworks` 与 `/var/jb/Library/WebKitOverride` 不得同时作为可被选中的 18.3 来源。前者退回为纯安装位置即可（第 3 步的推荐方案），不必删除。
 
-**在 (B) 路线下的含义不同。** (B) 下 UI 只能加载系统 16.1 的 `WebKit`（覆盖目录里放 `WebKit` 二进制就让端点归零，`build-state.md:407` 的结论一，**已确证**），所以「路径唯一」根本不可能成立：UI 与 helper 必然来自两代。那一路的对应措辞是「两个目录都有 18.3 时哪一份被选中」，一个纯粹的择一问题，而不是「如何让两者相同」。
+**在 (B) 路线下的含义不同。** (B) 下 UI 只能加载系统 16.1 的 `WebKit`（覆盖目录里放 `WebKit` 二进制就让端点归零，`build-state.md:511` 的结论一，**已确证**），所以「路径唯一」根本不可能成立：UI 与 helper 必然来自两代。那一路的对应措辞是「两个目录都有 18.3 时哪一份被选中」，一个纯粹的择一问题，而不是「如何让两者相同」。
 
 **为什么这条最关键。** 它是唯一一条**不需要 launchd 行为成立**就能先修的：即使最后判 (B)，第 3 步的路径对齐也不会白做（M69 独立在做同一件事）。M63 审计 `:134` 把它列为第 10 行：「第 10 行不影响归零判定，但会让「是否真的跑的是全 18.3」无法从路径前缀反推。」
 
@@ -388,7 +388,7 @@ sleep 3
 
 需要检查的只有「同一份构建」这一层：打包脚本的必需项保证 `WebKit`、`WebCore`、`JavaScriptCore`、`WebKitLegacy` 一起进包，缺一个就 `exit 1`（`scripts/package-webkit-device-deb.sh:198-204`）。「同代」指同一次构建产出，不是同版本号：设备上出现过 `/var/jb` 是 `620.2.4-20261123233945` 的旧字节而新包已装上的组合，版本号一致但字节不同代（M66 文档 2.1 节，**已确证**）。判据用 `shasum -a 256` 比两侧二进制，不用版本号。
 
-**在 (B) 路线下的含义不同，且不可能满足。** (B) 下 UI 永远是 16.1、helper 是 18.3，跨代是**定义**而不是缺陷。跨代的后果已确证：两端对同一结构体给出不同布局，在 `initializeWebProcess` 处 `PAC_EXCEPTION, code = 1` 崩溃（`build-state.md:346-352`，**已确证**，两批崩溃签名一致）。要绕过只能做 IPC 协议转换层，而那一层已被证伪（第五节）。
+**在 (B) 路线下的含义不同，且不可能满足。** (B) 下 UI 永远是 16.1、helper 是 18.3，跨代是**定义**而不是缺陷。跨代的后果已确证：两端对同一结构体给出不同布局，在 `initializeWebProcess` 处 `PAC_EXCEPTION, code = 1` 崩溃（`build-state.md:415-420`，**已确证**，两批崩溃签名一致）。要绕过只能做 IPC 协议转换层，而那一层已被证伪（第五节）。
 
 ### 3.3 `usedImages` 不能用作镜像来源判据
 
@@ -415,7 +415,7 @@ sleep 3
 | --- | --- | --- |
 | 覆盖目录内容 | **带** `XPCServices`（第 2 步） | **不带** `XPCServices`，靠系统桩（`install-webkit-override.sh:259-278` 的剪枝结果；脚本原先给的理由已标为 UNVERIFIED，见第 2 步） |
 | helper 由谁起动 | 覆盖目录自己的 `.xpc`，其内嵌路径指向覆盖目录 | 系统桩，无 `LC_DYLD_ENVIRONMENT`，只能靠 `__XPC_DYLD_FRAMEWORK_PATH` 转交（转交行为未验证，M66 文档 2.3 节，**假设**） |
-| UI 的 `WebKit` 来源 | 覆盖目录 18.3 | 系统 16.1（放 18.3 二进制就归零，`build-state.md:407`） |
+| UI 的 `WebKit` 来源 | 覆盖目录 18.3 | 系统 16.1（放 18.3 二进制就归零，`build-state.md:511`） |
 | 两端代际 | 同代，按构造成立 | 必然跨代 |
 | 是否需要协议转换层 | 不需要 | 需要，但已被证伪（第五节） |
 
@@ -452,7 +452,7 @@ sleep 3
 | 中间值（如 3） | `UNKNOWN` | 重测，不当倾向证据 |
 | 本轮无新 helper | `UNKNOWN` | 与 launchd 路径规则无关，先修拉起方式 |
 
-**一个先验**：`build-state.md:264-267` 已经记录过一次 launchd 从 `/var/jb/Library/WebKitOverride` 下的 `.xpc` 启动 GPU（`procPath` 为硬证据），所以 (A) 不是低概率分支。那份读数崩在 `_xpc_api_misuse`，而该缺陷已由 `patches/ios16-xpc-bootstrap-compat.patch` 修掉（M63 审计 `:125`），**补丁之后的同类配置从未重测过**。因此判 B 之前应当确认那次补丁确实进了当前设备上的构建；否则「端点归零」可能只是在复现一个已经修好的缺陷。
+**一个先验**：`build-state.md:333-336` 已经记录过一次 launchd 从 `/var/jb/Library/WebKitOverride` 下的 `.xpc` 启动 GPU（`procPath` 为硬证据），所以 (A) 不是低概率分支。那份读数崩在 `_xpc_api_misuse`，而该缺陷已由 `patches/ios16-xpc-bootstrap-compat.patch` 修掉（M63 审计 `:125`），**补丁之后的同类配置从未重测过**。因此判 B 之前应当确认那次补丁确实进了当前设备上的构建；否则「端点归零」可能只是在复现一个已经修好的缺陷。
 
 ---
 
@@ -480,7 +480,7 @@ sleep 3
 
 1. 两侧 `lldb image list -o -f` 的 `WebKit.framework/WebKit` 路径前缀不同（第二节第 5 步）；
 2. 对两份二进制跑 `shasum -a 256`，哈希不同。**不用版本号**——同版本号不同字节的组合在上文已出现过；
-3. 崩溃报告出现 `termination.namespace = PAC_EXCEPTION`、`code = 1`，栈顶 `WebKit::WebProcess::initializeWebProcess`（`build-state.md:346-352`）。这是跨代的确证签名，不是新故障。
+3. 崩溃报告出现 `termination.namespace = PAC_EXCEPTION`、`code = 1`，栈顶 `WebKit::WebProcess::initializeWebProcess`（`build-state.md:415-420`）。这是跨代的确证签名，不是新故障。
 
 **这一条与 (B) 的区别必须说清**：(B) 的跨代是**无法避免**的（UI 只能 16.1）；此处的跨代是**可修的配置错误**（把两个目录对齐成一份即可），修完就回到同代，不需要转换层。所以「A 成立但路径不唯一」不是 (A) 退化成了 (B)，而是 (A) 路线上第 3 步没做完。两者的处置完全不同：前者改配置，后者无解。
 
@@ -539,11 +539,11 @@ done
 
 若这一条没有拉起进程，改由用户手动点开 Safari。`docs/safari-injection-plan.md:888-898` 的实测显示 SSH 侧拉起不总是成功（**已确证**），所以这一条的读数可能需要在有人值守时取。
 
-同时在本地探测页上看特性位回传（`build-state.md:492` 记录的形态：`GET /beacon` 两次，返回 `cssSupportsHas`、`cssNesting`、`popover`、`textWrapBalance`）。
+同时在本地探测页上看特性位回传（`build-state.md:596` 记录的形态：`GET /beacon` 两次，返回 `cssSupportsHas`、`cssNesting`、`popover`、`textWrapBalance`）。
 
 **预期读数**：
 
-- 16.1：特性位为 `cssNesting=no`、`popover=no`（`build-state.md:492` 的实测值，**已确证**）；
+- 16.1：特性位为 `cssNesting=no`、`popover=no`（`build-state.md:596` 的实测值，**已确证**）；
 - 不是 16.1：至少一个特性位翻转成 `yes`。这证明引擎换了，但不证明换成的是 18.3，所以还要叠加第 5 步的两侧 `WebKit` 路径；
 - 达成：页面上出现内容，且「不是 16.1」成立。特性位为 `yes` 但页面空白属于 IPC 或渲染循环问题，不是引擎没换。
 
@@ -555,7 +555,7 @@ done
 
 1. **Chrome 的 8 与 Safari 的 6 相差两条，来源未查。** 没有一份记录保留当时的 `services = {` 原段（M63 附录 A 是唯一保留原段的一份，只覆盖 Safari）。本文因此不写绝对数字。
 2. **`__XPC_DYLD_FRAMEWORK_PATH` 的转交行为未验证。** `xpcproxy` 与 `libxpc` 的源码不在 `apple-oss-distributions`，`__XPC_` 前缀的转交位置在 `/usr/libexec/xpcproxy` 的字符串表、`/sbin/launchd`、共享缓存三处都查不到（M66 文档 2.3 节，**假设**）。这条只影响 (B) 路线，(A) 路线不依赖它。
-3. **`.xpc` 内嵌路径是否被采纳，有反例。** `build-state.md:430` 记录内嵌的 `DYLD_FRAMEWORK_PATH` 在系统桩场景下没有把 helper 切到自建版本（**已确证**）。那测的是系统桩配置，不直接反驳 (A)，但说明第二节第 3 步的改动必须重新测，不能按「写了就生效」推断。
+3. **`.xpc` 内嵌路径是否被采纳，有反例。** `build-state.md:534` 记录内嵌的 `DYLD_FRAMEWORK_PATH` 在系统桩场景下没有把 helper 切到自建版本（**已确证**）。那测的是系统桩配置，不直接反驳 (A)，但说明第二节第 3 步的改动必须重新测，不能按「写了就生效」推断。
 4. **`_CodeSignature` 目录缺失的影响未测。** 见 M63 审计 `:191`。与端点解析无关的部分已由源码判定（`preferences.sb` 是沙箱模板，不参与服务清单）。
 5. **`build-state.md` 内部那处矛盾仍未解。** 第二轮记 `procPath` 指向覆盖目录的 GPU 崩溃、第三轮同配置 spawn 0，两者不能同时成立（M63 审计 `:175`，已作为 finding 提交）。这直接影响 (A)/(B) 的判定权重，不是本文能解决的。
 6. **本文没有提出任何新的设备步骤顺序建议**，除第二节的七步外；通用流程（第 0 至 6 步的完整版）在 `docs/ios16-whole-18.3-deployment-path.md`，本文只在需要时指向它。
