@@ -453,7 +453,7 @@ client-sdk-aligned-behaviors, extra-initialization-data
 - 两版都有的测试与调试键 `configure-jsc-for-testing`、`disable-jit`、`enable-shared-array-buffer`、`stdout`、`stderr` 属于开发构建分支，不参与这里的判定。
 - `server-port` 两版都有，它是 UI 进程的接收端口，也就是第 1 节里 helper 发消息的目标。
 
-按第 2 节，16.1 发的 `client-sdk-aligned-behaviors` 是 **8 字节**，18.3 helper 的 `storageLengthInBytes()` 是 **12**，`EPM18:93` 的 `RELEASE_ASSERT` 在发布构建里也生效，helper 在 `XPCServiceInitializer` 内中止。也就是说这组错配在 XPC 阶段就终止了，不会走到 CoreIPC。
+按第 2 节，16.1 发的 `client-sdk-aligned-behaviors` 是 **8 字节**，18.3 helper 的 `storageLengthInBytes()` 是 **12**，`EPM18:93` 的 `RELEASE_ASSERT` 在发布构建里也生效。按两版 tag 原文求值，helper 在 `XPCServiceInitializer` 内中止，这组错配在 XPC 阶段就终止了，不会走到 CoreIPC；本工程产物删掉该断言后不再中止，见本节末段。
 
 启动握手两版一致：helper 收到 `message-name == "bootstrap"` 后回 `message-name == "process-finished-launching"`（16.1 `XPCServiceMain.mm:122-124`，18.3 `:214-216`），UI 侧断言这个回复（16.1 `ProcessLauncherCocoa.mm:288`，18.3 `:507`）。两版都在回完这条消息之后才调用初始化函数（16.1 `XM16:134-138`，18.3 `XM18:226-236`），所以断言中止发生在回复入队之后，与回复的实际投递竞争。
 
