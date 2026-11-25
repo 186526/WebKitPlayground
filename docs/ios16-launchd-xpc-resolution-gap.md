@@ -432,11 +432,11 @@ launchd_flat_mach_namespace = false;
 
 不过真正把名字钉在域内的是**外层那个 `BOOTSTRAP_PROPERTY_XPC_DOMAIN` 判断**，它与 `launchd_flat_mach_namespace` 无关：`core.c:7155` 是 `if (!(jm->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN)) { ... }`，`core.c:6358` 是同一形状的 `if (!(j->mgr->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN)) { ... }`。XPC 域连进这两个 `if` 都进不去，所以不管哪个 launchd 实例、命名空间平不平，XPC 域的 `where2look` 与 `where2put` 都只能是自己。`launchd.c:227-228` 关掉的是「非 XPC 域但走 root 回退」那条路。**这两条合起来，证据强度是已确证。**
 
-**「app 的 manager 就是私有 XPC 域」这一步不同，它是「有源码支撑」，不是已确证。** 没有任何一次读数直接读出域类型字段。先记一条否定：**报告把 `print pid/N` 的应答归到 `job_mig_info` 这个归因没有验证过。** `job_mig_info`（`core.c:9211` 起）在 `core.c:9233-9241` 按 `launchd_flat_mach_namespace` 决定 `jm`，但 Procursus `launchctl`（`v1.2.0`）的 `print.c:65` 走的是 `XPC_ROUTINE_PRINT` / `XPC_ROUTINE_PRINT_SERVICE` 这条 XPC 消息，不是那个 MIG 例程；`protocol_jobmgr.defs:71` 的 `info` 还标着 `skip; /* last used in 10.4 */`。**无法从公开源码确认 `print pid/N` 落到哪个处理函数**，所以不能拿 `job_mig_info` 的分支当证据。
+**「app 的 manager 就是私有 XPC 域」这一步不同，它是「有源码支撑」，不是已确证。** 没有任何一次读数直接读出域类型字段。先记一条否定：**报告把 `print pid/N` 的应答归到 `job_mig_info` 这个归因没有验证过。** `job_mig_info`（`core.c:9211` 起）在 `core.c:9233-9241` 按 `launchd_flat_mach_namespace` 决定 `jm`，但 Procursus `launchctl`（`v1.2.0`，`22906f7`，`print.c` 共 227 行）的 `print.c:61-64` 走的是 `XPC_ROUTINE_PRINT` / `XPC_ROUTINE_PRINT_SERVICE` 这条 XPC 消息（`:62` 是 `XPC_ROUTINE_PRINT_SERVICE`，`:64` 是 `XPC_ROUTINE_PRINT`，按 `name` 是否为空二选一；`:65` 是空行），不是那个 MIG 例程；`protocol_jobmgr.defs:71` 的 `info` 还标着 `skip; /* last used in 10.4 */`。**无法从公开源码确认 `print pid/N` 落到哪个处理函数**，所以不能拿 `job_mig_info` 的分支当证据。
 
 真正支撑这一步的是两条设备读数：
 
-- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:199`），Chrome 基线 8 条（`build-state.md:465`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
+- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:202`），Chrome 基线 8 条（`build-state.md:465`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
 - 四个 WebKit 服务名在 `system`/`user/501`/`gui/501` 三域都查不到（`build-state.md:371`）。
 
 这两条只说明「`print pid/N` 看到的那个集合很小」，不能单独证明「这个集合来自 XPC 域」，也不能排除「来自某个很小的非 XPC 域」。9.9 第 1 条是能把它定案的读数。
@@ -566,7 +566,7 @@ if (!entitlement) {
 
 即客户端自己 attach 到已导入私有域的服务。**plist 声明的任务永远不会有 attach 记录**，所以 launchd 不会为它启用 `xpcproxy`，也不会把 peer 递给 helper。
 
-把 9.2 与这一节合起来：`MachServices` 能让名字出现在某个域里，但既不会让 launchd 把 helper 当 XPC 服务启动，也不会递送 peer。若 helper 因为别的原因被拉起来，它会收到 `ConnectionInvalid` 并按上面那个 block 直接 `exitProcess`（退出码 137）。这与 `build-state.md` 记的「覆盖目录含二进制时 spawn 0」表现同形，但是另一个成因。
+把 9.2 与这一节合起来：`MachServices` 能让名字出现在某个域里，但既不会让 launchd 把 helper 当 XPC 服务启动，也不会递送 peer。若 helper 因为别的原因被拉起来，它会收到 `ConnectionInvalid` 并按上面那个 block 调用 `exitProcess(EXIT_FAILURE)`。`exitProcess` 在非 Windows 平台就是 `exit(status)`（`Source/WTF/wtf/WTFProcess.cpp:41-63`，`#else` 分支在 `:61`），`EXIT_FAILURE` 是 1，所以退出码是 **1**。137 是 `128+9`，来自另一条路径：16.1 的 libxpc 对 `xpc_dictionary_apply(NULL, …)` 直接发 SIGKILL（`build-state.md` 第六轮「设备实测」一节那条独立小程序测到的 `Killed: 9` / `exit=137`），与这里的 `exitProcess` 不是同一回事。这与 `build-state.md` 记的「覆盖目录含二进制时 spawn 0」表现同形，但是另一个成因。
 
 ### 9.4 `/var/jb` 任务的发现路径
 

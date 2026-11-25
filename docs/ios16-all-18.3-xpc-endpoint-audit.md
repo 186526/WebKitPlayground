@@ -123,7 +123,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | 1 | `_WTFSignpostIndirectLoggingEnabled` 缺失致 dyld 中止 | 无（打包） | 五个 framework 必须整套投放，不能只放 `WebKit` | `ls -t .../CrashReporter/*.ips` 里无 `namespace = DYLD`；`lldb -b -o "image list"` 里 `JavaScriptCore` 来自 `/var/jb` | 已落地（`install-webkit-override.sh` 的 `FRAMEWORK_NAMES` 含 JSC） |
 | 2 | `.xpc` 的 bundle id 带 `.Service` 后缀，launchd 查不到 | `Configurations/{WebContentService,NetworkService,GPUService}.xcconfig` | `sdk=iphone*` 下去掉 `.Service` | `launchctl print pid/<PID>` 里出现裸名 `com.apple.WebKit.Networking`；或 `ps` 里 helper 路径的 `.xpc` 目录名不带后缀 | 已覆盖，`ios16-xpc-service-bundle-identifier.patch` |
 | 3 | 16.1 UI 把 `ContainerEnvironmentVariables` 写在 bootstrap 消息上，18.3 helper 从事件字典读，取到 NULL | `XPCServiceMain.mm` | 两个来源各自独立尝试，取到才 `apply` | helper 不再 `Killed: 9`（退出 137）；`launchd.log` 里出现 `Successfully spawned` | 已覆盖，`ios16-xpc-bootstrap-compat.patch` |
-| 4 | 16.1 的 `pre-bootstrap` 消息在 18.3 无分支，落到 `handleXPCEndpointMessage` 被丢弃 | `XPCServiceMain.mm` | 增加 `pre-bootstrap` 分支并存下 `priorityBoostMessage` | helper 存活期间不因 transaction 提前释放而退出 | 已覆盖，同一补丁 |
+| 4 | 上游在 18.x 已删除 `pre-bootstrap` 这条路径（八个 18.x tag 的 `Source/WebKit` 对该串 0 命中），收到这个名字后落到 `handleXPCEndpointMessage`，那里没有对应分支，消息被丢弃 | `XPCServiceMain.mm` | 恢复该分支并存下 `priorityBoostMessage` | 会发这条消息的 UI 进程连上时，helper 不再把它当未知消息丢弃。本工程部署的 iOS 16.1 UI 不发这条消息（`ProcessLauncherCocoa.mm:82-86` 的 `shouldLeakBoost` 在 iOS 上返回假），所以此路径在部署组合上是死代码 | 已覆盖，同一补丁 |
 | 5 | `InitializerFunction` 参数个数 16.1 为 3、18.3 为 2 | `XPCServiceEntryPoint.h` | 入口签名加默认第三参数 | helper 能走到 `initializeAuxiliaryProcess`，不因函数指针调用而崩 | 已覆盖，同一补丁 |
 | 6 | `getClientSDKAlignedBehaviors` 两版都收位图，但 16.1 发 8 字节、18.3 期望 12 字节，`RELEASE_ASSERT` 相等比较导致 helper 中止 | `XPCServiceEntryPoint.mm` | 删除 `RELEASE_ASSERT`，改为按宽度分三支：等宽时 `memcpy` 并返回真（本包部署的组合两端是同一份 framework，位序相同，这一支正确）；窄于本版时丢弃、位图保持全零、记 `RELEASE_LOG_ERROR`、返回真；宽于本版时丢弃、记另一条日志、返回假。两版位序不可按位置换算，所以 8 字节的负载不被解码 | helper 不再中止，8 字节负载走「窄」那一支取默认值；等宽的 12 字节对端（16.4、17.x、18.0–18.2）仍会被按错位序拷贝（需在 helper 内打点） | M85 已落地（`97cfd79`、`ddfaa5f`、`e657b79`、`30ae1b9` 至 `7295bbb`，其中 `e657b79` 恢复等宽拷贝） |
 | 7 | `xpc_main` 在公开 iOS SDK 上不可用 | `XPCServiceMain.mm` | 用 `xpc_connection_create(nullptr,nullptr)` 复现 `xpc_main` 的接线 | helper 能被拉起并回 `process-finished-launching` | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
@@ -144,7 +144,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | `XPCServiceEntryPoint.h @@ -93,8 +93,14` | 入口签名加默认第三参数 | 第 5 行 |
 | `XPCServiceEntryPoint.mm @@ -90,10 +90,66` | `getClientSDKAlignedBehaviors` 改写后的函数体（`RELEASE_ASSERT` 删除，按数据块宽度分派：等宽 `memcpy` 进位图并返回真，更窄丢弃留全零并返回真，更宽丢弃并返回假；不为 `client-sdk-version` 做回退。这一形态由 `97cfd79`、`ddfaa5f`、`e657b79` 这一串提交确定，其中 `e657b79` 恢复等宽拷贝） | 第 6 行 |
 | `XPCServiceMain.mm @@ -124,6 +124,8` | `InitializerFunction` 改三参数 | 第 5 行 |
-| `XPCServiceMain.mm @@ -152,18 +154,49` | `ContainerEnvironmentVariables` 双来源、`OverrideLanguages` 双来源、`pre-bootstrap` 分支 | 第 3、4 行 |
+| `XPCServiceMain.mm @@ -152,18 +154,49` | `ContainerEnvironmentVariables` 双来源、`OverrideLanguages` 双来源、`pre-bootstrap` 分支（18.x 已删除这条路径，`Source/WebKit` 在八个 18.x tag 上对该串 0 命中；分支形态取自发货 16.1 的 `XPCServiceMain.mm:145-149`） | 第 3、4 行 |
 | `XPCServiceMain.mm @@ -174,11 +207,21` | `ContainerEnvironmentVariables` 取到才 `apply` | 第 3 行 |
 | `XPCServiceMain.mm @@ -201,7 +244,9`、`@@ -230,11 +275,14` | 调用处传第三参数、配平 | 第 5 行 |
 
