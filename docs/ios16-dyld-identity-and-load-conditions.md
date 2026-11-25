@@ -330,12 +330,12 @@ Successfully marked proc of pid 32399 as debugged
 [ctor] after claim, WebKit images = 1
 ```
 
-（`JavaScriptCore` 与两条 dylib 三步都成功，其后四步各自失败、报的符号互不相同；调整 `JavaScriptCore` 与两条 dylib 以外的顺序无法补救。）
+（`JavaScriptCore` 与两条 dylib 三步都成功，其后四步各自失败；四步报的是三条符号——`WebCore` 与 `WebKit` 同缺 `_WTFSignpostIndirectLoggingEnabled`，`WebKitLegacy` 缺 `WTF::Thread::s_key`，`WebGPU` 缺 `StringImpl` 那条；调整 `JavaScriptCore` 与两条 dylib 以外的顺序无法补救。）
 
 读数说明：
 
 - **constructor 进入时 `WebKit` 已经在场，而且是系统那份。** `__mod_init_func` 在 dyld 映射完主可执行文件的全部依赖之后才运行，所以链接了 `WebKit` 的宿主里，constructor 永远晚于 `WebKit` 的映射。
-- **前三步成功，后四步各自失败，报的是四个不同的符号。** `WebCore` 与 `WebKit` 报 `_WTFSignpostIndirectLoggingEnabled`，`WebKitLegacy` 报 `WTF::Thread::s_key`，`WebGPU` 报 `StringImpl` 那条（2.2 引的同一条）。四个符号都由 `JavaScriptCore` 提供，所以这四步失败不是签名失败，而是它们绑定到的不是自建那份 `JavaScriptCore`。区别在于这一次自建 `JavaScriptCore` 的 `dlopen` 拿回的是已在场的 handle，没有替换掉系统那份：判重按 install name 进行，先在场的那份赢，见 4.3。`after claim, WebKit images = 1` 说明整个过程没有多出第二份 `WebKit`。
+- **前三步成功，后四步各自失败，四步报的是三条符号。** `WebCore` 与 `WebKit` 报同一条 `_WTFSignpostIndirectLoggingEnabled`，`WebKitLegacy` 报 `WTF::Thread::s_key`，`WebGPU` 报 `StringImpl` 那条（2.2 引的同一条）。在本轮那份 18.3 载荷上实测：这三条符号只由自建 `JavaScriptCore` 导出（`llvm-nm -gU` 在它那里分别读到 `S`、`D`、`T`，其余四个镜像都是 0），而这四个失败镜像各自以未定义导入引用自己那条，所以四步失败不是签名失败，而是它们绑定到的不是自建那份 `JavaScriptCore`。区别在于这一次自建 `JavaScriptCore` 的 `dlopen` 拿回的是已在场的 handle，没有替换掉系统那份：判重按 install name 进行，先在场的那份赢，见 4.3。`after claim, WebKit images = 1` 说明整个过程没有多出第二份 `WebKit`。
 - 因此 6.1 的成立条件要写全：**constructor 先行只在「宿主不链接 `WebKit`、而由 constructor 自己第一个 `dlopen` 它」时有效。** 真实 app 的形态（主可执行文件链接 `WebKit`）不满足这个条件。
 
 所以这一项的准确说法是：**constructor 机制只在不链接 `WebKit` 的宿主上被证明；真实 `WebContent` 的形态下它被证明无效（6.3），沙盒与 JIT entitlement 继承则是连读数都还没有。** 下一步不该再试 constructor，应当回到「在 dyld 绑定之前让覆盖目录生效」这条路（`DYLD_FRAMEWORK_PATH` 注入），它与 constructor 无关。

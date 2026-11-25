@@ -44,9 +44,12 @@ and loads JavaScriptCore.
 
 Doc 6.3 answers a different question. There the chain ran in this same order with
 `JavaScriptCore` first, and `JavaScriptCore`, `libwebrtc` and `libANGLE-shared` all
-loaded; the four remaining steps then failed, each on its own `WTF` symbol —
-`WebCore` and `WebKit` on `_WTFSignpostIndirectLoggingEnabled`, `WebKitLegacy` on
-`WTF::Thread::s_key`, `WebGPU` on the `StringImpl` symbol quoted above. The cause is
+loaded; the four remaining steps then failed, on three distinct `WTF` symbols: `WebCore` and
+`WebKit` both on `_WTFSignpostIndirectLoggingEnabled`, `WebKitLegacy` on
+`WTF::Thread::s_key`, and `WebGPU` on the `StringImpl` symbol quoted above. All three
+are exported by the self-built `JavaScriptCore` alone (`llvm-nm -gU` finds them as
+`S`/`D`/`T` definitions there and in none of the other four images), and each of the
+four failing images refers to its own one as an undefined import. The cause is
 the identity rule in doc 4.3: a host that links `WebKit` already has the system copy
 resident, and it keeps the identity, so the `dlopen` of the self-built
 `JavaScriptCore` returned the resident handle instead of replacing it. That is a
