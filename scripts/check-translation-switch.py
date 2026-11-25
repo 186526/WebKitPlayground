@@ -186,6 +186,19 @@ COMMENT_SENTINEL = " "
 # `R"delimiter(`, with an empty delimiter allowed. Matched at the position the scan is on, so the anchor
 # is the caller's loop rather than `^`.
 RAW_STRING_HEAD = re.compile(r'R"(?P<delimiter>[^()\\\s]{0,16})\(')
+# A pp-number as C++14 spells a digit separator: `1'000`, `0xFF'FF`, `1'000'000`. The apostrophe there
+# is punctuation inside a number, not a quote, and reading it as one swallowed the rest of the
+# statement: `RELEASE_LOG(IPC, "%d", 1'000); }` counted no closer, so a setter call written after it
+# passed the whole check.
+#
+# The rule is the one the standard states for a pp-number, evaluated left of the apostrophe. Everything
+# from the start of the identifier-like run must be `[0-9A-Za-z_.]` and the run must start with a
+# digit; the character after the apostrophe must be alphanumeric. `u8'1'` is a character constant
+# because its prefix starts with `u`, and `'}'` is one because the character before it is not part of a
+# digit-leading run.
+PP_NUMBER_RUN = re.compile(r"[0-9A-Za-z_.]+$")
+DIGIT = re.compile(r"[0-9]")
+ALPHANUMERIC = re.compile(r"[0-9A-Za-z]")
 
 
 class LexicalRegion(NamedTuple):
@@ -195,6 +208,27 @@ class LexicalRegion(NamedTuple):
     start: int
     end: int
     closed: bool
+
+
+def is_digit_separator(statement: str, position: int) -> bool:
+    """True when the apostrophe at `position` sits inside a pp-number, as `1'000` does.
+
+    C++14 lets a digit separator appear between digits of a number. The test is the pp-number rule read
+    from the left: the run of identifier-like characters ending just before the apostrophe must be
+    non-empty, must consist of `[0-9A-Za-z_.]`, and must start with a digit; the character after the
+    apostrophe must be alphanumeric. Every other apostrophe opens a character constant.
+
+    Both halves are load-bearing, on different shapes. The start-digit half keeps `u8'1'` a character
+    constant, because `u8` is an encoding marker rather than a number, and it is also what refuses
+    `'1'`, whose run before the quote is empty. The following-character half keeps `1';` a quote: a
+    run that starts with a digit is not enough on its own, because the character after the apostrophe
+    decides whether a number continues there.
+    """
+    run = PP_NUMBER_RUN.search(statement, 0, position)
+    if not run or not DIGIT.match(run.group(0), 0):
+        return False
+    following = position + 1
+    return following < len(statement) and bool(ALPHANUMERIC.match(statement, following))
 
 
 def lexical_regions(statement: str) -> list[LexicalRegion]:
@@ -235,6 +269,9 @@ def lexical_regions(statement: str) -> list[LexicalRegion]:
             continue
         opener = statement[position]
         if opener in ('"', "'"):
+            if opener == "'" and is_digit_separator(statement, position):
+                position += 1
+                continue
             cursor = position + 1
             while cursor < length:
                 if statement[cursor] == "\\":
@@ -442,6 +479,26 @@ DEFINITION_FILES = (
 TRANSLATE_CALL = re.compile(r"\btranslate(?:Outgoing|Incoming)MessageName\s*\(")
 
 
+def unmatched_closer_offsets(view: str) -> list[int]:
+    """Offsets, in a lexical view, of the `}` that close a block opened before the statement started.
+
+    A `}` is paired against a `{` from the same statement first, so a braced initialiser or a one-line
+    function body contributes nothing. Each surviving `}` closes something that was already open, and
+    `count_unmatched_closers` and `last_unmatched_closer` are two readings of this one list.
+    """
+    offsets = []
+    opened = 0
+    for offset, character in enumerate(view):
+        if character == "{":
+            opened += 1
+        elif character == "}":
+            if opened:
+                opened -= 1
+            else:
+                offsets.append(offset)
+    return offsets
+
+
 def count_unmatched_closers(statement: str) -> int:
     """How many `}` in the statement close a block that was open before the statement started.
 
@@ -455,17 +512,19 @@ def count_unmatched_closers(statement: str) -> int:
     counted. `RELEASE_LOG(IPC, "closing {"); }` closes one block; without the view its string's `{`
     cancelled the real `}`, the guard stayed on the stack, and the call that followed was accepted.
     """
-    unmatched = 0
-    opened = 0
-    for character in code_view(statement):
-        if character == "{":
-            opened += 1
-        elif character == "}":
-            if opened:
-                opened -= 1
-            else:
-                unmatched += 1
-    return unmatched
+    return len(unmatched_closer_offsets(code_view(statement)))
+
+
+def last_unmatched_closer(view: str) -> int:
+    """Offset of the last `}` in the view that closes a block opened before the statement, or -1.
+
+    A call after this offset has left every block the statement started inside, so the enclosing chain
+    no longer describes where the call is. `enclosing_blocks` samples the stack before the statement's
+    closers pop it, which is right for a call at the statement's head and wrong for one written after
+    `pending(); }` on the same statement.
+    """
+    offsets = unmatched_closer_offsets(view)
+    return offsets[-1] if offsets else -1
 
 
 def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
@@ -923,11 +982,23 @@ def check_read_sites(patch: str) -> list[Violation]:
         return path in DEFINITION_FILES and bool(TRANSLATION_DEFINITION.match(view))
 
     def guarded(index: int, call_start: int) -> bool:
-        if chain_has_guard(blocks[index]):
-            return True
-        if braceless_guard_before(statements, index):
-            return True
-        return inline_guard_covers(code_view(statements[index][1]), call_start)
+        """True when the member's guard covers the call at `call_start`.
+
+        A call written after a closer in the same statement has left the block the chain describes.
+        `enclosing_blocks` samples the stack before the statement's own closers pop it, which is right
+        for a call at the statement's head and wrong for one written after `pending(); }` on the same
+        statement: the chain still names the guard the statement just closed, so the call was accepted
+        as guarded. Past the last closer only the call's own statement can decide, and
+        `inline_guard_covers` asks exactly that.
+        """
+        view = code_view(statements[index][1])
+        closer = last_unmatched_closer(view)
+        if closer == -1 or call_start < closer:
+            if chain_has_guard(blocks[index]):
+                return True
+            if braceless_guard_before(statements, index):
+                return True
+        return inline_guard_covers(view, call_start)
 
     # Every added statement that calls the translation has to sit under the member, not just the two
     # files that were the read sites when this check was written. Every call in a statement is checked,

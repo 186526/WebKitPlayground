@@ -50,10 +50,14 @@ cases are the ways the switch can come back and the ways the check could pass by
   settled.
 
 Open boundary: a call that follows a closed guard block inside the same statement — `if (m) { x();
-} call;` — is currently refused, because the whole statement's block chain is read at the statement's
-start. That is the safe direction (a false reject, not a false accept), and tightening it needs a
-change in how statements are cut. A block comment inside the condition — `if (m /* c */)` — is refused
-for the same reason: the condition is read as written and the comment is not stripped there.
+} call;` — is refused, in both spellings. The one-line form was refused because its chain is empty
+and no closure sits before the call; the split form used to *pass*, because the chain is read at the
+statement's start and still held the guard the statement had just closed. That was a false accept —
+wrong code accepted — so the check now stops consulting the chain once a closer in the call's own
+statement precedes the call, and asks only the call's own statement. Accepting the call in either
+spelling would need the statement to be cut at the closure, which this check does not do. A block
+comment inside the condition — `if (m /* c */)` — is refused because the condition is read as written
+and the comment is not stripped there.
 
 The "as committed" case reads the real patch, so a patch edited without updating this check fails
 here rather than in the build. Two further passes read the real patch too: every rationale needle
@@ -529,6 +533,66 @@ CODE_VIEW_CASES = (
     ("/* a \"q\" */ }", "  }"),
     ("/* don't */ log('}');", "  log(?);"),
     ("x(); /* don't */ log('}'); }", "x();   log(?); }"),
+    # A digit separator is punctuation inside a pp-number, so the number stays verbatim in the view.
+    # Read as a character constant it swallowed the rest of the statement: the closing brace above
+    # disappeared, and a setter call written after it passed the whole check.
+    ("1'000", "1'000"),
+    ("0xFF'FF", "0xFF'FF"),
+    ("1'000'000", "1'000'000"),
+    ('RELEASE_LOG(IPC, "%d", 1\'000); }', "RELEASE_LOG(IPC, ?, 1'000); }"),
+    # The other side of the same rule: these are character constants because their prefix is not a
+    # digit-leading run, so they are still swallowed. `u8'1'` is the one that a rule keyed only on the
+    # character before the apostrophe would read as a separator.
+    ("u8'1'", "u8?"),
+    ("'1'", "?"),
+    # A digit-leading run is not enough on its own: the character after the apostrophe decides whether
+    # a number continues there. `1';` is a character constant that a rule without the lookahead would
+    # read as a separator, leaving `; }` as code and counting a brace that is really inside it.
+    ("1';", "1?"),
+    ("x = 1'; }", "x = 1?"),
+)
+
+# Round 13's P2-1: a `'` inside a pp-number is not a quote. Each entry is a body or guard line whose
+# closing brace must still be counted, and the code around it must judge the way the compiler would.
+DIGIT_SEPARATOR_CLOSERS = (
+    ("a digit separator does not hide the closing brace of its statement",
+     'RELEASE_LOG(IPC, "%d", 1\'000); }', 1),
+    ("a hex digit separator does not hide the closing brace of its statement",
+     "x = 0xFF'FF; }", 1),
+    ("two digit separators do not hide the closing brace of their statement",
+     "t = 1'000'000; }", 1),
+)
+
+# The same defect end to end. The first entry is the one that matters most: the separator used to
+# swallow the setter call that followed it, so `setShouldTranslateMessageNames(true)` passed the check
+# the whole mission exists for. The control differs only in the number's spelling.
+DIGIT_SEPARATOR_PATCHES = (
+    ("a setter call after a line with a digit separator fails",
+     '+    RELEASE_LOG(IPC, "budget %d", 1\'000); setShouldTranslateMessageNames(true);\n', 1,
+     "calls setShouldTranslateMessageNames"),
+    ("a setter call after the same line without a separator fails",
+     '+    RELEASE_LOG(IPC, "budget %d", 1000); setShouldTranslateMessageNames(true);\n', 1,
+     "calls setShouldTranslateMessageNames"),
+)
+
+# A digit separator inside correct code. These must pass: the separator is digits, not structure, and
+# reading it as a quote removed the loop's `{`, which popped the guard and refused the call inside it.
+DIGIT_SEPARATOR_CORRECT_CODE = (
+    ("a loop bound with a digit separator does not close the guard",
+     "for (unsigned i = 0; i < 1'000; ++i) {", 0),
+    ("the same loop bound without a separator passes", "for (unsigned i = 0; i < 1000; ++i) {", 0),
+)
+
+# Round 13's P2-2: a call after a closure in its own statement. The two spellings differ only in where
+# the statement boundary falls, and before this round they disagreed: the one-line form was refused and
+# the split form passed, because the chain is sampled at the statement's start.
+GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT = (
+    ("a call after a closed guard in the same statement fails",
+     ["if (m_shouldTranslateMessageNames) { pending(); } "
+      "auto translated = translateIncomingMessageName(decoder->messageName());"]),
+    ("the same call joined from two lines fails, because joining cannot make it guarded",
+     ["if (m_shouldTranslateMessageNames) {",
+      "pending(); } auto translated = translateIncomingMessageName(decoder->messageName());"]),
 )
 
 
@@ -994,6 +1058,88 @@ for description, body, expected_code in BRACES_IN_TEXT_MASKING_CLOSURE:
         None if expected_code == 0 else "calls the translation outside the member's guard",
     ),)
 
+# Statement-level readings that are not patch fixtures: the counter and the last-closer offset.
+COUNTER_CASES = ()
+
+for description, statement, expected_count in DIGIT_SEPARATOR_CLOSERS:
+    COUNTER_CASES += ((description, statement, expected_count),)
+
+for description, statement, expected_code, expected_message in DIGIT_SEPARATOR_PATCHES:
+    CASES += ((
+        description,
+        BASE.replace(SEND_GUARD, SEND_GUARD + statement, 1),
+        expected_code,
+        expected_message,
+    ),)
+
+for description, body, expected_code in DIGIT_SEPARATOR_CORRECT_CODE:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void f() {\n"
+        + "+    if (m_shouldTranslateMessageNames) {\n"
+        + "+        " + body + "\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+        }\n"
+        + "+}\n",
+        expected_code,
+        None if expected_code == 0 else "calls the translation outside the member's guard",
+    ),)
+
+for description, lines in GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT:
+    CASES += ((
+        description,
+        BASE.replace(RECEIVE_GUARD,
+                     "".join("+    " + line + "\n" for line in lines), 1),
+        1,
+        "calls the translation outside the member's guard",
+    ),)
+
+
+def check_open_boundary_docstring_matches_behaviour() -> int:
+    """Assert the Open boundary paragraph describes what the checker does, in both directions.
+
+    The paragraph is the only place a reader learns which spellings of a closed guard are refused and
+    why. It said "a false reject, not a false accept" while the split spelling was accepted, so the
+    document disagreed with the code on the one question it exists to answer. Each claim below is a
+    sentence the paragraph has to carry *and* a behaviour it has to match: the wrong direction is
+    refused, and the checker refuses exactly the spellings the sentence names.
+    """
+    module_doc = (SCRIPTS / "test-check-translation-switch.py").read_text(encoding="utf-8")
+    start = module_doc.find("Open boundary:")
+    if start < 0:
+        print("FAIL: the Open boundary paragraph is gone from this file's docstring")
+        return 1
+    paragraph = module_doc[start:module_doc.find("\n\n", start)]
+    normalised = " ".join(paragraph.split())
+
+    failures = 0
+    if "wrong code accepted" not in normalised:
+        failures += 1
+        print("FAIL: the Open boundary paragraph no longer says the split form was "
+              "wrong code accepted")
+    if "a false reject, not a false accept" in normalised:
+        failures += 1
+        print("FAIL: the Open boundary paragraph still claims 'a false reject, not a false accept'; "
+              "the split spelling is refused today, so that sentence describes the code as it was "
+              "before the fix and the direction it names is the opposite of the measured one")
+    if "Refused" not in paragraph and "refused" not in paragraph:
+        failures += 1
+        print("FAIL: the Open boundary paragraph no longer says the call is refused")
+
+    # The paragraph's claim, executed: the one-line spelling and the split spelling are both refused.
+    for description, lines in GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT:
+        result = run(BASE.replace(RECEIVE_GUARD,
+                                  "".join("+    " + line + "\n" for line in lines), 1))
+        if result.returncode != 1:
+            failures += 1
+            print("FAIL: the Open boundary paragraph says the call is refused, but %s exits %d"
+                  % (description, result.returncode))
+
+    if not failures:
+        print("ok: the Open boundary paragraph matches the checker on both spellings")
+    return failures
+
 
 def check_needles_are_unique_and_necessary() -> int:
     """Assert each rationale needle occurs exactly once in the real patch's prose, and is necessary.
@@ -1139,6 +1285,17 @@ def main() -> int:
             print("FAIL: code_view(%r) is %r, expected %r" % (statement, actual, expected_view))
         else:
             print("ok: code_view(%r) is %r" % (statement, actual))
+
+    for description, statement, expected_count in COUNTER_CASES:
+        actual = len(CHECK.unmatched_closer_offsets(CHECK.code_view(statement)))
+        if actual != expected_count:
+            failures += 1
+            print("FAIL: %s: closers(%r) is %d, expected %d"
+                  % (description, statement, actual, expected_count))
+        else:
+            print("ok: %s: closers(%r) is %d" % (description, statement, actual))
+
+    failures += check_open_boundary_docstring_matches_behaviour()
 
     if failures:
         print("%d case(s) failed" % failures)
