@@ -89,9 +89,9 @@ WTF::StringImpl::createWithoutCopyingNonEmpty(std::__1::span<char16_t const, 184
 | `WebCore` | FAILED，报上面那条 `Symbol not found` | LOADED |
 | `WebGPU`（设备上已安装的原始镜像） | FAILED，同样的符号错误 | LOADED |
 | `WebGPU`（`rcodesign` 重签） | FAILED，同样的符号错误 | **LOADED** |
-| `WebGPU`（剥掉 `LC_CODE_SIGNATURE`） | FAILED | 未测 |
+| `WebGPU`（剥掉 `LC_CODE_SIGNATURE`） | FAILED | FAILED（第三节记了这处记录差异） |
 
-最后一行是这张表里唯一的空格，第九节把它列进未验证清单。
+前一行给出的结论是「顺序是充分条件的一部分」；最后一行说明「授权把签名检查放行了，但无签名这一形态仍然过不去」，所以授权不能替代签名。第九节把复跑这一格列为待办。
 
 ### 2.3 顺序有两个层，别混成一个
 
@@ -101,7 +101,7 @@ WTF::StringImpl::createWithoutCopyingNonEmpty(std::__1::span<char16_t const, 184
 JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy → WebGPU → WebKit
 ```
 
-只满足第一层、把 `WebCore` 提前的顺序（第一节那段原文用的就是它）仍然 7/7 加载成功，但会带出重复类告警，见第五节五点二。这两层的判据不同：第一层看有没有 `Symbol not found`，第二层看重复计数是 0 还是 31。
+只满足第一层、把 `WebCore` 提前的顺序（第一节那段原文用的就是它）仍然 7/7 加载成功，但会带出重复类告警，见 5.2。这两层的判据不同：第一层看有没有 `Symbol not found`，第二层看重复计数是 0 还是 31。
 
 ### 2.4 这两条只覆盖「能加载」
 
@@ -111,16 +111,18 @@ JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy �
 
 ## 三、签名形态不是判据
 
-四种签名形态在同一组条件下对照，结论是签名形态既不构成充分条件，也不构成必要条件：
+四种签名形态在同一组条件下对照。结论：签名形态既不构成充分条件，也不是必要条件，只有「完全没有签名」这一形态必败。
 
-| 签名形态 | 已授权 + 按顺序 | 判读 |
-| --- | --- | --- |
-| Apple 链接器原签名（deb 里现在就是这个形态） | LOADED | 可用 |
-| `rcodesign` 重签（`flags=0x2` ADHOC、SHA-256 单 CodeDirectory、CMS 桩） | LOADED | 可用 |
-| 剥掉 `LC_CODE_SIGNATURE`（完全没有签名） | **FAILED** | 唯一必败形态 |
-| 未授权（不做 `proc_set_debugged`） | FAILED | 与签名形态无关，全部失败 |
+| 签名形态 | 已授权、单独加载 | 已授权、先 `JavaScriptCore` 后加载 | 判读 |
+| --- | --- | --- | --- |
+| Apple 链接器原签名（deb 里现在就是这个形态） | FAILED，`Symbol not found` | LOADED | 可用 |
+| `rcodesign` 重签（`flags=0x2` ADHOC、SHA-256 单 CodeDirectory、CMS 桩） | FAILED，`Symbol not found` | **LOADED** | 可用 |
+| 剥掉 `LC_CODE_SIGNATURE`（完全没有签名） | FAILED | **FAILED** | 唯一必败形态 |
+| 任意签名形态、未授权 | FAILED，`code signature invalid` | FAILED，同左 | 与签名形态无关 |
 
-所以真正决定成败的是第二节的两个条件；签名形态在两种「有签名」的形态之间没有区分度，而「没有签名」这一形态即使授权也失败。
+第三行要留一处记录差异：更早的一次对照表把「剥掉签名 + 先 JSC」这一格记为未测，本轮的结论是它 FAILED。两处都指向「没有签名不能加载」，但若有人要复跑，应当把这一格当成待复核，而不是当成已有两份独立读数。
+
+所以真正决定成败的是第二节的两个条件。签名形态在两种「有签名」的形态之间没有区分度，而「没有签名」这一形态即使授权也失败。
 
 这条对照推翻了一个更早的猜想：曾经设想「完全无签名 + 授权」可以绕过签名问题，从而让加载命令改写不必重签。实测不支持，剥掉签名是唯一必败的形态。加载命令区在签名覆盖的页里，改写它必然破坏印章，所以改写之后仍要重签，两件事一起做。
 
@@ -455,7 +457,7 @@ uuid 直接读 `mach_header_64` 的 `uuid` 字段（偏移 8，在 `load_command
 
 - **4.3 表格第三行**：宿主已加载系统 `WebKit` 之后 `dlopen` 自建那份，handle 与镜像数如何。前两行已测，第三行是同一规则的推论。
 - **4.4 的三种解释**：`build-state.md:515` 的双份共存与 4.2 的判重结果如何并存，本轮没有判定。
-- **`WebGPU` 剥掉签名 + 以 `JavaScriptCore` 起头的顺序**：2.2 表里这一格是未测。
+- **`WebGPU` 剥掉签名 + 以 `JavaScriptCore` 起头的顺序**：本轮记 FAILED，更早一份对照表记未测。两者不冲突，但这一格按「待复核」处理，不要当成两份独立读数。
 - **真实 `WebContent` 的注入时机**：6.2 第 1 点。需要镜像清单、注入日志、`launchctl` 的 `environment` 段落三者时间戳对齐。
 - **真实 `WebContent` 的沙盒与 JIT entitlement 继承**：6.2 第 2 点。`AuxiliaryProcessIOS.mm:45-48` 的 `RELEASE_ASSERT_REACHED` 在自建镜像映射时是否触发，没有读数。
 - **重复告警的条数口径**：33 与 31 两个读数并存，判据取「是不是 0」。
