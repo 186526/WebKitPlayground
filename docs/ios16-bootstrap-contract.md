@@ -110,6 +110,8 @@ $ git grep -c 'SDKAlignedBehavior' Safari-614.1.9 -- Source | wc -l
 | `stderr` | fd | `PL16:205`，条件同上 | `PL18:420`，条件同上 | `XM16:130` | `XM18:222` | 同上 |
 | `WebKitBundleVersion` | string | `PL16:141`，写进 `initializationMessage` 而非 `bootstrap` 字典，仅 `PLATFORM(MAC)` | `PL18:361`，直接写进 `bootstrap` 字典，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | `XM16:202`，仅 `PLATFORM(MAC)` | `XM18:115`，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | iOS 两侧都编译掉，无影响 |
 
+上表按两个 tag 的原文求值，不按本工程产物求值。产物在 tag 原文之上还叠了两份补丁，所以有两行的读数会不一样：`client-sdk-version` 在产物里**有**读取点，`main` 上的 `patches/ios16-xpc-bootstrap-compat.patch` 在 `getClientSDKAlignedBehaviors` 里回退读它并调用 `setSDKAlignedBehaviorsFromClientSDKVersion` 重建位图，`main` 上的 `patches/ios16-ipc-message-number-translation.patch` 另有一处读取（M85 分支把这两处都删掉了，见「修补补丁的现状与缺口」）；`client-sdk-aligned-behaviors` 的「缺失后果」在产物里也不再是 `RELEASE_ASSERT` 中止，而是按长度清零走默认或拒绝。
+
 `client-sdk-version` 在 16.1 这一版里完全消失，确认命令与输出：
 
 ```sh
