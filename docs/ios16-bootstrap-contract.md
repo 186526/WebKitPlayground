@@ -183,7 +183,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 | 16.1 对 16.2 | 63 | 13 | 50 | 0 |
 | 16.4 对 18.3.1 | 73 | 3 | 69 | 1 |
 
-16.1 与 16.2 同为 8 字节，位序也只在前 13 项一致，从下标 13 起 `DOMWindowReuseRestriction` 被 `DoesNotAddIntrinsicMarginsToFormControls` 顶开，此后整体错位。16.4 与 18.3.1 同为 12 字节，73 个可比下标里只有 `0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt` 三个指向同一行为。
+16.1 与 16.2 同为 8 字节，位序也只在前 13 项一致：16.2 在下标 13 插入 `DoesNotAddIntrinsicMarginsToFormControls`，原来在 16.1 下标 13 的 `DOMWindowReuseRestriction` 落到 16.2 的 14。此后 16.1 的下标整体比 16.2 小 1，63 个名字里有 50 个符合这条平移，只有 13 个名字两版仍在同一位置。所以即使宽度相等、只差一个插入项，也不能按下标搬运。16.4 与 18.3.1 同为 12 字节，73 个可比下标里只有 `0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt` 三个指向同一行为。
 
 所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。M85 的长度分支因此按「12 字节走原路径、8 字节丢弃」处理，而这个分支只对 16.1 与 18.3 这一对成立；把 16.4 的 12 字节负载原样交给 18.3，长度检查放行、位序仍然错，需要下标对照表才能解码。这份对照表尚未编写。
 
