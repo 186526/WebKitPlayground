@@ -1,10 +1,10 @@
 # 16.1 UI 进程与 18.3 helper 的消息编号转换层设计
 
-本文回答四个问题：18.3 的 `Encoder.cpp` 在 Xcode iOS device 构建里由哪一步编译进产物；新增一个翻译源文件要改哪些构建清单；把函数塞进既有文件能否完全不动构建系统；以及这条跨版本连接在 18.3 源码里的唯一创建点、以及如何只让它生效。
+本文回答五个问题：18.3 的 `Encoder.cpp` 在 Xcode iOS device 构建里由哪一步编译进产物；新增一个翻译源文件要改哪些构建清单；把函数塞进既有文件能否完全不动构建系统；这条跨版本连接在 18.3 源码里的唯一创建点、以及如何只让它生效；以及新增函数落在 `XPCServiceEntryPoint.mm` 的哪个位置才不会与另一张补丁争同一个锚点。
 
 所有源码行号取自 18.3.1 tag `releases/Apple/Safari-18.3.1-iOS-18.3.2`（提交 `1b670a0c038dd7c909cca0c46346670f43c6334d`）。取证方式是用 `git` 对该 tag 做 `--filter=blob:none` 的稀疏克隆，再 `git show HEAD:<path>` 逐文件读出；正文里的行号可以用同一条 `git show HEAD:<path> | cat -n` 复核。16.1 的编号取自 tag `Safari-614.1.9`。
 
-本任务只产出设计文档，不产出代码或补丁。
+第 7 节记录的补丁落点已经写进 `patches/ios16-ipc-message-number-translation.patch`，其余各节仍是设计依据。
 
 ## 1. 结论
 
@@ -19,6 +19,8 @@
 **D.** 唯一的跨版本 `IPC::Connection` 是 `Source/WebKit/Shared/AuxiliaryProcess.cpp:108` 创建的 `m_connection`：三个 helper（WebContent、GPU、Networking）都继承 `AuxiliaryProcess` 并共用这一行，所以这一行对三者语义一致，都是「我到 UI 进程的连接」。标志在那里判定并置位，不在 `Connection::createClientConnection` 工厂内部置真，因为该工厂有 7 个调用点，其余 6 个两端都是 18.3。判据是对端 UI 进程的 SDK 版本（bootstrap 字典的 `client-sdk-version`），不是本进程的 `processType`（第 5.3 节）。翻译落点是 `Connection::sendMessageImpl`（发方向）与 `Connection::receiveSourceEventHandler`（收方向，必须在 `:545` 的 `InitializeConnection` 比较之前）。GPU 与 Networking 之间、WebContent 与 Networking 之间的连接用同一个工厂但走别的调用点，标志保持假，字节不动。
 
 还有一个必须先说清的前提：**编号只在 helper 到 UI 进程这一条连接上跨版本，其余连接两端同为 18.3。** 无条件翻译会把这些连接的自洽编号翻成对方不认的值，等于自己破坏自己，所以 D 不是可选优化，是正确性要求。
+
+**E.** 翻译补丁与 `ios16-xpc-bootstrap-compat.patch` 曾争用 `XPCServiceEntryPoint.mm` 里同一个空行：两个补丁都把新函数插在 `getClientBundleIdentifier` 与 `getClientSDKAlignedBehaviors` 之间。workflow 的字典序让翻译补丁先应用，bootstrap 补丁随即失配并以 `exit 1` 终止构建；反序也失败。解法是把 `getUIProcessSDKVersion` 的定义从那个空行移到 `XPCServiceEntryPoint.mm` 末尾的 `} // namespace WebKit` 之前，`.mm` 只在文件头部保留一个 `#import "MessageNumberTranslation.h"` 的 hunk。定义不能内联进 `.h`：函数体用的 `parseInteger` 由 `<wtf/text/StringToIntegerConversion.h>` 声明，而 `.h` 的包含链到不了它（第 7 节）。
 
 ## 2. 问题 A：Encoder.cpp 由哪一步编译进 WebKit.framework
 
@@ -615,7 +617,7 @@ PY
 
 编号对齐保证了「消息被送到正确的接收者」，但 16.1 的接收者会按 16.1 的序列化格式读参数。两版之间的参数类型不兼容处会导致解码失败、字段错位或值被误读。这些属于载荷层，本文不处理，但要指出一个已经量化的点：
 
-**同步/异步分区位置在两版不同，并且有 19 条同名消息的性质在两版之间翻转。** 16.1 的判定是 `return name >= MessageName::GPUConnectionToWebProcess_EnsureAudioSession;`（`Names16_correct.h:3369-3372`），阈值 2899；18.3 用 `FirstSynchronous`（`Names18_correct.h:5785-5788`），阈值 3838（该文件的平坦下标；iOS 编译值小于此，见第 7 节）。把两张表对齐后逐条比较：
+**同步/异步分区位置在两版不同，并且有 19 条同名消息的性质在两版之间翻转。** 16.1 的判定是 `return name >= MessageName::GPUConnectionToWebProcess_EnsureAudioSession;`（`Names16_correct.h:3369-3372`），阈值 2899；18.3 用 `FirstSynchronous`（`Names18_correct.h:5785-5788`），阈值 3838（该文件的平坦下标；iOS 编译值小于此，见第 8 节）。把两张表对齐后逐条比较：
 
 ```
 flips 19
@@ -648,13 +650,69 @@ flips 19
 
 helper 之间的连接（WebContent 到 GPU、WebContent 到 Networking）两端都是 18.3，编号自洽，标志为假，字节原样传输（第 5.2 节）。这条边界是编号层与载荷层共同的前提：只有 helper→UI 这条连接同时需要两层，其余连接两层都不需要。
 
-## 7. 未验证项
+## 7. 与 `ios16-xpc-bootstrap-compat.patch` 的锚点冲突
+
+### 7.1 冲突的现象
+
+workflow 的 `Apply worktree patch` 步骤按 `patches/*.patch` 的字典序逐个 `git apply --check` 再 `git apply`。在这个顺序下，`ios16-ipc-message-number-translation.patch` 先应用，紧接着的 `ios16-xpc-bootstrap-compat.patch` 对 `Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm` 报：
+
+```
+error: patch failed: Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm:84
+error: Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm: patch does not apply
+```
+
+workflow 对这个补丁不走任何豁免：`ref_needs_xpc_bootstrap_compat` 由 `XPCServiceMain.mm` 里是否还有 `auto containerEnvironmentVariables = xpc_dictionary_get_value(event, "ContainerEnvironmentVariables");` 决定，18.3.1 命中，于是走 `REQUIRED PATCH DOES NOT APPLY` 分支并以 `exit 1` 终止构建。
+
+### 7.2 成因
+
+18.3.1 的 `XPCServiceEntryPoint.mm` 里，`XPCServiceInitializerDelegate::getClientBundleIdentifier` 的函数体结束与 `XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors` 的定义之间只有一个空行。两个补丁都把新函数插在这个空行处：
+
+- `ios16-ipc-message-number-translation.patch` 插入 `XPCServiceInitializerDelegate::getUIProcessSDKVersion`
+- `ios16-xpc-bootstrap-compat.patch` 插入文件内的 `static void setSDKAlignedBehaviorsFromClientSDKVersion`，并改写 `getClientSDKAlignedBehaviors` 本身的函数体
+
+后一个补丁那个 hunk 的原文一侧，从 `getClientBundleIdentifier` 结尾的 `return !clientBundleIdentifier.isEmpty();`、`}`、空行起，一路接上 `getClientSDKAlignedBehaviors` 的完整函数体，共 12 行。前一个补丁一旦在这个空行插入了一个完整函数，这段上下文就不再连续，后一个补丁必然失配。
+
+交换顺序同样不成立。先应用 bootstrap 补丁时，它在 `getClientSDKAlignedBehaviors` 之前插入了 `setSDKAlignedBehaviorsFromClientSDKVersion`，翻译补丁那个 hunk 的原文一侧（`getClientBundleIdentifier` 结尾三行紧接 `getClientSDKAlignedBehaviors` 定义的开头）同样失配，报的是同一个 `XPCServiceEntryPoint.mm:84`。两个方向都不通，所以这不是排序问题，只能改补丁落点。
+
+### 7.3 为什么最终落点是 `.mm` 文件末尾
+
+`getUIProcessSDKVersion` 的定义从 `getClientBundleIdentifier` 之后的空行移到 `XPCServiceEntryPoint.mm` 末尾，即 `} // namespace WebKit` 之前。这个位置在两个文件里都没有竞争者：
+
+- `ios16-xpc-bootstrap-compat.patch` 只改 `XPCServiceEntryPoint.h` 的 `enum class EnableLockdownMode` 之后、`XPCServiceEntryPoint.mm` 的 `getClientBundleIdentifier` 与 `getClientSDKAlignedBehaviors` 区域，以及 `XPCServiceMain.mm`；它不触碰 `.mm` 的末尾。
+- 其余补丁都不改这个文件。
+
+`.h` 一侧保持原状：声明留在 `virtual bool getClientSDKAlignedBehaviors(SDKAlignedBehaviors&);` 之后，调用留在 `XPCServiceInitializer` 模板里 `delegate.getClientSDKAlignedBehaviors(...)` 之后。`.h` 的 hunk 与 bootstrap 补丁的 `.h` hunk 锚在不同位置（前者在 `getClientSDKAlignedBehaviors` 声明之后，后者在 `enum class EnableLockdownMode` 之后），两者可以各自按偏移应用。
+
+**没有把定义内联进 `XPCServiceEntryPoint.h`。** 函数体用到 `parseInteger<uint32_t>`，它由 `<wtf/text/StringToIntegerConversion.h>` 声明。该头文件只在 `XPCServiceEntryPoint.mm` 里被直接包含，`XPCServiceEntryPoint.h` 经 `AuxiliaryProcess.h` → `Connection.h` 的包含链到不了它。定义留在 `.mm` 就能沿用这个文件原有的可见性，不需要新增任何包含。
+
+顺带说明一条容易反过来的判断：`xpc_dictionary_get_string` 在 `.h` 里其实是可见的，路径是 `XPCServiceEntryPoint.h` → `AuxiliaryProcess.h` → `Connection.h` 的 `#if OS(DARWIN)` 段 `#include <wtf/spi/darwin/XPCSPI.h>`。`XPCServiceEntryPoint.h` 自己那处 `#import <wtf/spi/darwin/XPCSPI.h>` 在 `#if !USE(RUNNINGBOARD)` 里，iOS 上该宏为真，所以那一处不生效；真正提供声明的是 `Connection.h` 那条链。可见 `xpc_dictionary_get_string` 不是内联的阻碍，`parseInteger` 才是。
+
+### 7.4 验证
+
+验证在一棵用 18.3.1 tag `1b670a0c038dd7c909cca0c46346670f43c6334d` 真实文件搭起的临时树上进行：把这些补丁 `diff --git` 行里出现的全部文件从该 tag 取下来，`git init` 后提交成基线，再按 workflow 的 `for p in patches/*.patch` 语义（含 `case` 分支与 `PATCH APPLIED BUT HAS NO EFFECT` 的 grep）逐个 `git apply --check` 加 `git apply`，Safari-18.3.1 下各版本门取 1：
+
+```
+patches=25 applied=23 skipped=2 fail=0
+```
+
+两个 `skipped` 是 `webkit_iOS_16.3.1-worktree-*.patch` 与 `webkit_iOS_16.4.1-worktree-*.patch`，workflow 对这两个文件名分支的设计结果就是跳过。
+
+应用后 `XPCServiceEntryPoint.mm` 的实际落点按符号定位：
+
+- `XPCServiceInitializerDelegate::getClientBundleIdentifier` 之后仍是原来的那个空行，紧接 `setSDKAlignedBehaviorsFromClientSDKVersion`（bootstrap 补丁插入）
+- `XPCServiceInitializerDelegate::getUIProcessSDKVersion` 的定义在 `} // namespace WebKit` 之前
+
+反序验证：先单独应用 `ios16-xpc-bootstrap-compat.patch`，再应用翻译补丁，两者都成功，`MessageNumberTranslation.h` 存在。
+
+`PATCH APPLIED BUT HAS NO EFFECT` 的检查命令 `git grep -q translateOutgoingMessageName -- Source/WebKit/Platform/IPC/Encoder.cpp` 退出 0，改动没有影响这条断言。
+
+## 8. 未验证项
 
 **消息编号的真实编译值没有取到。** 本文 18.3 的所有编号都是把 `MessageNames.h` 当平坦下标读出来的，而 18.3 的生成器会输出 `#if` 条件（`Names18_correct.h` 共 703 个 `#if`），被条件剔除的条目会让后续编号前移。举一个本机算过的例子：`InitializeConnection` 在 18.3 的平坦下标是 3076，但它被 `#if PLATFORM(COCOA)` 包住（`Names18_correct.h:4405-4407`），且它之前有大量位于 `PLATFORM(MAC)`、`PLATFORM(GTK)`、`OS(LINUX)` 等 iOS 上为假的分支，iOS 编译后的真实编号小于 3076。
 
 按本机一份近似求值（未知宏按真/假两种极端各算一遍）得到的区间是：总条目 3416–3972，`InitializeConnection` 2555–2988。这个区间只用来说明「平坦下标不等于编译值」，不是可用编号。
 
-把已知在 iOS 上为假的守卫（`OS(LINUX)`、`PLATFORM(MAC)`、`PLATFORM(GTK)`、`PLATFORM(WPE)`、`OS(WINDOWS)`、`USE(LIBWPE)`、`ENABLE(PDF_PLUGIN) && PLATFORM(MAC)`）一律当作剔除、其余未知宏当作保留，重算得到：具名条目 4023 个，`InitializeConnection` 3026，`GPUConnectionToWebProcess_EnsureAudioSession` 3780。这三个数同样不是可用编号（未知宏按「保留」处理会高估条目数），但它们说明 3076 这个平坦下标在 iOS 上至少前移 50 位，也说明第 7 节下文那条「5 条同号」的白名单在真实构建里就失效了 2 条。这些数字一并留作实现阶段的交叉校验参考。
+把已知在 iOS 上为假的守卫（`OS(LINUX)`、`PLATFORM(MAC)`、`PLATFORM(GTK)`、`PLATFORM(WPE)`、`OS(WINDOWS)`、`USE(LIBWPE)`、`ENABLE(PDF_PLUGIN) && PLATFORM(MAC)`）一律当作剔除、其余未知宏当作保留，重算得到：具名条目 4023 个，`InitializeConnection` 3026，`GPUConnectionToWebProcess_EnsureAudioSession` 3780。这三个数同样不是可用编号（未知宏按「保留」处理会高估条目数），但它们说明 3076 这个平坦下标在 iOS 上至少前移 50 位，也说明第 8 节下文那条「5 条同号」的白名单在真实构建里就失效了 2 条。这些数字一并留作实现阶段的交叉校验参考。
 
 因此实现必须遵守一条：18.3 侧一律用 `MessageName::` 符号常量，由编译器赋值，不写任何字面量。表里 18.3 一侧的值应当是符号，16.1 一侧是真实数字（16.1 的生成器不输出 `#if`，`Names16_correct.h` 里 `#if` 数为 0，平坦下标就是编译值）。
 
@@ -725,6 +783,6 @@ phase('8DC2EF560486A6940098B216 /* Frameworks */ = {')# WebKit Frameworks
 
 头文件登记统计用同一份 pbxproj 加 `git show HEAD:<path>` 读每个被编译源文件的 `#include "X.h"`，按「同目录是否存在」「是否出现在 `PBXFileReference`」分类，结果见第 3.2 节。
 
-16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4085。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，因此 0–4085 连续无空洞。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（值 4086，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4086` 与「最大编号 4085」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 7 节的枚举计数与第 6.3 节的 19 条翻转取自这两份文件；第 6.2 节同样从这两份文件按第 6.2 节给出的规则重算，第 5 节的调用点数取自源码检索。
+16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4085。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，因此 0–4085 连续无空洞。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（值 4086，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4086` 与「最大编号 4085」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 8 节的枚举计数与第 6.3 节的 19 条翻转取自这两份文件；第 6.2 节同样从这两份文件按第 6.2 节给出的规则重算，第 5 节的调用点数取自源码检索。
 
 **口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3140 个消息名」「2807 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3141 条、4087 条（18.3 侧把 `Last` 计入）、同名 2808 条。两套口径的差值恰好是这一个别名，`only16`/`only18` 与其余结论完全一致。tower 早先给的 3141 / 4087 / 2808 就是含别名的口径，本文统一用排除别名的口径，因为映射表里不会给别名单独建项。
