@@ -191,7 +191,9 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 
 两个混合方向都会死，因为断言是相等比较，不是范围检查。`EPM16:89` 与 `EPM18:91` 的 `if (!length || !behaviorData) return false` 只在**键缺失或长度为 0** 时生效；16.1 发送时 key 存在且长度为 8，这条短路不会被走到，断言必然执行。
 
-死亡时机要写准：辅助进程在 `XM18:214-216` **先**把 `process-finished-launching` 回给 UI 进程，**再**在 `XM18:226-233` 的 `dispatchSync` 里调用初始化函数。`getClientSDKAlignedBehaviors` 由 `EP18:133` 在初始化函数内调用，所以断言触发点在回复之后。UI 进程看到的是「启动成功」，随后子进程消失，不会重试。这一点与「握手前死亡」不同，定位时要以崩溃栈里是否出现 `XPCServiceInitializer` 为准。
+死亡时机要写准：辅助进程在 `XM18:214-216` **先**把 `process-finished-launching` 交给 XPC，**再**在 `XM18:226-233` 的 `dispatchSync` 里调用初始化函数。`getClientSDKAlignedBehaviors` 由 `EP18:133` 在初始化函数内调用，所以断言触发点在回复入队之后，不在握手之前。
+
+`xpc_connection_send_message` 只是把消息交给连接的发送队列，实际投递由 libxpc 自己的队列完成；紧随其后的中止会与投递竞争，所以 UI 进程可能来不及看到这条回复。结果是两种表现都可能出现：收到回复后再丢失子进程，或启动回调根本不触发。定位时不能把「没收到回复」当成「键缺失导致没回」，要看崩溃栈里是否出现 `XPCServiceInitializer`，以及 `termination.namespace` 是否为 `SIGNAL` 类中止而非 dyld 类。**这一条同样未在设备上实测。**
 
 **这一条未在设备上实测。** 结论来自两个 tag 的源码与 `RELEASE_ASSERT` 的语义；设备上尚未取得「16.1 UI 进程拉起 18.3 helper 后 helper 收到 8 字节 data block 并在 `getClientSDKAlignedBehaviors` 中断言失败」的崩溃报告。
 
