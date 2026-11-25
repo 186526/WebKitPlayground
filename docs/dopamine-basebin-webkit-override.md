@@ -936,20 +936,36 @@ iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` �
 
 `DYLD_FALLBACK_FRAMEWORK_PATH`、`DYLD_FALLBACK_LIBRARY_PATH` 两个版本都是 0，补丁没有引入回退目录。
 
-### 十二·五 信任缓存：`launchdhook` 不在 `basebin.tc` 里是预期状态
+### 十二·五 信任缓存：把 sha1 换成 cdhash 之后，原来的结论不成立
 
-`basebin.tc` 640 字节，结构是 4 字节版本（实测 `1`）、16 字节 uuid、4 字节条目数（实测 `28`），随后 28 条 22 字节记录（20 字节 cdhash + 2 字节 flags）。`24 + 28 × 22 = 640`，长度自洽。
+`basebin.tc` 640 字节，结构是 4 字节版本（实测 `1`）、16 字节 uuid、4 字节条目数（实测 `28`），随后 28 条 22 字节记录（20 字节 cdhash + 2 字节 flags）。`24 + 28 × 22 = 640`，长度自洽。设备上这份的 uuid 是 `a3e4647f…`。
 
-四个待装文件（补丁版与原版各两个）的文件 sha1 全部**不在**这 28 条里：
+**这张表存的是 CodeDirectory 的 cdhash，不是文件 sha1。** 两者不是同一个量：文件 sha1 覆盖整个文件，cdhash 覆盖签名里那个 CodeDirectory blob，长度也不同。用文件 sha1 去查这张表，无论文件在不在表里都会读成「不在」。本节原先就是这么比的，下面按正确的量重算。
 
-| 文件 | 版本 | sha1 | 在 `basebin.tc` 里 |
-| --- | --- | --- | --- |
-| `launchdhook.dylib` | 补丁版 330144 | `005a70a6a2914ab54f9f4e429b8d2d1d4ba01c40` | 否 |
-| `launchdhook.dylib` | 原版 312848 | `a4e3d0a0b607a989ec5f8c1e741775744baddac6` | 否 |
-| `systemhook.dylib` | 补丁版 234336 | `f4367ca8ad939b01ce6ad34ec54f7fc4c3419b23` | 否 |
-| `systemhook.dylib` | 原版 233520 | `11b7ef6d414254e3f1a1c04ea19ef40daa84e50c` | 否 |
+2026-11-25T17:23Z 设备实测，用 `/var/jb/usr/bin/python3` 从每个架构切片里取出 `LC_CODE_SIGNATURE` 的 `0x0` 槽位 CodeDirectory，按它自己的 `hashType` 求哈希，再查 `basebin.tc` 的 28 条：
 
-原版的两个也不在，这一条比「补丁版不在」更有说服力：同名的原版文件本来就以不在表里的状态在这台设备上正常工作。`systemhook.dylib` 上一次被单独换掉时同样不在，那次用户空间重启成功了。两者都由 `launchd` 或 `dyld` 在越狱环境下加载，走的是 basebin 的信任路径，不是这张表的 cdhash 匹配。
+| 文件 | 版本 | 文件 sha1 | 切片 cdhash（`hashType`） | 在 `basebin.tc` 里 |
+| --- | --- | --- | --- | --- |
+| `launchdhook.dylib` | 原版 312848 | `a4e3d0a0b607…` | `0e59e39881d8ed71…`、`a7438ed3dc79bcda…`（2） | **是，两条都命中** |
+| `launchdhook.dylib` | 补丁版 330144 | `005a70a6a291…` | `fe83a746623ac9cc…`、`6e8952fb386181b0…`（1） | 否 |
+| `systemhook.dylib` | 原版 233520 | `11b7ef6d4142…` | `dd3f99c4a4ba13da…`、`d3c4e949ddb14907…`（2） | **是，两条都命中** |
+| `systemhook.dylib` | 补丁版 234336 | `f4367ca8ad93…` | `8d580b8510297956…`、`bd93fa08208960d6…`（1） | 否 |
+
+cdhash 按 CodeDirectory 自己的 `hashType` 算：`hashType` 为 2 时取 `SHA256(CodeDirectory)` 的前 20 字节，为 1 时取 `SHA1(CodeDirectory)` 的前 20 字节，两者都截到 20 字节，所以表里的 cdhash 都是 40 个十六进制字符。原版两份是 `hashType` 2，补丁版两份是 `hashType` 1，这是替换签名时换了算法，不是同一个量算了两遍。补丁版两个切片还各多一个 `0x1000` 槽位，那也是 `hashType` 2，它的 cdhash 同样不在表里。
+
+同一套取法作用在设备上另外两个 basebin 文件上，`libjailbreak.dylib` 与 `jbctl` 的各两个切片也都命中 `basebin.tc`，所以这套取法本身是对的，不是只会读到「不在」。
+
+**但补丁版不在表里的这一差别，也不能用来解释 panic。** 有一条独立的实测反例：`systemhook.dylib` 的 234336 字节版本（`d7045cd4…`）同样不在 `basebin.tc` 里，而它在 2026-11-24 就已经以那份字节装在这台设备上并生效过：`webkit-install-runbook.md` 记录 2026-11-24 05:58Z 设备上就是 234336 字节，05:59Z 的第六阶段六项读数通过，同一时段的 (d-1) 判定也通过，期间设备正常工作。也就是说「补丁版的 cdhash 不在 `basebin.tc` 里」这一状态在 2026-11-24 已经以正常工作状态存在过，它不是这次 panic 专有的异常。这条反例只用两份仓库文档加本节重算的 cdhash 就能成立，不依赖任何运行期缓存读数。
+
+**先看磁盘这一层：它根本不是这次实验里的变量。** 实验用的那份 tar（`/var/mobile/Documents/bb/basebin-lh.tar`，`d5bd3ef3…`）里的 `basebin.tc` 是 `12bdb75e6962…`/640，与设备上 `/var/jb/basebin/basebin.tc` 逐字节相同，`version` 与 28 条记录也相同。也就是说不论装前装后，这个磁盘文件都是同一份内容，它没有随补丁一起变化，因此不可能是新旧两态之间的差异来源。2026-11-26 00:50Z 那次安装之后设备被重新越狱、`basebin` 整包回到出厂版本，本节读数是恢复之后在设备上重新取的。
+
+**而且磁盘上这 28 条并不是运行期生效的那张表。** 运行时内核查阅的缓存由 `jbctl trustcache info` 列出，它与磁盘文件的 `uuid` 与条数都不同：磁盘是 `a3e4647f…` / 28 条，运行期是 `A65DF2BA30F543B1B9A2FC3032D5ED8E` / 178 条。两张表不同，所以「某个 cdhash 在不在磁盘 `basebin.tc` 里」回答不了「运行期会不会被拦」。上面那张表的用处仅限于核对 tar 内容本身，不能延伸成运行期信任判定。
+
+**运行期那份本轮无法复测，但上一轮的读数指向否定的答案。** `jbctl trustcache info` 需要 root，而本节所有读数都在 `mobile` 账户下取，该命令退出码 3、`ERROR: trustcache subcommand requires root.`。2026-11-26 的 M127 安装记录称运行期表有 178 条，其中**不含**原版 `launchdhook` 的两个 cdhash（`0e59e398…`、`a7438ed3…`），而原版二进制一直正常工作。那条读数只有一次，reviewer 当时也拿不到 root 无法复算，所以本轮不把它当作已验证的事实，只记为方向性证据。
+
+**本节原先的结论「原版的两个也不在，所以 trust 状态无所谓」予以撤回。** 那句话是从一次错量的比对里得出来的，前提本身不成立。按正确量算，情况是：原版的每个切片都在磁盘 `basebin.tc` 里，补丁版两份都不在；而那个「在表里」的原版 `launchdhook` 与那个「不在表里」的补丁版 `systemhook` 都曾在这台设备上正常加载过。两个方向各自都有正常工作的例子，所以 trust 状态既不能说「重要」也不能说「无所谓」，只能说**它不是这次 panic 的可解释原因**。若上一段那条运行期读数成立，它进一步说明运行期这一层也不构成判据；若不成立，本节对这条轴线的结论不变。panic 的病因在这条轴线上**未知**。
+
+要判定运行期这一层，需要一次以 root 读取 `jbctl trustcache info` 的测量并留存原始输出，本轮没有做。
 
 ### 十二·六 安装步骤（**未执行**）
 
@@ -1093,7 +1109,8 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 两个 `launchdhook` 版本的变量计数（三种口径） | **已执行**（本机） |
 | 三个成员的依赖加载命令逐切片比对 | **已执行**（本机），逐条相同 |
 | 三个成员的未定义符号比对 | **已执行**（本机）：`launchdhook` 275/275、hook dylib 0/0、`systemhook` 134→135（新增 `__xpc_type_bool`） |
-| `basebin.tc` 的 28 条 cdhash 核对 | **已执行**（本机） |
+| `basebin.tc` 的 28 条 cdhash 核对 | **已执行**（设备，2026-11-25T17:23Z）：原版两份每切片命中，补丁版两份不命中，见十二·五 |
+| 运行期 `jbctl trustcache info` | **未执行**：需 root，本节在 `mobile` 账户下取数 |
 | 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：6 条具体断言失败 + 1 条汇总行，见十二·二 |
 | 把 tar 送到设备 | **未执行** |
 | `jbctl update basebin` | **未执行** |
