@@ -5,14 +5,26 @@
 结论先写五条：
 
 1. **`gen/dyld` 是合成产物，不是装进去的文件。** 它每次由 `gen/dyld.orig` 复制一份、打 `getAMFI` 与 `LC_UUID` 补丁、用 `MachOMerger` 合并 `basebin/dyldhook_merge.<arch>.iOS<ver>.dylib`、再重签名得到。所以「装 hook」等于「换掉那个 `dyldhook_merge` 输入」，不是换 `gen/dyld`。
-2. **dyld 这一层已在本机装好并验证通过，但它只让 helper 换到 18.3，没让 app 的 UI 进程换。** 2026-11-25 23:51–23:53 设备装上了两份补丁（`dyldhook_merge` 75952 / 四计数 `1 1 1 1`，`systemhook` 234336 含四个变量），`gen/dyld` 由 974016 变成 974608；`dyld.orig` 未被重写。装上后 4.2 节出现 `found: dylib-from-disk-to-override-cache`（8 次命中），4.3 节直接跑 18.3 的 `WebContent` 得到五个镜像全部来自 `/var/jb`；`uiopen` 真实拉起 Safari 时，launchd 起的 `WebContent`/`Networking` 同样加载 `/var/jb`。装 hook 之前的同一组测试全部是 `found: dylib-from-cache` 或没有候选行，两侧都留了读数。
+2. **dyld 这一层曾在 2026-11-25 23:51–23:53 装好并验证通过，但它只让 helper 换到 18.3，没让 app 的 UI 进程换；而且那次安装随后在 2026-11-26 00:51–01:00 引发五次内核恐慌，重新越狱后已被清除。** 那次装上的是两份补丁（`dyldhook_merge` 75952 / 四计数 `1 1 1 1`，`systemhook` 234336 含四个变量），`gen/dyld` 由 974016 变成 974608；`dyld.orig` 未被重写。装上后 4.2 节出现 `found: dylib-from-disk-to-override-cache`（8 次命中），4.3 节直接跑 18.3 的 `WebContent` 得到五个镜像全部来自 `/var/jb`；`uiopen` 真实拉起 Safari 时，launchd 起的 `WebContent`/`Networking` 同样加载 `/var/jb`。装 hook 之前的同一组测试全部是 `found: dylib-from-cache` 或没有候选行，两侧都留了读数。**2026-11-26 01:08 设备已回到 974016 / `1 0 0 1`，所以本节所有「已装上」的描述只对那九十分钟成立。**
 3. **同一时刻 `MobileSafari`、`Chrome`、`SpringBoard` 三个 UI 进程仍加载 `/System` 的 16.1。** 它们的 envp 里只有 `__XPC_DYLD_FRAMEWORK_PATH`/`__XPC_DYLD_LIBRARY_PATH`，没有裸名那两个，dyld 不读前者。于是设备处于跨代形态：UI 是 16.1、helper 是 18.3。这与 `docs/ios16-whole-18.3-deployment-path.md:47` 的硬约束一致——那一节要求 UI 与每个 helper 同代，`:80` 写明不同代的后果是「渲染循环卡死而非进程死亡」。本次没有取得「页面是否真的渲染」的读数（设备上没有截图工具，也没有用户的界面观察），所以只能记到「进程结构与那条失败形态一致」为止。
-4. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（装之前设备 `1 0 0 1`）；`systemhook` 是原版、不写那四个搜索路径变量（原版 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次；`basebin.tar` 里那份 234336，裸名 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 各 4 次，因 `__XPC_` 前缀那两个名字各含一次裸名，换算成去重后的变量名是两个裸名加两个 `__XPC_` 前缀名）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`）。三处补上之后 4.2 与 4.3 两层对 helper 都通过。三者的依赖是有序的——hook 是前提，变量是通道，链接是让通道末端有文件（4.4 节）。
+4. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（2026-11-25 装补丁前设备 `1 0 0 1`，974016 字节；装补丁后变 `1 1 1 1` / 974608；2026-11-26 01:03 重新越狱后又回到 `1 0 0 1` / 974016）；`systemhook` 是原版、不写那四个搜索路径变量（原版 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次；`basebin.tar` 里那份 234336，裸名 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 各 4 次，因 `__XPC_` 前缀那两个名字各含一次裸名，换算成去重后的变量名是两个裸名加两个 `__XPC_` 前缀名）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`）。三处补上之后 4.2 与 4.3 两层对 helper 都通过。三者的依赖是有序的——hook 是前提，变量是通道，链接是让通道末端有文件（4.4 节）。**2026-11-26 01:08 设备上三处缺口全部回到原状**：`gen/dyld` 974016 `1 0 0 1`、`systemhook` 233520 裸串 0 次、`launchdhook` 312848 裸串 0 次。
 5. **安装需要 root，并且要一次用户空间重启。** 本次没有执行任何需要 root 的写操作；设备上的那次安装发生在 23:51–23:53，不是本次执行的。命令整理成清单，见第六节。
 
 本文的结论分三档标注，与 `docs/ios16-launchd-xpc-resolution-gap.md` 的约定一致：**已确证**（附设备读数原文）、**有源码支撑**（能指出代码位置，但没有设备行为读数）、**假设**（无直接读数）。一条论断的强度取它最弱的一环。
 
 读数全部取自 2026-11-25 的 iPad Pro 11 英寸 M2（`iPad14,4`）、iPadOS 16.1（20B82）、Dopamine 3.0.13 rootless，设备地址 `mobile@192.168.2.136`，只读连接。文件写入只发生在设备 `/tmp` 与 `/var/jb/tmp` 下，测试文件已删除。
+
+**状态块，读本文之前先读这一段。** 本文主体写于 2026-11-25，描述的是「补丁已装上」的状态。**那个状态在 2026-11-26 01:03 已经不存在了。** 装上补丁之后设备在 00:51–01:00 连续五次内核恐慌，只有手动重新越狱才能恢复，恢复后 basebin 回到出厂形态。所以本文所有讲到「已装上」「当前是」的句子，都只对 2026-11-25 23:53 到 2026-11-26 01:00 这段时间成立。
+
+| 日期时刻 | `gen/dyld` | 判定 (b) | `dyldhook_merge` | 判定 (b) | 事件 |
+| --- | --- | --- | --- | --- | --- |
+| 2026-11-25 23:53 | 974608 | `1 1 1 1` | 75952 | `1 1 1 1` | 23:51–23:53 那次 `jbctl update basebin` |
+| 2026-11-26 00:51–01:00 | 不详 | 不详 | 不详 | 不详 | 五次内核恐慌，见第五节 |
+| 2026-11-26 01:03 | 974016 | `1 0 0 1` | 74352 | `1 0 0 1` | 手动重新越狱恢复 |
+
+2026-11-26 01:08 的只读实测：`gen/dyld` 974016、sha256 `486620f0…`；`dyldhook_merge` 74352、sha256 `1e90c5a3…`；`systemhook.dylib` 233520 `6f16c545…`；`launchdhook.dylib` 312848 `449a9606…`；`gen/dyld.old` 不存在。
+
+**规则：basebin 状态不跨重新越狱存活，所以本文任何不带时刻的形态描述都不是证据。** 要判断你手上这台此刻的状态，跑第五节的四条命令，并把读取时刻一起记下来。
 
 ---
 
@@ -140,7 +152,7 @@ dyld                             974608  6920d1ddecc00d6a  [1, 1, 1, 1]
 dyldhook_merge.arm64e.iOS16-17.dylib   75952  9fb3b9c0e2ae128b  [1, 1, 1, 1]
 ```
 
-前一份里 974016 那个文件现在叫 `gen/dyld.old`（`486620f0…`），`gen/dyld.orig` 仍是 926240 `7eb2e72f…` 未被重写。用这条脚本判断当前状态时，读到的应当是后一组；读到前一组说明补丁不在，或者已被整包还原（1.3 节）。
+**2026-11-25 23:53 到 2026-11-26 01:00 之间**，974016 那个文件叫 `gen/dyld.old`，`gen/dyld` 是上表后一组。**2026-11-26 01:08 已经不是那样**：重新越狱后 `gen/dyld` 回到 974016 / `1 0 0 1`，而 `gen/dyld.old` 不存在了。`gen/dyld.orig` 始终是 926240 `7eb2e72f…` 未被重写。用这条脚本判断当前状态时，先记下读取时刻，并同时记下 `ls -l /var/jb/basebin/gen/` 的结果；单独一组元组看不出是装过、没装过，还是重新越狱过。
 
 **必须数带前缀的完整符号，不能数裸子串。** `gen/dyld` 里裸的 `isOverridablePath` 本来就有 1 处，来自 dyld 自己的导出符号 `__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc`，与补丁无关。`isAlwaysOverridablePath` 是非 const 成员函数，符号前缀是 `_ZN5` 而不是 `_ZNK5`，写成 `_ZNK5` 会数出 0，把装好的 basebin 误判成没装。
 
@@ -326,7 +338,7 @@ dyld[37278]:   found: dylib-from-cache: (0x06DD) "/System/Library/Frameworks/UIK
 
 第三种之所以难再取得，是因为装好之后 `gen/dyld` 里已经有那两个 hook，唯一回到该形状的办法是第五节第 5 步的回退。本次没有为了取这条读数而回退。
 
-**装 hook 前的第三种形状有直接读数。** 3.1 节那三段全部是「候选行根本不出现」，当时 `gen/dyld` 判据是 `1 0 0 1`，与本节第一行互为对照：同一台设备、同一条命令，`gen/dyld` 换掉前后分别落在第三与第一种形状，所以两者确实由两个 override hook 决定，不是由命令写法或目录内容决定。
+**装 hook 前的第三种形状有直接读数。** 3.1 节那三段全部是「候选行根本不出现」，当时 `gen/dyld` 判据是 `1 0 0 1`（2026-11-25 白天，974016 字节），与本节第一行互为对照：同一台设备、同一条命令，`gen/dyld` 换掉前后分别落在第三与第一种形状，所以两者确实由两个 override hook 决定，不是由命令写法或目录内容决定。这个形状在 2026-11-26 01:08 又出现了一次（974016 / `1 0 0 1`），但那次是重新越狱的结果，不是「还没装」。
 
 **旧记录里一个当时被误算的形状，要更正。** 本节早前版本说装 hook 前有 36 条候选行、其中 18 条落在 `/var/jb` 下，并把这归为「第二种判据的形状」。那个归因不对：那 18 条命中的是 `systemhook.dylib`、`TweakLoader.dylib` 这类**不在共享缓存里**的文件，它们走 `found: dylib-from-disk` 是「本来就不在缓存」的正常结果，与 override hook 无关。第二种形状的判据必须同时满足「叶子名在共享缓存里」与「候选行指向覆盖目录」这两条，`libiosexec.1.dylib` 那条也不满足前者。判据按第三种记，装 hook 前针对 `WebKit.framework/WebKit` 的候选行确实是 0 条。
 
@@ -525,6 +537,18 @@ WebCore   LOAD_WEAK    /System/Library/PrivateFrameworks/WebCore.framework/Frame
 
 ## 五、最小可逆安装步骤
 
+**先读这条：这条路线已经在设备上触发过五次内核恐慌，不要直接照做。** 2026-11-26 00:51 到 01:00 的九分钟内，按本节步骤装完之后设备连续五次 panic，只有手动重新越狱才能恢复；恢复后 basebin 回到出厂形态（`gen/dyld` 974016 / `1 0 0 1`、`dyldhook_merge` 74352 / `1 0 0 1`）。五份日志在设备的 `/var/mobile/Library/Logs/CrashReporter/panic-full-2026-11-26-*.ips`，`panicString` 原文：
+
+| 时刻 | 文件 | `panicString` 关键片段 |
+| --- | --- | --- |
+| 00:51:11 | `panic-full-2026-11-26-005111.000.ips` | `initproc exited -- exit reason namespace 2 subcode 0x5 description: none` |
+| 00:56:21 | `panic-full-2026-11-26-005621.000.ips` | `pmap_mark_page_as_ppl_page_internal: page still has mappings, pa=0x8d4d18000 @pmap_data.c:1101` |
+| 00:56:58 | `panic-full-2026-11-26-005658.000.ips` | 同上，`pa=0xa80b8c000 @pmap_data.c:1101` |
+| 00:58:58 | `panic-full-2026-11-26-005858.000.ips` | 同上，`pa=0xaaf89c000 @pmap_data.c:1101` |
+| 01:00:37 | `panic-full-2026-11-26-010037.0003.ips` | 同上，`pa=0x9d75c0000 @pmap_data.c:1101` |
+
+四次 `pmap_mark_page_as_ppl_page_internal` 的 `pa` 各不相同，不是同一个固定页。五次的内核都是 `Darwin Kernel Version 22.1.0`、`OS version: 20B82`。下面的步骤保留下来作为「装了什么、怎么退」的记录，不是待执行的清单。
+
 前提：备份必须在改动之前完成，且备份与校验和都落到设备的 `/var/mobile/Documents` 下（`mobile` 可写）。全部步骤改动的是 `/var/jb/basebin` 下两个库文件（由 tar 解包写入）与 `/var/jb/Library` 下一个新建目录及其六条符号链接，不碰 `/System`、不改 seal、不写 `/usr`。
 
 ### 第 1 步：记录现状（不需要 root）
@@ -561,7 +585,7 @@ EOS
 7fd379340780e245c86fd0afe15ee55173bbb22d8a623bd60e2e34aa644afbc6   6144000  /var/mobile/Documents/basebin.tar
 ```
 
-**设备当前（装补丁之后，2026-11-26 00:34 复测）在同一组路径上是**：
+**装补丁之后、重新越狱之前（2026-11-26 00:34 复测）在同一组路径上是**：
 
 ```
 6920d1ddecc00d6a…    974608  /var/jb/basebin/gen/dyld            （mtime 2026-11-25 23:53）
@@ -570,7 +594,7 @@ EOS
 d7045cd4850eb0c7…    234336  /var/jb/basebin/systemhook.dylib
 ```
 
-因此第 1 步的 `cp` 在这台设备上现在会备份出**已打补丁**的那两份，而不是原版。若要拿回原版，来源是 `Dopamine.app/basebin.tar` 里的 74352 `1e90c5a3` 与 233520 `6f16c545`；若要拿回 974016 那份 `gen/dyld`，它在 `/var/jb/basebin/gen/dyld.old`（`486620f0…`），且只保一代。第 5 步的回退按这个来源写。
+因此**在 2026-11-25 23:53 到 2026-11-26 01:00 之间**，第 1 步的 `cp` 会备份出**已打补丁**的那两份，而不是原版；2026-11-26 01:03 重新越狱之后又变回原版（74352 `1e90c5a3` 与 233520 `6f16c545`，本轮 01:08 实测就是这个形态）。若要拿回原版，来源是 `Dopamine.app/basebin.tar` 里的 74352 `1e90c5a3` 与 233520 `6f16c545`；若要拿回 974016 那份 `gen/dyld`，它当时在 `/var/jb/basebin/gen/dyld.old`（`486620f0…`），只保一代，重新越狱后已不存在。第 5 步的回退按这个来源写。
 
 目标文件（`basebin.tar` 里那两份打了补丁的库）：
 
@@ -682,7 +706,7 @@ ps -E -p $(ps -Ao pid=,comm= | awk '/com.apple.WebKit.WebContent$/{print $1; exi
 
 预期：四个计数 `1 1 1 1`、`gen/dyld` 974608 字节、4.2 出现 `dylib-from-disk-to-override-cache`、4.3 的环境里出现 `/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride` 这两条真实路径。
 
-**这一步必须重跑，不能只看 `jbctl` 的退出码。** 设备上已经发生过一次「装上了又被整包还原」：`AGENTS.md` 记录 11-24 那次更新之后 `gen/dyld` 是 974608、四个 hook 齐全，11-25 上午开机后同一文件变成 974016、`1 0 0 1`，那份状态下 22 个文件与出厂 tar 逐位相同。出厂 tar 比对要按你此刻的设备状态读数，不要照抄一个常数：装补丁**之前**是 `same=25 diff=2`（两个 `LaunchDaemons` plist），装补丁**之后**（当前）是 `same=23 diff=4`（多出 `dyldhook_merge` 与 `systemhook`）。1.3 节给了两种状态的完整读数与复测命令；读到 `diff=4` 而第四项不是这两份库，才说明有别的文件被动过。
+**这一步必须重跑，不能只看 `jbctl` 的退出码。** 设备上已经发生过两次「装上了又被整包还原」：`AGENTS.md` 记录 11-24 那次更新之后 `gen/dyld` 是 974608、四个 hook 齐全，11-25 上午开机后同一文件变成 974016、`1 0 0 1`，那份状态下 22 个文件与出厂 tar 逐位相同；11-25 23:53 又装回 974608，11-26 01:03 重新越狱之后第三次回到 974016、`1 0 0 1`。出厂 tar 比对要按你此刻的设备状态读数，不要照抄一个常数：装补丁**之前**是 `same=25 diff=2`（两个 `LaunchDaemons` plist），装补丁**之后**是 `same=23 diff=4`（多出 `dyldhook_merge` 与 `systemhook`）。**2026-11-26 01:08 设备上读到的是装补丁之前那种（`diff=2`），因为已经重新越狱了。** 1.3 节给了两种状态的完整读数与复测命令；读到 `diff=4` 而第四项不是这两份库，才说明有别的文件被动过。
 
 ### 第 5 步：回退
 
@@ -707,7 +731,7 @@ cp -p /var/mobile/Documents/m121-backup/systemhook.dylib.orig /var/jb/basebin/sy
 
 第 ③ 步走 `basebin_generate(YES)`，只用 `dyld.orig` 与恢复后的 hook 合成。注意它同时会把出厂 tar 里的原版 `systemhook.dylib`（233520）解包进去，所以第 ② 步的 `cp` 只是为了在 ③ 之前就让库回到原状；如果只跑 ③ 也能达到同样结果，② 的价值是「③ 万一失败，库至少已经是对的」。回退之后同样跑第 4 步的四条，不要只看退出码。
 
-期望回到：`gen/dyld` 974016 字节、`1 0 0 1`、`dyldhook_merge` 74352 `1e90c5a3…`、`systemhook` 233520 `6f16c545…`、`/var/jb/Library/WebKitOverride` 不存在。
+期望回到：`gen/dyld` 974016 字节、`1 0 0 1`、`dyldhook_merge` 74352 `1e90c5a3…`、`systemhook` 233520 `6f16c545…`、`/var/jb/Library/WebKitOverride` 不存在。**2026-11-26 01:08 设备已经处在这个形态**，因为 01:03 那次重新越狱替你把 basebin 复位了；`/var/jb/Library/WebKitOverride` 目录本身仍在（链接指向 `/var/jb/Library/Frameworks`），只有第 ② 项还需要你确认。
 
 `.safe_mode` 不能替代回退：`systemhook/src/main.c:198-202` 的 `should_enable_tweaks()` 在 `.safe_mode` 存在时返回假，`common.c:207-225` 的 `_SafeMode`、`_MSSafeMode` 为 `1` 时把 `shouldInsertJBEnv` 置假。两条都只挡住注入，挡不住已经换掉的 `gen/dyld`。本次读到 `/var/jb/basebin/.safe_mode` 不存在。
 
@@ -794,4 +818,4 @@ dyld[36445]:   found: dylib-from-disk-to-override-cache: "…/procursus/Library/
 
 **`launchctl print` 的 `environment` 段不能当 envp 用。** 本次在同一个 pid（33349）上对照过两种读法，`launchctl print` 只显示四项，而 `ps -E` 与 `sysctl KERN_PROCARGS2` 都显示 21 项、其中含 `DYLD_INSERT_LIBRARIES`，`lldb image list` 也确认 `systemhook.dylib` 已映射进该进程。这条修正影响三份文档的读法：本文 4.3 节已改；`docs/ios16-whole-18.3-deployment-path.md:150/:178/:179` 与 `docs/ios16-all-18.3-xpc-endpoint-audit.md:203` 里「`environment` 段落含 `DYLD_FRAMEWORK_PATH`」这类记载不是否认能成立的证据，因为反向（段落为空）不代表进程里没有。它们要重取一次 `ps -E` 才能定案。
 
-**一处要改的既有记录。** 外层 `AGENTS.md:224` 写「用设备上那份 hook dylib 合并得到 948414 字节，比 `gen/dyld` 的 974016 小。这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的，设备上的 hook 已被换回 74352 的原版」。前半句对，结论错：974016 减去 2 字节填充与 25600 的签名正好是 948414，差额全部来自重签名，所以今天的 `gen/dyld` 是用 **74352 那份原版**合成的；974608 才是 75952 那份的结果。`dyldhook_merge` 本身是否被换回过，判据只能是第二节的四位计数，不是尺寸差。外层 `AGENTS.md` 不在本 mission 的可改范围，改法是把 `:224` 这句换成 1.1 节的字节模型。
+**一处已改的既有记录。** 外层 `AGENTS.md` 曾经写「用设备上那份 hook dylib 合并得到 948414 字节，比 `gen/dyld` 的 974016 小。这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的，设备上的 hook 已被换回 74352 的原版」。前半句对，结论错：974016 减去 2 字节填充与 25600 的签名正好是 948414，差额全部来自重签名，所以 974016 那份 `gen/dyld` 是用 **74352 原版**合成的；974608 才是 75952 那份的结果。`dyldhook_merge` 本身是否被换回过，判据只能是第二节的四位计数，不是尺寸差。外层 `AGENTS.md` 的那句已按本文 1.1 节的字节模型改正（M130，2026-11-26）。

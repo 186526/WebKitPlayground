@@ -84,7 +84,7 @@ _MACHOMERGER_HOOK___fcntl
 
 实际 hook 只有两个：`dlopen_from` 与 `__fcntl`。没有 `isOverridablePath`，也没有 `isAlwaysOverridablePath`。所以官方 3.0.13 装在本机上，dyld 不会去磁盘比对 WebKit.framework。
 
-`/var/jb/basebin/gen/dyld`（974016 字节，`sha256 486620f0…`）是这份 dylib 用 `MachOMerger` 合进原始 dyld 的结果，符号集合相同。`gen/dyld.orig`（926240 字节，`sha256 7eb2e72f…`）里 `MACHOMERGER` 符号为 0，说明它是未改动的系统 dyld。
+`/var/jb/basebin/gen/dyld`（974016 字节，`sha256 486620f0…`，2026-11-26 01:08 设备实测）是这份 dylib 用 `MachOMerger` 合进原始 dyld 的结果，符号集合相同。`gen/dyld.orig`（926240 字节，`sha256 7eb2e72f…`）里 `MACHOMERGER` 符号为 0，说明它是未改动的系统 dyld。**这两个读数要带时刻引用**：2026-11-25 23:53 到 2026-11-26 01:00 之间同一路径是 974608 / `6920d1dd…`，因为那段时间 basebin 装过补丁；01:03 重新越狱后回到现在这个值。
 
 ### 目标函数确实存在，且被直接调用
 
