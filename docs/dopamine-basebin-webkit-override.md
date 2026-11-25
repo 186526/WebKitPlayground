@@ -10,7 +10,9 @@
 
 即使这一半补上，Safari 换成自建 WebKit 也只覆盖 UI 进程。网页由系统的 `com.apple.WebKit.WebContent` 进程解析。那个进程带自己的 `LC_DYLD_ENVIRONMENT`，第十一节按设备实测说明它与 app 进程的覆盖手段不同。
 
-**而且「补上这一半」本身在平台签名进程上还没有被验证过。** 更晚的一组设备实测（塔台 2026-11-26 02:27–02:34 CST）显示：把 `DYLD_FRAMEWORK_PATH` 直接交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的镜像表里该 UUID 命中 0 次，`WebKit` 与 `WebCore` 仍来自共享缓存的 16.1 副本（`WebKit` 的 UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。越狱签名二进制上那组读数（`/var/jb/usr/bin/ls` 的候选行、`CoreFoundation` 的缓存命中）证明 dyld 的判定被改对了，它不能替代平台签名进程上的读数。所以本文的第一条结论适用于 dyld 的判定层，不适用于「app 进程最终会加载哪一份 WebKit」——后者在这台设备上至今没有一次成功的读数（十一·六、十一·七）。
+**而且「补上这一半」本身在平台签名进程上还没有被验证过。** 有一组设备实测（塔台 2026-11-26 02:27–02:34 CST）显示：把 `DYLD_FRAMEWORK_PATH` 直接交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的镜像表里该 UUID 命中 0 次，`WebKit` 与 `WebCore` 仍来自共享缓存的 16.1 副本（`WebKit` 的 UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。这组读数取自 `gen/dyld` 判定 (b) 为 `1 0 0 1`、两个 override hook 都不在的窗口（`01:03:43` 之后），而十一·三已经写明该状态下 `Loader.cpp:565` 会把磁盘候选直接短路，所以它不能把「平台签名进程不接受这个变量」与「hook 不在」分开。越狱签名二进制上那组读数（`/var/jb/usr/bin/ls` 的候选行、`CoreFoundation` 的缓存命中）证明 dyld 的判定被改对了，它同样不能替代平台签名进程上的读数。
+
+**「app 进程最终会加载哪一份 WebKit」这一层至今没有定论。** `gen/dyld` 判定 (b) 为 `1 1 1 1` 的窗口内（`23:53:11`–`01:03:43`）有一条平台签名进程上的记录：`2026-11-25T16:28:27Z`（`00:28:27` CST）那份通报里，`MobileSafari` 的 `WebKit` 是镜像 #47、路径在 `/var/jb`。`1 0 0 1` 窗口内 `02:27` 那次没有采纳磁盘副本。两次不在同一个 hook 状态下，也没有任何一次被同状态下的重复测量复现，所以这一层既不能写成「已验证」，也不能写成「从未出现」（十一·六、十一·七）。
 
 ## 二、官方 3.0.13 为什么不能覆盖共享缓存
 
@@ -671,9 +673,13 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 
 真机对照（设备上目录已按十一·三建好、M39 尚未安装）：带 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 跑 `/var/jb/usr/bin/ls`，`libiosexec.1.dylib` 与 `systemhook.dylib` 出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，说明路径变量这一半在工作；同一进程的 `CoreFoundation.framework` 只有 `possible path(original path on disk)` 与 `possible path(original path)` 两条，`found: dylib-from-cache`，没有 `DYLD_FRAMEWORK/LIBRARY_PATH` 候选行，说明缓存项未被磁盘副本顶替——正是 `Loader.cpp:565` 短路的表现。两相对照，缺 M39 那一半时候选不产生、加载仍走缓存，与本节第一段的推导一致。
 
-**这段推导的适用范围只到「dyld 的判定被改对了」，不能推广到「平台签名进程会把自建 WebKit 换进来」。** 上面那个对照用的 `/var/jb/usr/bin/ls` 是越狱签名二进制。平台签名进程上有一组更晚的实测（塔台 2026-11-26 02:27–02:34 CST，设备 `mobile@192.168.2.136`），结论与本节推导的方向相反：把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_PRINT_LIBRARIES=1` 直接交给 `/Applications/MobileSafari.app/MobileSafari`，dyld 打印里 `/var/jb` 那份 `WebKit` 确实出现过（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 **0** 次，`WebKit.framework/WebKit` 仍解析到 `/System`（镜像 #51，UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），`WebCore` 同样在 `/System`（#416）。也就是那份磁盘镜像被映射过又被卸掉，活进程镜像表里只剩 16.1 的系统副本。
+**这段推导的适用范围只到「dyld 的判定被改对了」，不能推广到「平台签名进程会把自建 WebKit 换进来」。** 上面那个对照用的 `/var/jb/usr/bin/ls` 是越狱签名二进制。平台签名进程上有一组实测（塔台 2026-11-26 02:27–02:34 CST，设备 `mobile@192.168.2.136`），结论与本节推导的方向相反：把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_PRINT_LIBRARIES=1` 直接交给 `/Applications/MobileSafari.app/MobileSafari`，dyld 打印里 `/var/jb` 那份 `WebKit` 确实出现过（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 **0** 次，`WebKit.framework/WebKit` 仍解析到 `/System`（镜像 #51，UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），`WebCore` 同样在 `/System`（#416）。也就是那份磁盘镜像被映射过又被卸掉，活进程镜像表里只剩 16.1 的系统副本。
 
-所以「两半同时上线就加载磁盘那一份」这个结论，在平台签名进程上**没有被观测到过**。`/var/jb/usr/bin/ls` 那一组读数证明的是 dyld 的候选枚举与缓存短路判定按预期工作，它不能替代平台签名进程上的读数。这条差别对第十二节的判据直接相关：十二·八那条路径读数必须取在平台签名进程上（`MobileSafari` 或 Chrome），取在越狱签名二进制上会得到一个与交付目标无关的「成功」。至于为什么平台签名进程不接受，本节不解释，也没有定位；M126 的范围到「记录这条边界」为止。
+**这组读数取自 `gen/dyld` 判定 (b) 为 `1 0 0 1`、两个 override hook 都不在的窗口。** `02:27` 在 `01:03:43` 之后，那时 `gen/dyld` 是 974016 字节、两个 override hook 都不在。十一·三已经写明该状态下 `Loader.cpp:565` 会把磁盘候选直接短路，所以这组读数不能把「平台签名进程不接受这个变量」与「hook 不在」分开：两个原因在这个状态下给出同一个结果。
+
+**所以「两半同时上线就加载磁盘那一份」在平台签名进程上还没有定论，既不能说成立，也不能说从未出现。** `gen/dyld` 判定 (b) 为 `1 1 1 1` 的窗口（`23:53:11`–`01:03:43`）内有一条记录：`2026-11-25T16:28:27Z`（`00:28:27` CST）那份通报里，`MobileSafari` 的 `WebKit` 是镜像 #47、路径在 `/var/jb`。`1 0 0 1` 窗口内 `02:27` 那次没有采纳磁盘副本。两次不在同一个 hook 状态下，也没有任何一次被同状态下的重复测量复现，旧读数未被取到第二次。`/var/jb/usr/bin/ls` 那一组读数证明的是 dyld 的候选枚举与缓存短路判定按预期工作，它不能替代平台签名进程上的读数。
+
+这条差别对第十二节的判据直接相关：十二·八那条路径读数必须取在平台签名进程上（`MobileSafari` 或 Chrome），取在越狱签名二进制上会得到一个与交付目标无关的「成功」。本节把这条边界记录在案，成因没有定位，M126 的范围不含它。
 
 两半的回滚手段不同：这一半可以运行时停用（十一·八），那一半要换回旧 `basebin.tar` 并触发一次用户空间重启（第八节）。
 
@@ -683,7 +689,9 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 
 **app 进程只认环境变量。** `/Applications/MobileSafari.app/MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 是 0 条，只导入 `MobileSafariUI`、`Foundation`、`libobjc.A.dylib`、`libSystem.B.dylib`。这类进程没有自己的搜索路径声明，dyld 只能从环境里拿到目录，所以四个变量是它们唯一的来源。
 
-**但「唯一的来源」不等于「送进去就能生效」。** 平台签名的 app 进程上有一组实测（塔台 2026-11-26 02:27–02:34 CST）说明这条路目前走不通：直接把 `DYLD_FRAMEWORK_PATH` 交给 `MobileSafari`，dyld 的打印里确实出现过 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 0 次，`WebKit.framework/WebKit` 与 `WebCore.framework/WebCore` 仍分别落在 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）与 #416。也就是那份磁盘镜像被映射过又被卸载。所以四个变量是「唯一的候选来源」，不是「已经可用的手段」；`DYLD_LIBRARY_PATH` 那一侧在同一份通报里另有读数，框架一侧没有成功的读数。本节把这条记录在案，不解释成因——机制没有定位，M126 的范围不含它。
+**「唯一的来源」在 `1 1 1 1` 窗口内被观测到过一次，在 `1 0 0 1` 窗口内没被观测到。** 平台签名的 app 进程上有一组实测（塔台 2026-11-26 02:27–02:34 CST）：直接把 `DYLD_FRAMEWORK_PATH` 交给 `MobileSafari`，dyld 的打印里确实出现过 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 0 次，`WebKit.framework/WebKit` 与 `WebCore.framework/WebCore` 仍分别落在 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）与 #416。这组读数同样取自 `gen/dyld` 判定 (b) `1 0 0 1`、两个 override hook 都不在的窗口，而该状态下 `Loader.cpp:565` 会把磁盘候选直接短路（十一·三），因此它不能单独说明平台签名进程拒收这个变量。
+
+另一条记录方向相反，在 `1 1 1 1` 窗口内：`2026-11-25T16:28:27Z`（`00:28:27` CST）那份通报里，exec 时裸设 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 之后，`MobileSafari` 的 `JavaScriptCore` #34、`WebKit` #47、`WebKitLegacy` #48、`libwebrtc` #412、`WebCore` #419、`libANGLE-shared` #420、`WebGPU` #421 全部在 `/var/jb`。那次两条变量是同时设的，所以它分不开 framework 与 library 两侧各自的贡献，也没有被取到第二次。两次读数不在同一个 hook 状态下，都没有被同状态下的重复测量复现，所以四个变量只能算「唯一的候选来源」，能不能变成「已经可用的手段」至今没有定论。本节把这条记录在案，成因没有定位，M126 的范围不含它。
 
 **`.xpc` 服务进程由自身的 load command 覆盖。** 设备上五个 `.xpc`（`com.apple.WebKit.GPU`、`Networking`、`WebContent`、`WebContent.CaptivePortal`、`WebContent.Development`）各带 4 条 `LC_DYLD_ENVIRONMENT`。下面这段是当时设备二进制的读数，后两条已被本仓改动过取值：
 
@@ -884,7 +892,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 | 输入 | `verify-systemhook-search-paths.py --kind launchdhook` 的结果 |
 | --- | --- |
-| 本 tar 里的补丁版 330144 / `150270a5…` | 18 条断言全 PASS，`all assertions hold`，退出 **0** |
+| 本 tar 里的补丁版 330144 / `150270a5…` | 19 条断言全 PASS，`all assertions hold`，退出 **0** |
 | 出厂原版 312848 / `449a9606…` | **12 条断言失败**（两个切片各 6 条），退出 **1** |
 
 所以这道断言不是空转：换成原版就会被拒。它对本 tar 的意义是一次确认，不是一次免责——本 tar 仍然因为另外六个成员而退出 1。
@@ -1068,7 +1076,7 @@ EOF
 
 **判据只有一条，且必须是路径读数，不是端点计数。** 端点计数不能证明覆盖生效：系统 WebKit 正常工作同样会注册 4 个端点。
 
-**判据的适用对象必须写死在平台签名进程上。** 越狱签名二进制上取到的「路径改成 `/var/jb`」不构成本节的判据读数：`/var/jb/usr/bin/ls` 这类进程在 dyld 判定被改对之后就会走磁盘，与交付目标（`MobileSafari` 等平台签名 app 用上自建 WebKit）无关。反过来的实测也支持这条：把 `DYLD_FRAMEWORK_PATH` 交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程镜像表里该 UUID 命中 0 次、`WebKit` 仍是 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。所以本节的读数必须在 `MobileSafari`（或 Chrome）这类进程上取；取在越狱二进制上的成功是假阳性。
+**判据的适用对象必须写死在平台签名进程上。** 越狱签名二进制上取到的「路径改成 `/var/jb`」不构成本节的判据读数：`/var/jb/usr/bin/ls` 这类进程在 dyld 判定被改对之后就会走磁盘，与交付目标（`MobileSafari` 等平台签名 app 用上自建 WebKit）无关。反过来的实测也支持这条：把 `DYLD_FRAMEWORK_PATH` 交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程镜像表里该 UUID 命中 0 次、`WebKit` 仍是 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。这组读数取自 `gen/dyld` 判定 (b) `1 0 0 1`、两个 override hook 都不在的窗口，该状态下 `Loader.cpp:565` 会把磁盘候选直接短路（十一·三），所以它支持的是「越狱二进制的成功不能替代平台签名进程」，不支持「平台签名进程不接受这个变量」。本节的读数必须在 `MobileSafari`（或 Chrome）这类进程上取；取在越狱二进制上的成功是假阳性。
 
 先启动被测应用，再拿到它的 pid，最后让 `lldb` 列出镜像的完整路径。**启动方法因应用而异，这一步搞错会让后面全部白测**：本设备的默认浏览器是 Chrome，`uiopen <url>` 打开的是 Chrome 而不是 Safari，测 Safari 必须用 `uiopen --path /Applications/MobileSafari.app`；直接 `exec` 浏览器只得到没有页面的 UI 进程，不请求 WebContent。
 
@@ -1089,7 +1097,7 @@ lldb -b -o "process attach --pid $APP" -o "image list -o -f" -o detach -o quit 2
 
 **成功的样子**：`WebKit.framework/WebKit` 那一行的路径前缀不再是 `/System/Library`，而是越狱根下的 `/Library/WebKitOverride/`。因为 `/var/jb` 是指向 preboot 目录的符号链接，这一行的完整形式可能是 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`，也可能是解析后的 `/private/preboot/<uuid>/dopamine-XXXX/procursus/Library/WebKitOverride/WebKit.framework/WebKit`。两种都算成功，判据写成两条同时成立：路径**不以** `/System/Library` 开头，且包含 `/Library/WebKitOverride/`。
 
-**失败的样子**：那行仍是 `/System/Library/Frameworks/WebKit.framework/WebKit`。这时先读 app 进程的环境段落，再按下面这张表分诊。前四行按环境里有哪些变量分，最后一行是环境全对但结果仍不对的情形：
+**失败的样子**：那行仍是 `/System/Library/Frameworks/WebKit.framework/WebKit`。这时先读 app 进程的环境段落，再按下面这张表分诊。前三行按环境里有哪些变量分；后两行都是环境全对但结果仍不对，用 `gen/dyld` 的两个 override hook 计数齐不齐分开：
 
 ```sh
 launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
@@ -1100,25 +1108,28 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 读数 | 含义 | 下一步查哪里 |
 | --- | --- | --- |
 | 四个变量都没有 | `launchdhook` 没写任何东西 | 十二·六的落地字节核对；`launchdhook` 是否真的被换掉 |
-| 只有 `__XPC_` 两个，且值指向覆盖目录 | **补丁运行了，裸名被丢掉了** | 见下一段 |
+| 只有 `__XPC_` 两个，且值指向覆盖目录 | **补丁运行了，裸名被丢掉了** | 见本节末尾「第二行的判别」那几段 |
 | 只有 `__XPC_` 两个，值不是覆盖目录 | 补丁没运行，`__XPC_` 是别处留下的 | `launchdhook` 是否被替换、`config.plist` 的 `DisableJBFrameworkPath` 是否为真 |
-| 四个都在且值正确，路径仍来自 `/System` | 搜索路径到位，但 dyld 不采纳磁盘副本，**或平台签名进程不接受这个变量** | 先查 `gen/dyld` 的两个 override hook 计数（第九节）；两个 hook 都在则落到本表下面的第五行 |
+| 四个都在且值正确，路径仍来自 `/System`，且 `gen/dyld` 的 hook 计数不齐 | 搜索路径到位，但 dyld 这一半没上线，磁盘候选在 `Loader.cpp:565` 被短路 | 按第九节装 `gen/dyld`（两个 override hook 都要在 `1 1 1 1`），再复测 |
+| 四个都在且值正确，路径仍来自 `/System`，且 `gen/dyld` 的 hook 计数齐（`1 1 1 1`） | 两半都到位，磁盘副本仍未在活进程里被采纳 | 见下一段：这一行没有已知解释 |
 
-**第五行是实测里已经出现过的那种**，不是理论分支：四个变量都送到、值也对，平台签名的 `MobileSafari` 仍加载 `/System` 那份（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），而 `/var/jb` 那份（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`）在 dyld 打印里出现过、在活进程镜像表里不存在。这时 `gen/dyld` 的两个 override hook 计数可能是齐的（`1 1 1 1`），所以查完 hook 计数不能就此收尾。这条读数的成因没有定位，本节的判据因此只能报「未达成」，不能报「某个已知原因」。也就是十二·八的成功样子目前没有被观测到过——说明这一点是为了防止把上表前三行当成「只剩这几种可能」。
+**在已经记录下来的读数里，第五行还没有一条落在它上面。** `1 0 0 1` 窗口内那次（`02:27`–`02:34` CST）按本表归到第四行：四个变量都送到、值也对，`MobileSafari` 仍加载 `/System` 那份（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），而 `/var/jb` 那份（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`）在 dyld 打印里出现过、在活进程镜像表里不存在；但那次 `gen/dyld` 的两个 override hook 不在，正是第四行写的原因，所以它不需要第五行来解释。`1 1 1 1` 窗口内那一条（`00:28:27` CST，`MobileSafari` 的 `WebKit` #47 在 `/var/jb`，见十一·六）方向相反，落在「成功」一侧。
 
-**中间那一行的判别为什么成立。** 判别靠的是值，不是名字，但这里要先把「`launchd` 会丢 `DYLD_` 名字」这句话收窄到实测覆盖的范围。
+这两条都不是按第五行的条件取到的：一条 hook 不齐，一条没记完整路径且没复测。所以本节的判据现在只能报「未达成」，不能报「某个已知原因」，也不能反过来断言 `1 1 1 1` 状态下不会出现第五行。留这一行是为了让分诊时知道：hook 计数齐而路径仍是 `/System` 时，本表没有已知解释，不要把它硬塞进前四行。
+
+**第二行的判别为什么成立。** 判别靠的是值，不是名字，但这里要先把「`launchd` 会丢 `DYLD_` 名字」这句话收窄到实测覆盖的范围。
 
 实测的形态是：**通过 `launchctl setenv` 一类途径放进 `launchd` 自身环境的变量，名字以精确前缀 `DYLD_` 开头时被丢掉**（`DYLD_FOO` 读回空），而 `dyld_FOO`、`XDYLD_FOO`、`__XPC_DYLD_FOO`、`DYLDX`、`DYLD` 都读回 `yes`；`/sbin/launchd` 里 13 个 `DYLD_` 字符串全是 `DYLD_PRINT_*`。这一条来自本轮任务上下文记录的实测，仓库内没有对应文档，本节也未重测。
 
 **这句话不能推广成「所有 `DYLD_` 名字都进不了子进程」。** 同一个 `environment` 段落里就有反例：`DYLD_INSERT_LIBRARIES` 在场，而它同样以 `DYLD_` 开头。它的来源不同——它由 `launchdhook` 在 `spawn_exec_hook_common()` 里直接写进子进程 `envp`，不经过 `launchd` 自身环境那一步。所以两件事要分开：一条是「`launchctl setenv` 那条路丢 `DYLD_` 名字」，另一条是「spawn 钩子在 exec 时写进去的变量会不会也被后一层丢掉」，后者本节没有读数。
 
-**这决定了中间那一行能证到多少。** 补丁写四个变量用同一段代码、同一个时机（`jbSearchPathSet` 一次写四条），所以「裸名被丢、`__XPC_` 保留」这种选择性丢弃，要么发生在写入之后的某一层，要么根本没发生、只是补丁没写到。能把两者分开的对照就在同一段落里：`DYLD_INSERT_LIBRARIES` 一直是在的，所以若四个变量由同一次 spawn 写入、而只有两个裸搜索路径名不在，说明写入确实发生了，丢弃发生在写入之后；若 `__XPC_` 两条的值不是覆盖目录，说明这份补丁根本没写到这一层。
+**这决定了第二行能证到多少。** 补丁写四个变量用同一段代码、同一个时机（`jbSearchPathSet` 一次写四条），所以「裸名被丢、`__XPC_` 保留」这种选择性丢弃，要么发生在写入之后的某一层，要么根本没发生、只是补丁没写到。能把两者分开的对照就在同一段落里：`DYLD_INSERT_LIBRARIES` 一直是在的，所以若四个变量由同一次 spawn 写入、而只有两个裸搜索路径名不在，说明写入确实发生了，丢弃发生在写入之后；若 `__XPC_` 两条的值不是覆盖目录，说明这份补丁根本没写到这一层。
 
 判别仍然只看值：`__XPC_DYLD_FRAMEWORK_PATH` 的值等于覆盖目录，说明是这份补丁写的；指向别处或没有，说明不是它写的。**覆盖目录这个字符串只由这份补丁写进环境**，这是这条判别成立的全部依据，不依赖「`launchd` 丢所有 `DYLD_` 名字」这个更强的说法。
 
 顺带一个容易误判的点：`.xpc` 类型的 helper 自带 4 条 `LC_DYLD_ENVIRONMENT`，所以它们的候选路径即使补丁完全没生效也会出现。app 进程没有这类加载命令，所以**对 app 进程「路径来自哪里」才是这份补丁是否生效的判据**。
 
-**中间那一行具体长什么样。** 假设补丁写入了变量，但裸名在写入之后被某一层丢掉、只把 `__XPC_` 那对传下来，则 `launchctl print pid/$APP` 的 `environment` 段落会是这样（其余条目照旧；注意 `DYLD_INSERT_LIBRARIES` 在场）：
+**第二行具体长什么样。** 假设补丁写入了变量，但裸名在写入之后被某一层丢掉、只把 `__XPC_` 那对传下来，则 `launchctl print pid/$APP` 的 `environment` 段落会是这样（其余条目照旧；注意 `DYLD_INSERT_LIBRARIES` 在场）：
 
 ```
 	environment = {
@@ -1159,7 +1170,7 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 落地字节核对 | **未执行** | 未取到（设备进入 panic 循环） |
 | `lldb` 路径读数（十二·八的成功判据） | **未执行** | **未取到，判据记为失败**，见其文档第三节 |
 
-**此刻设备上是出厂 basebin**，`launchdhook` 312848 / `449a9606`，`gen/dyld` 只带 Dopamine 原有的两个 hook。这个状态来自 panic 之后的手动重新越狱，不来自「从未安装」。十二·八的成功判据至今**没有被观测到过**，因此不能用于宣布任何结论。
+**此刻设备上是出厂 basebin**，`launchdhook` 312848 / `449a9606`，`gen/dyld` 只带 Dopamine 原有的两个 hook。这个状态来自 panic 之后的手动重新越狱，不来自「从未安装」。十二·八的成功判据要求两项同时成立：路径不以 `/System/Library` 开头，且包含 `/Library/WebKitOverride/`。至今没有一次读数把这两项都记下来：`1 1 1 1` 窗口内 `00:28:27` CST 那条通报只写到 `WebKit` #47 与其余六个镜像「all under `/var/jb`」，没有记 `/var/jb` 下面哪一级目录，也没有复测。所以本节的判据不能用于宣布任何结论。
 
 ### 十二·十 信任缓存这一节，本 mission 的独立复算
 
