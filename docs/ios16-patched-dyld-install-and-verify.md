@@ -293,7 +293,7 @@ dyldhook_merge.arm64e.iOS16-17.dylib   75952  <tar 里那份的 sha>  [1, 1, 1, 
 
 | 读数 | 含义 | 下一步 |
 | --- | --- | --- |
-| `dyldhook_merge...` 仍是 `[1, 0, 0, 1]`、74352 字节 | 文件没换成功（拷贝失败或被还原） | 查第五节第 2 步的 `sha256` |
+| `dyldhook_merge...` 仍是 `[1, 0, 0, 1]`、74352 字节 | 文件没换成功（拷贝失败或被还原） | 查第五节第 1 步那两个目标哈希，再按第 4 步 ① 复读 |
 | `dyldhook_merge...` 是 `[1, 1, 1, 1]`，但 `gen/dyld` 仍是 `[1, 0, 0, 1]` | 文件换了，但 `gen/dyld` 没有重新合成 | 用户空间重启没走完，或 `basebin_generate` 返回 3（`MachOMerger` 失败） |
 | `gen/dyld` 是 `[1, 1, 1, 1]`，但 `dyldhook_merge...` 不是 | `gen/dyld` 是旧的打好版本，下次重启会被合成回原版 | 一样要换 hook 文件 |
 
@@ -647,7 +647,7 @@ cat SHA256SUMS
 EOS
 ```
 
-设备上不能用 `sha256sum` 与 `shasum`（两者都不存在），用 `/var/jb/usr/bin/python3` 的 `hashlib`；本次实测 `python3 -c` 与 `stat -c '%s'` 两条读数一致。
+设备上没有 `shasum`，`sha256sum` 在 `/var/jb/usr/bin/`（`build-state.md:1205`）；本节统一用 `/var/jb/usr/bin/python3` 的 `hashlib`，因为它同时给出字节数与哈希、一条命令写完。本次实测 `python3 -c` 与 `stat -c '%s'` 两条读数一致。
 
 **装补丁之前（2026-11-25 早于 23:51）的本机现状，作为「改动前应当长这样」的对照**：
 
