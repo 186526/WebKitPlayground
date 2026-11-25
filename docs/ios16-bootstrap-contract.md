@@ -242,7 +242,7 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支不进入，控制直接到 `RELEASE_ASSERT`。
 2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），即使进了分支也取不到字符串，回退在第二个 `if` 处返回 false，位图保持全零。
 
-所以 `main` 上的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（内层 `feat/p9-inner-aligned-behaviors-fallback-and-constant`，外层 `feat/p9-make-the-aligned-behaviors-fallback-r`）改为另一种形态：`RELEASE_ASSERT` 删除，长度不等时不再中止进程；它不把宽度不等的负载拷进位图，这类负载一律丢弃，位图保持全零；等宽负载如何处理见 M85 的当前提交。同一批提交顺带删掉了 `setSDKAlignedBehaviorsFromClientSDKVersion` 与 `client-sdk-version` 的读取点。已提交的三个是 `97cfd79`、`ddfaa5f`、`30ae1b9`，截至本文写作时尚未合入 `main`；审查要求把等宽分支改为拷贝，该改动尚未落地。
+所以 `main` 上的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（内层 `feat/p9-inner-aligned-behaviors-fallback-and-constant`，外层 `feat/p9-make-the-aligned-behaviors-fallback-r`）改为另一种形态：`RELEASE_ASSERT` 删除，长度不等时不再中止进程；它不把宽度不等的负载拷进位图，这类负载一律丢弃，位图保持全零；等宽负载如何处理见 M85 的当前提交。同一批提交顺带删掉了 `setSDKAlignedBehaviorsFromClientSDKVersion` 与 `client-sdk-version` 的读取点。已提交的三个是 `97cfd79`、`ddfaa5f`、`30ae1b9`，截至本文写作时尚未合入 `main`；审查要求等宽负载改为拷贝，该改动尚未落地。
 
 ### 8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图
 
@@ -259,7 +259,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 按名字逐项比对，**63 个可比下标里只有 3 个在两版指同一个行为**：`0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt`。有 62 个名字两版都存在，其中 59 个下标不同。另有名字只在 16.1 存在，例如 `ApplicationCacheDisabledByDefault`（16.1 下标 1）在 18.3.1 的枚举里完全没有。
 
-结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 因此删掉了 `RELEASE_ASSERT`，宽度不等的负载一律丢弃、位图保持全零，等宽负载如何处理见 M85 的当前提交。这不是缺陷，是两版位序无关这一事实的必然结果。
+结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 因此不按位置拷贝：宽度不等的负载一律丢弃、位图保持全零；它同时删掉 `RELEASE_ASSERT`，让长度不等不再中止进程。等宽负载如何处理见 M85 的当前提交。这不是缺陷，是两版位序无关这一事实的必然结果。
 
 要让 16.1 的位图真正生效，需要一份两版的下标对照表，按名字把 16.1 的每个行为映射到 18.3 的对应项，对 18.3 独有的项取默认值。这份表尚未编写，也不在 M85 范围内。
 
