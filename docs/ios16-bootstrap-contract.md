@@ -187,7 +187,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 16.1 与 16.2 同为 8 字节，位序也只在前 13 项一致：16.2 在下标 13 插入 `DoesNotAddIntrinsicMarginsToFormControls`，原来在 16.1 下标 13 的 `DOMWindowReuseRestriction` 落到 16.2 的 14。此后 16.1 的下标整体比 16.2 小 1，63 个名字里有 50 个符合这条平移，只有 13 个名字两版仍在同一位置。所以即使宽度相等、只差一个插入项，也不能按下标搬运。16.4 与 18.3.1 同为 12 字节，73 个可比下标里只有 `0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt` 三个指向同一行为。
 
-所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。M85 的长度分支因此按「12 字节走原路径、8 字节丢弃」处理，而这个分支只对 16.1 与 18.3 这一对成立；把 16.4 的 12 字节负载原样交给 18.3，长度检查放行、位序仍然错，需要下标对照表才能解码。这份对照表尚未编写。
+所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。M85 的长度分派因此不按宽度选一条可用的老布局：只有宽度不超过本端 `storageLengthInBytes()` 时清零走默认、更宽则拒绝，两条路径都只记日志，任何外来位图都不拷贝。把 16.4 的 12 字节负载原样交给 18.3，长度检查放行、位序仍然错，需要下标对照表才能解码。这份对照表尚未编写。
 
 ### 发送与接收
 
@@ -233,14 +233,14 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 
 ## 修补补丁的现状与缺口
 
-`patches/ios16-xpc-bootstrap-compat.patch` 目前给 `getClientSDKAlignedBehaviors` 加了一条回退路径：当 `!length || !behaviorData` 为真时，改为读 `client-sdk-version` 并据版本号重建位图。
+M85 落地前，`patches/ios16-xpc-bootstrap-compat.patch` 在 `getClientSDKAlignedBehaviors` 里有一条回退路径：当 `!length || !behaviorData` 为真时，改为读 `client-sdk-version` 并调用 `setSDKAlignedBehaviorsFromClientSDKVersion` 重建位图。M85 落地后这条回退连同 `setSDKAlignedBehaviorsFromClientSDKVersion` 一起删除：函数改为取本端 `storageLengthInBytes()` 作 `ownLength`，宽度不超过本端时记一条日志并返回真、更宽时记另一条日志并返回假，两条路径都不写位图。任何外来位图都不拷贝，也没有任何宽度走 `memcpy`。
 
 这条回退对 16.1 是死代码，两个理由各自独立成立：
 
 1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支不进入，控制直接到 `RELEASE_ASSERT`。
 2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），即使进了分支也取不到字符串，回退在第二个 `if` 处返回 false，位图保持全零。
 
-所以修补后的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。正确的判据是**数据块长度**而不是键是否存在：长度为 12 时走原路径，长度为 8 时走 16.1 分支，两者都不等于时才算非法。这条改动在 mission M85（`feat/p9-inner-aligned-behaviors-fallback-and-constant`）里进行，截至本文写作时该分支尚无提交，所以本节同时描述现状与 M85 的规则。
+所以修补后的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（`feat/p9-make-the-aligned-behaviors-fallback-r`）已经落地这个修法，但收在更窄的形式里：`RELEASE_ASSERT` 与 `memcpy` 都删除，只保留「宽度不超过本端时清零走默认、更宽则拒绝，任何外来位图都不拷贝」。三个提交是 `97cfd79`、`ddfaa5f`、`30ae1b9`，截至本文写作时尚未合入 `main`。
 
 ### 8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图
 
@@ -257,7 +257,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 按名字逐项比对，**63 个可比下标里只有 3 个在两版指同一个行为**：`0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt`。有 62 个名字两版都存在，其中 59 个下标不同。另有名字只在 16.1 存在，例如 `ApplicationCacheDisabledByDefault`（16.1 下标 1）在 18.3.1 的枚举里完全没有。
 
-结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 的 16.1 分支因此在长度匹配时**丢弃**该负载、让位图保持已知状态，而不是试图解码它。这不是缺陷，是两版位序无关这一事实的必然结果。
+结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 因此删掉了 `memcpy`：只有宽度不超过本端 `storageLengthInBytes()` 时清零走默认、更宽则拒绝，任何外来位图都不拷贝，位图保持已知状态而不是被解码。这不是缺陷，是两版位序无关这一事实的必然结果。
 
 要让 16.1 的位图真正生效，需要一份两版的下标对照表，按名字把 16.1 的每个行为映射到 18.3 的对应项，对 18.3 独有的项取默认值。这份表尚未编写，也不在 M85 范围内。
 
@@ -367,6 +367,6 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 - 16.1 UI 进程拉起 18.3 helper 时，helper 是否确实在 `getClientSDKAlignedBehaviors` 的 `RELEASE_ASSERT` 处中止。判据是崩溃报告里 `termination.namespace` 与栈顶是否出现 `XPCServiceInitializer`；本次未取得该报告。同理反向组合也未实测。
 - `XM18:178` 在 `ContainerEnvironmentVariables` 缺失时把 `xpc_dictionary_get_value` 返回的 NULL 传给 `xpc_dictionary_apply`，libxpc 在这种情况下是否中止进程，未经实测。
 - `EPM18:117` 之后的子键读取在 `extra-initialization-data` 整个字典缺失时把 NULL 传给 `xpc_dictionary_get_string`，行为未经实测。16.1 恒发送该键，这条路径在本组合下不会发生。
-- 全零或按已知状态初始化的位图能否让 18.3 的 WebKit 与 WebCore 在 16.1 上跑完初始化。位图宽度可以通过长度分支解决，两版位序不可按位置换算这一条已经核实（见「8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图」），但各行为的消费点在 WebKit 与 WebCore 里分散多处，本次未逐点核对。
+- 全零或按已知状态初始化的位图能否让 18.3 的 WebKit 与 WebCore 在 16.1 上跑完初始化。位图宽度可以通过长度分派消除中止，两版位序不可按位置换算这一条已经核实（见「8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图」），但各行为的消费点在 WebKit 与 WebCore 里分散多处，本次未逐点核对。
 - 设备上实际运行的 16.1 WebKit 二进制发出的字典是否与 `releases/Apple/Safari-16.1-iOS-16.1` 源码一致，本次未做二进制对照。设备系统 WebKit 是 `8614.2.9.0.10`，与 `614.2.9.0.10` 同版本号，但没有逐键比对二进制。
 - 本文没有解释设备上已观察的两个现象。18.3 三元组配 16.1 `.xpc` 壳时 helper spawn 为 0、lookup 失败 8987 次：该现象在 `XPCServiceMain` 被调用之前就已确定，与本文列出的任何键无关。18.3 全套时 WebContent 收到第一条 IPC 后 `PAC_EXCEPTION`、栈顶 `WebKit::WebProcess::initializeWebProcess`：这发生在 `XPCServiceInitializer` 返回之后，本文的键缺失与宽度断言只影响该函数内的分支选择，不能解释这条崩溃。
