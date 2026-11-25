@@ -6,9 +6,11 @@
 
 > **安装前必读：这条路线在 2026-11-26 已经两次让设备宕机，起因就是本文要替换的那个 `launchdhook.dylib`。**
 >
-> 2026-11-26 **00:50** 与 **05:58** 各执行过一次 `jbctl update basebin`，两次都以**五次内核 panic** 与设备宕机结束。panic 信息是 `pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`，它之前先出现的是 `initproc exited`。起因是 `launchdhook.dylib` 在被 `launchd` 映射期间被替换：`pmap` 在 PPL 页上遇到残留映射，内核直接 panic。两次都只能靠**人工重新越狱**恢复，而重新越狱会把 basebin 还原成出厂形态，也就是装上去的东西随恢复一起消失。
+> 2026-11-26 **00:50** 执行过一次 `jbctl update basebin`，之后 **00:51 到 01:00** 连续五次内核 panic；**05:58** 又执行了同一条命令，设备在约 60 秒内停止响应，至 06:16 仍未恢复。两次都只能靠**人工重新越狱**恢复，而重新越狱会把 basebin 还原成出厂形态，也就是装上去的东西随恢复一起消失。
 >
-> 记录在 `build-state.md:1069`、`build-state.md:1099`、`.tower/comms/inbox/20261126-survey-z6b-tower-survey-summary.md:138`（「Installing a patched one triggered five kernel panics … and required a manual re-jailbreak … **Nothing in this report proposes re-opening it.**」）与 `AGENTS.md` 的「一之二」节。
+> 五份 panic 报告是 `panic-full-2026-11-26-{005111,005621,005658,005858,010037}.ips`，全部落在 `00:51:11`–`01:00:37`，也就是 00:50 那次运行的窗口内，逐条原文在 `docs/ios16-patched-dyld-install-and-verify.md:612-616`：`00:51:11` 那份是 `initproc exited -- exit reason namespace 2 subcode 0x5`，其后四份是 `pmap_mark_page_as_ppl_page_internal: page still has mappings, pa=… @pmap_data.c:1101`，四个 `pa` 各不相同。起因是 `launchdhook.dylib` 在被 `launchd` 映射期间被替换：`pmap` 在 PPL 页上遇到残留映射，内核直接 panic。05:58 那次没有 panic 计数，只有 `incident-20261126-basebin.md:5` 的「约 60 秒内停止响应，至 06:16 仍未恢复」。
+>
+> 记录在 `build-state.md:1069`、`build-state.md:1099`、`incident-20261126-basebin.md:5`、`.tower/comms/inbox/20261126-survey-z6b-tower-survey-summary.md:138`（「Installing a patched one triggered five kernel panics … and required a manual re-jailbreak … **Nothing in this report proposes re-opening it.**」）与 `AGENTS.md` 的「一之二」节。
 >
 > **这条路线已被记录为关闭，重新开启需要用户明确授权。** 本文记录的是产物是什么、装上去会发生什么、这条路为什么现在是关的。文中的安装命令是记录，不是推荐执行的动作；任何一节里的命令块都不构成执行建议，也不能由读者自行判断「这次的产物是对的所以这次不同」——`05:58` 那一次的产物就是对的，设备仍然宕机。产物正确与安装安全是两个独立命题，前者成立不推出后者。
 
@@ -248,7 +250,7 @@ dyld 的容忍路径可查：`JustInTimeLoader.cpp:460`（`dyld-1042.1`）把弱
 
 ## 七、安装：流程记录，不是执行建议
 
-**本节与第八节记录的是这条路线怎么走一遍，不是可以被照着做的事。** 走一遍会让设备两次进入五次内核 panic 并需要人工重新越狱，理由、时间与 panic 原文见文首的警告段。要重新开启这条路线，先取得用户明确授权。
+**本节与第八节记录的是这条路线怎么走一遍，不是可以被照着做的事。** 走一遍会让设备进入连续五次内核 panic 与一次不可达，都需要人工重新越狱，理由、时间与 panic 原文见文首的警告段。要重新开启这条路线，先取得用户明确授权。
 
 流程本身如下。动手前先确认三件设备事实（本机已实测）：
 
@@ -271,7 +273,7 @@ scp -C BaseBin/basebin.tar mobile@192.168.2.136:/var/mobile/Documents/basebin.ta
 ssh -t mobile@192.168.2.136 'sudo /var/jb/basebin/jbctl update basebin /var/mobile/Documents/basebin.tar'
 ```
 
-**上面这两条命令就是 00:50 与 05:58 各跑一次的那两条。** 两次的结果都是五次内核 panic 与设备宕机，见文首的警告段。
+**上面这两条命令就是 00:50 与 05:58 各跑一次的那两条。** 00:50 那次之后 00:51 到 01:00 连续五次内核 panic，05:58 那次设备在约 60 秒内停止响应、至 06:16 未恢复，见文首的警告段。
 
 第二条需要 root。本机 `mobile` 没有免密 sudo，`jbctl update` 也必须在 root 下执行（它在 `BaseBin/jbctl/src/main.m:209` 调 `jbclient_platform_stage_jailbreak_update`）。执行由用户在自己的终端完成。
 
@@ -321,7 +323,7 @@ dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001): Symbol not f
 
 **改的是越狱引导层。** `gen/dyld` 是每个进程的 dyld。合并或签名出错时 `basebin_generate` 返回 2、3 或 4，`launchdhook` 在 `update.m:225-229` 随即调 `abort_with_reason(7, 1, ...)` 中止这次越狱更新。表现是这次用户空间重启没能建起新的 `gen/dyld`，与某个 app 崩溃不同。
 
-**比上面那条更严重的一层是安装动作本身：两次实测都以五次内核 panic 与宕机结束。** panic 信息是 `pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`，先有 `initproc exited`；起因是 `launchdhook.dylib` 在被 `launchd` 映射期间被替换，恢复只能靠人工重新越狱。时间、出处与命令见文首的警告段与第七节。这一层的风险不随补丁内容、tar 内容或构建产物质量变化，只随「是否执行这条命令」变化。
+**比上面那条更严重的一层是安装动作本身：两次实测都以设备宕机、必须人工重新越狱结束。** 00:50 那次之后 00:51 到 01:00 连续五次内核 panic，四份是 `pmap_mark_page_as_ppl_page_internal: page still has mappings, pa=… @pmap_data.c:1101`，第一份是 `initproc exited`；05:58 那次设备在约 60 秒内停止响应、至 06:16 未恢复，没有 panic 计数。起因是 `launchdhook.dylib` 在被 `launchd` 映射期间被替换，恢复只能靠人工重新越狱。时间、出处与命令见文首的警告段与第七节。这一层的风险不随补丁内容、tar 内容或构建产物质量变化，只随「是否执行这条命令」变化。
 
 **两个 hook 无条件返回真，改变了所有镜像的路径判定。** dyld 从此对缓存里每个镜像都去 `stat()` 磁盘副本并比对 inode。本机实测了这条通道的落点：`/System/Library/Frameworks/{Foundation,UIKit,CoreFoundation,Security}.framework`、`/System/Library/PrivateFrameworks/WebCore.framework/WebCore`、`/usr/lib/{libSystem.B,libobjc.A,libc++.1,libsqlite3}.dylib` 在磁盘上都不存在。`.fakelib` 里落在 `/usr/lib` 下的真实文件只有 `libRPAC`、`libMTLCapture`、`libMTLToolsDiagnostics`、`libCoreKE`、`libFaultOrdering`、`libBacktraceRecording`、`libMainThreadChecker`、`libSystem.B_asan`、`libSystem_asan` 与 `swift/libswiftRemoteMirror.dylib`，都不在共享缓存里；`/var/jb/basebin/.fakelib/system/` 下只有 `introspection/libdispatch.dylib`，不是 dyld 用来比对的 `/usr/lib/system/libdispatch.dylib`。
 
@@ -888,6 +890,18 @@ app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因�
 
 `jbuserconfig_get_value` 在这个进程里可用：它读 `JBROOT_PATH("/basebin/config.plist")`（`common.c:99`），只查 `DisableJBFrameworkPath` 一个键，文件不存在或读不到时返回 NULL，搜索路径保持开启。
 
+**作用域是每个被 spawn 的进程，不是只有 app 与 helper。** 判定入口是 `spawn_config_for_executable`（`common.c:121-146`），它返回的是一个**黑名单**结果，不是一份点名过的白名单：
+
+- `:125-134`：四条硬编码路径（`GSSCred`、`dataaccessd`、`IDSBlastDoorService`、`MessagesBlastDoorService`）命中时返回 `0`，既不注入也不上信任缓存。
+- `:137-143`：用户配置 `ProcessBlacklist` 里的路径命中时返回 `kSpawnConfigTrust`，只上信任缓存、不注入。
+- `:145`：其余一律返回 `kSpawnConfigInject | kSpawnConfigTrust`，**默认注入**。
+
+`spawn_exec_hook_common` 在 `:245` 取这个结果，`:304` 只把 `!spawnConfig & kSpawnConfigInject` 当停止条件。`:304` 之后还有三条会关掉注入的条件，同样与「这个进程是不是 WebKit 相关」无关：`_SafeMode` / `_MSSafeMode` 为 `1`（`:309-326`）、`POSIX_SPAWN_PROC_TYPE_DRIVER`（`:328-335`）、`HOOK_DYLIB_PATH` 在设备上不存在（`:337-341`）。`DYLD_INSERT_LIBRARIES` 那一处（`:252-260`）不是停止条件，它只决定 `systemHookAlreadyInserted`，进而影响 `:417-418` 的快路径判断。
+
+所以这次改动**不是**把变量写给「ellekit 过滤器点名的那几个 app」：那个过滤器是黑名单，除四条硬编码路径与用户 `ProcessBlacklist` 之外的每个被 spawn 进程都会拿到四个变量。任务 2 原文里「scoped to the apps the existing ellekit filter already names」如果按字面理解成一份白名单，就要新增一个用不到的配置项；本文按黑名单语义交付，不新增机制。
+
+这条作用域决定了覆盖目录前置条件的严重程度。`十一·二` 的 `:506` 已经写明「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」，两个目录因此必须专用；同样的道理向上提一级：**覆盖目录里放的那一代 `WebKit` 若不能在 16.1 上加载，受影响的是每个被 spawn 的进程，不是只有 app 与 helper**。也就是说下面 `十二·七` 的三条性质是全系统级的前置条件，不是 WebKit 级的。设备当前那一代不满足第 1、2 条，这一句的分量按全系统范围读。
+
 ### 十二·五 helper 进程今天走哪条分支：未核，两侧后果都写明
 
 **helper 今天的 `envp` 有没有那四个变量，本仓没有读数。** 这一条是任务 4 的核心，所以先把已知与未知分开。
@@ -941,31 +955,26 @@ app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因�
 
 ### 十二·七 交付物：basebin tar 的内容、安装命令与回滚命令
 
-**本节记录产物与命令，不是推荐执行的动作。** 装这份 tar 的那条命令在 2026-11-26 已经两次让设备进入五次内核 panic 并需要人工重新越狱，起因是它替换的 `launchdhook.dylib` 正被 `launchd` 映射，时间、panic 原文与出处见文首的警告段。这条路线已被记录为关闭，重新开启需要用户明确授权。下面给出的 sha256、条目数、成员表与重建命令都是可以离线复核的产物读数；紧随其后的安装与回滚命令是记录。
+**本节记录产物与命令，不是推荐执行的动作。** 装这份 tar 的那条命令在 2026-11-26 已经两次让设备宕机并需要人工重新越狱：00:50 那次之后 00:51 到 01:00 连续五次内核 panic，05:58 那次设备约 60 秒内停止响应、至 06:16 未恢复。起因是它替换的 `launchdhook.dylib` 正被 `launchd` 映射，时间、panic 原文与出处见文首的警告段。这条路线已被记录为关闭，重新开启需要用户明确授权。下面给出的 sha256、条目数、成员表与重建命令都是可以离线复核的产物读数；紧随其后的安装与回滚命令是记录。
 
-**用外层 gitlink 作合并基准，不要用内层 `main`。** 外层仓库把子模块固定在一个提交上，那个提交可能只活在一条特性分支里：2026-11-26 实测内层 `main` 是 `61577b6`，而外层 `main` 的 gitlink 是 `75e8695`，`bb12c3f` 至今仍不在内层 `main` 上（`git merge-base --is-ancestor bb12c3f main` 返回 1，`git rev-list --count 61577b6..bb12c3f` 为 10）。`bb12c3f` 的 10 个提交带来 `docs/ios16-dyld-identity-and-load-conditions.md`（570 行），而 `build-state.md:997` 仍在引它。
+**用外层 gitlink 作合并基准，不要用内层 `main`。** 外层仓库把子模块固定在一个提交上，那个提交可能只活在一条特性分支里，而内层 `main` 未必包含它。基准一律现取：`git ls-tree main WebKitPlayground` 记录的那个 SHA。2026-11-26 这一天的读数是外层 `main` 的 gitlink 为 `75e8695`、内层 `main` 为 `61577b6`，且 `bb12c3f` 至今不在内层 `main` 上（`git merge-base --is-ancestor bb12c3f main` 返回 1，`git rev-list --count 61577b6..bb12c3f` 为 10）。这三个提交号都是会变的读数，`61577b6` 只是「内层 `main` 落后」那次采样的值，不要把它们写进脚本。`bb12c3f` 的 10 个提交带来 `docs/ios16-dyld-identity-and-load-conditions.md`（570 行），而 `build-state.md:997` 仍在引它。
 
-「合并内层 `main` 会删掉这个文件」在 `55260ad` 之前成立，之后是空操作：`55260ad` 合并了 `bb12c3f`，而 `bb12c3f` 已经包含 `61577b6`，所以内层 `main` 现在是本分支的内层 tip 的祖先，`merge-tree` 出来的树与 tip 自己的树逐字节相同。四条命令的读数（基准是本节分支的外层 gitlink `fe99658`，换分支时把 SHA 换掉）：
-
-```sh
-cd WebKitPlayground
-git merge-base --is-ancestor 61577b6 fe99658          # rc=0
-git rev-list --count fe99658..main                    # 0
-git merge-tree --write-tree main fe99658              # e806ce03977dd8915d78642aca016445a2455aa8
-git rev-parse fe99658^{tree}                          # e806ce03977dd8915d78642aca016445a2455aa8
-```
-
-两条树哈希相同即内层合并为空操作，不会再丢文档。判断合并是否完整仍然要拿外层 gitlink 当基准，因为下面这个读数不会变：`bb12c3f` 不在内层 `main` 上，用内层 `main` 当基准会把外层已落地的提交算成新增。
+「合并内层 `main` 会删掉这个文件」在 `55260ad` 之前成立，之后是空操作：`55260ad` 合并了 `bb12c3f`，而 `bb12c3f` 已经包含 `61577b6`，所以内层 `main` 现在是本分支内层 tip 的祖先，`merge-tree` 出来的树与 tip 自己的树逐字节相同。取基准当天的读数是 `git merge-base --is-ancestor 61577b6 <基准>` 为 0、`git rev-list --count <基准>..main` 为 0、`git merge-tree --write-tree main <基准>` 与 `git rev-parse <基准>^{tree}` 打出同一个树哈希。下面这段用变量取基准，所以不必每次抄 SHA：
 
 ```sh
-cd ..                      # 外层
-git ls-tree main WebKitPlayground          # 记下这个 SHA
+cd ..                                      # 外层
+base=$(git ls-tree main WebKitPlayground | awk '{print $3}')
 cd WebKitPlayground
-git merge-base --is-ancestor <那个 SHA> HEAD; echo rc=$?   # 必须是 0
-git diff --name-status <那个 SHA>..HEAD | grep '^D'        # 必须为空
+git merge-base --is-ancestor "$base" HEAD; echo "ancestor rc=$?"   # 必须是 0
+git diff --name-status "$base"..HEAD | grep '^D'                   # 必须为空
+git rev-list --count HEAD..main                                    # 0 即内层 main 没有本分支缺的提交
+test "$(git merge-tree --write-tree main HEAD)" = "$(git rev-parse HEAD^{tree})" \
+  && echo "inner merge is a no-op" || echo "inner merge changes the tree"
 ```
 
-这段命令块在主检出里跑会打出 `rc=1` 与 `D docs/ios16-dyld-identity-and-load-conditions.md`，因为主检出的子模块停在 `61577b6`，不是本分支的 tip。那是检出位置差异，不是真告警。
+两个判据都是读数而不是预测：`ancestor rc` 非 0、或 `diff` 出现 `^D`，才是真告警；`merge-tree` 的树与 `HEAD` 的树不同，说明内层合并不再空操作、需要按合并结果重新核对。基准与内层 `HEAD` 是否相同不构成告警：主检出可以挂在任意提交上，同一份命令在不同检出位置本来就该给出不同基准。
+
+判断合并是否完整仍然要拿外层 gitlink 当基准，因为 `bb12c3f` 不在内层 `main` 上这个读数不会变：用内层 `main` 当基准会把外层已落地的提交算成新增。
 
 下面这些读数可以离线复核，不需要设备：sha256、字节数、条目数、成员哈希与重建命令。
 
@@ -1045,7 +1054,9 @@ cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m
 
 `WebKit` 对 `_WTFSignpostIndirectLoggingEnabled` 的强引用，与它为什么必须靠 sibling 提供，见 `build-state.md:558-562` 的崩溃原文（`Symbol not found: _WTFSignpostIndirectLoggingEnabled` / `Referenced from: <787DFAB1-…> /Volumes/VOLUME/*/WebKit.framework/WebKit` / `Expected in: <D309AA36-…> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore` / `dyld4::prepare → dyld4::halt → abort_with_payload`）与 `build-state.md:631` 的判定。
 
-**设备当前这一代不满足第 1、2 条，第 3 条未核。** 2026-11-26 只读实测：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 是 51654688 字节、`sha256 a5eadac56c8155ce…`、`LC_UUID 7e97b496-db02-3e46-9799-c4bdec869e8e`、`LC_BUILD_VERSION minos 18.5.0 sdk 18.5.0`，`BrowserEngineKit` 引用 5 处（其中绝对路径 2 处）；`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 与它是同一个 inode（60588），即同一份字节。`minos 18.5.0` 已高于 16.1，5 处 `BrowserEngineKit` 引用也在，所以第 1 条与第 2 条都不满足。第 3 条的状态是「未核」而不是「已知不满足」：`build-state.md:574-583` 记录 2026-11-25 那次往覆盖目录里放过同代 `JavaScriptCore` 并加载成功（镜像 #892），而 2026-11-26 那次只读实测只读了 `WebKit` 与 `Frameworks` 下的副本，没有读覆盖目录里的 `JavaScriptCore`，所以今天它还在不在没有读数。装前必须按下面第 1 条的第四条重新核一遍，不能假定它还在。这是装前必须换到 `minos ≤ 16.1` 那一代、并确认同代 `JavaScriptCore` 同在的两件事，与本次 tar 无关。
+**设备当前这一代不满足第 1、2 条，第 3 条未核；按 `十二·四` 的作用域，这是全系统级的缺陷，不是 WebKit 级。** 2026-11-26 只读实测：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 是 51654688 字节、`sha256 a5eadac56c8155ce…`、`LC_UUID 7e97b496-db02-3e46-9799-c4bdec869e8e`、`LC_BUILD_VERSION minos 18.5.0 sdk 18.5.0`，`BrowserEngineKit` 引用 5 处（其中绝对路径 2 处）；`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 与它是同一个 inode（60588），即同一份字节。`minos 18.5.0` 已高于 16.1，5 处 `BrowserEngineKit` 引用也在，所以第 1 条与第 2 条都不满足。第 3 条的状态是「未核」而不是「已知不满足」：`build-state.md:574-583` 记录 2026-11-25 那次往覆盖目录里放过同代 `JavaScriptCore` 并加载成功（镜像 #892），而 2026-11-26 那次只读实测只读了 `WebKit` 与 `Frameworks` 下的副本，没有读覆盖目录里的 `JavaScriptCore`，所以今天它还在不在没有读数。装前必须按下面第 1 条的第四条重新核一遍，不能假定它还在。这是装前必须换到 `minos ≤ 16.1` 那一代、并确认同代 `JavaScriptCore` 同在的两件事，与本次 tar 无关。
+
+**严重程度要按作用域算。** `十二·四` 记的作用域是每个被 spawn 的进程（`common.c:121-146` 的黑名单默认注入），所以覆盖目录里一代加载不了的 `WebKit` 影响的不是只有 app 与 helper：任何被 spawn、且搜索路径里先命中这个目录的进程都会拿到它。这也是 `十一·二`「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」那条理由向上一级：候选集合收窄到只放需要覆盖的五个 framework 与两个 dylib，出问题的面才是这五个 framework 而不是整个 `/var/jb/Library/Frameworks`。
 
 `install-webkit-override.sh` 的 `preflight_sources` 只检查各 framework 的二进制与 `Info.plist` 是否存在，不读 `minos`，不查 `BrowserEngineKit`，也不解析符号，所以这三条都要手工核，脚本不会拦。
 
@@ -1062,7 +1073,7 @@ cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m
 
 本地 deb 的 `WebKit` 用 `@rpath` 而不是绝对路径，它的 `LC_RPATH` 是 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`，所以 `JavaScriptCore` 从这两个目录取。`g3`、`g4` 写的是 `/System/...` 绝对路径，靠 `getFrameworkPartialPath` 把它归约成 `JavaScriptCore.framework/JavaScriptCore` 再拼到 `DYLD_FRAMEWORK_PATH` 下（本文第三节复刻过这段归约）。两条路都要求同代 `JavaScriptCore` 与 `WebKit` 落在同一个被搜索的目录里。
 
-安装命令（**未执行，也不构成执行建议**。`jbctl update basebin` 会替换 `launchdhook.dylib` 并触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出；2026-11-26 00:50 与 05:58 各跑一次，两次都以五次内核 panic 与设备宕机结束，只能人工重新越狱，见文首的警告段）：
+安装命令（**未执行，也不构成执行建议**。`jbctl update basebin` 会替换 `launchdhook.dylib` 并触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出；2026-11-26 00:50 那次之后 00:51 到 01:00 连续五次内核 panic，05:58 那次设备约 60 秒内停止响应、至 06:16 未恢复，两次都只能人工重新越狱，见文首的警告段）：
 
 ```sh
 scp /tmp/m125/basebin-m125-full.tar mobile@192.168.2.136:/var/mobile/Documents/basebin.tar
