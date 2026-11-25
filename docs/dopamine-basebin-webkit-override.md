@@ -874,10 +874,10 @@ git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '最终那代' 
 git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '最终那代'         # 1
 git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '换过四代'            # 1
 git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '换过四代'         # 0
-git show "$U:docs/dopamine-basebin-webkit-override.md" | grep '这条读数的取法要固定' | grep -o '`[0-9a-f]\{7\}`' | wc -l   # 4
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep '^\*\*这条读数的取法要固定' | grep -o '`[0-9a-f]\{7\}`' | wc -l   # 4
 ```
 
-最后一条是本分支与 union 在这一行上的实质差别：同一行用同样的命令在 `HEAD` 上读到 0，因为本分支这一行不写提交号。这一行的两个判别词在共同祖先与 union 上是互斥的——`最终那代` 祖先 1、union 0，`换过四代` 祖先 0、union 1——所以「union 侧把第 3 代说成最终那代」这句话可以直接被第一组读数否掉。
+最后一条是本分支与 union 在这一行上的实质差别：同一行用同样的命令在 `HEAD` 上读到 0，因为本分支这一行不写提交号。命令锚了段首的 `**`，所以两侧各只命中一处『这条读数』段落。不锚定的话，本分支这份文件读到 3 处，多出的两处是本节那条子项与上面命令块里把它抄进正文的那行命令，都是自指；union 与祖先两份正文里没抄 pattern，锚与不锚都只命中 1 处。这一行的两个判别词在共同祖先与 union 上是互斥的——`最终那代` 祖先 1、union 0，`换过四代` 祖先 0、union 1——所以「union 侧把第 3 代说成最终那代」这句话可以直接被那两组读数否掉。
 
 两条标题计数都锚了行首，所以每条只命中标题本身，各为 1，说明十二·五 在两侧各只有一节。锚与不锚的差别只出现在本分支这份文件上，而且两个 pattern 的读数不同。「launchdhook 版标题」这条 pattern 不锚定读到 2、锚定读到 1，多出来的那一处是上面命令块里把它抄进正文的那条命令（自指），标题本身只一处。「把 sha1 版标题」这条不锚定读到 1、锚定读到 0：那唯一一处也是同一个自指，本分支这份文件的标题还是 M135 之前的「不在 `basebin.tc` 里是预期状态」，没有 M135 那版标题可命。祖先与 union 两份正文里没抄 pattern，锚与不锚读数一致：祖先的 launchdhook 版是 1 与 1、把 sha1 版是 0 与 0；union 反过来，是 0 与 0、1 与 1。所以「读到 2」不是「十二·十 也提到这两个标题」造成的——十二·十 对这两个标题的命中数是 0。
 
