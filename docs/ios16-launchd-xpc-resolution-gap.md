@@ -669,7 +669,9 @@ if (!strcmp(key, "LaunchDaemons")) {                                     // :38
 
 **这五条里有四条至今未执行；第 1 条的判据命令本身是错的，已在本节修正并实测。** 工具限 `ps`/`launchctl`/`lldb`/`killall`/`uiopen`/`ls`/`grep`/`wc`/`tail`/`sed`/`awk`。
 
-前置检查原先写成「`launchctl print gui/501` 必须非空且退出 0，否则先重启」（旧文见 `build-state.md:937-941`）。这条判据在 iOS 16.1 加 Dopamine 的设备上恒不成立，且设备健康时也不成立：2026-11-25 20:41 CST 实测，开机 10 小时、Safari pid 622 与 Chrome pid 626 均为开机时启动、23 个 WebKit helper 在跑的设备上，`launchctl print gui/501` 返回 `exit=125`、0 行输出、stderr 也为空，加 `sudo` 与不加 `sudo` 同样是 `exit=125`、0 行（五种写法全部如此：`sudo -S -p ""`、`printf` 喂密码、`sudo -i`、root `bash -c`、`sudo -n`）。同一时刻 `launchctl print system` 的域列表只有 `user/501`（第 300 行），没有 `gui/501`；`launchctl print user/501` 返回 `exit=0`、2135 行、`active count = 573`，其中 `com.apple.SpringBoard` pid 345 与 `com.apple.backboardd` pid 380 都在。iOS 的图形会话落在 `user/501`，`gui/501` 本来就不存在。
+前置检查原先写成「`launchctl print gui/501` 必须非空且退出 0，否则先重启」。这条判据在 iOS 16.1 加 Dopamine 的设备上恒不成立，且设备健康时也不成立：2026-11-25 20:41 CST 实测，开机 10 小时、Safari pid 622 与 Chrome pid 626 均为开机时启动、23 个 WebKit helper 在跑的设备上，`launchctl print gui/501` 返回 `exit=125`、0 行输出、stderr 也为空，加 `sudo` 与不加 `sudo` 同样是 `exit=125`、0 行（五种写法全部如此：`sudo -S -p ""`、`printf` 喂密码、`sudo -i`、root `bash -c`、`sudo -n`）。同一时刻 `launchctl print system` 的域列表只有 `user/501`（第 300 行），没有 `gui/501`；`launchctl print user/501` 返回 `exit=0`、2135 行、`active count = 573`，其中 `com.apple.SpringBoard` pid 345 与 `com.apple.backboardd` pid 380 都在。iOS 的图形会话落在 `user/501`，`gui/501` 本来就不存在。
+
+旧判据的出处是 `build-state.md` 的〈七、`gui/501` 图形域丢失：现象、已试手段、结论〉一节，那节的结论句「需要一次正常重启，`gui/501` 才会重建」与紧随其后的前置检查段，就是「`gui/501` 必须非空」这条的原文。该节的结论只适用于它记录的那次事故（2026-11-25 02:05 前后应用全部起不来），同一文件〈第十轮〉第一节已用健康设备的读数把它降为事故专用。
 
 所以前置检查改成读图形会话本身：
 

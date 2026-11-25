@@ -11,19 +11,30 @@ M63 第四节的问题：一个位于 launchd 索引外、被进程 `dlopen` 进
 
 第八节第 1 条把这条列为「本文最重要的未知量」，并提醒必须同时排除 dyld 中止，否则端点归零的成因无法区分。
 
-**这套配置是否等于 `build-state.md:506`，由第 2 步装完后的读数决定，不由脚本名推断。** 仓库里的 `scripts/install-webkit-override.sh` 调 `prune_xpc_services` 删掉 `WebKit.framework/XPCServices`，但本脚本调用的是**设备上**的 `/var/mobile/install-webkit-override.sh`，实测那版把每个 framework 目录整树 `cp -a` 过去，**保留** `XPCServices`（13598 字节，mtime `Nov 24 21:27`，`sha256 7bb77e09…`；源目录 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices` 下有 5 个 `.xpc`）。所以第 2 步装完后脚本自己数一次：
+**这套配置是否等于 `build-state.md:506`，由第 2 步装完后的读数决定，不由脚本名推断。** 仓库里的 `scripts/install-webkit-override.sh` 调 `prune_xpc_services` 删掉 `WebKit.framework/XPCServices`，但本脚本调用的是**设备上**的 `/var/mobile/install-webkit-override.sh`，实测那版把每个 framework 目录整树 `cp -a` 过去，**保留** `XPCServices`（13598 字节，mtime `Nov 24 21:27`，`sha256 7bb77e09…`；源目录 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices` 下有 5 个 `.xpc`）。所以第 2 步装完后脚本自己读一次形态。
+
+读形态分两次调用，先判存在再计数。不要写成 `ls -1 … 2>/dev/null | wc -l`：那条管线的退出码是 `wc` 的，恒为 0，stderr 又被丢掉，于是路径不存在、权限被拒、安装脚本还在写，三种情况都输出 `0`；而 `0` 在这套判据里是「安装脚本剪掉了 `XPCServices`」这个**肯定断言**。失败被读成断言正是这个分支要避免的事。
 
 ```sh
-ls -1 /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices 2>/dev/null | wc -l | tr -d ' '
+p=/var/jb/Library/WebKitOverride/WebKit.framework/XPCServices
+framework=/var/jb/Library/WebKitOverride/WebKit.framework
+if [ -d "$p" ]; then echo present
+elif [ ! -e /var/jb/Library/WebKitOverride ]; then echo unreadable
+elif [ -x "$framework" ]; then echo absent
+elif [ -e "$framework" ]; then echo unreadable
+elif [ -x /var/jb/Library/WebKitOverride ]; then echo absent
+else echo unreadable; fi
 ```
 
-读数记进 `OVERRIDE_XPC_SERVICES`，结论文字按它分支：
+存在性检查为什么要三态：`[ -d path ]` 对「路径不存在」和「父目录不可穿越」都返回假，两态写法仍会把权限拒绝报成 `absent`。`-x` 检查父目录才分得开前两枝；判不了的枝输出 `unreadable`。2026-11-25 22:00 CST 在设备上逐形态实测：覆盖目录不存在（`/var/jb/Library/WebKitOverride`）→ `unreadable`、`/var/jb/Library/Frameworks` 有 `XPCServices` → `present`、`/var/jb/usr` 与 `/var/jb/Library` 都没有 `WebKit.framework` → `absent`、整条根路径不存在（`/var/jb/NopeDoesNotExist`）→ `unreadable`。「父目录 `chmod 000`」这一枝在宿主机的 `/tmp` 上复现（设备上不做写操作），同样得 `unreadable`。
 
-- `absent`（0 个）——这是 `build-state.md:506` 那个配置（「再加只含 `WebKit` 二进制的 `WebKit.framework`」，端点 0、spawn 0、lookup 失败 265）。读到 0 到 2 个端点（B）**复现**已知结果；读到 4 个端点（A）与该行矛盾，必须重做。
+`present` 时再单独跑一次 `ls -1 "$p"`，退出码为 0 才在宿主侧数非空行。读数记进 `OVERRIDE_XPC_SERVICES`，结论文字按它分支：
+
+- `absent`（0 个，或目录存在但为空）——这是 `build-state.md:506` 那个配置（「再加只含 `WebKit` 二进制的 `WebKit.framework`」，端点 0、spawn 0、lookup 失败 265）。读到 0 到 2 个端点（B）**复现**已知结果；读到 4 个端点（A）与该行矛盾，必须重做。
 - `present (N bundles)`——**不是** `build-state.md:506` 那个配置。0 个端点是关于未剪枝形态的新读数，应与 `build-state.md:333-347` 对照；A 也不再只能来自系统桩，`comm` 落在覆盖目录的 helper 就是 launchd 直接从覆盖目录 `.xpc` 起进程的直接证据。
-- `unknown`——`ls` 失败或输出的不是数字。结论文字直接 withheld，不猜。
+- `unknown`——存在性检查没回答（`unreadable` 或非零退出），或 `ls` 失败。结论文字直接 withheld，不猜。
 
-两种形态下 A 都携带新信息，但含义不同，`PROBE_REASON` 与两个计数器负责区分。
+两种形态下 A 都携带新信息，但含义不同，`PROBE_REASON` 与两个计数器负责区分。**A 与 B 两个结论分支都按这个读数三分支**：`absent` 才说「复现 `build-state.md:506`」，`present*` 说「不是那个配置，这次是未剪枝形态的新读数」，`unknown` 时结论 withheld。B 在 basebin 未部署的设备上是更常见的结论，所以它同样需要这条保护，不能只在 A 上加。
 
 这个探针的价值不在于「第一次测这个配置」，而在于第一次把四项读数对齐在同一份带时间顺序的日志里：
 
@@ -139,7 +150,7 @@ M63 的实测与 `AGENTS.md` 记过设备缺哪些工具：没有 `plutil`、`st
 - 因此下列事实只有 `AGENTS.md` 的间接依据，没有实测：`ps -Ao pid,ppid,comm` 在 iPadOS 16.1 上是否接受 ppid 列；`sudo lldb` 附着 helper 是否被允许；`image list -o -f` 的实际行格式（脚本按「路径是行末字段、可含空格」解析）。
 - 一个 helper 也可能在 lldb 附着前就退出。此时 framework 路径读不到，A 与 B 都不可达，脚本会给出对应的 `..._no_helper_framework_path_read` 而不是猜。
 - 端点数只统计 Safari。`build-state.md` 那张表用的是 Chrome，两者的 per-pid 域结构相同但读数不必一一对应；比对时看的是「四个 WebKit 服务在不在」这个定性结论。
-- **两种安装脚本产出的目录不同，不能混用读数，所以脚本实测而不是按名字推断。** 设备上那份 `/var/mobile/install-webkit-override.sh`（2026-11-25 实测 13598 字节、mtime `Nov 24 21:27`、`sha256 7bb77e09…`）只有一条 `cp -a`，**保留** `XPCServices`，源目录下有 5 个 `.xpc`；仓库里的 `scripts/install-webkit-override.sh` 在 `:259` 定义 `prune_xpc_services()`、`:285` 在 `copy_all()` 里调用，**删除**它。探针第 2 步装完后数一次覆盖目录里的 `.xpc`，记进 `OVERRIDE_XPC_SERVICES`，结论文字按这个读数分支：剪枝形态复现 `build-state.md:402` 且 A 只能来自系统桩的 framework 交接；带 `XPCServices` 时那条对照不成立，A 的第一种机制可达，`comm` 落在覆盖目录的 helper 就是 launchd 直接从覆盖目录 `.xpc` 起进程的证据。跑之前先记下用的是哪一份、字节数与 `sha256`。
+- **两种安装脚本产出的目录不同，不能混用读数，所以脚本实测而不是按名字推断。** 设备上那份 `/var/mobile/install-webkit-override.sh`（2026-11-25 实测 13598 字节、mtime `Nov 24 21:27`、`sha256 7bb77e09…`）只有一条 `cp -a`，**保留** `XPCServices`，源目录下有 5 个 `.xpc`；仓库里的 `scripts/install-webkit-override.sh` 在 `:259` 定义 `prune_xpc_services()`、`:285` 在 `copy_all()` 里调用，**删除**它。探针第 2 步装完后读一次覆盖目录的形态，记进 `OVERRIDE_XPC_SERVICES`，A 与 B 的结论文字都按这个读数三分支：剪枝形态复现 `build-state.md:506` 且 A 只能来自系统桩的 framework 交接；带 `XPCServices` 时那条对照不成立，A 的第一种机制可达，`comm` 落在覆盖目录的 helper 就是 launchd 直接从覆盖目录 `.xpc` 起进程的证据；读不出形态时结论 withheld。跑之前先记下用的是哪一份、字节数与 `sha256`。
 - 本探针不修改安装脚本，也不能切换它的形态。要在一个不受设备脚本版本影响的确定目录上判定 (A)，用 `docs/ios16-branch-a-deployment-path.md:187` 的「第 2 步」，它显式补回 `XPCServices`。
 - **端点数取去重后的基础服务名，不取行数。** `services = {` 段里每个活着的页面各注册一条带 UUID 后缀的实例条目，所以按行 `grep -c` 随页面数浮动。2026-11-25 20:41 CST 实测 Chrome pid 626：按行 `grep -cE` 得 9，其中 5 条带 UUID，去重后基础名 4 个。脚本的 `count_service` 一直按整词边界匹配，从来没数过实例条目，所以脚本读数不受这个影响；日志里额外打印行数与 UUID 实例数，只是为了让新日志与 `build-state.md` 旧表里那个「8」对得上。
 

@@ -244,28 +244,87 @@ expect_status 'a-override-xpc exit' "${CASE_STATUS}" 0
 expect_contains 'a-override-xpc reason names the resolved bundle' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=all_four_services_present_and_a_helper_started_from_the_override_xpc_loaded_a_var_jb_framework'
 expect_contains 'a-override-xpc counter' "${CASE_DIR}/log/probe.log" 'PROBE_JB_FRAMEWORK_FROM_OVERRIDE_XPC=1'
 expect_contains 'a-override-xpc reads the installed shape' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: present (5 bundles)'
-expect_contains 'a-override-xpc is not called a reproduction' "${CASE_DIR}/log/probe.log" 'This run is NOT the build-state.md:402 configuration'
+expect_contains 'a-override-xpc is not called a reproduction' "${CASE_DIR}/log/probe.log" 'This run is NOT the build-state.md:506 configuration'
 expect_not_contains 'a-override-xpc never retracts A' "${CASE_DIR}/log/probe.log" 'A cannot come from launchd scanning the override tree'
 expect_contains 'a-override-xpc says A is direct evidence' "${CASE_DIR}/log/probe.log" 'which is (A)'
 
 printf '\n== an override whose XPCServices cannot be read withholds the comparison\n'
 # The install script's name cannot settle which of the two on-device shapes was
 # produced, so a run that cannot read the directory must not claim to reproduce
-# build-state.md:402 either way.
+# build-state.md:506 either way. The stub fails the existence check itself, with
+# the error on stderr, which is what the real `[ -d ... ]` does when the read is
+# refused: no present/absent word comes back.
 new_case xpc-unreadable "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8304, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_xpc_services_unreadable\": true}"
 run_probe
 expect_contains 'xpc-unreadable records unknown' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: unknown'
 expect_contains 'xpc-unreadable withholds the comparison' "${CASE_DIR}/log/probe.log" 'Comparison withheld'
 expect_not_contains 'xpc-unreadable never claims a reproduction' "${CASE_DIR}/log/probe.log" 'is therefore a reproduction of'
 
-printf '\n== the pruned shape still reproduces build-state.md:402 and still retracts A\n'
-# build-state.md:402 is the pruned shape, so this is the one run where a zero
+printf '\n== a listing that fails after the directory was found present is unknown, not absent\n'
+# The directory exists, so the shape is not the pruned one; but its listing failed,
+# so the bundle count is unknown. The old `ls ... 2>/dev/null | wc -l` form turned
+# exactly this state into 0, which reads as "pruned", a positive claim from a failed
+# read.
+new_case xpc-listing-fails "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8306, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_prunes_xpc_services\": false, \"override_xpc_bundles\": 5, \"override_xpc_listing_fails\": true}"
+run_probe
+expect_contains 'xpc-listing-fails records unknown' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: unknown'
+expect_not_contains 'xpc-listing-fails never claims absent' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: absent'
+expect_contains 'xpc-listing-fails withholds the comparison' "${CASE_DIR}/log/probe.log" 'Comparison withheld'
+
+printf '\n== the pruned shape still reproduces build-state.md:506 and still retracts A\n'
+# build-state.md:506 is the pruned shape, so this is the one run where a zero
 # endpoint reading is a reproduction and where A does contradict that row.
 new_case xpc-pruned "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8305, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_prunes_xpc_services\": true, \"override_xpc_bundles\": 0}"
 run_probe
 expect_contains 'xpc-pruned records absent' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: absent'
 expect_contains 'xpc-pruned reproduces the known row' "${CASE_DIR}/log/probe.log" 'is therefore a reproduction of'
 expect_contains 'xpc-pruned retracts A' "${CASE_DIR}/log/probe.log" 'A cannot come from launchd scanning the override tree'
+
+# --- p1 round 2: B must say which shape it measured, exactly as A does -------
+#
+# The Comparison paragraph above the verdict already branches on the shape. When
+# B was left flat, one log said "This run is NOT the build-state.md:506
+# configuration" and then, eleven lines later, "this run is a reproduction" of
+# it. B is the likelier verdict on this device (basebin is undeployed, so helpers
+# load the system copy), so the shape-blind text covered the common case. Each
+# case below pins one of the three shapes, and two of them assert on the verdict
+# arm's own wording rather than the comparison paragraph's.
+
+printf '\n== B with the pruned override reproduces the known row\n'
+new_case b-pruned "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8700), \"override_prunes_xpc_services\": true, \"override_xpc_bundles\": 0}"
+run_probe
+expect_status 'b-pruned exit' "${CASE_STATUS}" 0
+expect_contains 'b-pruned verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
+expect_contains 'b-pruned records absent' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: absent'
+expect_contains 'b-pruned calls itself a reproduction' "${CASE_DIR}/log/probe.log" 'is a reproduction that adds a CrashReporter diff'
+expect_contains 'b-pruned names the row it agrees with' "${CASE_DIR}/log/probe.log" 'This agrees with build-state.md:506'
+
+printf '\n== B with an unpruned override is a new reading, not a reproduction\n'
+# The shape the device's own install script produces. The log must not claim both
+# "not this configuration" and "a reproduction of it"; the verdict arm has to say
+# the second thing the first one implies.
+new_case b-unpruned "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8700), \"override_prunes_xpc_services\": false, \"override_xpc_bundles\": 5}"
+run_probe
+expect_status 'b-unpruned exit' "${CASE_STATUS}" 0
+expect_contains 'b-unpruned verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
+expect_contains 'b-unpruned comparison says it is not that row' "${CASE_DIR}/log/probe.log" 'This run is NOT the build-state.md:506 configuration'
+expect_contains 'b-unpruned verdict says it is not that row too' "${CASE_DIR}/log/probe.log" 'This is NOT the build-state.md:506 configuration: that row is the pruned'
+expect_contains 'b-unpruned calls itself a new reading' "${CASE_DIR}/log/probe.log" 'a new reading about the unpruned shape'
+expect_contains 'b-unpruned points at the unpruned comparison' "${CASE_DIR}/log/probe.log" 'comparable with build-state.md:333-347'
+# The contradiction the reviewer reproduced, asserted absent by wording: no arm
+# may call an unpruned run a reproduction of the pruned row.
+expect_not_contains 'b-unpruned never claims a reproduction' "${CASE_DIR}/log/probe.log" 'is a reproduction that adds a CrashReporter diff'
+expect_not_contains 'b-unpruned never agrees with the pruned row' "${CASE_DIR}/log/probe.log" 'This agrees with build-state.md:506'
+
+printf '\n== B whose override shape could not be read withholds the comparison\n'
+new_case b-unreadable "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8700), \"override_xpc_services_unreadable\": true}"
+run_probe
+expect_status 'b-unreadable exit' "${CASE_STATUS}" 0
+expect_contains 'b-unreadable verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
+expect_contains 'b-unreadable records unknown' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: unknown'
+expect_contains 'b-unreadable withholds the verdict comparison' "${CASE_DIR}/log/probe.log" 'is withheld. Read the step 2 lines above.'
+expect_not_contains 'b-unreadable never claims a reproduction' "${CASE_DIR}/log/probe.log" 'is a reproduction that adds a CrashReporter diff'
+expect_not_contains 'b-unreadable never agrees with the pruned row' "${CASE_DIR}/log/probe.log" 'This agrees with build-state.md:506'
 
 printf '\n== A from the /var/jb Frameworks copy is named separately again\n'
 new_case a-jb-copy "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8303, \"path\": \"${SYS_XPC}\", \"frameworks\": [\"${JB_FW}\"]}]}"

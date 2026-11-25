@@ -725,16 +725,60 @@ step_install() {
 # the device's /var/mobile copy copies each framework tree whole, while the repo's
 # scripts/install-webkit-override.sh calls prune_xpc_services. Read it instead of
 # assuming it, because the verdict narrative is different for the two shapes.
+#
+# Existence and count are two calls on purpose. A single
+# `ls -1 dir 2>/dev/null | wc -l` prints a number for every input: the pipeline's
+# status is wc's, which is always 0, and a denied or racing directory becomes 0.
+# Zero is the positive claim "the install pruned XPCServices", so that form turns
+# a failed read into an assertion. Here a failed existence check or a failed
+# listing leaves the shape unknown instead.
+#
+# The existence check is three-way for the same reason. `[ -d path ]` is false
+# both for a missing path and for one whose parent cannot be traversed, so a
+# two-way check still reports a permission refusal as `absent`. `-x` on the
+# containing directories is what separates the two, and a directory it cannot
+# vouch for reports unreadable.
 read_override_xpc_services() {
     OVERRIDE_XPC_SERVICES=unknown
-    run 'does the installed override carry XPCServices' \
-        "ls -1 ${OVERRIDE_ROOT}/WebKit.framework/XPCServices 2>/dev/null | wc -l | tr -d ' '"
-    local bundles
-    bundles=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^[0-9]+$' | tail -n 1)
-    case ${bundles} in
-        ''|*[!0-9]*) OVERRIDE_XPC_SERVICES=unknown ;;
-        0) OVERRIDE_XPC_SERVICES=absent ;;
-        *) OVERRIDE_XPC_SERVICES="present (${bundles} bundles)" ;;
+    local presence listing
+    run 'is WebKit.framework/XPCServices present in the installed override' \
+        "p=${OVERRIDE_ROOT}/WebKit.framework/XPCServices
+framework=${OVERRIDE_ROOT}/WebKit.framework
+if [ -d \"\$p\" ]; then echo present
+elif [ ! -e ${OVERRIDE_ROOT} ]; then echo unreadable
+elif [ -x \"\$framework\" ]; then echo absent
+elif [ -e \"\$framework\" ]; then echo unreadable
+elif [ -x ${OVERRIDE_ROOT} ]; then echo absent
+else echo unreadable; fi"
+    presence=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^(present|absent|unreadable)$' | tail -n 1)
+    case ${presence:-none} in
+        absent)
+            OVERRIDE_XPC_SERVICES=absent
+            ;;
+        present)
+            # Counted on this host from the listing itself, so REMOTE_RC is ls's
+            # own status rather than wc's. A listing that failed reports nothing
+            # and the shape stays unknown.
+            run 'list the XPC bundles in the installed override' \
+                "ls -1 ${OVERRIDE_ROOT}/WebKit.framework/XPCServices"
+            if [ "${REMOTE_RC}" -eq 0 ]; then
+                listing=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -cE '[^[:space:]]' || true)
+                case ${listing} in
+                    ''|*[!0-9]*) OVERRIDE_XPC_SERVICES=unknown ;;
+                    # An existing but empty XPCServices directory gives launchd no
+                    # bundle to resolve, which is the pruned configuration's shape
+                    # in every respect the verdict turns on.
+                    0) OVERRIDE_XPC_SERVICES=absent ;;
+                    *) OVERRIDE_XPC_SERVICES="present (${listing} bundles)" ;;
+                esac
+            fi
+            ;;
+        *)
+            # Either the framework directory exists but the check could not look
+            # inside it, or the check itself did not answer. Neither presence nor
+            # absence is known, so the shape is not claimed.
+            OVERRIDE_XPC_SERVICES=unknown
+            ;;
     esac
     emit "  WebKit.framework/XPCServices in the override: ${OVERRIDE_XPC_SERVICES}"
 }
@@ -1405,7 +1449,7 @@ step_summary() {
     emit ""
     case ${OVERRIDE_XPC_SERVICES} in
         absent)
-            emit 'Comparison. build-state.md:402 is this configuration: "再加只含 WebKit 二进制的'
+            emit 'Comparison. build-state.md:506 is this configuration: "再加只含 WebKit 二进制的'
             emit 'WebKit.framework", endpoints 0, spawn 0, lookup failures 265. This run measured no'
             emit 'WebKit.framework/XPCServices in the override, so it installs the Info.plist and the'
             emit 'binary and nothing else. A reading of 0 endpoints here is therefore a reproduction of'
@@ -1419,14 +1463,14 @@ step_summary() {
             emit 'this run, and the two counters above say how many helpers each.'
             emit 'Separating them definitively needs an unpruned run; docs/ios16-branch-a-deployment-path.md'
             emit 'section 第 2 步 describes one. Existing partial (A) evidence for that configuration'
-            emit 'is at build-state.md:264-278, where launchd launched GPU from the override .xpc.'
+            emit 'is at build-state.md:333-347, where launchd launched GPU from the override .xpc.'
             ;;
         present*)
-            emit 'Comparison. This run is NOT the build-state.md:402 configuration. That row is the'
+            emit 'Comparison. This run is NOT the build-state.md:506 configuration. That row is the'
             emit 'pruned shape (Info.plist plus the WebKit binary, no XPCServices), while this run'
             emit 'measured WebKit.framework/XPCServices inside the override. A 0-endpoint reading here'
             emit 'is a new observation about the unpruned shape rather than a reproduction, and it is'
-            emit 'directly comparable with build-state.md:264-278 instead.'
+            emit 'directly comparable with build-state.md:333-347 instead.'
             emit ''
             emit 'What A can mean here. With XPCServices present in the override, both routes are live'
             emit 'and the two counters above separate them: a helper whose own executable (comm) is'
@@ -1438,9 +1482,9 @@ step_summary() {
         *)
             emit 'Comparison withheld: the run could not establish whether the installed override'
             emit 'carries WebKit.framework/XPCServices, so it cannot say which configuration'
-            emit 'build-state.md:402 corresponds to. Read the step 2 line above; the ls of the override'
-            emit 'directory failed or printed something that is not a count. Re-run before citing this'
-            emit 'log as a reproduction of that row.'
+            emit 'build-state.md:506 corresponds to. Read the step 2 lines above: either the existence'
+            emit 'check did not answer with present or absent, or the listing of the directory failed.'
+            emit 'Re-run before citing this log as a reproduction of that row.'
             ;;
     esac
 
@@ -1452,20 +1496,20 @@ step_summary() {
             emit '  /var/jb WebKit framework.'
             case ${OVERRIDE_XPC_SERVICES} in
                 absent)
-                    emit '  That contradicts build-state.md:402 (same pruned configuration, endpoints 0),'
+                    emit '  That contradicts build-state.md:506 (same pruned configuration, endpoints 0),'
                     emit '  so that reading was affected by a variable it did not record and has to be'
                     emit '  redone. It does not by itself show that launchd resolved an unindexed path:'
                     emit '  see the paragraph above.'
                     ;;
                 present*)
                     emit '  This run installed XPCServices inside the override, so it is not the'
-                    emit '  build-state.md:402 configuration and does not contradict that row. Read the'
+                    emit '  build-state.md:506 configuration and does not contradict that row. Read the'
                     emit '  reason line to see whether launchd started the override .xpc itself or the'
                     emit '  /System stub handed the framework over.'
                     ;;
                 *)
                     emit '  The installed override shape could not be established, so whether this'
-                    emit '  contradicts build-state.md:402 is not decided here.'
+                    emit '  contradicts build-state.md:506 is not decided here.'
                     ;;
             esac
             emit '  The whole-18.3 route stays open; what remains is the helper-to-UI protocol and'
@@ -1473,13 +1517,30 @@ step_summary() {
             ;;
         B)
             emit '  B: every new helper whose framework was read loaded the system copy, and at most'
-            emit '  two of the four services remain. This agrees with build-state.md:402 (endpoints 0,'
-            emit '  spawn 0, 265 lookup failures): under this configuration the endpoints going to zero'
-            emit '  is a known result, and this run is a reproduction that adds a CrashReporter diff'
-            emit '  and the helper framework paths rather than a new attribution. Replacing the UI'
-            emit '  process on 16.1 cannot work, because the UI process has no code to register those'
-            emit '  names itself (section 4, 若 (B) 成立); work moves to the 16.1 UI plus 18.3 helper'
-            emit '  translation route.'
+            emit '  two of the four services remain.'
+            case ${OVERRIDE_XPC_SERVICES} in
+                absent)
+                    emit '  This agrees with build-state.md:506 (endpoints 0, spawn 0, 265 lookup'
+                    emit '  failures): under this configuration the endpoints going to zero is a known'
+                    emit '  result, and this run is a reproduction that adds a CrashReporter diff and the'
+                    emit '  helper framework paths rather than a new attribution.'
+                    ;;
+                present*)
+                    emit '  This is NOT the build-state.md:506 configuration: that row is the pruned'
+                    emit '  shape, and this run measured XPCServices inside the override. Endpoints going'
+                    emit '  to zero here is a new reading about the unpruned shape rather than a'
+                    emit '  reproduction of that row; it is comparable with build-state.md:333-347, where'
+                    emit '  the unpruned override did get GPU started from its own .xpc before that'
+                    emit '  process died in xpc_dictionary_apply.'
+                    ;;
+                *)
+                    emit '  The installed override shape could not be established, so whether this'
+                    emit '  reproduces build-state.md:506 is withheld. Read the step 2 lines above.'
+                    ;;
+            esac
+            emit '  Replacing the UI process on 16.1 cannot work, because the UI process has no code'
+            emit '  to register those names itself (section 4, 若 (B) 成立); work moves to the 16.1 UI'
+            emit '  plus 18.3 helper translation route.'
             ;;
         *)
             emit '  UNKNOWN: this run does not answer (A) or (B). The PROBE_REASON line names the condition that blocked it.'
