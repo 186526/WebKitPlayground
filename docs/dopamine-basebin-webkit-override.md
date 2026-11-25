@@ -20,6 +20,10 @@
 
 即使这一半补上，Safari 换成自建 WebKit 也只覆盖 UI 进程。网页由系统的 `com.apple.WebKit.WebContent` 进程解析。那个进程带自己的 `LC_DYLD_ENVIRONMENT`，第十一节按设备实测说明它与 app 进程的覆盖手段不同。
 
+**而且「补上这一半」本身在平台签名进程上还没有被验证过。** 有一组设备实测（塔台 2026-11-26 02:27–02:34 CST）显示：把 `DYLD_FRAMEWORK_PATH` 直接交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的镜像表里该 UUID 命中 0 次，`WebKit` 与 `WebCore` 仍来自共享缓存的 16.1 副本（`WebKit` 的 UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。这组读数取自 `gen/dyld` 判定 (b) 为 `1 0 0 1`、两个 override hook 都不在的窗口（`01:03:43` 之后），而十一·三已经写明该状态下 `Loader.cpp:565` 会把磁盘候选直接短路，所以它不能把「平台签名进程不接受这个变量」与「hook 不在」分开。越狱签名二进制上那组读数（`/var/jb/usr/bin/ls` 的候选行、`CoreFoundation` 的缓存命中）证明 dyld 的判定被改对了，它同样不能替代平台签名进程上的读数。
+
+**「app 进程最终会加载哪一份 WebKit」这一层至今没有定论。** `gen/dyld` 判定 (b) 为 `1 1 1 1` 的窗口内（`23:53:11`–`01:03:43`）有一条平台签名进程上的记录：`2026-11-25T16:28:27Z`（`00:28:27` CST）那份通报里，`MobileSafari` 的 `WebKit` 是镜像 #47、路径在 `/var/jb`。`1 0 0 1` 窗口内 `02:27` 那次没有采纳磁盘副本。两次不在同一个 hook 状态下，也没有任何一次被同状态下的重复测量复现，所以这一层既不能写成「已验证」，也不能写成「从未出现」（十一·六、十一·七）。
+
 ## 二、官方 3.0.13 为什么不能覆盖共享缓存
 
 ### dyld 只对少数路径去磁盘比对
@@ -687,6 +691,14 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 
 真机对照（设备上目录已按十一·三建好、M39 尚未安装）：带 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 跑 `/var/jb/usr/bin/ls`，`libiosexec.1.dylib` 与 `systemhook.dylib` 出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，说明路径变量这一半在工作；同一进程的 `CoreFoundation.framework` 只有 `possible path(original path on disk)` 与 `possible path(original path)` 两条，`found: dylib-from-cache`，没有 `DYLD_FRAMEWORK/LIBRARY_PATH` 候选行，说明缓存项未被磁盘副本顶替——正是 `Loader.cpp:565` 短路的表现。两相对照，缺 M39 那一半时候选不产生、加载仍走缓存，与本节第一段的推导一致。
 
+**这段推导的适用范围只到「dyld 的判定被改对了」，不能推广到「平台签名进程会把自建 WebKit 换进来」。** 上面那个对照用的 `/var/jb/usr/bin/ls` 是越狱签名二进制。平台签名进程上有一组实测（塔台 2026-11-26 02:27–02:34 CST，设备 `mobile@192.168.2.136`），结论与本节推导的方向相反：把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_PRINT_LIBRARIES=1` 直接交给 `/Applications/MobileSafari.app/MobileSafari`，dyld 打印里 `/var/jb` 那份 `WebKit` 确实出现过（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 **0** 次，`WebKit.framework/WebKit` 仍解析到 `/System`（镜像 #51，UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），`WebCore` 同样在 `/System`（#416）。也就是那份磁盘镜像被映射过又被卸掉，活进程镜像表里只剩 16.1 的系统副本。
+
+**这组读数取自 `gen/dyld` 判定 (b) 为 `1 0 0 1`、两个 override hook 都不在的窗口。** `02:27` 在 `01:03:43` 之后，那时 `gen/dyld` 是 974016 字节、两个 override hook 都不在。十一·三已经写明该状态下 `Loader.cpp:565` 会把磁盘候选直接短路，所以这组读数不能把「平台签名进程不接受这个变量」与「hook 不在」分开：两个原因在这个状态下给出同一个结果。
+
+**所以「两半同时上线就加载磁盘那一份」在平台签名进程上还没有定论，既不能说成立，也不能说从未出现。** `gen/dyld` 判定 (b) 为 `1 1 1 1` 的窗口（`23:53:11`–`01:03:43`）内有一条记录：`2026-11-25T16:28:27Z`（`00:28:27` CST）那份通报里，`MobileSafari` 的 `WebKit` 是镜像 #47、路径在 `/var/jb`。`1 0 0 1` 窗口内 `02:27` 那次没有采纳磁盘副本。两次不在同一个 hook 状态下，也没有任何一次被同状态下的重复测量复现，旧读数未被取到第二次。`/var/jb/usr/bin/ls` 那一组读数证明的是 dyld 的候选枚举与缓存短路判定按预期工作，它不能替代平台签名进程上的读数。
+
+这条差别对第十二节的判据直接相关：十二·八那条路径读数必须取在平台签名进程上（`MobileSafari` 或 Chrome），取在越狱签名二进制上会得到一个与交付目标无关的「成功」。本节把这条边界记录在案，成因没有定位，M126 的范围不含它。
+
 两半的回滚手段不同：这一半可以运行时停用（十一·八），那一半要换回旧 `basebin.tar` 并触发一次用户空间重启（第八节）；后者走的是同一条会让设备宕机的安装命令，见文首的警告段。
 
 ### 十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对
@@ -694,6 +706,10 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 进程分两类，覆盖手段不同。
 
 **app 进程只认环境变量。** `/Applications/MobileSafari.app/MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 是 0 条，只导入 `MobileSafariUI`、`Foundation`、`libobjc.A.dylib`、`libSystem.B.dylib`。这类进程没有自己的搜索路径声明，dyld 只能从环境里拿到目录，所以四个变量是它们唯一的来源。
+
+**「送进去就能生效」在两个 hook 状态下各有一条方向相反的读数，两条都没复现。** 平台签名的 app 进程上有一组实测（塔台 2026-11-26 02:27–02:34 CST）：直接把 `DYLD_FRAMEWORK_PATH` 交给 `MobileSafari`，dyld 的打印里确实出现过 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 0 次，`WebKit.framework/WebKit` 与 `WebCore.framework/WebCore` 仍分别落在 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）与 #416。这组读数取自 `gen/dyld` 判定 (b) `1 0 0 1`、两个 override hook 都不在的窗口，而该状态下 `Loader.cpp:565` 会把磁盘候选直接短路（十一·三），因此它不能单独说明平台签名进程拒收这个变量。
+
+另一条记录方向相反，在 `1 1 1 1` 窗口内：`2026-11-25T16:28:27Z`（`00:28:27` CST）那份通报里，exec 时裸设 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 之后，`MobileSafari` 的 `JavaScriptCore` #34、`WebKit` #47、`WebKitLegacy` #48、`libwebrtc` #412、`WebCore` #419、`libANGLE-shared` #420、`WebGPU` #421 全部在 `/var/jb`。那次两条变量是同时设的，所以它分不开 framework 与 library 两侧各自的贡献，也没有被取到第二次。两次读数不在同一个 hook 状态下，都没有被同状态下的重复测量复现，所以四个变量只能算「唯一的候选来源」，能不能变成「已经可用的手段」至今没有定论。本节把这条记录在案，成因没有定位，M126 的范围不含它。
 
 **`.xpc` 服务进程由自身的 load command 覆盖。** 设备上五个 `.xpc`（`com.apple.WebKit.GPU`、`Networking`、`WebContent`、`WebContent.CaptivePortal`、`WebContent.Development`）各带 4 条 `LC_DYLD_ENVIRONMENT`。下面这段是当时设备二进制的读数，后两条已被本仓改动过取值：
 
@@ -796,6 +812,8 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 
 对每个架构切片断言五件事：四个变量名都在；两个目录字符串都在（`/Library/WebKitOverride` 与 `/Library/WebKitOverride/usr/lib`）；`/Library/Frameworks`、`/usr/lib` 及它们的 `/var/jb` 形式都没有作为整条目出现（负向断言，见下）；`DYLD_INSERT_LIBRARIES` 仍在（丢了它等于弄坏 Dopamine 的注入）；文件本身是 Mach-O。
 
+这一节说的是本节交付的 `systemhook.dylib`，即 `--kind systemhook`，它的禁止集是四个根。`--kind launchdhook` 的禁止集少一个 `/usr/lib`，共三个根，原因见十二·二那段。
+
 **这一层不检查「哪个变量配哪个目录」。** 真实产物里四个变量名排在 `__cstring` 的一段、两个目录串排在另一段，中间没有配对关系：补丁把目录存成 `{name, value}` 数组，而 value 字段是运行期的 `jbFrameworkPath`、`jbLibraryPath` 两个指针，目录字面量本身是别处的 `JBROOT_PATH` 实参。所以静态脚本能证明「四个名字在、两个专用目录在、四个共享根不在」，不能证明名字与目录的对应关系，配对要回到写配对的地方查。`logic-harness/run.py` 的 12 项配对断言读 `common.c` 里的两条 `JBROOT_PATH` 与 `searchPathVariables` 数组，检查每个变量名绑定到哪个指针，并核对脚本自己那张表是否相同。实测把 `DYLD_LIBRARY_PATH` 的值改成 `jbFrameworkPath` 后，这一项报 `FAIL: common.c binds DYLD_LIBRARY_PATH to jbLibraryPath`、退出 1。
 
 `llvm-nm` 存在时才额外查未定义符号：`systemhook/Makefile` 没有 `CHECK_SELF_CONTAINED`（该规则只在 `dyldhook/Makefile:12`），所以未定义符号属正常，默认只报数量，给 `--baseline <原版 dylib>` 时才比对有没有新增。
@@ -826,15 +844,483 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 **未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会替换 `launchdhook.dylib` 并让设备宕机，见文首警告段）。所以「**打过本补丁**构建出的 `systemhook.dylib` 带着这四个字符串」没有在真实产物上跑过。本 mission 用四件事替代：脚本对真实编译出的 Mach-O 判定正确，脚本对设备上取回的真实官方 dylib 判失败，补丁行为由 25 个静态用例固定，以及由 44 项逻辑与配对断言固定。
 
-**负向断言补的是 reviewer-k2c 指出的一个洞。** 先前只有正向检查（`EXPECTED_DIRS` 里的两个目录在不在），一个把两个专用目录与 `/Library/Frameworks`、`/usr/lib` 一起塞进去的 Mach-O 会照样通过、退出 0。现在每个切片另查一条 `names no shared search root`：四个共享根作为**整条目**出现即失败。用整条目匹配而不是子串，是因为真实 `__cstring` 里有 `/usr/lib/systemhook.dylib` 这类合法文件路径（官方 dylib 的 29 条绝对路径里就有），子串匹配会误报。回归用例里两条都固定了：塞共享根必须退出 1，塞 `/usr/lib/systemhook.dylib` 必须退出 0。
 
-## 十二、把搜索路径送进 app 进程：launchdhook 这一半
+**负向断言补的是 reviewer-k2c 指出的一个洞。** 先前只有正向检查（`EXPECTED_DIRS` 里的两个目录在不在），一个把两个专用目录与 `/Library/Frameworks`、`/usr/lib` 一起塞进去的 Mach-O 会照样通过、退出 0。现在每个切片另查一条 `names no shared search root`：四个共享根作为**整条目**出现即失败。这里是 `--kind systemhook` 的禁止集，也就是本节交付的那个 dylib；`--kind launchdhook` 的禁止集只有三条，`/usr/lib` 被豁免，原因见十二·二那段。用整条目匹配而不是子串，是因为真实 `__cstring` 里有 `/usr/lib/systemhook.dylib` 这类合法文件路径（官方 dylib 的 29 条绝对路径里就有），子串匹配会误报。回归用例里两条都固定了：塞共享根必须退出 1，塞 `/usr/lib/systemhook.dylib` 必须退出 0。
+
+## 十二、把三个补丁成员装进 basebin tar：核对、安装、回滚、成功判据
+
+第十一节交付了让 `systemhook` 与 `launchdhook` 写四个搜索路径变量的源码改动。要让它上设备，还差一次 `jbctl update basebin`，而那次更新用的 tar 必须是**设备的 tar 加上补丁成员**，不是 CI 的整包 tar。本节给出一份这样的 tar 的逐字节核对、安装步骤、回滚步骤与成功判据。
+
+**本 mission 没有执行任何安装动作，但这份 tar 已经被装过一次，并且失败了。** 两个陈述都要写清楚，因为它们不是同一件事：
+
+- **本 mission 只读**：全部读数在本机对三份 tar 做，没有向设备写入任何文件，没有跑 `jbctl`，没有触发重启。
+- **这份 tar 在别的 mission 里被执行过**：M127 于 2026-11-26 00:50:43 对同一个文件 `/var/mobile/Documents/bb/basebin-lh.tar` 跑过 `jbctl update basebin`，其后 00:51:11 起连续五次内核 panic（`00:51:11` 一次 `initproc exited -- exit reason namespace 2 subcode 0x5`，随后 `00:56:21`、`00:56:58`、`00:58:58`、`01:00:37` 四次 `pmap_mark_page_as_ppl_page_internal: page still has mappings`），用户手动重新越狱才恢复。经过写在 M127 的 `docs/ios16-launchdhook-basebin-install-panic.md`，**该文件只存在于内层分支 `feat/y2-inner-record-the-launchdhook-panic-outcome`，尚未合入 `main`**；本节不复述它的全部内容、也不把它的读数当成自己的测量，只把与本 mission 判据直接相关的五个时间点抄在上句里，使这一段不依赖那个分支。
+
+**所以「设备上此刻是出厂 basebin」这个读数不是「没人试过」的证据。** 它是「试过、panic 了、重新越狱把 basebin 整包还原了」的结果。设备当前状态分两半记，出处不同：`gen/dyld` 判定 (b) 为 `1 0 0 1`（只带 Dopamine 原有的两个 hook）照 `AGENTS.md` 五之二「确认 basebin 的两个注入点是否生效」里那两张表——第一张「文件 | 补丁版（`basebin.tar`） | 设备上 | 结论」的 `gen/dyld` 行给 974016 与判定 (b) `1 0 0 1`，第二张「文件 | 字节 | hook token 数 | 判定 (b)」的「设备上的 `gen/dyld` | 974016 | 2 | `1 0 0 1`」行给 token 数。这两处按表头与行文定位，不写行号：行号会随文档增删漂移。`launchdhook` 312848 / `449a9606` 是 M127 那次安装失败后重新越狱复读的读数，`AGENTS.md` 全文不含 `312848` 与 `449a9606`，这条不挂在它上面，本节的十二·七也把这两个值用作回滚基线。
+
+**M127 对这条路线给出的结论是「不安全，不要在这台设备上安装」。** 本节下面记的安装步骤因此**不是待执行的计划**，而是一份历史记录加一份回滚依据：它说明当时装了什么、怎么装、失败后怎么恢复。要再尝试，先解决 M127 那份文档里未解释的 panic 成因，本节不提供再次安装的依据。
+
+**本章的合并裁决，写给合入时解冲突的人。** 本章另有一份较早的快照在内层分支 `feat/m139-inner-union` 上（2026-11-26 05:35，本章 443 行）。它是 M138 联合分支在 `acaa076 Merge M126 round 6` 时把本章整章带进去的第 6 轮版本，此后本分支又改了两轮：第 7 轮在十二·二写明「不引那一行的完整字面量」并把三代断言改写成四代叙述，第 9 轮把 `mislabelled` 补成第三类并给出本 tar 上它为 0 的理由。`git merge-tree --write-tree feat/m139-inner-union HEAD` 退出 1，本章范围内冲突是四条文本，位置如下（行号按合并输出，会变，用段名定位）。整条命令输出是 6 条 blob，另外 3 条属于 `docs/ios16-patched-dyld-install-and-verify.md`。这一对提交有四个 merge base，其中只有一个含该文件，递归合并取它作合成祖先，所以那条命令给出三行 stage 而不是两行：合成祖先 90889 字节 / 942 行，两侧各自改写——union 侧 972 行（stage 2），本侧 991 行（stage 3）。`git merge-base feat/m139-inner-union HEAD` 不带 `--all` 只返回其中一个（这里是 `34e6eac`），而那个正好没有这个文件，看着像「空祖先」；要复现得用 `git merge-base --all` 再看哪几个 `git cat-file -e <base>:<path>` 成功。内层 `main` 里没有这个文件，但本侧这 991 行不是本分支自写的版本：它是本分支在合并外层 `main` 的 gitlink 那一次带进来的，那个指针就是 `WebKitPlayground` 目录的上一级执行 `git ls-tree main WebKitPlayground` 的输出（在内层仓库里跑这条会静默返回空、退出码仍是 0，所以位置必须对）。所以这一侧是外层 `main` 当前记录的那一份，解成 union 的 972 行会丢掉这一版相对它的 40 增 21 删。那不属本章裁决范围，按它自己的文档处理。所以核对本章时把命令收窄到本章文件，见下面的命令块。
+
+- **十二·二 的两段都取本分支，但两行理由不同，不能合成一句。**
+  - **第一行「乙组 1 条是……」**：union 侧是第 6 轮旧文本，它把明细整行字面量引了。第 7 轮加的「不引那一行的完整字面量」那句、第 9 轮加的把 `mislabelled` 说成第三类的那条，在 union 那份上都没有（两者在 union 版上各命中 0 次，读数与命令见下）。解成它会同时回退第 7 轮与第 9 轮。
+  - **第二行「这条读数的取法要固定在……」**：union 侧写的是四代叙述，并在括号里给出四个版次各自的提交号。本分支从第 7 轮起这一行一个提交号都不写，所以仍取本分支。这一行只关系到追溯用的提交号要不要写进正文，不涉及第 9 轮，解成它回退的只是写法。
+  - **「把第 3 代断言说成是最终的那一代」是共同祖先的句子，不是 union 侧的。** 全文件范围内，字符串 `最终那代` 在共同祖先那份出现 1 次、在 union 那份出现 0 次；`换过四代` 在 union 那份出现 1 次、在祖先那份出现 0 次。这两组计数在两个文件里都只由「这条读数」那一行贡献，所以按整份文件数与按那一行数读数相同。union 那一行用的是四代叙述，并逐个列出四个版次的提交号，说明它已经把祖先那句三代断言换掉了，不能用祖先那句当「union 侧是第 6 轮旧文本」的证据。
+- **十二·六「两处行号的出处」那行**取本分支。union 侧那一行把第七节指到第 268 行，而 union 那份文件第 268 行是一条空的代码围栏，`main.m:211-216` 在它那里首次出现在第 272 行；本分支这一行已改成按行首原文定位，两侧的失效原因相同。
+- **十二·九 的两行都要留**。union 侧多出的「运行期 `jbctl trustcache info`」一行是本分支没有的新信息，保留；`verify-basebin-tar.sh` 那一行取本分支的 `(cdhash, hash_type)` 对集合相等写法，union 侧的「双向集合相等」是被第 9 轮取代的旧措辞。
+
+**十二·五 与十二·十 不在冲突里，而它们会自动落到 union 侧，这个方向是对的，不要把它们改回来。** 这两节在共同祖先 `34e6eac` 上与本分支相同（本分支自 `dc29926` 起没有再动过它们），union 侧已由 M135 按 cdhash 重写，所以三方合并直接取 union：十二·五 15 行变 46 行，标题从「`launchdhook` 不在 `basebin.tc` 里是预期状态」换成「把 sha1 换成 cdhash 之后，原来的结论不成立」。十二·十 两侧行数只差一行，差异是同段的两句结论句，本分支写「M135 那版尚未合并进来」，union 写「已按 M135 那版落地」——这组句子与十二·五 取哪一侧绑定，既然取 union 的十二·五，就必须同时取 union 的这两句，否则本文会自述一个已经不存在的前置状态。
+
+核对这一段的命令与期望读数（用分支名，不写提交号：提交号会随依赖分支前进而过期）：
+
+```sh
+cd WebKitPlayground
+BASE=$(git merge-base feat/m139-inner-union HEAD)
+git merge-tree --write-tree feat/m139-inner-union HEAD | grep -c '^100644.*dopamine-basebin-webkit-override\.md'   # 3，同一个文件的三份 blob
+git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | grep -c '^### 十二·五 信任缓存：把 sha1'   # 1
+git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '^### 十二·五 信任缓存：`launchdhook`'             # 1
+git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | sed -n '268p'                # 三个反引号，即那一侧的 :268 落在空围栏上
+git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | grep -n 'main.m:211-216' | head -1   # 272:…
+```
+
+十二·二 那三分条里引到的两组计数，读数如下（同样用分支名定位）：
+
+```sh
+U=feat/m139-inner-union
+BASE=$(git merge-base "$U" HEAD)
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '不引那一行'          # 0
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '第三类'              # 0
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '最终那代'            # 0
+git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '最终那代'         # 1
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '换过四代'            # 1
+git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '换过四代'         # 0
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep '^\*\*这条读数的取法要固定' | grep -o '`[0-9a-f]\{7\}`' | wc -l   # 4
+```
+
+最后一条是本分支与 union 在这一行上的实质差别：同一行用同样的命令在 `HEAD` 上读到 0，因为本分支这一行不写提交号。命令锚了段首的 `**`，所以两侧各只命中一处『这条读数』段落。不锚定的话，本分支这份文件读到 3 处，多出的两处是本节那条子项与上面命令块里把它抄进正文的那行命令，都是自指；union 与祖先两份正文里没抄 pattern，锚与不锚都只命中 1 处。这一行的两个判别词在共同祖先与 union 上是互斥的——`最终那代` 祖先 1、union 0，`换过四代` 祖先 0、union 1——所以「union 侧把第 3 代说成最终那代」这句话可以直接被那两组读数否掉。
+
+两条标题计数都锚了行首，所以每条只命中标题本身，各为 1，说明十二·五 在两侧各只有一节。锚与不锚的差别只出现在本分支这份文件上，而且两个 pattern 的读数不同。「launchdhook 版标题」这条 pattern 不锚定读到 2、锚定读到 1，多出来的那一处是上面命令块里把它抄进正文的那条命令（自指），标题本身只一处。「把 sha1 版标题」这条不锚定读到 1、锚定读到 0：那唯一一处也是同一个自指，本分支这份文件的标题还是 M135 之前的「不在 `basebin.tc` 里是预期状态」，没有 M135 那版标题可命。祖先与 union 两份正文里没抄 pattern，锚与不锚读数一致：祖先的 launchdhook 版是 1 与 1、把 sha1 版是 0 与 0；union 反过来，是 0 与 0、1 与 1。所以「读到 2」不是「十二·十 也提到这两个标题」造成的——十二·十 对这两个标题的命中数是 0。
+
+十二·五 在本分支与共同祖先逐字相同，用下面这条确认（无输出、退出 0）：取本分支那一节与祖先那一节做 `diff`，两者相同，所以三方合并对这一节没有本分支的改动可保，只能取 union 侧。
+
+```sh
+BASE=$(git merge-base feat/m139-inner-union HEAD)
+diff <(git show "$BASE:docs/dopamine-basebin-webkit-override.md" | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f') \
+     <(git show "HEAD:docs/dopamine-basebin-webkit-override.md"   | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f')   # 无输出
+```
+
+行数差就是取 union 的收益：本分支十二·五 15 行，union 46 行（本节第一段已写过这一对读数）。
+
+### 十二·一 这份 tar 是怎么来的，逐字节核对了什么
+
+三个可能被动到的成员，连同两个基准的读数：
+
+| 成员 | 本 tar | 出厂原版 | 设备 `basebin-hybrid.tar` | 与出厂不同 | 与设备 tar 不同 |
+| --- | --- | --- | --- | --- | --- |
+| `dyldhook_merge.arm64e.iOS16-17.dylib` | 75952 / `9fb3b9c0e2ae` | 74352 / `1e90c5a38405` | **75952 / `9fb3b9c0e2ae`** | 是 | 否 |
+| `launchdhook.dylib` | 330144 / `150270a5f2e6` | 312848 / `449a96068dbc` | 312848 / `449a96068dbc` | 是 | **是** |
+| `systemhook.dylib` | 234336 / `d7045cd4850e` | 233520 / `6f16c545abda` | **234336 / `d7045cd4850e`** | 是 | 否 |
+
+**两个基准给出的「换了几个」不同，两个数都要留着，用途也不同：**
+
+- **相对设备的 `basebin-hybrid.tar`，只换了 1 个成员**（`launchdhook.dylib`），其余 26 个逐字节相同。这份设备 tar 里已经是补丁版 `systemhook` 与 `dyldhook`，两个都与 CI 产物逐位相同。
+- **相对出厂原版，换了 3 个成员**，其余 24 个逐字节相同。这是「装到一台原版设备上会改动什么」的完整答案。
+
+注意设备 tar 的这两项与「设备上当前状态」是两回事：设备 `/var/jb/basebin` 下 22 个文件与 `Dopamine.app/basebin.tar` 逐位相同，即文件系统上是出厂状态。`basebin-hybrid.tar` 是留在 `/var/mobile/Documents/bb/` 的**一份 tar**，它的内容不等于已装的字节。
+
+所以「本 tar 只补了 `launchdhook` 这一处」只对**当前这台设备**成立。对别的设备、或对本设备回滚之后再装，要用 3 个成员那一列。
+
+三个替换件全部来自 CI 产物，与 CI 产物逐位相同（`launchdhook.dylib` 的 sha256 与 CI 那份相同，都是 `150270a5f2e6…`）。替换后与两个基准的成员列表都完全相同：27 个文件名逐一比对，无增无减。
+
+三份 tar 的身份，在本机实测：
+
+| tar | 字节 | sha256 |
+| --- | --- | --- |
+| 本 tar | 6103040 | `d5bd3ef3e0b281e12016dd76a0ddc01b353f0d9b591db0c2f14f3b5a5d08bd60` |
+| 设备 tar（`basebin-hybrid.tar`） | 6092800 | `e06c9aa2c2d1c06ce2ce9517ca429f5024f142d58e782bc9cb49f2eeb3618f25` |
+| 出厂 tar（本机副本 `webkit-work/hybrid/orig.tar`） | 6082560 | `52607d787d01efa34a28815cd522b20b05e7e3d648fe94432171abcac3c9e828` |
+
+第三行是本机的一份副本。设备上那份 `/var/mobile/Documents/bb/device-basebin-orig.tar` 的**字节内容本轮没有测过**，只按现有记录标为 6082560 字节。它与 `Dopamine.app/basebin.tar` 是否逐位相同也只在尺寸一级确认（两者都是 6082560），没有逐位比对。回滚前应先按十二·六那段 `python3` 核对设备上那份的实际 sha256，再决定用哪一份。
+
+**核对方法**：解包后对每个成员算 sha256 再逐一比对，不按文件名或尺寸判断。三份 tar 的 27 个成员文件名列表互相同构，所以「有几个不同」是确定值，不是估计。
+
+### 十二·二 这份 tar 通不过仓库自己的六个名字的 gate，原因与可接受范围
+
+**事实先写**：本 tar 在 `dopamine-basebin/verify-basebin-tar.sh` 上退出 1。输出里 `^FAIL` 开头的行共 **8** 行，由 **7 条具体断言**加 **1 条汇总行**（`shipped dyldhook dylibs violate verify-dyldhook-merge.sh`）组成。7 条具体断言分成两组：6 条落在 `verify-dyldhook-merge.sh` 那一组（六个 dyldhook dylib 的两个 hook），1 条落在 `basebin.tc` 与所带切片的 **`(cdhash, hash_type)` 对集合相等**检查上。
+
+甲组 6 条逐条是：
+
+| 失败的断言 | 涉及成员 |
+| --- | --- |
+| 缺少 `isOverridablePath` hook | `dyldhook_merge.arm64.iOS16-17.dylib` |
+| 缺少 `isAlwaysOverridablePath` hook | `dyldhook_merge.arm64.iOS16-17.dylib` |
+| 缺少 `isOverridablePath` hook | `dyldhook_merge.arm64e.iOS18+.dylib` |
+| 缺少 `isAlwaysOverridablePath` hook | `dyldhook_merge.arm64e.iOS18+.dylib` |
+| 缺少 `isOverridablePath` hook | `dyldhook_merge.arm64.iOS18+.dylib` |
+| 缺少 `isAlwaysOverridablePath` hook | `dyldhook_merge.arm64.iOS18+.dylib` |
+
+乙组 1 条是 `basebin.tc and the members this tar ships disagree; jbctl would upload the wrong trustcache`。它的明细按三类偏离分别计数：本 tar 上是**4 个未覆盖切片、4 条孤儿记录**，另有 `mislabelled` 一项为 **0**，共检查 16 个成员、文件里 28 条记录。
+
+这一节的正文不引那一行的完整字面量。`mislabelled` 是 M125 的 `4da8260` 给这条断言追加的第三类检查，此后每加一项都会让那一行变长；引字面量等于把文档钉在一个会移动的快照上，M126 前两轮已经因为钉快照错过两次。所以这里给的是各项的**计数与含义**，不是原文整行。
+
+这条断言比甲组强，也比「覆盖性检查」强：`verify-basebin-trustcache.py` 的 docstring 写明比较是 **`(cdhash, hash_type)` 对的集合相等**，三类偏离各自单独报一行——本 tar 有切片但表里没记录、表里有记录但没有切片产生它、以及 cdhash 对而标签错。前两类都不是无害的，「一条任何切片都不产生的记录是内核永远不会算出的 cdhash」。第三类（`mislabelled`）由 M125 的 `4da8260` 加入，理由是 `trustcache_file_build_from_path` 把那个标签字节直接拷进上传的文件，所以标签也要对上。本 tar 命中前两类，第三类为 0：
+
+- **4 个未覆盖切片。** `launchdhook` 的 `f68f9da3…`、`6f362b32…` 与 `systemhook` 的 `14d05a3f…`、`d468b1fb…`，都是这两个文件各自两个切片的 `0x1000`（SHA-256）备用 CodeDirectory。脚本对每个切片只取一个 cdhash，有 `0x1000` 时优先取它，因为上游 `basebin.tc` 对双 CodeDirectory 的切片正是只留 `0x1000` 那一对。这四个值不在 stock 那 28 条里。
+- **4 条孤儿记录。** `0e59e398…`、`a7438ed3…`、`d3c4e949…`、`dd3f99c4…` 在 `basebin.tc` 里，却不对应本 tar 任何切片——它们是**原版** `launchdhook` 与 `systemhook` 的 `0x0` cdhash。这正是「成员被替换、`basebin.tc` 仍是 stock 版」的直接特征，也是单向覆盖检查抓不到的那一半。
+- **`mislabelled` 为 0。** 这一项查的是「cdhash 对、标签错」，本 tar 没有这种记录：4 条孤儿记录在 `basebin.tc` 里的标签都是 `2`（SHA-256），而这 4 个 cdhash 各自来自一个声明 SHA-256 的 CodeDirectory，标签与来源一致，所以它们只归入「孤儿」一类。`0x0` 在这里指槽位号（主 CodeDirectory 槽），不是指 SHA-1；原版那两个成员的两个切片都只带 SHA-256 的 CodeDirectory。这一项为 0 不表示检查没跑，表示三类里本 tar 只落在前两类。
+
+这两个文件的 `0x0`（SHA-1）cdhash 是 `fe83a746…`、`6e8952fb…`、`8d580b85…`、`bd93fa08…`，它们同样不在那 28 条里，但**不进入上面任何一组的计数**：一个双 CodeDirectory 切片在信任缓存里只占一个槽位，脚本对每个切片只产出一个 cdhash，所以未覆盖数是 4 而不是 8。这四个 `0x0` 值只在「如果按 SHA-1 槽位算」的意义上存在，见十二·十那张按 `hashType` 逐槽位列的表。
+
+乙组与甲组问的不是同一件事。甲组说六个 dyldhook dylib 里只有一个打过补丁；乙组说本 tar 换上去的两个该进信任缓存的成员没有被覆盖，而 `basebin.tc` 还留着它们原版的记录。`dyldhook_merge.*` 六个成员不在这条断言的范围内：`BaseBin/Makefile:100` 说明它们不走 basebin 信任缓存，`verify-basebin-trustcache.py` 的 `is_trustcached_member` 对 `dyldhook_merge.` 前缀直接豁免。所以这里不能说「换上去的三个成员一个都没被 `basebin.tc` 覆盖」——该进表的是 `launchdhook` 与 `systemhook` 两个，`dyldhook_merge.arm64e.iOS16-17.dylib` 不在其列。事实是这三个成员里，两个该进表的都没被覆盖。
+
+`jbctl update basebin` 先上传 `basebin.tc` 再拷成员（`BaseBin/launchdhook/src/update.m:32-39`），所以这条断言的措辞就是「上传的信任缓存与本 tar 实际带的二进制不匹配」。孤儿记录那一半让这个错配更具体：传上去的表里还留着两个成员原版的 cdhash。
+
+这条失败与十二·五那段「不在 `basebin.tc` 里是预期状态」可以同时成立，两处不矛盾：十二·五论证的是「不在表里不足以让二进制加载失败」，据此说明它不构成 panic 的充分原因；乙组断言的是「上传的信任缓存必须与本 tar 带的二进制一致」，是一条完整性要求。前者回答「为什么还能跑」，后者回答「这份 tar 是否自洽」。`basebin.tc` 的结构与逐切片 cdhash 见十二·五与十二·十，本节不重复。
+
+**这条读数的取法要固定在一个会随合入而稳定的对象上，不挂在某个提交号上。** 本节的读数取自 **M125 合入后的 `dopamine-basebin/verify-basebin-tar.sh`**（连同它调用的 `verify-basebin-trustcache.py`），不引用 M125 分支上任何中间提交的编号。这条 `basebin.tc` 断言在 M125 分支上改过四版：最早那版没有它，同一份 tar 只报 7 行；第二版只做单向覆盖、对每个 CodeDirectory 一律按 SHA-256 算 cdhash，本 tar 上明细写作 `8 slice(s) of 16 members`，而其中四个值内核根本不会算出；第三版改成双向集合相等、按 `hashType` 取 cdhash；第四版把比较从 cdhash 集合扩成 `(cdhash, hash_type)` 对的集合，并加了 `mislabelled` 那一类。本节按第四版描述——按提交号会立刻过期，M126 前两轮已经在这上面错过两次，所以这里只用「合入后」定位。
+
+要复核本节读数，用合入后 `main` 上的那份脚本跑 `/tmp/basebin-lh.tar`，期望 8 行 `^FAIL`：6 条甲组 + 1 条乙组 + 1 条汇总。同一份脚本跑 CI 产物 tar（`/home/real186/webkit-work/basebin-ci/basebin.tar`，6144000 字节）应得退出 0 与 `Result: PASS`——这一条同时是「拿到的是哪一代脚本」的判别：中间那代在这个 CI tar 上报退出 1。
+
+**六个名字之外还有一项，已经由 M125 加进同一个 gate。** 上面那张表说的是 `verify-dyldhook-merge.sh` 那一组，它只管六个 dyldhook dylib。本 tar 里真正会被这台设备选中的第二个成员 `basebin/launchdhook.dylib` 现在也在断言范围内：M125 的 `dopamine-basebin/verify-basebin-tar.sh` 里有一段专门检查它（从 `# launchdhook is the other binary built from systemhook/src/common/common.c` 那句注释起，到对应的 `fi` 止），实现是复用 `verify-systemhook-search-paths.py --kind launchdhook`，断言它在每个切片的 `__cstring` 里带四个搜索路径名与两个覆盖目录。这一段不写行号：它在 M125 分支上随每次改动前移，写死会像提交号一样过期，用那段注释原文定位更稳。
+
+**这道断言对 launchdhook 只禁三个共享根，不是四个。** `KINDS["launchdhook"]` 用的是 `FORBIDDEN_STRINGS_LAUNCHDHOOK`，即 `FORBIDDEN_STRINGS` 滤掉 `/usr/lib` 的结果：`/Library/Frameworks`、`/var/jb/Library/Frameworks`、`/var/jb/usr/lib` 三条仍然禁止，`/usr/lib` 豁免。理由是 `launchdhook/src/spawn_hook.c:36` 的 `ensure_fakelib_mounted()` 要 `statfs("/usr/lib")` 判断 fakelib 是否挂上，所以这个二进制合法地带着该整条目。**本 tar 的 `launchdhook` 正带着它**，两个切片的 `__cstring` 里都有，仍 19 条全 PASS——豁免是它通过的原因之一，不是漏检。拿 `--kind systemhook` 跑同一个文件会失败 2 条（两个切片各一条 `names no shared search root (/usr/lib)`），所以复核时用错 kind 会得到相反的结论。
+
+**本 tar 在这一项上通过。** 用 M125 的脚本跑本 tar，输出里 `PASS: tar ships basebin/launchdhook.dylib` 与 `PASS: launchdhook.dylib carries the four search-path names` 两行。这条通过的断言与乙组那条失败说的是两件事，两者同时成立：`launchdhook` 确实带了四个搜索路径名（这一项通过），而它的 `0x1000` 槽位不在 `basebin.tc` 里（乙组那 4 个未覆盖切片中的两个）。所以本 tar 的 `launchdhook` 既是「按内容该装」的，也是「没被信任缓存覆盖」的。
+
+两个方向都实测过，用的是 M125 分支上的这同一份脚本。下表两行是本 mission 在本机的读数，输入分别是本 tar 里的补丁版与出厂 `orig.tar` 里的原版；M125 自己的 `test-verify-basebin-artifacts.py` 用合成的 Mach-O fixture 固定了同样两个方向（M125 合入后那一版里，一条检查健康 tar 报出 `launchdhook.dylib carries the four search-path names`，另一条检查原版被拒并提示 `does not set the search paths dyld reads`），那组 fixture 与下表是两回事，不要混为一谈：
+
+| 输入 | `verify-systemhook-search-paths.py --kind launchdhook` 的结果 |
+| --- | --- |
+| 本 tar 里的补丁版 330144 / `150270a5…` | 19 条断言全 PASS，`all assertions hold`，退出 **0** |
+| 出厂原版 312848 / `449a9606…` | **12 条断言失败**（两个切片各 6 条），退出 **1** |
+
+所以这道断言不是空转：换成原版就会被拒。它对本 tar 的意义是一次确认，不是一次免责——本 tar 仍然因为甲组那六个成员与乙组那条错配而退出 1。
+
+甲组那六条失败的原因是**六个 dyldhook dylib 里只有一个打过补丁**。按 `_MACHOMERGER_HOOK_` 前缀 token 计数（四位依次是 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl`）：
+
+| 成员 | 本 tar | 原版 | 打补丁后应为 |
+| --- | --- | --- | --- |
+| `dyldhook_merge.arm64e.iOS15.dylib` | 1001（原版） | 1001 | 1001 |
+| `dyldhook_merge.arm64.iOS15.dylib` | 1001（原版） | 1001 | 1001 |
+| `dyldhook_merge.arm64e.iOS16-17.dylib` | **1111（已打补丁）** | 1001 | 1111 |
+| `dyldhook_merge.arm64.iOS16-17.dylib` | 1001（原版） | 1001 | 1111 |
+| `dyldhook_merge.arm64e.iOS18+.dylib` | 0001（原版） | 0001 | 0111 |
+| `dyldhook_merge.arm64.iOS18+.dylib` | 0001（原版） | 0001 | 0111 |
+
+iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` 包住），所以它们「通过」不是因为被打过补丁。
+
+**为什么它对这台设备仍然够用**：`dyldhook_dylib_for_platform()` 按 `hw.cpusubtype` 与运行中的 iOS 版本只选一个名字。这台设备是 `iPad14,4`（arm64e）、iPadOS 16.1，选中的就是 `dyldhook_merge.arm64e.iOS16-17.dylib`——恰好是唯一打过补丁的那个，且与 CI 产物逐位相同、四个 hook 齐全。其余五个成员在这台设备上永远不会被合并，所以它们的 hook 计数不影响结果。
+
+**由此产生三条使用约束，必须照办**：
+
+1. 本 tar **不得**被描述成「通过 gate 的产物」。它过一次真实 gate 会退出 1，这是它的确定属性。
+2. 本 tar **只能**用在 arm64e、iOS 16 到 17 的设备上。换一台 arm64 设备或 iOS 18+ 设备，被选中的成员就是原版，两个 override hook 不在，覆盖完全不生效。
+3. 换设备或换 iOS 版本时**必须重新生成**，不能复制这个文件。生成方法就是把目标设备的 `basebin-hybrid.tar` 取出，按十二·一的三行替换对应成员；若目标设备是 arm64 或 iOS 18+，还要替换会被选中的那个名字。
+
+整包使用 CI 产物同样不行：CI 的 tar 与本 tar 相比，除这三处以外还有 **19 个成员不同**（`MachOMerger`、`dopamine`、`jbctl`、`libjailbreak.dylib`、`hookd`、`boomerang`、`basebin.tc` 等）。整包替换等于换掉整个越狱运行时，与本 mission 的「只补两处缺口」不是一回事。
+
+### 十二·三 为什么换这三个文件不引入 ABI 不匹配
+
+三个成员的依赖加载命令（`LC_LOAD_DYLIB` / `LC_LOAD_WEAK_DYLIB` / `LC_REEXPORT_DYLIB`）在两个版本里逐条相同，`systemhook.dylib` 与 `dyldhook_merge.arm64e.iOS16-17.dylib` 的每个切片都比对过。所以三个文件都不带进新的库依赖。
+
+未定义符号的比对结果是**三个成员分两种情形，而且必须按架构分别读**：
+
+| 成员 | 每个切片的未定义符号（补丁版 / 原版） | 新增 | 移除 |
+| --- | --- | --- | --- |
+| `launchdhook.dylib` | arm64 273 / 273，arm64e 273 / 273 | 0 | 0 |
+| `dyldhook_merge.arm64e.iOS16-17.dylib` | 0 / 0（`dyldhook/Makefile` 要求自包含） | 0 | 0 |
+| `systemhook.dylib` | arm64 **131 / 130**，arm64e **126 / 125** | 各 1 | 0 |
+
+**计数口径要先说清，否则同一条命令会报出四个不同的数。** `llvm-nm -u` 对每个架构切片先打印一个空行、再打印一行 `file (for architecture arm64):` 这样的表头，然后列该切片的符号。三种数法在本机的读数，按「补丁版 / 原版」写：
+
+| 数法 | `launchdhook` | `systemhook` arm64 | `systemhook` arm64e | `systemhook` 两切片并集 |
+| --- | --- | --- | --- | --- |
+| 每切片、去表头（本节采用） | 273 / 273 | **131 / 130** | **126 / 125** | 133 / 132 |
+| 每切片、连表头一起数 | 274 / 274 | 132 / 131 | 127 / 126 | — |
+| 并成一个集合、连表头 | — | — | — | 135 / 134 |
+
+`launchdhook` 两版符号完全相同，差 0；`systemhook` 每切片各多 1（补丁版多一个 `__xpc_type_bool`），那个 `+1` 在三种口径下都看得见。十二·三那张表用的是**每切片、去表头**的口径，与十二·四对变量名采用的口径一致。三种数字不可跨口径比较。本节早先写的 `275/275` 与 `134→135` 是**两切片并成一个集合、连表头**的读数，把两个架构的符号合并去重了，已按上表更正。
+
+`systemhook.dylib` 每个切片新增的那一个是 `__xpc_type_bool`。它不是新依赖：`0001-systemhook-set-search-paths.patch:114` 写的是 `xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL`，而 `XPC_TYPE_BOOL` 在 `<xpc/xpc.h>` 里就展开成 `&_xpc_type_bool`——`_xpc_type_bool` 是 C 源码里的标识符，链接期在符号表里带前导下划线，所以 `llvm-nm -u` 读到的是 `__xpc_type_bool`。同一条语句里的 `xpc_get_type` 在原版 `systemhook` 里已经是未定义符号（它本来就用 `xpc_get_type` 判断 `DisableTweakInjection` 一类配置），所以多出来的只是取这个对象地址的那一处引用。
+
+这台设备的 `libxpc` 里确实有这个导出数据符号——`AGENTS.md` 第六节记录过用 `dlsym` 核对 16.1 `libxpc` 的 52 个 `xpc` / `CFBundle` 符号全部可解析，且 `xpc_main`、`sandbox_extension_*_to_process` 在场。**但 `_xpc_type_bool` 这个具体名字没有单独核对过**，所以准确的表述是：它由 `libxpc` 提供，未在本设备上单独用 `dlsym` 验证过；若缺失，表现会是加载 `systemhook.dylib` 时 dyld 报 `Symbol not found: __xpc_type_bool`（报错按符号表里的拼写给出），而不是静默失败。装机后第一次启动 `launchd` 就会暴露，回滚按十二·七。
+
+`launchdhook.dylib` 两个版本都链 **10** 个库，逐条相同：
+
+```
+/System/Library/Frameworks/Foundation.framework/Foundation
+/System/Library/Frameworks/CoreServices.framework/CoreServices
+/System/Library/Frameworks/Security.framework/Security
+/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+@loader_path/libjailbreak.dylib
+@loader_path/libchoma.dylib
+/usr/lib/libbsm.0.dylib
+/usr/lib/libMobileGestalt.dylib
+/usr/lib/libobjc.A.dylib
+/usr/lib/libSystem.B.dylib
+```
+
+其中两条是 `@loader_path`，解析到 `/var/jb/basebin/` 下的 `libjailbreak.dylib` 与 `libchoma.dylib`；这两个成员在本 tar 里与两个基准都逐字节相同。所以换 `launchdhook` 不带进任何新的库依赖。**这一条纠正了本轮任务上下文里「只链 5 个库」的说法**：那 5 个只覆盖 `libSystem.B.dylib` 一路的系统库，漏了 4 个 system framework 与 2 个 `@loader_path` 成员。
+
+### 十二·四 六个变量名的计数，以及三种计数口径的差别
+
+同一份 dylib 换三种数法会得到三组不同的数，混用会得出互相矛盾的结论。以下全部是本机实测，`launchdhook.dylib` 两个版本，arm64 与 arm64e 两个切片：
+
+| 计数口径 | 版本 | `DYLD_FRAMEWORK_PATH` | `__XPC_DYLD_FRAMEWORK_PATH` | `DYLD_LIBRARY_PATH` | `__XPC_DYLD_LIBRARY_PATH` | `DisableJBFrameworkPath` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 整文件子串 | 原版 312848 | 0 | 0 | 0 | 0 | 0 |
+| 整文件子串 | 补丁版 330144 | 4 | 2 | 4 | 2 | 2 |
+| 整文件整条目 | 原版 | 0 | 0 | 0 | 0 | 0 |
+| 整文件整条目 | 补丁版 | 1 | 1 | 1 | 1 | 1 |
+| 每切片整条目 | 原版 | 0 | 0 | 0 | 0 | 0 |
+| 每切片整条目 | 补丁版 | 2 | 2 | 2 | 2 | 2 |
+
+差别的来源：`DYLD_FRAMEWORK_PATH` 是 `__XPC_DYLD_FRAMEWORK_PATH` 的子串，所以整文件子串计数里前者的 4 是「2 个裸名 + 2 个前缀里嵌着的」，后者的 2 只数自己。整条目只数一次。每切片整条目因为有两个切片，是整条目的两倍。
+
+**判据用哪种口径取决于要回答的问题。** 「这个版本设了没有」用整条目（`0` 与 `1` 的差别最干净，且不会被子串嵌套蒙蔽）；「仓库 gate 断言的是什么」是每切片整条目，因为 `verify-systemhook-search-paths.py` 逐切片断言、每个切片各算一次。两种口径下原版都是 `0`、补丁版都是非零，所以无论用哪种都能区分两个版本，但数字本身不可跨口径比较。
+
+`DYLD_FALLBACK_FRAMEWORK_PATH`、`DYLD_FALLBACK_LIBRARY_PATH` 两个版本都是 0，补丁没有引入回退目录。
+
+### 十二·五 信任缓存：`launchdhook` 不在 `basebin.tc` 里是预期状态
+
+`basebin.tc` 640 字节，结构是 4 字节版本（实测 `1`）、16 字节 uuid、4 字节条目数（实测 `28`），随后 28 条 22 字节记录（20 字节 cdhash + 2 字节 flags）。`24 + 28 × 22 = 640`，长度自洽。
+
+四个待装文件（补丁版与原版各两个）的文件 sha1 全部**不在**这 28 条里：
+
+| 文件 | 版本 | sha1 | 在 `basebin.tc` 里 |
+| --- | --- | --- | --- |
+| `launchdhook.dylib` | 补丁版 330144 | `005a70a6a2914ab54f9f4e429b8d2d1d4ba01c40` | 否 |
+| `launchdhook.dylib` | 原版 312848 | `a4e3d0a0b607a989ec5f8c1e741775744baddac6` | 否 |
+| `systemhook.dylib` | 补丁版 234336 | `f4367ca8ad939b01ce6ad34ec54f7fc4c3419b23` | 否 |
+| `systemhook.dylib` | 原版 233520 | `11b7ef6d414254e3f1a1c04ea19ef40daa84e50c` | 否 |
+
+原版的两个也不在，这一条比「补丁版不在」更有说服力：同名的原版文件本来就以不在表里的状态在这台设备上正常工作。`systemhook.dylib` 上一次被单独换掉时同样不在，那次用户空间重启成功了。两者都由 `launchd` 或 `dyld` 在越狱环境下加载，走的是 basebin 的信任路径，不是这张表的 cdhash 匹配。
+
+### 十二·六 安装步骤（**本 mission 未执行；M127 已执行且失败**）
+
+**本 mission 没有执行这一节，但这一节描述的动作已经在 M127 里被执行过一次，结果见其文档第一节与第二节。** 本节记录的是当时的安装方法，供理解失败现场与执行回滚，**不是待执行的计划**。
+
+设备现在是出厂 basebin，`launchdhook` 312848 / `449a9606`——这是 panic 之后重新越狱把 basebin 整包还原的结果，不是「没装过」的状态。
+
+先备份。回滚要靠下面四份，缺任何一份都会让回滚变复杂：
+
+| 备份对象 | 建议路径 | 说明 |
+| --- | --- | --- |
+| 设备的原 tar | `/var/mobile/Documents/bb/basebin-hybrid.tar` | 本机副本 6092800 字节、sha256 `e06c9aa2…`；设备上那份未在本轮核对字节 |
+| 出厂 tar | `/var/mobile/Documents/bb/device-basebin-orig.tar` | 6082560 字节（按记录，未在本轮核对字节）；回滚前先核 sha256，见十二·一末段 |
+| `gen/dyld` 当前副本 | `/var/mobile/Documents/bb/gen-dyld-before` | 更新前的合并产物，用于事后比对 |
+| `dyld.orig` 当前副本 | `/var/mobile/Documents/bb/dyld.orig-before` | 回滚锚点，更新流程不覆盖它 |
+
+四份在本轮之前已经存在于 `/var/mobile/Documents/bb/`。**建议在动手前重新确认四份都在且非空**，因为设备可能被其他实验改动过。确认命令（设备上没有 `sha256sum`，用 `python3`）：
+
+```sh
+/var/jb/usr/bin/python3 - <<'EOF'
+import hashlib, os
+for p in ['basebin-hybrid.tar','device-basebin-orig.tar','gen-dyld-before','dyld.orig-before']:
+    f = '/var/mobile/Documents/bb/' + p
+    d = open(f, 'rb').read()
+    print(len(d), hashlib.sha256(d).hexdigest()[:16], p)
+EOF
+```
+
+把新 tar 送上去，再更新。`jbctl update basebin` 必须在 root 下运行：
+
+```sh
+scp -C /tmp/basebin-lh.tar mobile@192.168.2.136:/var/mobile/Documents/bb/basebin-lh.tar
+ssh -t mobile@192.168.2.136 'echo "<密码>" | sudo -S -p "" /var/jb/basebin/jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar'
+```
+
+`bb/` 这一层不是本节写作时任取的目录：M127 当时就是把 tar 放在 `/var/mobile/Documents/bb/` 下、并对该路径跑的 `jbctl`（本节开头的记录与十二·九的表都按那次实际执行写），备份四份与回滚用的 `device-basebin-orig.tar` 也在同一目录。历史记录必须与已发生的路径一致，所以命令里的路径照抄现场，不换成别的目录。
+
+**上机后第一件事是核对落地字节，不是看退出码。** `jbctl` 返回 0 只表示它接受了这个 tar。真正要确认的是三个文件已经被替换：
+
+```sh
+/var/jb/usr/bin/python3 - <<'EOF'
+import hashlib
+want = {
+ 'launchdhook.dylib': ('330144','150270a5f2e6d631abaf7b67a472e22515a34215a8b5bc506a76b2af93770eeb'),
+ 'systemhook.dylib': ('234336','d7045cd4850eb0c7498d0a63a4de797aeffc7577a21379fd774c4bc219fbe13f'),
+ 'dyldhook_merge.arm64e.iOS16-17.dylib': ('75952','9fb3b9c0e2ae128b54ae3151b9f97505622140280152d01e3977a143513970c4'),
+}
+for name,(size,digest) in want.items():
+    f = '/var/jb/basebin/' + name
+    d = open(f,'rb').read()
+    print('OK ' if (str(len(d)), hashlib.sha256(d).hexdigest()) == (size,digest) else 'MISMATCH ', name, len(d), hashlib.sha256(d).hexdigest()[:16])
+EOF
+```
+
+**用户空间重启是什么意思，怎么触发。** `jbctl update basebin` 不直接替换 `gen/dyld`。它把 tar 暂存，然后按 `BaseBin/jbctl/src/main.m:211-216` 触发一次 `reboot3(RB2_USERREBOOT)`——用户空间重启，不是整机重启。屏幕上所有应用退出，SpringBoard 重建，但内核不重启、Dopamine 不重启。重启过程中 `BaseBin/launchdhook/src/update.m:223` 调 `basebin_generate(YES)` 用 `dyld.orig` 加上 tar 里的 `dyldhook_merge.arm64e.iOS16-17.dylib` 现场合成新的 `gen/dyld`。
+
+两处行号的出处不同，要分清：`update.m:223` 与根目录 `AGENTS.md` 五之三「Dopamine 的开机流程决定了补丁能活多久」里那张「位置 / 行为」表的一行一致——该行以 `BaseBin/launchdhook/src/update.m:223` 开头，行为列写 `jbctl update basebin` 走 `basebin_generate(YES)`；`main.m:211-216` **在本仓库里只出现在本文（第七节里以「`jbctl update basebin` 不会立即替换 `gen/dyld`」开头的那段，与本处），`AGENTS.md` 没有这一条**——该文件全文不含 `main.m`，同一张表里以 `BaseBin/libjailbreak/src/basebin_gen.m:172` 开头的那行写的是 `basebin_generate(comingFromJBUpdate)`，参数为 `false` 时走另一条分支。两处都按表格行首的源码路径定位，不写行号：行号会随文档增删漂移。所以这条行号目前只有源码侧的引用，没有仓库内第二处印证。本节复述的是原有的记录，没有重新核对 `main.m` 的那几行。
+
+第七节那段用行首原文定位，不用行号：以「`jbctl update basebin` 不会立即替换」开头的行全文只有一处，行号则随上方增删漂移。M126 在第十二章开头插入几句引言之后，本节原先写的 `:266` 落在一条空的代码围栏上，`main.m:211-216` 已经被推到它后面。
+
+所以**触发就是那条 `jbctl` 命令本身**，不需要另跑一条重启命令。若想核对 `gen/dyld` 是否真的重建过，重启后用第九节「安装后确认 `gen/dyld` 真的重建过」那三条只读命令：新 `gen/dyld` 里 `_MACHOMERGER_HOOK_` 前缀的 `isOverridablePath` 与 `isAlwaysOverridablePath` 应各为 1（此前自身为 0）。
+
+这条命令会中断用户界面，是用户要单独确认的动作，不是 agent 可以自行执行的。
+
+### 十二·七 回滚三步（**未执行**）
+
+回滚锚点是出厂 tar 与 `dyld.orig`，不是 `gen/dyld` 本身：更新时 `gen/dyld` 被改名成 `gen/dyld.old`，只保留一代，再更新一次就没了。
+
+1. **把三个 dylib 改回原版**：恢复 `launchdhook.dylib`（312848 / `449a96068dbc`）、`systemhook.dylib`（233520 / `6f16c545abda`）、`dyldhook_merge.arm64e.iOS16-17.dylib`（74352 / `1e90c5a38405`）。第 2 步的 tar 里带的就是这三个原版字节，所以单独做这一步只在两种情况下需要：不想再触发一次用户空间重启，或第 2 步的 tar 不可用。单改文件不会重建 `gen/dyld`，所以只做这一步时 `gen/dyld` 里两个 override hook 仍在，覆盖仍然生效——**这一步不是完整回滚**。
+2. **用设备的原 tar 再更新一次**：出厂 tar 在 `/var/mobile/Documents/bb/device-basebin-orig.tar`（记录为 6082560 字节；本机副本的 sha256 是 `52607d787d01efa3…`，设备上那份在动手前先核对）。包内另一份原件是 Dopamine.app 的 `/var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar`。
+   ```sh
+   ssh -t mobile@192.168.2.136 'echo "<密码>" | sudo -S -p "" /var/jb/basebin/jbctl update basebin /var/mobile/Documents/bb/device-basebin-orig.tar'
+   ```
+   同样触发一次用户空间重启。重启后 `gen/dyld` 由 `dyld.orig` 加原版 hook 合成，两个 override hook 消失，`launchdhook` 与 `systemhook` 回到原版。**这一步才是完整回滚**，因为它同时复原了 `gen/dyld`。
+3. **确认回到基线**：三个文件尺寸应回到 312848 / 233520 / 74352，`gen/dyld` 里两个 override hook 计数回到 0，`gen/dyld.orig` 的 mtime 仍停在装机时间（本机记录为 2022-10-19）。
+
+`.safe_mode` 不是回滚手段：它只让 `systemhook` 停止注入，挡不住已经替换的 `gen/dyld` 与 `launchdhook`。真出问题时它是止血带，不是复原。
+
+### 十二·八 失败时的读数分诊，其中 `__XPC_` 只有一种的判别
+
+**判据只有一条，且必须是路径读数，不是端点计数。** 端点计数不能证明覆盖生效：系统 WebKit 正常工作同样会注册 4 个端点。
+
+**判据的适用对象必须写死在平台签名进程上。** 越狱签名二进制上取到的「路径改成 `/var/jb`」不构成本节的判据读数：`/var/jb/usr/bin/ls` 这类进程在 dyld 判定被改对之后就会走磁盘，与交付目标（`MobileSafari` 等平台签名 app 用上自建 WebKit）无关。反过来的实测也支持这条：把 `DYLD_FRAMEWORK_PATH` 交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程镜像表里该 UUID 命中 0 次、`WebKit` 仍是 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。这组读数取自 `gen/dyld` 判定 (b) `1 0 0 1`、两个 override hook 都不在的窗口，该状态下 `Loader.cpp:565` 会把磁盘候选直接短路（十一·三），所以它支持的是「越狱二进制的成功不能替代平台签名进程」，不支持「平台签名进程不接受这个变量」。本节的读数必须在 `MobileSafari`（或 Chrome）这类进程上取；取在越狱二进制上的成功是假阳性。
+
+先启动被测应用，再拿到它的 pid，最后让 `lldb` 列出镜像的完整路径。**启动方法因应用而异，这一步搞错会让后面全部白测**：本设备的默认浏览器是 Chrome，`uiopen <url>` 打开的是 Chrome 而不是 Safari，测 Safari 必须用 `uiopen --path /Applications/MobileSafari.app`；直接 `exec` 浏览器只得到没有页面的 UI 进程，不请求 WebContent。
+
+```sh
+# Chrome
+uiopen https://example.com
+APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
+
+# MobileSafari（默认浏览器不是它，必须走 --path）
+uiopen --path /Applications/MobileSafari.app
+APP=$(ps ax | grep -F 'MobileSafari.app/MobileSafari' | grep -v grep | awk '{print $1}' | head -1)
+
+lldb -b -o "process attach --pid $APP" -o "image list -o -f" -o detach -o quit 2>/dev/null \
+  | grep -E "WebKit\.framework/WebKit$|WebCore\.framework/WebCore$"
+```
+
+**不要用端点计数当判据，也不要把「进程活着」当判据。** 两者都在本仓库的历史里出过错：端点数为 0 曾被误判成「`libxpc` 拒绝注册」，真实原因是 dyld 缺符号直接终止；「进程稳定 3 分钟」也曾与用户报告的白屏同时成立。
+
+**成功的样子**：`WebKit.framework/WebKit` 那一行的路径前缀不再是 `/System/Library`，而是越狱根下的 `/Library/WebKitOverride/`。因为 `/var/jb` 是指向 preboot 目录的符号链接，这一行的完整形式可能是 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`，也可能是解析后的 `/private/preboot/<uuid>/dopamine-XXXX/procursus/Library/WebKitOverride/WebKit.framework/WebKit`。两种都算成功，判据写成两条同时成立：路径**不以** `/System/Library` 开头，且包含 `/Library/WebKitOverride/`。
+
+**失败的样子**：那行仍是 `/System/Library/Frameworks/WebKit.framework/WebKit`。这时先读 app 进程的环境段落，再按下面这张表分诊。前三行按环境里有哪些变量分；后两行都是环境全对但结果仍不对，用 `gen/dyld` 的两个 override hook 计数齐不齐分开：
+
+```sh
+launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
+```
+
+这个 `sed` 范围取法与 `AGENTS.md` 第五节里读 `services` 段落的那条同形。段落结尾的缩进在不同 iOS 版本上可能不同，`/}/` 比写死制表符稳。
+
+| 读数 | 含义 | 下一步查哪里 |
+| --- | --- | --- |
+| 四个变量都没有 | `launchdhook` 没写任何东西 | 十二·六的落地字节核对；`launchdhook` 是否真的被换掉 |
+| 只有 `__XPC_` 两个，且值指向覆盖目录 | **补丁运行了，裸名被丢掉了** | 见本节末尾「第二行的判别」那几段 |
+| 只有 `__XPC_` 两个，值不是覆盖目录 | 补丁没运行，`__XPC_` 是别处留下的 | `launchdhook` 是否被替换、`config.plist` 的 `DisableJBFrameworkPath` 是否为真 |
+| 四个都在且值正确，路径仍来自 `/System`，且 `gen/dyld` 的 hook 计数不齐 | 搜索路径到位，但 dyld 这一半没上线，磁盘候选在 `Loader.cpp:565` 被短路 | 按第九节装 `gen/dyld`（两个 override hook 都要在 `1 1 1 1`），再复测 |
+| 四个都在且值正确，路径仍来自 `/System`，且 `gen/dyld` 的 hook 计数齐（`1 1 1 1`） | 两半都到位，磁盘副本仍未在活进程里被采纳 | 见下一段：这一行没有已知解释 |
+
+**在已经记录下来的读数里，第五行还没有一条落在它上面。** `1 0 0 1` 窗口内那次（`02:27`–`02:34` CST）按本表归到第四行：四个变量都送到、值也对，`MobileSafari` 仍加载 `/System` 那份（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），而 `/var/jb` 那份（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`）在 dyld 打印里出现过、在活进程镜像表里不存在；但那次 `gen/dyld` 的两个 override hook 不在，正是第四行写的原因，所以它不需要第五行来解释。`1 1 1 1` 窗口内那一条（`00:28:27` CST，`MobileSafari` 的 `WebKit` #47 在 `/var/jb`，见十一·六）方向相反，落在「成功」一侧。
+
+这两条都不是按第五行的条件取到的：一条 hook 不齐，一条没记完整路径且没复测。所以本节的判据现在只能报「未达成」，不能报「某个已知原因」，也不能反过来断言 `1 1 1 1` 状态下不会出现第五行。留这一行是为了让分诊时知道：hook 计数齐而路径仍是 `/System` 时，本表没有已知解释，不要把它硬塞进前四行。
+
+**第二行的判别为什么成立。** 判别靠的是值，不是名字，但这里要先把「`launchd` 会丢 `DYLD_` 名字」这句话收窄到实测覆盖的范围。
+
+实测的形态是：**通过 `launchctl setenv` 一类途径放进 `launchd` 自身环境的变量，名字以精确前缀 `DYLD_` 开头时被丢掉**（`DYLD_FOO` 读回空），而 `dyld_FOO`、`XDYLD_FOO`、`__XPC_DYLD_FOO`、`DYLDX`、`DYLD` 都读回 `yes`；`/sbin/launchd` 里 13 个 `DYLD_` 字符串全是 `DYLD_PRINT_*`。这一条来自本轮任务上下文记录的实测，仓库内没有对应文档，本节也未重测。
+
+**这句话不能推广成「所有 `DYLD_` 名字都进不了子进程」。** 同一个 `environment` 段落里就有反例：`DYLD_INSERT_LIBRARIES` 在场，而它同样以 `DYLD_` 开头。它的来源不同——它由 `launchdhook` 在 `spawn_exec_hook_common()` 里直接写进子进程 `envp`，不经过 `launchd` 自身环境那一步。所以两件事要分开：一条是「`launchctl setenv` 那条路丢 `DYLD_` 名字」，另一条是「spawn 钩子在 exec 时写进去的变量会不会也被后一层丢掉」，后者本节没有读数。
+
+**这决定了第二行能证到多少。** 补丁写四个变量用同一段代码、同一个时机（`jbSearchPathSet` 一次写四条），所以「裸名被丢、`__XPC_` 保留」这种选择性丢弃，要么发生在写入之后的某一层，要么根本没发生、只是补丁没写到。能把两者分开的对照就在同一段落里：`DYLD_INSERT_LIBRARIES` 一直是在的，所以若四个变量由同一次 spawn 写入、而只有两个裸搜索路径名不在，说明写入确实发生了，丢弃发生在写入之后；若 `__XPC_` 两条的值不是覆盖目录，说明这份补丁根本没写到这一层。
+
+判别仍然只看值：`__XPC_DYLD_FRAMEWORK_PATH` 的值等于覆盖目录，说明是这份补丁写的；指向别处或没有，说明不是它写的。**覆盖目录这个字符串只由这份补丁写进环境**，这是这条判别成立的全部依据，不依赖「`launchd` 丢所有 `DYLD_` 名字」这个更强的说法。
+
+顺带一个容易误判的点：`.xpc` 类型的 helper 自带 4 条 `LC_DYLD_ENVIRONMENT`，所以它们的候选路径即使补丁完全没生效也会出现。app 进程没有这类加载命令，所以**对 app 进程「路径来自哪里」才是这份补丁是否生效的判据**。
+
+**第二行具体长什么样。** 假设补丁写入了变量，但裸名在写入之后被某一层丢掉、只把 `__XPC_` 那对传下来，则 `launchctl print pid/$APP` 的 `environment` 段落会是这样（其余条目照旧；注意 `DYLD_INSERT_LIBRARIES` 在场）：
+
+```
+	environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+		__XPC_DYLD_FRAMEWORK_PATH => /var/jb/Library/WebKitOverride
+		__XPC_DYLD_LIBRARY_PATH => /var/jb/Library/WebKitOverride/usr/lib
+		DYLD_INSERT_LIBRARIES => /usr/lib/systemhook.dylib
+		...
+	}
+```
+
+三处可以读出结论：
+
+1. `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 两条**不在**，而同段里 `DYLD_INSERT_LIBRARIES` 在；
+2. `__XPC_` 两条的值**正好是** `/var/jb/Library/WebKitOverride` 与它下面的 `usr/lib`，与 `0001-systemhook-set-search-paths.patch` 里那两条 `JBROOT_PATH(...)` 拼接结果一致；
+3. `launchctl print` 里 `path = /System/Library/...` 仍然成立，即路径读数失败。
+
+这三条同时出现，结论是「补丁运行了，写入的裸名在补丁之后被丢掉」，不是「补丁没运行」。判别只看第 2 条：值是不是覆盖目录。补丁没运行时 `__XPC_` 这两个名字即使在场，值也不会是覆盖目录——覆盖目录这个字符串只由这份补丁写进环境。
+
+对照的「补丁没运行」形态是 `__XPC_` 两条的值指向别处（例如上一轮实验留下的 `/var/jb/Library/Frameworks`），或者四条一个都没有。
+
+### 十二·九 本节各步的执行状态
+
+「本 mission」一列只说我自己的动作。M127 执行过的步骤单独标在最后一列，因为把它们算成「未执行」会掩盖一次真实的设备事故。
+
+| 步骤 | 本 mission | M127 |
+| --- | --- | --- |
+| 三份 tar 的 sha256、尺寸、成员数与逐成员比对 | **已执行**（本机） | 未做 |
+| 六个 dyldhook 成员的 hook token 计数 | **已执行**（本机） | 未做 |
+| 两个 `launchdhook` 版本的变量计数（三种口径） | **已执行**（本机） | 未做 |
+| 三个成员的依赖加载命令逐切片比对 | **已执行**（本机），逐条相同 | 未做 |
+| 三个成员的未定义符号比对 | **已执行**（本机，每切片去表头）：`launchdhook` 273 / 273、hook dylib 0 / 0、`systemhook` arm64 131 / 130 与 arm64e 126 / 125，见十二·三 | 未做 |
+| 四个成员（两版各两个）的 cdhash 与 `basebin.tc` 的比对 | **已执行**（本机），含 11 个槽位的反面对照，见十二·十 | 未做 |
+| 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：7 条具体断言失败（6 条 dyldhook + 1 条 `basebin.tc` 的 `(cdhash, hash_type)` 对集合相等）+ 1 条汇总行，见十二·二 | 未做 |
+| 把 tar 送到设备 | **未执行** | **已执行**，`/var/mobile/Documents/bb/basebin-lh.tar` |
+| `jbctl update basebin` | **未执行** | **已执行**，2026-11-26 00:50:43 |
+| 用户空间重启 | **未执行** | **已执行**，由 `jbctl` 触发，随后五次内核 panic |
+| 落地字节核对 | **未执行** | 未取到（设备进入 panic 循环） |
+| `lldb` 路径读数（十二·八的成功判据） | **未执行** | **未取到，判据记为失败**，见其文档第三节 |
+
+**此刻设备上是出厂 basebin**，`launchdhook` 312848 / `449a9606`，`gen/dyld` 只带 Dopamine 原有的两个 hook。这个状态来自 panic 之后的手动重新越狱，不来自「从未安装」。十二·八的成功判据要求两项同时成立：路径不以 `/System/Library` 开头，且包含 `/Library/WebKitOverride/`。至今没有一次读数把这两项都记下来：`1 1 1 1` 窗口内 `00:28:27` CST 那条通报只写到 `WebKit` #47 与其余六个镜像「all under `/var/jb`」，没有记 `/var/jb` 下面哪一级目录，也没有复测。所以本节的判据不能用于宣布任何结论。
+
+### 十二·十 信任缓存这一节，本 mission 的独立复算
+
+十二·五由 M135 负责改写，本节不重复它的结论，也不修改它。**十二·五的正文以 M135 那版为准**，本节只记录本 mission 自己按 cdhash 复算的读数，用途是交叉核对：两份文档若在同一个文件上得出不同的 cdhash，其中至少一份算错了。
+
+**本分支上的十二·五还是更早的按文件 sha1 查表那一版，M135 的改写尚未合并进来。** 两种量不同，所以在 M135 那版落地之前，本文件里这两节会在「原版在不在表里」这一点上给出相反的答案：现在这段十二·五说原版两个都不在，本节说原版每个切片都命中。**遇到这个矛盾时以 M135 那版十二·五为准，本节不作为替代文本**；本节只是把同一批文件按 cdhash 重算一遍留档。
+
+M135 那版十二·五发布的 cdhash 与本节下表逐条相同（`launchdhook` 的 `0e59e398…`、`a7438ed3…`、`fe83a746…`、`6e8952fb…`，`systemhook` 的 `dd3f99c4…`、`d3c4e949…`、`8d580b85…`、`bd93fa08…`），两份文档同时落地后不矛盾。
+
+**取法**：按每个架构切片读出 `LC_CODE_SIGNATURE`（load command `0x1d`），进入它指向的 SuperBlob，走索引取槽位 `0x0`，读 CodeDirectory 偏移 **37** 处的 `hashType`，`1` 取 `SHA1`、`2` 取 `SHA256`，都截到 20 字节。表文件 `basebin.tc` 是 640 字节、版本 `1`、uuid `a3e4647f…`、28 条记录，它自己的 sha256 是 `12bdb75e6962…`。
+
+| 文件 | 切片 | `hashType` | cdhash（前 40 位） | 在 28 条里 |
+| --- | --- | --- | --- | --- |
+| 原版 `launchdhook` 312848 | arm64 | 2 | `0e59e39881d8ed7152b5102c87fe3fd2d660818b` | 是 |
+| 原版 `launchdhook` 312848 | arm64e | 2 | `a7438ed3dc79bcda49ec9434b901bf5a73fbaab9` | 是 |
+| 补丁版 `launchdhook` 330144 | arm64 | 1 | `fe83a746623ac9ccb21c32305c750ecbb22833c2` | 否 |
+| 补丁版 `launchdhook` 330144 | arm64e | 1 | `6e8952fb386181b0c5edcd0f619db2aa76f290c0` | 否 |
+| 补丁版 `launchdhook` 330144 | arm64，槽位 `0x1000` | 2 | `f68f9da38e2e761e91a1a56032c411ac12288902` | 否 |
+| 补丁版 `launchdhook` 330144 | arm64e，槽位 `0x1000` | 2 | `6f362b32d2aa3550ebf42bd320d12e08e6a39243` | 否 |
+| 原版 `systemhook` 233520 | arm64 | 2 | `dd3f99c4a4ba13daf631e1f2fd1acd0a84883c35` | 是 |
+| 原版 `systemhook` 233520 | arm64e | 2 | `d3c4e949ddb149072bfef1d225eabbd4caab28e7` | 是 |
+| 补丁版 `systemhook` 234336 | arm64 | 1 | `8d580b8510297956b4071972a11cc1dc05215c09` | 否 |
+| 补丁版 `systemhook` 234336 | arm64e | 1 | `bd93fa08208960d6d1f205853e3e385712aa05a8` | 否 |
+| 补丁版 `systemhook` 234336 | arm64，槽位 `0x1000` | 2 | `14d05a3f395a5f28d69a2f61e02a9042fe7d5750` | 否 |
+| 补丁版 `systemhook` 234336 | arm64e，槽位 `0x1000` | 2 | `d468b1fb963f87126eaa4251e3149ebbf274b601` | 否 |
+
+本节与 M127 那份文档的对应关系要写明出处，因为那份文档此刻不在 `main` 上。M127 的 `docs/ios16-launchdhook-basebin-install-panic.md`（内层分支 `feat/y2-inner-record-the-launchdhook-panic-outcome`，尚未合入 `main`）关于 `launchdhook` 的原文是：
+
+> 装进 tar 的补丁版 `launchdhook`（`150270a5…`，330144 字节）两个切片的 cdhash 是 `fe83a746…` 与 `6e8952fb…`，**不在** `basebin.tc` 里。原版那两个切片是 `0e59e398…` 与 `a7438ed3…`，在表里的记录 3 与 19。
+
+上表 `launchdhook` 那六行与这句逐条一致：补丁版的 `fe83a746…`、`6e8952fb…` 与它的两个 `0x1000` 槽位 `f68f9da3…`、`6f362b32…`，原版的 `0e59e398…`、`a7438ed3…`。按 `basebin.tc` 里的记录顺序（从 0 开始数），`0e59e398…` 是第 3 条、`a7438ed3…` 是第 19 条，与上引那句的「记录 3 与 19」相符。
+
+那段引用是 M127 分支上的原文，不是本 mission 的测量。**上文抄进来的目的就是让这一条交叉核对不依赖那个分支是否存在**：值本身由本节自己从设备三份文件按 `hashType` 算出，抄原文只用来指出两处结论相同。M127 合入 `main` 之前，读者在本分支上找不到那个路径，这是预期的。
+
+原版 `systemhook` 的两条也在表里，0 起算分别是第 24 条 `d3c4e949…` 与第 25 条 `dd3f99c4…`。这两个值 M127 没有发布；M135 那版十二·五也列了它们。
+
+**反面对照**：同一套取法作用在设备 `basebin.tc` 里有记录的其他 basebin 文件上，11 个槽位 `0x0` 期望全部命中——`libjailbreak.dylib` 两切片 `4afef8bc…`/`6334958e…`，`jbctl` 两切片 `f5a7287e…`/`68ae65f9…`，`dopamine` 单切片 `4d2be50b…`，`hookd` 两切片 `00b60595…`/`ab5b18f1…`，`boomerang` 两切片 `61124285…`/`03eed9f8…`，`libchoma.dylib` 两切片 `f6ab2aea…`/`4f31e186…`。11 个期望、11 个命中，说明这套取法会读到「在」，不会一律读成「不在」。
+
+**一处与 M127 和 M135 发布范围的差别，记为本节的读数**：补丁版 `systemhook` 与补丁版 `launchdhook` 同形，每个切片也各多一个槽位 `0x1000`，它的 cdhash `14d05a3f…`/`d468b1fb…` 同样不在 28 条里。M127 第 126 行只发布了 `launchdhook` 的 `0x1000` 槽位，M135 那版十二·五也只提 `launchdhook` 的「各多一个 `0x1000` 槽位」。本节不改那两份文档；**本节与十二·五的论证都不依赖 `0x1000` 槽位的个数**，槽位 `0x0` 的命中与否就足以作出本节的全部陈述。
+
+**这个结果不足以解释 panic。** 「补丁版不在 `basebin.tc` 里」证到的只是它不是**加载失败**的充分原因：有不在表里的二进制在这台设备上照常工作过，而 Dopamine 3.0.13 的设备准入走 `pmap_cs_allow_invalid`（`BaseBin/libjailbreak/src/kernel.c:339`，对 arm64e 无条件执行），与这张表的 cdhash 匹配无关。反过来说「与 panic 无关」同样没有依据：补丁版确实不在那 28 条里，而这条链确实参与信任判定，两边不能互推。**panic 的病因在这条轴线上仍记为未知。**
+
+## 十三、把搜索路径送进 app 进程：launchdhook 这一半
 
 `systemhook` 的四个变量只在进程被 `posix_spawn` 时写入。走 XPC 起的服务进程（`WebContent`、`Networking`）能拿到，走 `runningboardd` 启动的 app 进程拿不到，所以这一节先确认谁真正在启动 app，再看现有补丁是否已经覆盖到那个进程。
 
 本章引用 `BaseBin/systemhook/src/common/common.c` 时，行号按打完补丁后的文件给出（510 行 → 620 行），单独标注为官方原行号者除外。
 
-### 十二·一 启动 app 的是 launchd，posix_spawn 拦截器在 launchd 里
+### 十三·一 启动 app 的是 launchd，posix_spawn 拦截器在 launchd 里
 
 三条读数把它钉住，都不依赖 `lldb` 是否能 attach pid 1：
 
@@ -851,7 +1337,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 **`lldb attach pid 1` 报 `invalid address` 不能当作「launchdhook 不在 launchd 里」的证据。** 那只说明调试器被 SIP 拒绝，不说明被注入的 dylib 不在。用「仪器看不见」推断「对象不存在」是本项目已经踩过的同一类错误（`env -i` 不能当对照那次）。
 
-### 十二·二 现有补丁已经覆盖 launchdhook，不需要第三个补丁
+### 十三·二 现有补丁已经覆盖 launchdhook，不需要第三个补丁
 
 `BaseBin/launchdhook/Makefile:10` 的依赖行里有 `../systemhook/src/common/*.[cSm]`：
 
@@ -861,21 +1347,21 @@ $(TARGET): $(wildcard src/*.m src/*.c src/jbserver/*.c ../systemhook/src/common/
 
 所以 `launchdhook` 与 `systemhook` 编译的是同一份 `common.c`，`0001-systemhook-set-search-paths.patch` 的改动同时进入两个 dylib。设备上的 `launchdhook` 与 `systemhook` 都还是原版，补丁在这两个二进制里都还没生效；换成打过补丁的那份即可，不需要新补丁。
 
-### 十二·三 为什么 app 进程里没有任何 dyld 认识的搜索路径
+### 十三·三 为什么 app 进程里没有任何 dyld 认识的搜索路径
 
-`launchd` 的 `envp` 里没有任何 DYLD 搜索路径变量：2026-11-26 以 `mobile` 身份对 `DYLD_FRAMEWORK_PATH`、`__XPC_DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`__XPC_DYLD_LIBRARY_PATH` 逐个 `launchctl getenv`，四个都读回空值；`launchd` pid 1 的 `launchctl print` 也不含 `environment` 段落。设备上当前的 app 只带 `DYLD_INSERT_LIBRARIES`：同一时刻 `Chrome`（pid 16085）与 `MobileSafari`（pid 15609）的 `ps -E` 输出分别是 10 个与 11 个变量，`DYLD` 类只有 `DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib` 这一条，连 `__XPC_` 拼写都没有。这两个进程属主是 `mobile`，`ps -E` 对它们完整打印，不是十二·七「安装后确认」那段说的那种 root 进程读不到的情况；同一输出里 `XPC_SERVICE_NAME` 保留了前缀，说明这个读数没有剥掉 `__XPC_`。
+`launchd` 的 `envp` 里没有任何 DYLD 搜索路径变量：2026-11-26 以 `mobile` 身份对 `DYLD_FRAMEWORK_PATH`、`__XPC_DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`__XPC_DYLD_LIBRARY_PATH` 逐个 `launchctl getenv`，四个都读回空值；`launchd` pid 1 的 `launchctl print` 也不含 `environment` 段落。设备上当前的 app 只带 `DYLD_INSERT_LIBRARIES`：同一时刻 `Chrome`（pid 16085）与 `MobileSafari`（pid 15609）的 `ps -E` 输出分别是 10 个与 11 个变量，`DYLD` 类只有 `DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib` 这一条，连 `__XPC_` 拼写都没有。这两个进程属主是 `mobile`，`ps -E` 对它们完整打印，不是十三·七「安装后确认」那段说的那种 root 进程读不到的情况；同一输出里 `XPC_SERVICE_NAME` 保留了前缀，说明这个读数没有剥掉 `__XPC_`。
 
 早先读数里 app 带 `__XPC_DYLD_FRAMEWORK_PATH` / `__XPC_DYLD_LIBRARY_PATH`，那是 root 域里一次 `launchctl setenv` 的残留，2026-11-26 01:00:29 CST 重启后已消失。它属于实验污染，不是 launchd 的固有环境，不能据此推出「app 继承这两个名字」。
 
 dyld 只读裸名：`dyld-1042` 的 `ProcessConfig::PathOverrides::addEnvVar`（`P.cpp:1614`，由 `P.cpp:1414` 逐条调用）用 `strncmp` 比对九个规范名，`forEachEnvVar`（`P.cpp:1574-1585`）里没有 `__XPC_` 形式，`gen/dyld` 的字符串表里 `__XPC_DYLD_FRAMEWORK_PATH` 出现 0 次。原版 `launchdhook` 一个裸名都不写，所以 `WebKit` 从共享缓存取，UUID 保持 16.1 的 `743EAFB4`。
 
-XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下覆盖目录里的那一代。这一代不绑定某个 UUID：判据是这份 `WebKit` 能在 16.1 上加载，三条性质见十二·七（`LC_BUILD_VERSION` 的 `minos` 不高于 16.1；不链接 `BrowserEngineKit`；强引用的符号由同代 sibling 提供，本设备具体是导出 `_WTFSignpostIndirectLoggingEnabled` 的 `JavaScriptCore`）。`787DFAB1` 是 2026-11-25 那次读数里出现的一代，不是常量。
+XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下覆盖目录里的那一代。这一代不绑定某个 UUID：判据是这份 `WebKit` 能在 16.1 上加载，三条性质见十三·七（`LC_BUILD_VERSION` 的 `minos` 不高于 16.1；不链接 `BrowserEngineKit`；强引用的符号由同代 sibling 提供，本设备具体是导出 `_WTFSignpostIndirectLoggingEnabled` 的 `JavaScriptCore`）。`787DFAB1` 是 2026-11-25 那次读数里出现的一代，不是常量。
 
-### 十二·四 补丁写进 app 的 envp 到底是哪些条目
+### 十三·四 补丁写进 app 的 envp 到底是哪些条目
 
 判断依据是 `common.c:153-157` 的 `envbuf_variable_matches`：它用 `strcmp` 比**值**，不只是名字。`get_jbroot()` 返回 `/var/jb`（该路径是指向 preboot 的符号链接），所以补丁要写的值是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/WebKitOverride/usr/lib`。
 
-app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因此 `present` 四项全为 `false`，`allPresent` 为 `false`，补丁四个都写：
+app 的 `envp` 里四个名字一个都没有（十三·三 的实测），因此 `present` 四项全为 `false`，`allPresent` 为 `false`，补丁四个都写：
 
 | 变量 | app 的 `envp` 里有 | `present` | 补丁动作 |
 | --- | --- | --- | --- |
@@ -908,9 +1394,9 @@ app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因�
 
 所以这次改动**不是**把变量写给「ellekit 过滤器点名的那几个 app」：那个过滤器是黑名单，除四条硬编码路径与用户 `ProcessBlacklist` 之外的每个被 spawn 进程都会拿到四个变量。任务 2 原文里「scoped to the apps the existing ellekit filter already names」如果按字面理解成一份白名单，就要新增一个用不到的配置项；本文按黑名单语义交付，不新增机制。
 
-这条作用域决定了覆盖目录前置条件的严重程度。`十一·二` 的 `:508` 已经写明「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」，两个目录因此必须专用；同样的道理向上提一级：**覆盖目录里放的那一代 `WebKit` 若不能在 16.1 上加载，受影响的是每个被 spawn 的进程，不是只有 app 与 helper**。也就是说下面 `十二·七` 的三条性质是全系统级的前置条件，不是 WebKit 级的。设备当前那一代不满足第 1、2 条，这一句的分量按全系统范围读。
+这条作用域决定了覆盖目录前置条件的严重程度。`十一·二` 的 `:508` 已经写明「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」，两个目录因此必须专用；同样的道理向上提一级：**覆盖目录里放的那一代 `WebKit` 若不能在 16.1 上加载，受影响的是每个被 spawn 的进程，不是只有 app 与 helper**。也就是说下面 `十三·七` 的三条性质是全系统级的前置条件，不是 WebKit 级的。设备当前那一代不满足第 1、2 条，这一句的分量按全系统范围读。
 
-### 十二·五 helper 进程今天走哪条分支：未核，两侧后果都写明
+### 十三·五 helper 进程今天走哪条分支：未核，两侧后果都写明
 
 **helper 今天的 `envp` 有没有那四个变量，本仓没有读数。** 这一条是任务 4 的核心，所以先把已知与未知分开。
 
@@ -939,13 +1425,13 @@ app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因�
 
 它不重排已有条目，也不改变可执行文件的解析顺序。所以「helper 的可执行文件仍是 `/System` 的 16.1、`Library/Frameworks` 来自 `/var/jb`」这个混合形态无论走哪条分支都保持。
 
-**走重建分支的代价落到加载哪一代上。** helper 的 `DYLD_FRAMEWORK_PATH` 变成 `/var/jb/Library/WebKitOverride` 之后，它解析 `WebKit.framework/WebKit` 时先看这个目录。所以它会加载覆盖目录那一代，而不是它今天加载的 `/var/jb/Library/Frameworks` 那一代（`787DFAB1`）。这就要求覆盖目录那一代满足十二·七开头的三条性质（`minos ≤ 16.1`、不链接 `BrowserEngineKit`、有导出 `_WTFSignpostIndirectLoggingEnabled` 的同代 `JavaScriptCore`）。**如果覆盖目录不满足，helper 会从「能跑」变成「跑不起来」，这是这次改动对已经正常工作的 helper 的真实风险，也是十二·七把前置条件排在最前的原因。**
+**走重建分支的代价落到加载哪一代上。** helper 的 `DYLD_FRAMEWORK_PATH` 变成 `/var/jb/Library/WebKitOverride` 之后，它解析 `WebKit.framework/WebKit` 时先看这个目录。所以它会加载覆盖目录那一代，而不是它今天加载的 `/var/jb/Library/Frameworks` 那一代（`787DFAB1`）。这就要求覆盖目录那一代满足十三·七开头的三条性质（`minos ≤ 16.1`、不链接 `BrowserEngineKit`、有导出 `_WTFSignpostIndirectLoggingEnabled` 的同代 `JavaScriptCore`）。**如果覆盖目录不满足，helper 会从「能跑」变成「跑不起来」，这是这次改动对已经正常工作的 helper 的真实风险，也是十三·七把前置条件排在最前的原因。**
 
 装后要补的第一个读数就是这个：`launchctl print pid/<WebContent pid>` 与同一个命令对 `<Networking pid>`，看 `environment` 段落有没有那四个名字、值是不是 `.../WebKitOverride`。有读数之后再回头把这一节从「未核」改成实测结论。
 
 `launchdhook` 与 `systemhook` 编译同一份源码，改的是同一段代码，`systemhook` 侧的行为不因为这份二进制同时存在于 launchdhook 而改变。
 
-### 十二·六 校验脚本补的洞
+### 十三·六 校验脚本补的洞
 
 `verify-basebin-tar.sh` 原先只查六个 `dyldhook_merge.*.dylib` 与 `systemhook.dylib`，因此一个 `launchdhook.dylib` 是原版的 tar 会打印 `Result: PASS`。实测用设备自带的 tar 跑旧脚本就是这个结果，而那个 tar 正是设备当前状态。
 
@@ -953,15 +1439,15 @@ app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因�
 
 回归用例两个方向都固定了：原版 `launchdhook`（312848 字节，`sha256 449a9606…`，四个名字出现 0 次）必须让脚本退出 1；打过补丁的（330144 字节，`sha256 150270a5…`）必须退出 0。缺成员、`arm64` 侧回退、`/Library/Frameworks` 混入也都各有用例。
 
-同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片完全相等，比对的是 `(cdhash, hash_type)` 二元组：少一条就点名该切片，多一条就点名该 entry，摘要对而标签错则单独点名。回归用例七条（对应闸门侧 13 条断言：`test-verify-basebin-artifacts.py` 的 `test_tar_script` 里 `:312` 到 `:387` 之间共 15 条 `check(`，除去 `:313` 的 `gen/dyld` 说明与 `:315` 的 launchdhook 说明，剩下的 13 条都以 `basebin.tc` 为期望）：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；单个 `0x0` 槽、`hashType=1`、没有 alternate 的切片写 SHA-1 摘要必须通过；同一个切片写 SHA-256 摘要必须失败并点名孤儿；同一个切片摘要正确但标签写成 2 必须失败并点名「labelled hash_type 2 … CodeDirectory declares 1」；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。生成器自身另有用例六条，见下。为什么这个不匹配必须修而不是解释成无害，见十二·八。
+同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片完全相等，比对的是 `(cdhash, hash_type)` 二元组：少一条就点名该切片，多一条就点名该 entry，摘要对而标签错则单独点名。回归用例七条（对应闸门侧 13 条断言：`test-verify-basebin-artifacts.py` 的 `test_tar_script` 里 `:312` 到 `:387` 之间共 15 条 `check(`，除去 `:313` 的 `gen/dyld` 说明与 `:315` 的 launchdhook 说明，剩下的 13 条都以 `basebin.tc` 为期望）：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；单个 `0x0` 槽、`hashType=1`、没有 alternate 的切片写 SHA-1 摘要必须通过；同一个切片写 SHA-256 摘要必须失败并点名孤儿；同一个切片摘要正确但标签写成 2 必须失败并点名「labelled hash_type 2 … CodeDirectory declares 1」；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。生成器自身另有用例六条，见下。为什么这个不匹配必须修而不是解释成无害，见十三·八。
 
-那七条里只有「单个 `0x0` 槽、`hashType=1`」这一形状能固定摘要算法。真实数据里所有 `0x1000` alternate 的 `hashType` 都是 2，所以先取 alternate 就把算法选择藏起来了：把 `code_directory_cdhash` 改回硬编码 SHA-256，双 CodeDirectory 的三条用例照样通过，失败的是这个形状的三条断言，加上经生成器传来的第四条，共 4 条 FAIL（见十二·八 的读数）。第四条由生成器经 `member_cdhashes` 复用同一份 cdhash 产生：改校验器的摘要也就改了生成器写出的内容，所以生成器选摘要这一支同样被这个变异钉住。标签那一支由「摘要正确、标签写成 2」这条单独固定：只把校验器的比对改成忽略标签，失败的恰好是这条与它配对的命名断言，共 2 条。
+那七条里只有「单个 `0x0` 槽、`hashType=1`」这一形状能固定摘要算法。真实数据里所有 `0x1000` alternate 的 `hashType` 都是 2，所以先取 alternate 就把算法选择藏起来了：把 `code_directory_cdhash` 改回硬编码 SHA-256，双 CodeDirectory 的三条用例照样通过，失败的是这个形状的三条断言，加上经生成器传来的第四条，共 4 条 FAIL（见十三·八 的读数）。第四条由生成器经 `member_cdhashes` 复用同一份 cdhash 产生：改校验器的摘要也就改了生成器写出的内容，所以生成器选摘要这一支同样被这个变异钉住。标签那一支由「摘要正确、标签写成 2」这条单独固定：只把校验器的比对改成忽略标签，失败的恰好是这条与它配对的命名断言，共 2 条。
 
 生成器写标签的那一行另有六条断言固定，因为上面七条都只经校验器，不经过生成器：`test_generator` 用 `build_code_directory(hash_type=HASH_TYPE_SHA1)` 造一棵只有 `launchdhook.dylib` 的暂存树，跑 `make-basebin-trustcache.py` 后断言它写出 1 条 entry、标签是 `1`、摘要是该 CodeDirectory 的 SHA-1 值、`flags` 为 `0`，且 `verify-basebin-trustcache.py` 接受这个文件。把 `make-basebin-trustcache.py:87` 的 `bytes([hash_type, ENTRY_FLAGS])` 改回 `bytes([2, ENTRY_FLAGS])`，这六条里恰好 2 条 FAIL：`generator: labels the entry from the CodeDirectory's hashType, not 2 (label 2, expected 1)` 与 `generator: the verifier accepts the file the generator wrote (verifier rc=1)`。
 
 六条里的第一条同时充当读取的守卫：它断言生成器退出 0 且 `basebin.tc` 确实写出，两者只要有一条不成立就 `return`，后面的读取不再执行。没有这个守卫时，生成器退出非零会让 `trustcache_entries` 对不存在的文件抛 `FileNotFoundError`，`main()` 没有捕获它，套件以 traceback 结束，`test_merge_script` 的 15 条断言一条不跑。加守卫后让生成器在 `collect_entries` 之前 `return 1`，读数是 1 条具名 FAIL（`generator: runs on a staging tree and writes basebin.tc`）、0 条 traceback、15 条 `merge:` 断言照常执行。
 
-### 十二·七 交付物：basebin tar 的内容、安装命令与回滚命令
+### 十三·七 交付物：basebin tar 的内容、安装命令与回滚命令
 
 **本节记录产物与命令，不是推荐执行的动作。** 装这份 tar 的那条命令在 2026-11-26 已经两次让设备宕机并需要人工重新越狱：00:50 那次之后 00:51 到 01:00 连续五次内核 panic，05:58 那次设备约 60 秒内停止响应、至 06:16 未恢复。起因是它替换的 `launchdhook.dylib` 正被 `launchd` 映射，时间、panic 原文与出处见文首的警告段。这条路线已被记录为关闭，重新开启需要用户明确授权。下面给出的 sha256、条目数、成员表与重建命令都是可以离线复核的产物读数；紧随其后的安装与回滚命令是记录。
 
@@ -1009,7 +1495,7 @@ for f in launchdhook.dylib systemhook.dylib dyldhook_merge.arm64e.iOS16-17.dylib
          dyldhook_merge.arm64e.iOS18+.dylib; do
   cp -p "cix/basebin/$f" "stage/basebin/$f"; chmod 755 "stage/basebin/$f"
 done
-# regenerate the trustcache from the members just written (十二·八)
+# regenerate the trustcache from the members just written (十三·八)
 python3 WebKitPlayground/dopamine-basebin/make-basebin-trustcache.py stage
 # pin the tc timestamp to the stock one, so the tar is byte-reproducible
 python3 - <<'PY'
@@ -1033,7 +1519,7 @@ cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m
 | `dyldhook_merge.arm64.iOS16-17.dylib` | 原版 | CI 构建 | 原版 |
 | `dyldhook_merge.arm64e.iOS18+.dylib` | 原版 | CI 构建 | 原版 |
 | `dyldhook_merge.arm64.iOS18+.dylib` | 原版 | CI 构建 | 原版 |
-| `basebin.tc` | `12bdb75e6962` | 重建，见十二·八 | `12bdb75e6962` |
+| `basebin.tc` | `12bdb75e6962` | 重建，见十三·八 | `12bdb75e6962` |
 
 `systemhook.dylib` 与 `dyldhook_merge.arm64e.iOS16-17.dylib` 取 CI 构建里的补丁版，因为设备当前是出厂字节：`/var/jb/basebin` 下 22 个文件与 `Dopamine.app/basebin.tar` 逐位相同，`systemhook.dylib` 是 233520 字节的 `6f16c545`，`dyldhook_merge.arm64e.iOS16-17.dylib` 是 74352 字节的 `1e90c5a3`。以自带 tar 为底会把这三处都留在原版。
 
@@ -1062,9 +1548,9 @@ cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m
 
 `WebKit` 对 `_WTFSignpostIndirectLoggingEnabled` 的强引用，与它为什么必须靠 sibling 提供，见 `build-state.md:558-562` 的崩溃原文（`Symbol not found: _WTFSignpostIndirectLoggingEnabled` / `Referenced from: <787DFAB1-…> /Volumes/VOLUME/*/WebKit.framework/WebKit` / `Expected in: <D309AA36-…> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore` / `dyld4::prepare → dyld4::halt → abort_with_payload`）与 `build-state.md:631` 的判定。
 
-**设备当前这一代不满足第 1、2 条，第 3 条未核；按 `十二·四` 的作用域，这是全系统级的缺陷，不是 WebKit 级。** 2026-11-26 只读实测：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 是 51654688 字节、`sha256 a5eadac56c8155ce…`、`LC_UUID 7e97b496-db02-3e46-9799-c4bdec869e8e`、`LC_BUILD_VERSION minos 18.5.0 sdk 18.5.0`，`BrowserEngineKit` 引用 5 处（其中绝对路径 2 处）；`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 与它是同一个 inode（60588），即同一份字节。`minos 18.5.0` 已高于 16.1，5 处 `BrowserEngineKit` 引用也在，所以第 1 条与第 2 条都不满足。第 3 条的状态是「未核」而不是「已知不满足」：`build-state.md:574-583` 记录 2026-11-25 那次往覆盖目录里放过同代 `JavaScriptCore` 并加载成功（镜像 #892），而 2026-11-26 那次只读实测只读了 `WebKit` 与 `Frameworks` 下的副本，没有读覆盖目录里的 `JavaScriptCore`，所以今天它还在不在没有读数。装前必须按下面第 1 条的第四条重新核一遍，不能假定它还在。这是装前必须换到 `minos ≤ 16.1` 那一代、并确认同代 `JavaScriptCore` 同在的两件事，与本次 tar 无关。
+**设备当前这一代不满足第 1、2 条，第 3 条未核；按 `十三·四` 的作用域，这是全系统级的缺陷，不是 WebKit 级。** 2026-11-26 只读实测：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 是 51654688 字节、`sha256 a5eadac56c8155ce…`、`LC_UUID 7e97b496-db02-3e46-9799-c4bdec869e8e`、`LC_BUILD_VERSION minos 18.5.0 sdk 18.5.0`，`BrowserEngineKit` 引用 5 处（其中绝对路径 2 处）；`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 与它是同一个 inode（60588），即同一份字节。`minos 18.5.0` 已高于 16.1，5 处 `BrowserEngineKit` 引用也在，所以第 1 条与第 2 条都不满足。第 3 条的状态是「未核」而不是「已知不满足」：`build-state.md:574-583` 记录 2026-11-25 那次往覆盖目录里放过同代 `JavaScriptCore` 并加载成功（镜像 #892），而 2026-11-26 那次只读实测只读了 `WebKit` 与 `Frameworks` 下的副本，没有读覆盖目录里的 `JavaScriptCore`，所以今天它还在不在没有读数。装前必须按下面第 1 条的第四条重新核一遍，不能假定它还在。这是装前必须换到 `minos ≤ 16.1` 那一代、并确认同代 `JavaScriptCore` 同在的两件事，与本次 tar 无关。
 
-**严重程度要按作用域算。** `十二·四` 记的作用域是每个被 spawn 的进程（`common.c:121-146` 的黑名单默认注入），所以覆盖目录里一代加载不了的 `WebKit` 影响的不是只有 app 与 helper：任何被 spawn、且搜索路径里先命中这个目录的进程都会拿到它。这也是 `十一·二`「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」那条理由向上一级：候选集合收窄到只放需要覆盖的五个 framework 与两个 dylib，出问题的面才是这五个 framework 而不是整个 `/var/jb/Library/Frameworks`。
+**严重程度要按作用域算。** `十三·四` 记的作用域是每个被 spawn 的进程（`common.c:121-146` 的黑名单默认注入），所以覆盖目录里一代加载不了的 `WebKit` 影响的不是只有 app 与 helper：任何被 spawn、且搜索路径里先命中这个目录的进程都会拿到它。这也是 `十一·二`「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」那条理由向上一级：候选集合收窄到只放需要覆盖的五个 framework 与两个 dylib，出问题的面才是这五个 framework 而不是整个 `/var/jb/Library/Frameworks`。
 
 `install-webkit-override.sh` 的 `preflight_sources` 只检查各 framework 的二进制与 `Info.plist` 是否存在，不读 `minos`，不查 `BrowserEngineKit`，也不解析符号，所以这三条都要手工核，脚本不会拦。
 
@@ -1139,7 +1625,7 @@ ssh mobile@192.168.2.136 'lldb -b -o "process attach --pid $(ps ax | grep -F Mob
 
 `grep -a -c` 对 38007776 字节的 `JavaScriptCore` 命中 1 是本机在 `webkit-rootless-rpath-lcid_18.3_arm64.deb` 那份上读到的值；命中 0 说明放进去的不是这一代。整数命中数只能说明字符串在，符号表里的定义还要另看：本机用 `rabin2 -s` 读同一份时该符号是 `GLOBAL NOTYPE 0x0162c004`，`n_type=0x0f`、`n_sect=35`，落在 `__DATA,__common` 段内（地址 `0x162c000`、长度 72328）。字符串命中数不区分「定义」与「引用」：同一 deb 的 `WebKit` 也命中 2 处，但那两处都在 `__LINKEDIT`，指向同一个未定义导入，不是定义。
 
-### 十二·八 信任缓存：为什么必须按交付的成员重新生成 `basebin.tc`
+### 十三·八 信任缓存：为什么必须按交付的成员重新生成 `basebin.tc`
 
 `basebin.tc` 不是描述性文件，它是内核信任缓存的输入。`update.m:32-39` 在替换成员**之前**把它上传为 `BASEBIN_TRUSTCACHE_UUID`；`DOJailbreaker.m:348` 每次越狱也上传同一份。之后没有任何一步会按 `/var/jb/basebin` 里的实际文件重算它（`jb_trustcache_add_directory` 在 `BaseBin/` 与 `Application/` 里没有任何调用点）。所以 tar 里的 `basebin.tc` 与实际成员不一致时，内核信任的是另一批二进制。
 
@@ -1197,7 +1683,7 @@ print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
 
 摘要算法与标签这两支各自被一条用例固定，读数如下。把 `code_directory_cdhash` 改回硬编码 SHA-256（保留 `(digest, hashType)` 的返回形状与槽位选择），`test-verify-basebin-artifacts.py` 立即 4 条 FAIL：`a lone SHA-1 CodeDirectory with its SHA-1 cdhash passes`、`that SHA-256 digest is named as an orphan`、`the mislabelled entry is named as such`、`generator: writes the SHA-1 digest the label claims (85e07834… vs baa262f1…)`。第四条经生成器传来：`make-basebin-trustcache.py:75` 从 `_verifier.member_cdhashes` 取 cdhash，改校验器的摘要也改了生成器写出的内容，于是生成器选摘要这一支同样被这个变异钉住。把校验器的比对改成忽略标签（覆盖与孤儿都只按摘要判），恰好 2 条 FAIL：`a SHA-1 cdhash labelled hash_type 2 is rejected` 与它的命名断言。两次改回原状后都是 `all cases passed`。
 
-### 十二·九 为什么改写必须在 dyld 路径解析阶段从进程内部发生
+### 十三·九 为什么改写必须在 dyld 路径解析阶段从进程内部发生
 
 一句话判据：**平台签名进程对 `DYLD_FRAMEWORK_PATH` 不生效，构造函数里的 `dlopen` 只会映射出第二份，两者都不能把 app 的 `WebKit` 换成 `/var/jb` 那一代。** 能让 app 换库的只有一条路：在 dyld 完成路径解析之前，由 `posix_spawn` 那一刻交给子进程的 `envp` 把搜索目录送进去。这就是本分支改 `launchdhook` 而不是改过滤器的原因。
 
@@ -1230,7 +1716,7 @@ print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
 
 因此判据落在 `posix_spawn` 的 `envp`：`launchdhook` 在 launchd 里拦住这次 exec，把四个变量写进子进程的 `envp`，dyld 在子进程里做的第一次解析就能看到 `/var/jb/Library/WebKitOverride`，不需要任何运行期替换。
 
-### 十二·十 这一节没有做的事
+### 十三·十 这一节没有做的事
 
 - 没有安装，也没有对设备发命令改动任何文件。tar、`basebin.tc` 与所有校验都在本机完成；设备侧只有只读的 `scp` 取回自带 tar 与三个成员用于比对。
 - 没有构建 `launchdhook.dylib`：交付的二进制取自 CI 构建产物 `basebin-tar`（artifact 14849117614，run 45237030318），本机没有 macOS 与 iPhoneOS SDK，无法重建。
