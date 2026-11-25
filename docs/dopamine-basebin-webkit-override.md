@@ -873,7 +873,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 ### 十二·二 这份 tar 通不过仓库自己的六个名字的 gate，原因与可接受范围
 
-**事实先写**：本 tar 在 `dopamine-basebin/verify-basebin-tar.sh` 上退出 1。输出里 `^FAIL` 开头的行共 **8** 行，由 **7 条具体断言**加 **1 条汇总行**（`shipped dyldhook dylibs violate verify-dyldhook-merge.sh`）组成。7 条具体断言分成两组：6 条落在 `verify-dyldhook-merge.sh` 那一组（六个 dyldhook dylib 的两个 hook），1 条落在 `basebin.tc` 的覆盖性检查上。
+**事实先写**：本 tar 在 `dopamine-basebin/verify-basebin-tar.sh` 上退出 1。输出里 `^FAIL` 开头的行共 **8** 行，由 **7 条具体断言**加 **1 条汇总行**（`shipped dyldhook dylibs violate verify-dyldhook-merge.sh`）组成。7 条具体断言分成两组：6 条落在 `verify-dyldhook-merge.sh` 那一组（六个 dyldhook dylib 的两个 hook），1 条落在 `basebin.tc` 与所带切片的**双向集合相等**检查上。
 
 甲组 6 条逐条是：
 
@@ -886,24 +886,37 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 | 缺少 `isOverridablePath` hook | `dyldhook_merge.arm64.iOS18+.dylib` |
 | 缺少 `isAlwaysOverridablePath` hook | `dyldhook_merge.arm64.iOS18+.dylib` |
 
-乙组 1 条是 `basebin.tc does not cover the members this tar ships; jbctl would upload the wrong trustcache`，明细为 `basebin.tc does not cover 8 slice(s) of 16 members`。8 个切片里 `launchdhook` 4 个（`8629ee98…`、`f68f9da3…`、`b0d2a727…`、`6f362b32…`）、`systemhook` 4 个（`737d2356…`、`14d05a3f…`、`20dcc827…`、`d468b1fb…`），都不在 stock 那 28 条里。它问的是与甲组不同的事：甲组说六个 dyldhook dylib 里只有一个打过补丁，乙组说本 tar 换上去的三个成员一个都没被 `basebin.tc` 覆盖。`jbctl update basebin` 先上传 `basebin.tc` 再拷成员（`BaseBin/launchdhook/src/update.m:32-39`），所以这条断言的措辞就是「上传的信任缓存与本 tar 实际带的二进制不匹配」。
+乙组 1 条是 `basebin.tc and the members this tar ships disagree; jbctl would upload the wrong trustcache`，明细为 `basebin.tc and the shipped slices disagree: 4 uncovered slice(s), 4 orphan entry/entries, 16 members checked, 28 entries in the file`。
+
+这条断言比甲组强，也比「覆盖性检查」强：`verify-basebin-trustcache.py` 的 docstring 写明比较是**双向集合相等**，「一条任何切片都不产生的记录是内核永远不会算出的 cdhash，不是无害的」。所以它对两种情形同时报错，本 tar 两种都命中：
+
+- **4 个未覆盖切片。** `launchdhook` 的 `f68f9da3…`、`6f362b32…` 与 `systemhook` 的 `14d05a3f…`、`d468b1fb…`，都是这两个文件各自两个切片的 `0x1000`（SHA-256）备用 CodeDirectory。脚本对每个切片只取一个 cdhash，有 `0x1000` 时优先取它，因为上游 `basebin.tc` 对双 CodeDirectory 的切片正是只留 `0x1000` 那一对。这四个值不在 stock 那 28 条里。
+- **4 条孤儿记录。** `0e59e398…`、`a7438ed3…`、`d3c4e949…`、`dd3f99c4…` 在 `basebin.tc` 里，却不对应本 tar 任何切片——它们是**原版** `launchdhook` 与 `systemhook` 的 `0x0` cdhash。这正是「成员被替换、`basebin.tc` 仍是 stock 版」的直接特征，也是单向覆盖检查抓不到的那一半。
+
+这两个文件的 `0x0`（SHA-1）cdhash 是 `fe83a746…`、`6e8952fb…`、`8d580b85…`、`bd93fa08…`，它们同样不在那 28 条里，但**不进入上面任何一组的计数**：一个双 CodeDirectory 切片在信任缓存里只占一个槽位，脚本对每个切片只产出一个 cdhash，所以未覆盖数是 4 而不是 8。这四个 `0x0` 值只在「如果按 SHA-1 槽位算」的意义上存在，见十二·十那张按 `hashType` 逐槽位列的表。
+
+乙组与甲组问的不是同一件事。甲组说六个 dyldhook dylib 里只有一个打过补丁；乙组说本 tar 换上去的两个该进信任缓存的成员没有被覆盖，而 `basebin.tc` 还留着它们原版的记录。`dyldhook_merge.*` 六个成员不在这条断言的范围内：`BaseBin/Makefile:100` 说明它们不走 basebin 信任缓存，`verify-basebin-trustcache.py` 的 `is_trustcached_member` 对 `dyldhook_merge.` 前缀直接豁免。所以这里不能说「换上去的三个成员一个都没被 `basebin.tc` 覆盖」——该进表的是 `launchdhook` 与 `systemhook` 两个，`dyldhook_merge.arm64e.iOS16-17.dylib` 不在其列。事实是这三个成员里，两个该进表的都没被覆盖。
+
+`jbctl update basebin` 先上传 `basebin.tc` 再拷成员（`BaseBin/launchdhook/src/update.m:32-39`），所以这条断言的措辞就是「上传的信任缓存与本 tar 实际带的二进制不匹配」。孤儿记录那一半让这个错配更具体：传上去的表里还留着两个成员原版的 cdhash。
 
 这条失败与十二·五那段「不在 `basebin.tc` 里是预期状态」可以同时成立，两处不矛盾：十二·五论证的是「不在表里不足以让二进制加载失败」，据此说明它不构成 panic 的充分原因；乙组断言的是「上传的信任缓存必须与本 tar 带的二进制一致」，是一条完整性要求。前者回答「为什么还能跑」，后者回答「这份 tar 是否自洽」。`basebin.tc` 的结构与逐切片 cdhash 见十二·五与十二·十，本节不重复。
 
-乙组这条是 M125 后续提交 `02e234a` 加进脚本的。在 M125 更早的 `64f8834` 上跑同一份 tar 只有 **7** 行（6 条甲组 + 1 条汇总），`basebin.tc` 那条还不在脚本里。本节按 `02e234a` 记录，因为 M125 先于 M126 合入，读者合并后拿到的就是这一版。
+**这条读数的取法要固定在一个会随合入而稳定的对象上，不挂在某个提交号上。** 本节的读数取自 **M125 合入后的 `dopamine-basebin/verify-basebin-tar.sh`**（连同它调用的 `verify-basebin-trustcache.py`），不引用 M125 分支上任何中间提交的编号。这条断言在 M125 分支上换过三代：最早那代没有 `basebin.tc` 检查，同一份 tar 只报 7 行；中间那代只做单向覆盖、对每个 CodeDirectory 一律按 SHA-256 算 cdhash，本 tar 上明细写作 `8 slice(s) of 16 members`，而其中四个值内核根本不会算出；最终那代才是双向集合相等、按 `hashType` 取 cdhash，即本节上面引的那条明细。写提交号会在依赖分支再前进时立刻过期，M126 前两轮已经在这上面错过两次，所以这里只用「合入后」定位。
 
-**六个名字之外还有一项，已经由 M125 加进同一个 gate。** 上面那张表说的是 `verify-dyldhook-merge.sh` 那一组，它只管六个 dyldhook dylib。本 tar 里真正会被这台设备选中的第二个成员 `basebin/launchdhook.dylib` 现在也在断言范围内：M125 在 `dopamine-basebin/verify-basebin-tar.sh:110-134` 增加了对它的检查，实现是复用 `verify-systemhook-search-paths.py --kind launchdhook`，断言它在每个切片的 `__cstring` 里带四个搜索路径名与两个覆盖目录，且不带共享搜索根。
+要复核本节读数，用合入后 `main` 上的那份脚本跑 `/tmp/basebin-lh.tar`，期望 8 行 `^FAIL`：6 条甲组 + 1 条乙组 + 1 条汇总。同一份脚本跑 CI 产物 tar（`/home/real186/webkit-work/basebin-ci/basebin.tar`，6144000 字节）应得退出 0 与 `Result: PASS`——这一条同时是「拿到的是哪一代脚本」的判别：中间那代在这个 CI tar 上报退出 1。
 
-**本 tar 在这一项上通过。** 用 M125 的脚本跑本 tar，输出里 `PASS: tar ships basebin/launchdhook.dylib` 与 `PASS: launchdhook.dylib carries the four search-path names` 两行。这条通过的断言与乙组那条失败说的是两件事，两者同时成立：`launchdhook` 确实带了四个搜索路径名（甲、乙两组之外，这一项通过），而它不在 `basebin.tc` 里（乙组那条失败）。所以本 tar 的 `launchdhook` 既是「按内容该装」的，也是「没被信任缓存覆盖」的。
+**六个名字之外还有一项，已经由 M125 加进同一个 gate。** 上面那张表说的是 `verify-dyldhook-merge.sh` 那一组，它只管六个 dyldhook dylib。本 tar 里真正会被这台设备选中的第二个成员 `basebin/launchdhook.dylib` 现在也在断言范围内：M125 的 `dopamine-basebin/verify-basebin-tar.sh` 里有一段专门检查它（从 `# launchdhook is the other binary built from systemhook/src/common/common.c` 那句注释起，到对应的 `fi` 止），实现是复用 `verify-systemhook-search-paths.py --kind launchdhook`，断言它在每个切片的 `__cstring` 里带四个搜索路径名与两个覆盖目录，且不带共享搜索根。这一段不写行号：它在 M125 分支上随每次改动前移，写死会像提交号一样过期，用那段注释原文定位更稳。
 
-两个方向都实测过，用的是 M125 分支上的这同一份脚本。下表两行是本 mission 在本机的读数，输入分别是本 tar 里的补丁版与出厂 `orig.tar` 里的原版；M125 自己的 `test-verify-basebin-artifacts.py` 用合成的 Mach-O fixture 固定了同样两个方向（`02e234a` 上第 185 行检查健康 tar 报出 `launchdhook.dylib carries the four search-path names`、第 209 行检查原版被拒并提示 `does not set the search paths dyld reads`），那组 fixture 与下表是两回事，不要混为一谈：
+**本 tar 在这一项上通过。** 用 M125 的脚本跑本 tar，输出里 `PASS: tar ships basebin/launchdhook.dylib` 与 `PASS: launchdhook.dylib carries the four search-path names` 两行。这条通过的断言与乙组那条失败说的是两件事，两者同时成立：`launchdhook` 确实带了四个搜索路径名（这一项通过），而它的 `0x1000` 槽位不在 `basebin.tc` 里（乙组那 4 个未覆盖切片中的两个）。所以本 tar 的 `launchdhook` 既是「按内容该装」的，也是「没被信任缓存覆盖」的。
+
+两个方向都实测过，用的是 M125 分支上的这同一份脚本。下表两行是本 mission 在本机的读数，输入分别是本 tar 里的补丁版与出厂 `orig.tar` 里的原版；M125 自己的 `test-verify-basebin-artifacts.py` 用合成的 Mach-O fixture 固定了同样两个方向（M125 合入后那一版里，一条检查健康 tar 报出 `launchdhook.dylib carries the four search-path names`，另一条检查原版被拒并提示 `does not set the search paths dyld reads`），那组 fixture 与下表是两回事，不要混为一谈：
 
 | 输入 | `verify-systemhook-search-paths.py --kind launchdhook` 的结果 |
 | --- | --- |
 | 本 tar 里的补丁版 330144 / `150270a5…` | 19 条断言全 PASS，`all assertions hold`，退出 **0** |
 | 出厂原版 312848 / `449a9606…` | **12 条断言失败**（两个切片各 6 条），退出 **1** |
 
-所以这道断言不是空转：换成原版就会被拒。它对本 tar 的意义是一次确认，不是一次免责——本 tar 仍然因为甲组那六个成员与乙组那条覆盖性失败而退出 1。
+所以这道断言不是空转：换成原版就会被拒。它对本 tar 的意义是一次确认，不是一次免责——本 tar 仍然因为甲组那六个成员与乙组那条错配而退出 1。
 
 甲组那六条失败的原因是**六个 dyldhook dylib 里只有一个打过补丁**。按 `_MACHOMERGER_HOOK_` 前缀 token 计数（四位依次是 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl`）：
 
@@ -1171,7 +1184,7 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 三个成员的依赖加载命令逐切片比对 | **已执行**（本机），逐条相同 | 未做 |
 | 三个成员的未定义符号比对 | **已执行**（本机，每切片去表头）：`launchdhook` 273 / 273、hook dylib 0 / 0、`systemhook` arm64 131 / 130 与 arm64e 126 / 125，见十二·三 | 未做 |
 | 四个成员（两版各两个）的 cdhash 与 `basebin.tc` 的比对 | **已执行**（本机），含 11 个槽位的反面对照，见十二·十 | 未做 |
-| 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：7 条具体断言失败（6 条 dyldhook + 1 条 `basebin.tc` 覆盖性）+ 1 条汇总行，见十二·二 | 未做 |
+| 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：7 条具体断言失败（6 条 dyldhook + 1 条 `basebin.tc` 双向集合相等）+ 1 条汇总行，见十二·二 | 未做 |
 | 把 tar 送到设备 | **未执行** | **已执行**，`/var/mobile/Documents/bb/basebin-lh.tar` |
 | `jbctl update basebin` | **未执行** | **已执行**，2026-11-26 00:50:43 |
 | 用户空间重启 | **未执行** | **已执行**，由 `jbctl` 触发，随后五次内核 panic |
