@@ -2,15 +2,16 @@
 
 本文回答四个问题：`gen/dyld` 怎么产生、在启动哪一步被读、替换它要重启什么；把它换成带 `isOverridablePath` / `isAlwaysOverridablePath` 两个 hook 的版本需要哪几步、每步怎么回退；装上之后用什么命令判定「链接期硬依赖系统 WebKit 的宿主加载了 18.3」；这条路走不通时否证它是哪一条读数。
 
-结论先写三条：
+结论先写四条：
 
 1. **`gen/dyld` 是合成产物，不是装进去的文件。** 它每次由 `gen/dyld.orig` 复制一份、打 `getAMFI` 与 `LC_UUID` 补丁、用 `MachOMerger` 合并 `basebin/dyldhook_merge.<arch>.iOS<ver>.dylib`、再重签名得到。所以「装 hook」等于「换掉那个 `dyldhook_merge` 输入」，不是换 `gen/dyld`。
 2. **这条路在离线证据上成立，但还缺一次重启后的行为读数。** 本次取到的三段读数把「缺什么」钉住了：覆盖目录里放一份 18.3 `WebKit`、`DYLD_FRAMEWORK_PATH` 指向它，未打 hook 时 dyld 连候选行都不打印（对照 `/var/jb/usr/lib/libiosexec.1.dylib` 会打印）；四个 hook 计数在设备上是 `1 0 0 1`、`basebin.tar` 里那份是 `1 1 1 1`；硬链接宿主的开局形态被判据复现（一份 `WebKit`、uuid `743EAFB4…`、来自 `/System`）。缺的是装上之后同一个宿主的 uuid 变成 `787DFAB1…`。
-3. **安装需要 root，并且要一次用户空间重启。** 本次没有执行任何需要 root 的写操作，也没有重启。命令整理成清单交回，见第六节。
+3. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（设备 `1 0 0 1`）；`systemhook` 是原版、不写那四个搜索路径变量（设备那份 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次，`basebin.tar` 里那份 234336 出现 2 次）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks`）。三处都要补，任缺一处都拿不到 18.3 那份 `WebKit`。
+4. **安装需要 root，并且要一次用户空间重启。** 本次没有执行任何需要 root 的写操作，也没有重启。命令整理成清单交回，见第六节。
 
 本文的结论分三档标注，与 `docs/ios16-launchd-xpc-resolution-gap.md` 的约定一致：**已确证**（附设备读数原文）、**有源码支撑**（能指出代码位置，但没有设备行为读数）、**假设**（无直接读数）。一条论断的强度取它最弱的一环。
 
-读数全部取自 2026-11-25 的 iPad Pro 11 英寸 M2（`iPad14,4`）、iPadOS 16.1（20B82）、Dopamine 3.0.13 rootless，设备地址 `mobile@192.168.2.136`，只读连接。文件写入只发生在设备 `/tmp` 与 `/var/jb/tmp` 下。
+读数全部取自 2026-11-25 的 iPad Pro 11 英寸 M2（`iPad14,4`）、iPadOS 16.1（20B82）、Dopamine 3.0.13 rootless，设备地址 `mobile@192.168.2.136`，只读连接。文件写入只发生在设备 `/tmp` 与 `/var/jb/tmp` 下，测试文件已删除。
 
 ---
 
@@ -140,6 +141,30 @@ dyld[32567]:   found: dylib-from-disk: "/var/jb/usr/lib/libiosexec.1.dylib"
 
 两相对照把分工钉住了：路径变量这一半（dyld 读 `DYLD_FRAMEWORK_PATH`、拼候选）现在是有效的；缺的是「缓存项允许被磁盘副本顶替」这一判定，也就是两个 hook。
 
+**打补丁的 `systemhook` 会不会真的写那四个变量，可以在不安装的情况下直接测。** 把两份 dylib 分别用 `DYLD_INSERT_LIBRARIES` 注入一个再派生 bash 的进程，看子进程的 `export -p`：
+
+```sh
+# 设备上，/var/jb/tmp 下解出 tar 里那份
+tar -xf /var/mobile/Documents/basebin.tar basebin/systemhook.dylib
+run() { env DYLD_INSERT_LIBRARIES="$1" /var/jb/usr/bin/bash -c \
+          "/var/jb/usr/bin/bash -c 'export -p'" | grep -E 'DYLD_|__XPC_DYLD'; }
+run /var/jb/basebin/systemhook.dylib            # 原版 233520 / 6f16c545…
+run /var/jb/tmp/xxx/basebin/systemhook.dylib    # 补丁版 234336 / d7045cd4…
+```
+
+原版只留 `DYLD_INSERT_LIBRARIES` 一行；补丁版给子进程加了四行：
+
+```
+DYLD_FRAMEWORK_PATH="/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride"
+DYLD_LIBRARY_PATH="/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride/usr/lib"
+__XPC_DYLD_FRAMEWORK_PATH=".../procursus/Library/WebKitOverride"
+__XPC_DYLD_LIBRARY_PATH=".../procursus/Library/WebKitOverride/usr/lib"
+```
+
+两点含义。第一，`0001-systemhook-set-search-paths.patch` 的行为已在设备上复现，不是只靠 CI 的静态断言。第二，变量值走的是 `JBROOT_PATH`，展开成 `/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride` 这一条真实路径，不是 `/var/jb/...` 这条符号链接路径；判定时按真实路径比对，不要按 `/var/jb` 比对。
+
+这个测试只说明「补丁会写变量」，不说明「真实 app 进程会拿到变量」：真实链路要经过 `launchd → uiopen → posix_spawn`，而测试里的父进程是我自己拉起的。后者的读法在 4.3 节。
+
 ### 3.2 硬链接宿主的形态已被复现
 
 `tools/idevice-webkit/src/claim_images.c:6-52` 记的是构造器路线在硬链接宿主上失败。本次用一个**只链接期依赖** stub 的宿主复现了同一条形态：stub 用 `-install_name /System/Library/Frameworks/WebKit.framework/WebKit` 且只导出一个符号；宿主对那个符号做 `weak_import` 引用（否则 18.3 那份不导出它，链接期就会失败）。运行读数：
@@ -193,11 +218,12 @@ dyldhook_merge.arm64e.iOS16-17.dylib   75952  <tar 里那份的 sha>  [1, 1, 1, 
 
 ### 4.2 第二层：运行期，dyld 愿不愿意用磁盘副本
 
-一条命令，不需要 root，不需要改任何文件：
+一条命令，不需要 root，不需要改任何文件。命令里的目录要和第五节的布局一致：按第 2 步做了符号链接，用 `/var/jb/Library/WebKitOverride`；没做，就直接用 18.3 实际所在的 `/var/jb/Library/Frameworks`。两种写法等价，因为链接指向后者。
 
 ```sh
-DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=/var/jb/Library/WebKitOverride \
-DYLD_LIBRARY_PATH=/var/jb/Library/WebKitOverride/usr/lib \
+DIR=/var/jb/Library/Frameworks          # 或 /var/jb/Library/WebKitOverride
+DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=$DIR \
+DYLD_LIBRARY_PATH=$DIR/usr/lib \
   /var/jb/usr/bin/python3 -c 'import ctypes; ctypes.CDLL("/System/Library/Frameworks/WebKit.framework/WebKit")' 2>&1 \
   | grep -A6 'find path "/System/Library/Frameworks/WebKit.framework/WebKit"'
 ```
@@ -206,17 +232,18 @@ DYLD_LIBRARY_PATH=/var/jb/Library/WebKitOverride/usr/lib \
 
 ```
 dyld[N]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
-dyld[N]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/var/jb/Library/WebKitOverride/WebKit.framework/WebKit"
-dyld[N]:   found: dylib-from-disk-to-override-cache: "/var/jb/Library/WebKitOverride/WebKit.framework/WebKit"
+dyld[N]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "<DIR>/WebKit.framework/WebKit"
+dyld[N]:   found: dylib-from-disk-to-override-cache: "<DIR>/WebKit.framework/WebKit"
 ```
 
-**本机当前（未打 hook）的实际输出**，即失败基线：
+**本机当前（未打 hook）的实际输出**，即失败基线。本次用真实的 18.3 目录重取了一遍，形状与之前用 `/tmp` 对照目录取的一致：
 
 ```
-dyld[32746]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
-dyld[32746]:   possible path(original path on disk): "/System/Library/Frameworks/WebKit.framework/WebKit"
-dyld[32746]:   possible path(original path): "/System/Library/Frameworks/WebKit.framework/WebKit"
-dyld[32746]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/WebKit.framework/WebKit"
+$ DIR=/var/jb/Library/Frameworks DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=$DIR ...
+dyld[33724]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[33724]:   possible path(original path on disk): "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[33724]:   possible path(original path): "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[33724]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/WebKit.framework/WebKit"
 ```
 
 判据写成三行，每条对应一种失败：
@@ -224,39 +251,110 @@ dyld[32746]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/Web
 | 判据 | 读数 | 归因 |
 | --- | --- | --- |
 | 出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 且 `found: dylib-from-disk-to-override-cache` | 通过 | hook 生效、目录命中、磁盘副本顶替成功 |
-| 有 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)`，但 `found: dylib-from-cache` | **hook 生效但没取代** | 目录里没有这个文件，或 inode 与缓存项相同；查 `ls -l /var/jb/Library/WebKitOverride/WebKit.framework/WebKit` |
+| 有 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)`，但 `found: dylib-from-cache` | **hook 生效但没取代** | 目录里没有这个文件，或 inode 与缓存项相同；查 `ls -l <DIR>/WebKit.framework/WebKit` |
 | 完全没有 `DYLD_FRAMEWORK/LIBRARY_PATH` 候选行 | **hook 没生效** | 回到 4.1 看四个计数 |
 
 这三种判据里，只有第三种有本机实测（3.1 节那三段：候选行根本不出现）。前两种的读数形状来自源码与 dyld 里的字符串，本次**没有**在装上 hook 的机器上取到，复跑时请按实际输出记录，不要照抄上表。
 
 第二种之所以能单独分辨，是因为同一台设备上出现过「候选行出现、但命中的不是覆盖目录」的现成例子，读数是 `/var/jb/usr/lib/libiosexec.1.dylib` 那条：候选行 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): ".../libiosexec.1.dylib"` 存在，`found:` 落在 `dylib-from-disk` 而不是覆盖目录。它证明「候选行出现」与「命中覆盖目录」是两件可分的事。
 
-**这条命令为什么能代表硬链接宿主。** 3.2 节那个硬链接宿主的判定与它同源：宿主开局是 `WEBKIT_IMAGES=1`、uuid `743EAFB4…`、全部来自 `/System`。hook 生效之后，同一个宿主的期望读数是 `WEBKIT_IMAGES=1`、uuid `787DFAB1…`、`path=/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`，并且 `anchor bound to: NOT the 16.1 system WebKit`。三行都要对上才算通过；只对上 uuid 不行，因为 uuid 相同不代表路径是覆盖目录那份（`/var/jb` 是符号链接，同一个文件有两条字符串形态）。
+**这条命令为什么能代表硬链接宿主。** 3.2 节那个硬链接宿主的判定与它同源：宿主开局是 `WEBKIT_IMAGES=1`、uuid `743EAFB4…`、全部来自 `/System`。hook 生效之后，同一个宿主的期望读数是 `WEBKIT_IMAGES=1`、uuid `787DFAB1…`、`path=<DIR>/WebKit.framework/WebKit`，并且 `anchor bound to: NOT the 16.1 system WebKit`。三行都要对上才算通过；只对上 uuid 不行，因为 uuid 相同不代表路径是覆盖目录那份（`/var/jb` 是符号链接，同一个文件有两条字符串形态）。
 
 ### 4.3 第三层：真实宿主，`WebContent` 是否也换了
 
 `WebContent` 与 app 进程拿目录的途径不同，判据也不同：
 
-- **五个 `.xpc` 自带 4 条 `LC_DYLD_ENVIRONMENT`。** 本次逐条解析，五份完全相同：`DYLD_FRAMEWORK_PATH=@executable_path/..`、`DYLD_LIBRARY_PATH=@executable_path/..`、`DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`、`DYLD_LIBRARY_PATH=/var/jb/usr/lib`。前两条是死的（`@executable_path/..` 展开到 `XPCServices/`，那里没有这些文件），真正起作用的是后两条，它们指向 `/var/jb/Library/Frameworks`，不是 `/var/jb/Library/WebKitOverride`。所以**只装 dyld hook 不会让 `.xpc` 用上覆盖目录**，`.xpc` 的目录来自它自己的加载命令。
-- **app 进程没有 `LC_DYLD_ENVIRONMENT`。** 本次读到 Safari（pid 2723）与 Chrome（pid 3533）的 `launchctl print pid/<pid>` `environment` 段落只有 `PATH`、`CFFIXED_USER_HOME`、`HOME`、`TMPDIR` 四项，没有 `DYLD_FRAMEWORK_PATH`。所以 app 进程的目录只能来自 `systemhook`，也就是 `basebin.tar` 里那份打了搜索路径补丁的 `systemhook.dylib`（本次读到它含 `/Library/WebKitOverride` 4 处、`/Library/WebKitOverride/usr/lib` 2 处，与设备上 233520 字节的原版不同）。
+- **18.3 的五个 `.xpc` 各带 4 条 `LC_DYLD_ENVIRONMENT`，16.1 的五个各 0 条。** 本次在设备上逐份解析，读数如下。18.3 那四条的取值是 `DYLD_FRAMEWORK_PATH=@executable_path/..`、`DYLD_LIBRARY_PATH=@executable_path/..`、`DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`、`DYLD_LIBRARY_PATH=/var/jb/usr/lib`；前两条是死的（`@executable_path/..` 展开到 `XPCServices/`，那里没有这些文件），后两条指向 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`。`grep -a -o 'DYLD_[A-Z_]*PATH=/[^[:space:]]*'` 在 `com.apple.WebKit.WebContent` 上只返回这两条，二进制里 `/var/jb` 开头的串也只有这两个。
+- **app 进程没有 `LC_DYLD_ENVIRONMENT`。** 本次读到 Safari（pid 33349）与 Chrome（pid 3533）的 load command 里没有这一项（`rabin2 -H` 计数为 0，`grep -a -c DYLD_FRAMEWORK_PATH` 也是 0）。所以 app 进程的目录只能来自环境变量。
 
-第三层的判定要三层同时对齐时间戳：`launchctl print pid/<helper>` 的 `environment` 段落里有覆盖目录、`lldb image list -o -f` 的三份镜像来自覆盖目录、`DYLD_PRINT_SEARCHING` 的候选行落在覆盖目录。本次没有做，列出读法：
+**读环境变量不能用 `launchctl print`。** 它的 `environment` 段落不是进程的 envp，实测同一个 pid（33349）上两者不一致：
 
-```sh
-# 取一个 WebContent 的 pid，再同时取三项
-PID=$(ps ax -o pid=,comm= | awk '/com.apple.WebKit.WebContent/{print $1; exit}')
-launchctl print pid/$PID | sed -n '/environment = {/,/^\t}/p' | grep -E 'DYLD_(FRAMEWORK|LIBRARY)_PATH'
-lldb -b -o "process attach --pid $PID" -o "image list -o -f" -o detach -o quit 2>/dev/null \
-  | grep -E 'WebKit.framework/WebKit$|WebCore.framework/WebCore$|JavaScriptCore.framework/JavaScriptCore$'
+```
+$ ps -E -p 33349 | tr ' ' '\n' | grep DYLD
+DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib
+
+$ /var/jb/usr/bin/python3 -c '...sysctl KERN_PROCARGS2...' 33349
+env_total=21  dyld_env=1
+    DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib
+
+$ launchctl print pid/33349 | sed -n '/environment = {/,/^\t}/p'
+	environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+		CFFIXED_USER_HOME => /private/var/mobile/Containers/Data/Application/6E62C835-...
+		HOME => ...
+		TMPDIR => .../tmp
+	}
 ```
 
-通过判据是三条镜像路径全部落在 `/var/jb/Library/WebKitOverride` 下，且 `environment` 段落里有覆盖目录。任一条落在 `/System` 即未通过；`environment` 段落为空而镜像来自覆盖目录，说明是 `.xpc` 自己的加载命令给的路（此时覆盖目录必须是 `/var/jb/Library/WebKitOverride`，否则反推失效）。
+`systemhook` 只能靠 `DYLD_INSERT_LIBRARIES` 注入，同一进程的 `lldb image list` 也确认它已映射（`image list` 第 2 项就是 `.../procursus/basebin/systemhook.dylib`），所以那个四行段落只是 launchd 记录的启动环境，不是进程启动后的 envp。凡是要回答「这个进程的环境里有没有搜索路径」，只能用 `ps -E` 或 `sysctl KERN_PROCARGS2`。
+
+判定用下面三条，第一条给环境，第二条给归属，第三条给来源：
+
+```sh
+PID=$(ps -Ao pid=,comm= | awk '/com.apple.WebKit.WebContent$/{print $1; exit}')
+
+# ① 真实 envp 里的搜索路径（不是 launchctl print）
+ps -E -p $PID | tr ' ' '\n' | grep -E '^(DYLD_(FRAMEWORK|LIBRARY)_PATH|__XPC_DYLD_)'
+
+# ② 三份镜像实际来自哪条路径
+lldb -b -o "process attach --pid $PID" -o "image list -o -f" -o detach -o quit 2>/dev/null \
+  | grep -E 'WebKit\.framework/WebKit$|WebCore\.framework/WebCore$|JavaScriptCore\.framework/JavaScriptCore$'
+
+# ③ 候选行落在哪个目录
+DYLD_PRINT_SEARCHING=1 /usr/libexec/... # 见 4.2 节
+```
+
+三条判据：
+
+| ① 环境 | ② 镜像路径 | 归因 |
+| --- | --- | --- |
+| 有覆盖目录 | 三份都在覆盖目录下 | 通过 |
+| 有覆盖目录 | 任一落在 `/System` | **hook 生效但没取代**，回到 4.2 的第二种情形 |
+| 没有覆盖目录 | 落在 `/System` | **环境这一层没提供目录**：装的是原版 `systemhook`，或 `.xpc` 的内嵌值是别的目录 |
+
+**本次基线（未装 hook）用 18.3 的 `WebContent` 直接跑，读数是不通过：**
+
+```
+$ DYLD_PRINT_SEARCHING=1 /var/jb/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent
+dyld[33746]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[33746]:   possible path(original path on disk): "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[33746]:   possible path(original path): "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[33746]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/WebKit.framework/WebKit"
+```
+
+这一轮共打印 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，其中 18 条落在 `/var/jb` 下（`systemhook.dylib`、`TweakLoader.dylib`、`libroot.dylib` 等），**但针对 `WebKit.framework/WebKit` 的候选行是 0 条**。这正好是 4.2 节第二种判据的形状：候选行机制本身是通的（非缓存路径上出现了），缺的是缓存项允许被磁盘副本顶替的那两个 hook。所以 18.3 的 `.xpc` 即使自己声明了 `/var/jb/Library/Frameworks`，现在也拿不到那份。
+
+### 4.4 要先把两处路径对齐
+
+本次读到三处路径不一致，装 hook 之前必须解决，否则即使 hook 生效也命中不到 18.3：
+
+| 谁给路径 | 实际给的目录 | 18.3 在哪 |
+| --- | --- | --- |
+| 18.3 的五个 `.xpc`（`LC_DYLD_ENVIRONMENT`，链接期常量） | `/var/jb/Library/Frameworks` | **在**，五个 framework 都在这里 |
+| `basebin.tar` 里打了补丁的 `systemhook.dylib` | `/var/jb/Library/WebKitOverride` | **不在**，该目录不存在 |
+| `install-webkit-override.sh:66` 的 `OVERRIDE_ROOT` | `/var/jb/Library/WebKitOverride` | 同上 |
+
+`/var/jb/Library/Frameworks` 下有 `WebKit`、`WebCore`、`JavaScriptCore`、`WebGPU`、`WebKitLegacy` 五个 framework 与 `adattributiond`、`webpushd`；`WebKit.framework/WebKit` 是 50758784 字节、`LC_UUID 787DFAB1-4DE3-3568-9923-C9409791B728`。
+
+**最小的对齐办法是给 `systemhook` 那个目录做一个符号链接，而不是移动 18.3。** `dyld` 接受符号链接作为搜索目录，本次实测：
+
+```
+$ ln -s /var/jb/usr/lib /tmp/m121-symtest/linkedlib
+$ DYLD_PRINT_SEARCHING=1 DYLD_LIBRARY_PATH=/tmp/m121-symtest/linkedlib \
+    /var/jb/usr/bin/python3 -c 'import ctypes; ctypes.CDLL("/tmp/m121-symtest/linkedlib/libiosexec.1.dylib")'
+dyld[33774]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/m121-symtest/linkedlib/libiosexec.1.dylib"
+dyld[33774]:   found: dylib-from-disk: "/tmp/m121-symtest/linkedlib/libiosexec.1.dylib"
+```
+
+所以一条 `ln -s /var/jb/Library/Frameworks /var/jb/Library/WebKitOverride` 就让两个来源指向同一批文件；回退是删掉这一个链接。这不改变 18.3 的位置，也不动 `/var/jb/Library/Frameworks` 里任何文件。代价是 `install-webkit-override.sh` 之后不能直接再跑：它会往 `WebKitOverride` 里写自己的那份，而那时该路径是一个符号链接，写入会落到 `/var/jb/Library/Frameworks` 上，把现有 18.3 覆盖掉。两条路只能选一条。
+
+**还有一处缺口：`libwebrtc.dylib`。** 18.3 的 `WebKit` 与 `WebCore` 都链接 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib`，而磁盘上 `/var/jb` 与 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/` 都没有这个文件（后者是空目录），`/var/jb/Library/Frameworks/WebCore.framework/Frameworks` 也不存在。它只可能来自共享缓存。`isAlwaysOverridablePath` 只让 dyld 去看磁盘副本，不能让一个不在磁盘上的文件出现在磁盘上，所以这一项要么随 18.3 一起放进覆盖目录（`WebCore.framework/Frameworks/libwebrtc.dylib` 的相对位置必须保留，dyld 对这类 install name 只取叶子名在 library 列表里找），要么就会继续解析到 16.1 缓存里的那份。4.2 节的三行判据不覆盖这一类；第三层通过之后要再核一次 `libwebrtc` 的 uuid。
 
 ---
 
 ## 五、最小可逆安装步骤
 
-前提：备份必须在改动之前完成，且备份与校验和都落到设备的 `/var/mobile/Documents` 下（`mobile` 可写）。全部步骤只动 `/var/jb/basebin` 下的一个文件，不碰 `/System`、不改 seal、不写 `/usr`。
+前提：备份必须在改动之前完成，且备份与校验和都落到设备的 `/var/mobile/Documents` 下（`mobile` 可写）。全部步骤改动的是 `/var/jb/basebin` 下两个库文件（由 tar 解包写入）与 `/var/jb/Library` 下一个符号链接，不碰 `/System`、不改 seal、不写 `/usr`。
 
 ### 第 1 步：记录现状（不需要 root）
 
@@ -270,55 +368,60 @@ cp -p /var/jb/basebin/gen/dyld        ./gen-dyld.orig
 cp -p /var/jb/basebin/systemhook.dylib ./systemhook.dylib.orig
 cp -p /var/jb/basebin/basebin.tc      ./basebin.tc.orig
 cp -p /var/mobile/Documents/basebin.tar ./basebin.tar.staged
-sha256sum * > SHA256SUMS
+/var/jb/usr/bin/python3 -c "
+import hashlib,os
+for p in sorted(os.listdir('.')):
+    print(hashlib.sha256(open(p,'rb').read()).hexdigest(), os.path.getsize(p), p)
+" > SHA256SUMS
 cat SHA256SUMS
 EOS
 ```
 
+设备上不能用 `sha256sum` 与 `shasum`（两者都不存在），用 `/var/jb/usr/bin/python3` 的 `hashlib`；本次实测 `python3 -c` 与 `stat -c '%s'` 两条读数一致。
+
 本机现状（可作为对照）：
 
 ```
-486620f0c5ce26e602f0155412375d9c9d564f10b014fee2c369cd58e55751ba  /var/jb/basebin/gen/dyld                  974016
-7eb2e72f00bd2105ad106e5462691bba09e04575aed7a75688513548a59b86c1  /var/jb/basebin/gen/dyld.orig             926240
-1e90c5a3840534de61afb78e07308656bb1d63ddbf05eec4383136c61aa7735f  /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib  74352
-6f16c545abda8b0eabfdf8b03542f90587956b825d9500df67889c98c50df432  /var/jb/basebin/systemhook.dylib          233520
-12bdb75e696230aa89c941a1e045158341582fb904f27831f42acb8a59878739  /var/jb/basebin/basebin.tc                640
-7fd379340780e245c86fd0afe15ee55173bbb22d8a623bd60e2e34aa644afbc6  /var/mobile/Documents/basebin.tar         6144000
+486620f0c5ce26e602f0155412375d9c9d564f10b014fee2c369cd58e55751ba    974016  /var/jb/basebin/gen/dyld
+7eb2e72f00bd2105ad106e5462691bba09e04575aed7a75688513548a59b86c1    926240  /var/jb/basebin/gen/dyld.orig
+1e90c5a3840534de61afb78e07308656bb1d63ddbf05eec4383136c61aa7735f     74352  /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
+6f16c545abda8b0eabfdf8b03542f90587956b825d9500df67889c98c50df432    233520  /var/jb/basebin/systemhook.dylib
+12bdb75e696230aa89c941a1e045158341582fb904f27831f42acb8a59878739       640  /var/jb/basebin/basebin.tc
+7fd379340780e245c86fd0afe15ee55173bbb22d8a623bd60e2e34aa644afbc6   6144000  /var/mobile/Documents/basebin.tar
 ```
 
-目标文件（`basebin.tar` 里那份打了 hook 的 hook dylib）：
+目标文件（`basebin.tar` 里那两份打了补丁的库）：
 
 ```
-9fb3b9c0e2ae128b54ae3151b9f97505622140280152d01e3977a143513970c4  basebin/dyldhook_merge.arm64e.iOS16-17.dylib  75952
+9fb3b9c0e2ae128b54ae3151b9f97505622140280152d01e3977a143513970c4     75952  basebin/dyldhook_merge.arm64e.iOS16-17.dylib
+d7045cd4850eb0c7498d0a63a4de797aeffc7577a21379fd774c4bc219fbe13f    234336  basebin/systemhook.dylib
 ```
 
 `gen/dyld.orig`（926240，`7eb2e72f…`）是回滚锚点，不要拿 `gen/dyld` 当备份：`basebin_generate` 每次把旧的改名成 `gen/dyld.old`，只保一代，再更新一次就没了（`basebin_gen.m:159-166`）。
 
-### 第 2 步：换掉 hook 输入（需要 root）
+### 第 2 步：让 `systemhook` 给的目录指到 18.3 实际所在处（需要 root）
+
+18.3 在 `/var/jb/Library/Frameworks`，打了补丁的 `systemhook` 给的是 `/var/jb/Library/WebKitOverride`（4.4 节）。两条路径用一个符号链接接上：
 
 ```sh
-# 在设备上，root 执行
-export PATH=/var/jb/usr/bin:$PATH
-cd /var/mobile/Documents/m121-backup
-tar -xf basebin.tar.staged basebin/dyldhook_merge.arm64e.iOS16-17.dylib
-sha256sum basebin/dyldhook_merge.arm64e.iOS16-17.dylib   # 必须是 9fb3b9c0…
-cp basebin/dyldhook_merge.arm64e.iOS16-17.dylib /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
-chmod 0755 /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
-chown root:wheel /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
+# root 执行
+ln -s /var/jb/Library/Frameworks /var/jb/Library/WebKitOverride
+ls -ld /var/jb/Library/WebKitOverride          # 期望 lrwxr-xr-x ... -> /var/jb/Library/Frameworks
+ls /var/jb/Library/WebKitOverride/WebKit.framework/WebKit   # 期望存在，50758784 字节
 ```
 
-只需换这一个文件，因为 `dyldhook_dylib_for_platform()`（`basebin_gen.m:9-37`）在本机只取 `dyldhook_merge.arm64e.iOS16-17.dylib`；另外五个 `.dylib` 文件名在本机不会被读。
+这一步不改任何现有文件，只新增一个链接，回退就是 `rm` 掉它。**如果用户更愿意按 `install-webkit-override.sh` 的布局把 18.3 复制进一个真正的新目录，那就跳过这一步，改跑那个脚本；不要两件事都做，符号链接存在时脚本的写入会落到 `/var/jb/Library/Frameworks` 上。**
 
-### 第 3 步：让 `gen/dyld` 重新合成（触发用户空间重启）
-
-只有一条路径，就是官方全量更新：
+### 第 3 步：装上两份库并重建 `gen/dyld`（需要 root，触发用户空间重启）
 
 ```sh
 # root 执行；随后所有应用退出、launchd 重起
 /var/jb/basebin/jbctl update basebin /var/mobile/Documents/m121-backup/basebin.tar.staged
 ```
 
-`jbctl update` 走 `main.m:209` 暂存 + `:213` `reboot3(RB2_USERREBOOT)`。重启中 `update.m:46-54` 把 tar 覆盖到 `/var/jb/basebin`，`:223` 调 `basebin_generate(YES)` 换 `gen/dyld`，`:233-258` 把新 dyld 的 cdhash 上传进 `DYLD_TRUSTCACHE_UUID`。
+**不需要先手工 `cp` 那份 hook dylib。** `jbctl update` 在重启中把整个 tar 覆盖到 `/var/jb/basebin`（`update.m:46-54`），tar 里同时带着打了 hook 的 `dyldhook_merge.arm64e.iOS16-17.dylib`（75952）与打了搜索路径补丁的 `systemhook.dylib`（234336），两个文件由这一次解包一起到位。先 `cp` 再 update 只会被解包覆盖，是重复动作。
+
+`jbctl update` 走 `main.m:209` 暂存 + `:213` `reboot3(RB2_USERREBOOT)`。重启中 `:223` 调 `basebin_generate(YES)` 合成 `gen/dyld`，`:233-258` 把新 dyld 的 cdhash 上传进 `DYLD_TRUSTCACHE_UUID`。
 
 **为什么没有更小的路径。** `jbctl` 只有四个子命令：`proc_set_debugged`、`trustcache info/clear/add`、`update`（本次实测无参数时的 usage 输出），没有「只重建 `gen/dyld`」这一项。`basebin_generate` 总共两个入口：
 
@@ -329,38 +432,64 @@ chown root:wheel /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
 
 第二条更危险：当前 `/usr/lib/dyld` 是软链到 `gen/dyld` 自己，`carbonCopySingle` 在目标存在时先 `removeItemAtPath` 再复制（`carbonCopy.m:50-52`），所以它会把已经打过补丁的那份写成新的 `dyld.orig`，回滚锚点当场失效。所以只用 `jbctl update`。
 
-**注意：这条命令会同时换上 tar 里那份打了搜索路径补丁的 `systemhook.dylib`（234336 字节，`d7045cd4…`）**，而不只是 hook dylib。这是另一处改动，回退时一起退（第 5 步 ①）。这份 `systemhook` 是 app 进程拿到覆盖目录的唯一来源（4.3 节），要验证第三层就必须有它。
+**`jbctl` 不在 `Systemhook` 的保护范围之外。** 本次实测 `jbctl` 的四个子命令里没有能只刷 `gen/dyld` 的，所以这一次用户空间重启是必需的，不能省。
 
 ### 第 4 步：确认（不需要 root）
 
-重启之后跑第二节脚本与 4.2 节那条命令。预期：四个计数 `1 1 1 1`、`gen/dyld` 974608 字节、4.2 节出现 `dylib-from-disk-to-override-cache`。
+重启之后按顺序跑四条，任一条不过就停：
 
-**这一步必须重跑第二节，不能只看 `jbctl` 的退出码。** 设备上已经发生过一次「装上了又被整包还原」：`AGENTS.md` 记录 11-24 那次更新之后 `gen/dyld` 是 974608、四个 hook 齐全，今天开机后同一文件是 974016、`1 0 0 1`，22 个文件与出厂 tar 逐位相同。本次复核 `Dopamine.app/basebin.tar` 与设备 `/var/jb/basebin` 得 `same=25 diff=2`（两个都是 `LaunchDaemons` plist），与那条记录一致。
+```sh
+# ① 两份库是否来自 tar
+/var/jb/usr/bin/python3 -c "
+import hashlib
+for p in ['/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib','/var/jb/basebin/systemhook.dylib']:
+    print(hashlib.sha256(open(p,'rb').read()).hexdigest(), p)
+"
+# 期望 9fb3b9c0…  75952  与  d7045cd4…  234336
+
+# ② gen/dyld 是否重新合成，四个 hook 是否齐
+#    （第二节那段脚本；期望 974608 字节、[1, 1, 1, 1]）
+
+# ③ dyld 是否愿意用磁盘副本（4.2 节那条命令）
+#    期望出现 possible path(DYLD_FRAMEWORK/LIBRARY_PATH) 与 found: dylib-from-disk-to-override-cache
+
+# ④ 真实宿主是否拿到变量（4.3 节 ① ②）
+ps -E -p $(ps -Ao pid=,comm= | awk '/com.apple.WebKit.WebContent$/{print $1; exit}') \
+  | tr ' ' '\n' | grep -E '^(DYLD_(FRAMEWORK|LIBRARY)_PATH|__XPC_DYLD_)'
+```
+
+预期：四个计数 `1 1 1 1`、`gen/dyld` 974608 字节、4.2 出现 `dylib-from-disk-to-override-cache`、4.3 的环境里出现 `/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride` 这两条真实路径。
+
+**这一步必须重跑，不能只看 `jbctl` 的退出码。** 设备上已经发生过一次「装上了又被整包还原」：`AGENTS.md` 记录 11-24 那次更新之后 `gen/dyld` 是 974608、四个 hook 齐全，今天开机后同一文件是 974016、`1 0 0 1`，22 个文件与出厂 tar 逐位相同。本次复核 `Dopamine.app/basebin.tar` 与设备 `/var/jb/basebin` 得 `same=25 diff=2`（两个都是 `LaunchDaemons` plist），与那条记录一致。
 
 ### 第 5 步：回退
 
-两件事都要做，顺序不能反：
+三件事都要做，顺序不能反：
 
 ```sh
-# ① 恢复 hook 输入（root）
-cp -p /var/mobile/Documents/m121-backup/dyldhook_merge.arm64e.iOS16-17.dylib.orig \
-      /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
-# 恢复 systemhook（第 3 步会一并换掉它）
-cp -p /var/mobile/Documents/m121-backup/systemhook.dylib.orig /var/jb/basebin/systemhook.dylib
-sha256sum /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib   # 必须是 1e90c5a3…
-sha256sum /var/jb/basebin/systemhook.dylib                        # 必须是 6f16c545…
+# ① 删掉第 2 步的符号链接（root）
+rm /var/jb/Library/WebKitOverride
 ```
 
 ```sh
-# ② 用出厂 tar 再走一次更新，让 gen/dyld 重新合成（root）
+# ② 恢复两份库（root）
+cp -p /var/mobile/Documents/m121-backup/dyldhook_merge.arm64e.iOS16-17.dylib.orig \
+      /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib
+cp -p /var/mobile/Documents/m121-backup/systemhook.dylib.orig /var/jb/basebin/systemhook.dylib
+```
+
+```sh
+# ③ 用出厂 tar 再走一次更新，让 gen/dyld 重新合成（root）
 /var/jb/basebin/jbctl update basebin /var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar
 ```
 
-第 ② 步走 `basebin_generate(YES)`，只用 `dyld.orig` 与恢复后的 hook 合成，得到今天的 974016 字节、`1 0 0 1`。回退之后同样跑第二节确认，不要只看退出码。
+第 ③ 步走 `basebin_generate(YES)`，只用 `dyld.orig` 与恢复后的 hook 合成。注意它同时会把出厂 tar 里的原版 `systemhook.dylib`（233520）解包进去，所以第 ② 步的 `cp` 只是为了在 ③ 之前就让库回到原状；如果只跑 ③ 也能达到同样结果，② 的价值是「③ 万一失败，库至少已经是对的」。回退之后同样跑第 4 步的四条，不要只看退出码。
+
+期望回到：`gen/dyld` 974016 字节、`1 0 0 1`、`dyldhook_merge` 74352 `1e90c5a3…`、`systemhook` 233520 `6f16c545…`、`/var/jb/Library/WebKitOverride` 不存在。
 
 `.safe_mode` 不能替代回退：`systemhook/src/main.c:198-202` 的 `should_enable_tweaks()` 在 `.safe_mode` 存在时返回假，`common.c:207-225` 的 `_SafeMode`、`_MSSafeMode` 为 `1` 时把 `shouldInsertJBEnv` 置假。两条都只挡住注入，挡不住已经换掉的 `gen/dyld`。本次读到 `/var/jb/basebin/.safe_mode` 不存在。
 
-**回退不需要整机重启。** 第 ② 步是用户空间重启，`/usr/lib/dyld` 是软链到 `gen/dyld`，重启后所有新进程读到新的那份。已经在跑的进程继续用旧的（`dyld` 本身已映射），这没有影响，因为下一次启动就换过来了。
+**回退不需要整机重启。** 第 ③ 步是用户空间重启，`/usr/lib/dyld` 是软链到 `gen/dyld`，重启后所有新进程读到新的那份。已经在跑的进程继续用旧的（`dyld` 本身已映射），这没有影响，因为下一次启动就换过来了。
 
 ---
 
@@ -370,14 +499,17 @@ sha256sum /var/jb/basebin/systemhook.dylib                        # 必须是 6f
 
 | # | 命令 | 作用 | 可逆性 |
 | --- | --- | --- | --- |
-| 1 | 第五节第 1 步的备份（写到 `/var/mobile/Documents`，只需 `mobile`），以及若做 4.2 节实机对照时 `mkdir -p /var/jb/Library/WebKitOverride` | 建备份与覆盖目录 | 备份是只读证据；覆盖目录删掉即还原 |
-| 2 | `cp basebin/dyldhook_merge.arm64e.iOS16-17.dylib /var/jb/basebin/` | 换上带 hook 的输入 | 用第五节第 5 步 ① 还原，有 `sha256` 对照 |
-| 3 | `/var/jb/basebin/jbctl update basebin <tar>` | 触发用户空间重启并重建 `gen/dyld` | 用第五节第 5 步 ② 还原 |
-| 4 | （仅在把 18.3 放进覆盖目录时）从 `/var/jb/Library/Frameworks` 复制 7 个文件到覆盖目录 | 让 4.2 节那条命令有东西可命中 | 删覆盖目录即还原；本次已用 `/tmp/m121-ovr` 做过对照，不是必须 |
+| 1 | 第五节第 1 步的备份（写到 `/var/mobile/Documents`，只需 `mobile`，**不需要 root**） | 建备份与校验和 | 只读证据，删目录即清 |
+| 2 | `ln -s /var/jb/Library/Frameworks /var/jb/Library/WebKitOverride` | 把 `systemhook` 给的目录接到 18.3 实际位置 | 回退：`rm /var/jb/Library/WebKitOverride` |
+| 3 | `/var/jb/basebin/jbctl update basebin /var/mobile/Documents/m121-backup/basebin.tar.staged` | 装上打了 hook 的 dyldhook 与打了补丁的 systemhook，并触发用户空间重启重建 `gen/dyld` | 第五节第 5 步 ①②③ |
 
-`/var/jb/Library` 是 `root:wheel 775`，`mobile` 不可写（实测 `[ -w /var/jb/Library ]` 为假），所以第 1 至 4 步都需要 root。`/var/mobile/Documents` 下的一切（备份、staged tar）不需要 root。
+三步之外没有别的 root 写操作。第 3 步是唯一一次用户空间重启，所有应用会退出。
 
-第 3 步的风险：`basebin_generate` 返回 2/3/4 时 `launchdhook` 在 `update.m:223-228` 调 `abort_with_reason(7, 1, ...)`。表现是这次用户空间重启没有建起新的 `gen/dyld`，与某个 app 崩溃不同。恢复手段是重跑第 3 步使用出厂 tar；若重启后仍异常，从 TrollStore 重装 `Dopamine.app`（它自带一份 `basebin.tar`，1.3 节已核对它与设备逐位相同）。
+`/var/jb/Library` 是 `root:wheel 775`，`mobile` 不可写（实测 `[ -w /var/jb/Library ]` 为假），所以第 2 步需要 root。`/var/jb/basebin` 同理。`/var/mobile/Documents` 下的一切（备份、staged tar）不需要 root。
+
+第 3 步的风险：`basebin_generate` 返回 2/3/4 时 `launchdhook` 在 `update.m:223-228` 调 `abort_with_reason(7, 1, ...)`。表现是这次用户空间重启没有建起新的 `gen/dyld`，与某个 app 崩溃不同。恢复手段是第五节第 5 步 ③ 用出厂 tar 再跑一次；若重启后仍异常，从 TrollStore 重装 `Dopamine.app`（它自带一份 `basebin.tar`，1.3 节已核对它与设备逐位相同）。
+
+**最坏情况的边界。** 系统分区全程未被写入，`dyld.orig` 未被重写（`jbctl update` 走 `YES` 分支），`gen/dyld` 每次由它现场合成。所以即使新 `gen/dyld` 让某些进程起不来，第 5 步 ③ 一定能把 `gen/dyld` 换回 974016 那份；如果连用户空间都起不来，用 TrollStore 重装 Dopamine 会解包出厂的 `basebin.tar` 并重建。
 
 ---
 
@@ -401,8 +533,11 @@ sha256sum /var/jb/basebin/systemhook.dylib                        # 必须是 6f
 | 未做项 | 为什么 | 补它的最小动作 |
 | --- | --- | --- |
 | 装上 hook 后的 4.2 节读数 | 需要 root 写 `/var/jb/basebin`，加一次用户空间重启 | 第五节全流程，约 5 分钟，重启一次 |
-| 4.3 节三层时间戳对齐 | 依赖上一条 | 上一条通过后取一个 `WebContent` 的 pid，跑 4.3 节三条命令 |
+| 4.3 节第 ④ 条的环境读数 | 依赖上一条 | 上一条通过后取一个 `WebContent` 的 pid，跑 4.3 节 ①② |
+| `libwebrtc.dylib` 的来源 | 磁盘上没有，18.3 的两个库都链接它 | 第三层通过后核它的 uuid 是否 18.3 那份；不是就要单独把它放进覆盖目录 |
 | 补丁跨重新越狱的存活 | 需要改写 `Dopamine.app/basebin.tar`（归 `_installd`，要 root） | 换它的对应成员，或接受每次重新越狱后重做第五节 |
 | `xpcproxy` 是否转发 `__XPC_` 前缀 | 设备上 `/usr/libexec/xpcproxy` 无该字符串，`libxpc` 源码不公开 | 与本文无关；4.3 节的通过条件是镜像路径，不依赖前缀转发 |
+
+**`launchctl print` 的 `environment` 段不能当 envp 用。** 本次在同一个 pid（33349）上对照过两种读法，`launchctl print` 只显示四项，而 `ps -E` 与 `sysctl KERN_PROCARGS2` 都显示 21 项、其中含 `DYLD_INSERT_LIBRARIES`，`lldb image list` 也确认 `systemhook.dylib` 已映射进该进程。这条修正影响三份文档的读法：本文 4.3 节已改；`docs/ios16-whole-18.3-deployment-path.md:150/:178/:179` 与 `docs/ios16-all-18.3-xpc-endpoint-audit.md:203` 里「`environment` 段落含 `DYLD_FRAMEWORK_PATH`」这类记载不是否认能成立的证据，因为反向（段落为空）不代表进程里没有。它们要重取一次 `ps -E` 才能定案。
 
 **一处要改的既有记录。** 外层 `AGENTS.md:224` 写「用设备上那份 hook dylib 合并得到 948414 字节，比 `gen/dyld` 的 974016 小。这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的，设备上的 hook 已被换回 74352 的原版」。前半句对，结论错：974016 减去 2 字节填充与 25600 的签名正好是 948414，差额全部来自重签名，所以今天的 `gen/dyld` 是用 **74352 那份原版**合成的；974608 才是 75952 那份的结果。`dyldhook_merge` 本身是否被换回过，判据只能是第二节的四位计数，不是尺寸差。外层 `AGENTS.md` 不在本 mission 的可改范围，改法是把 `:224` 这句换成 1.1 节的字节模型。
