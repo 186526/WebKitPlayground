@@ -110,7 +110,7 @@ $ git grep -c 'SDKAlignedBehavior' Safari-614.1.9 -- Source | wc -l
 | `stderr` | fd | `PL16:205`，条件同上 | `PL18:420`，条件同上 | `XM16:130` | `XM18:222` | 同上 |
 | `WebKitBundleVersion` | string | `PL16:141`，写进 `initializationMessage` 而非 `bootstrap` 字典，仅 `PLATFORM(MAC)` | `PL18:361`，直接写进 `bootstrap` 字典，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | `XM16:202`，仅 `PLATFORM(MAC)` | `XM18:115`，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | iOS 两侧都编译掉，无影响 |
 
-上表按两个 tag 的原文求值，不按本工程产物求值。产物在 tag 原文之上应用了 `patches/` 下的整组补丁，其中**两份**改动了本表的读数，所以有两行的读数会不一样：`client-sdk-version` 在产物里**有**读取点，`main` 上的 `patches/ios16-xpc-bootstrap-compat.patch` 在 `getClientSDKAlignedBehaviors` 里回退读它并调用 `setSDKAlignedBehaviorsFromClientSDKVersion` 重建位图，`main` 上的 `patches/ios16-ipc-message-number-translation.patch` 另有一处读取（M85 分支把这两处都删掉了，见「修补补丁的现状与缺口」）；`client-sdk-aligned-behaviors` 的「缺失后果」按树分两种：`main` 上的产物在长度不等时仍由 `RELEASE_ASSERT` 中止，补丁把该断言与紧随的 `memcpy` 留作未改动的 context line，只在其上方加了 fallback；M85 分支删除该断言，长度不等时不再中止，宽度不等的负载一律丢弃、位图保持全零，等宽负载 `memcpy` 进位图并返回真。
+上表按两个 tag 的原文求值，不按本工程产物求值。产物在 tag 原文之上应用了 `patches/` 下的整组补丁，其中**一份**改动了本表的读数，所以有一行的读数会不一样：`client-sdk-aligned-behaviors` 的「缺失后果」在产物里不是 `RELEASE_ASSERT` 中止，而是按数据块宽度分派——等宽时 `memcpy` 进位图并返回真，更窄时丢弃该负载、位图保持全零并返回真，更宽时丢弃并返回假，两条不等宽的路径各记一条日志。`client-sdk-version` 这一行不受影响：两版都不发也不读，产物里也没有读取点，bootstrap 补丁只为它留了一句说明为什么不做回退的注释。
 
 `client-sdk-version` 在 16.1 这一版里完全消失，确认命令与输出：
 
@@ -189,7 +189,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 16.1 与 16.2 同为 8 字节，位序也只在前 13 项一致：16.2 在下标 13 插入 `DoesNotAddIntrinsicMarginsToFormControls`，原来在 16.1 下标 13 的 `DOMWindowReuseRestriction` 落到 16.2 的 14。此后 16.1 的下标整体比 16.2 小 1，63 个名字里有 50 个符合这条平移，只有 13 个名字两版仍在同一位置。所以即使宽度相等、只差一个插入项，也不能按下标搬运。16.4 与 18.3.1 同为 12 字节，73 个可比下标里只有 `0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt` 三个指向同一行为。
 
-所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。M85 因此删掉了 `RELEASE_ASSERT`，长度不等时不再中止进程，宽度不等的负载一律丢弃、位图保持全零；等宽负载 `memcpy` 进位图并返回真，但宽度相等不等于位序相同。把 16.4 的 12 字节负载原样交给 18.3，长度检查放行、位序仍然错，需要下标对照表才能解码。这份对照表尚未编写。
+所以宽度检查能证明的只有一件事：对端发来的位图字数是本版 `storageLengthInBytes()` 的值。它不能证明两个版本的位图对同一个比特位指的是同一个行为。本工程产物因此删掉了 `RELEASE_ASSERT`，长度不等时不再中止进程，宽度不等的负载一律丢弃、位图保持全零；等宽负载 `memcpy` 进位图并返回真，但宽度相等不等于位序相同。把 16.4 的 12 字节负载原样交给 18.3，长度检查放行、位序仍然错，需要下标对照表才能解码。这份对照表尚未编写。
 
 ### 发送与接收
 
@@ -235,14 +235,14 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 
 ## 修补补丁的现状与缺口
 
-`main` 上的 `patches/ios16-xpc-bootstrap-compat.patch` 给 `getClientSDKAlignedBehaviors` 加了一条回退路径：当 `!length || !behaviorData` 为真时，改为读 `client-sdk-version` 并调用 `setSDKAlignedBehaviorsFromClientSDKVersion` 重建位图。
+当前 `patches/ios16-xpc-bootstrap-compat.patch` 把 `getClientSDKAlignedBehaviors` 改成按数据块宽度分派，`RELEASE_ASSERT` 已删除：`!length || !behaviorData` 时仍直接返回 false；等宽时 `memcpy` 进位图并返回真；更窄时丢弃该负载、位图保持全零并返回真；更宽时丢弃并返回假。两条不等宽的路径各记一条日志，位图都保持全零，因为参数进来就是零初始化的，函数不动它。
 
-这条回退对 16.1 是死代码，两个理由各自独立成立：
+补丁不为 `client-sdk-version` 做回退。这一条对 16.1 本来也走不通，两个理由各自独立成立：
 
-1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支不进入，控制直接到 `RELEASE_ASSERT`。
-2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），即使进了分支也取不到字符串，回退在第二个 `if` 处返回 false，位图保持全零。
+1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，`return false` 那条短路不进入，控制到下面的宽度比较。
+2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），任何按该键的回退都取不到字符串。
 
-所以 `main` 上的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（内层 `feat/p9-inner-aligned-behaviors-fallback-and-constant`，外层 `feat/p9-make-the-aligned-behaviors-fallback-r`）改为另一种形态：`RELEASE_ASSERT` 删除，长度不等时不再中止进程；宽度不等的负载一律丢弃、位图保持全零；等宽负载 `memcpy` 进位图并返回真。这一形态由 `97cfd79`（删掉 `setSDKAlignedBehaviorsFromClientSDKVersion` 与两个 `client-sdk-version` 读取点）、`ddfaa5f`（把分派收成按宽度比较）、`e657b79`（把等宽负载改为拷贝并返回真）三个提交确定；截至本句写作时这些提交尚未合入 `main`。
+所以 16.1 UI 配 18.3 helper 不再在 `getClientSDKAlignedBehaviors` 中止：8 字节走 `length < ownLength`，丢弃负载、位图保持全零、返回真，调用方丢弃返回值，进程继续初始化。当初设想的修法是按**数据块长度**而不是键是否存在分派，这一形态由 M85 的三个提交确定：`97cfd79` 删掉 `setSDKAlignedBehaviorsFromClientSDKVersion` 与两个 `client-sdk-version` 读取点，`ddfaa5f` 把分派收成按宽度比较，`e657b79` 把等宽负载改为拷贝并返回真。这些提交已合入 `main`。
 
 ### 8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图
 
@@ -259,7 +259,7 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 按名字逐项比对，**63 个可比下标里只有 3 个在两版指同一个行为**：`0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt`。有 62 个名字两版都存在，其中 59 个下标不同。另有名字只在 16.1 存在，例如 `ApplicationCacheDisabledByDefault`（16.1 下标 1）在 18.3.1 的枚举里完全没有。
 
-结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 因此不对宽度不等的负载按位置拷贝：这类负载一律丢弃、位图保持全零；它同时删掉 `RELEASE_ASSERT`，让长度不等不再中止进程。等宽的负载 `memcpy` 进位图并返回真。这不是缺陷，是两版位序无关这一事实的必然结果。
+结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。本工程产物因此不对宽度不等的负载按位置拷贝：这类负载一律丢弃、位图保持全零；它同时删掉 `RELEASE_ASSERT`，让长度不等不再中止进程。等宽的负载 `memcpy` 进位图并返回真。这不是缺陷，是两版位序无关这一事实的必然结果。
 
 要让 16.1 的位图真正生效，需要一份两版的下标对照表，按名字把 16.1 的每个行为映射到 18.3 的对应项，对 18.3 独有的项取默认值。这份表尚未编写，也不在 M85 范围内。
 
