@@ -72,9 +72,9 @@ cd WebKitPlayground
 DEVICE_SUDO_PASSWORD='...' scripts/probe-webkit-override-endpoints.sh
 ```
 
-可选参数：`--ssh-target <[user@]host>`（默认 `mobile@192.168.2.136`）、`--log-dir <dir>`（默认 `$TMPDIR` 下带时间戳的目录）、`--wait <秒>`（每次拉起后等多久，默认 5）。环境变量 `PROBE_SSH_TARGET`、`PROBE_LOG_DIR`、`PROBE_WAIT_SECONDS` 等价。
+可选参数：`--ssh-target <[user@]host>`、`--log-dir <dir>`（默认 `$TMPDIR` 下带时间戳的目录）、`--wait <秒>`（每次拉起后等多久，默认 5）。环境变量 `PROBE_SSH_TARGET`、`PROBE_LOG_DIR`、`PROBE_WAIT_SECONDS` 等价。**`--ssh-target` 这里不写默认值**，理由见下一段。
 
-**这一项与脚本当前行为不一致，以脚本为准。** 2026-11-26 00:53Z 复核时脚本 `:46` 的默认值仍是 `mobile@192.168.2.135`，而该地址现在报 `No route to host`；设备在 `192.168.2.136`（`uname -r` 返回 `22.1.0`）。换脚本属于 `scripts/**` 的范围，本文不动它，只在这里写明：在没有 `--ssh-target` 也没有 `PROBE_SSH_TARGET` 时，第一次 `ssh` 就会失败。
+**脚本给的默认地址不是这台设备现在的地址，`--ssh-target` 必须显式传。** 默认值写在 `scripts/probe-webkit-override-endpoints.sh:48` 的 `SSH_TARGET=${PROBE_SSH_TARGET:-mobile@192.168.2.135}`，`mobile@192.168.2.135` 在 2026-11-26 00:53Z 复核时已报 `No route to host`；设备在 `192.168.2.136`（`uname -r` 返回 `22.1.0`），脚本的 usage 文本（同文件 `:171`）也写 `.135`。换脚本属于 `scripts/**` 的范围，本文不动它，只在这里写明：在没有 `--ssh-target` 也没有 `PROBE_SSH_TARGET` 时，第一次 `ssh` 就会失败。
 
 退出码：`0` 读到 A 或 B，`4` UNKNOWN，`3` 图形会话缺失（SpringBoard 未运行，需重启），`2` 用法或环境错误。`gui/501` 的读数不参与退出码。
 
