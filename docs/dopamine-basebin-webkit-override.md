@@ -1024,13 +1024,22 @@ EOF
 
 **判据只有一条，且必须是路径读数，不是端点计数。** 端点计数不能证明覆盖生效：系统 WebKit 正常工作同样会注册 4 个端点。
 
-先拿到要测的 app 的 pid，再让 `lldb` 列出镜像的完整路径：
+先启动被测应用，再拿到它的 pid，最后让 `lldb` 列出镜像的完整路径。**启动方法因应用而异，这一步搞错会让后面全部白测**：本设备的默认浏览器是 Chrome，`uiopen <url>` 打开的是 Chrome 而不是 Safari，测 Safari 必须用 `uiopen --path /Applications/MobileSafari.app`；直接 `exec` 浏览器只得到没有页面的 UI 进程，不请求 WebContent。
 
 ```sh
+# Chrome
+uiopen https://example.com
 APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
+
+# MobileSafari（默认浏览器不是它，必须走 --path）
+uiopen --path /Applications/MobileSafari.app
+APP=$(ps ax | grep -F 'MobileSafari.app/MobileSafari' | grep -v grep | awk '{print $1}' | head -1)
+
 lldb -b -o "process attach --pid $APP" -o "image list -o -f" -o detach -o quit 2>/dev/null \
   | grep -E "WebKit\.framework/WebKit$|WebCore\.framework/WebCore$"
 ```
+
+**不要用端点计数当判据，也不要把「进程活着」当判据。** 两者都在本仓库的历史里出过错：端点数为 0 曾被误判成「`libxpc` 拒绝注册」，真实原因是 dyld 缺符号直接终止；「进程稳定 3 分钟」也曾与用户报告的白屏同时成立。
 
 **成功的样子**：`WebKit.framework/WebKit` 那一行的路径前缀不再是 `/System/Library`，而是越狱根下的 `/Library/WebKitOverride/`。因为 `/var/jb` 是指向 preboot 目录的符号链接，这一行的完整形式可能是 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`，也可能是解析后的 `/private/preboot/<uuid>/dopamine-XXXX/procursus/Library/WebKitOverride/WebKit.framework/WebKit`。两种都算成功，判据写成两条同时成立：路径**不以** `/System/Library` 开头，且包含 `/Library/WebKitOverride/`。
 
