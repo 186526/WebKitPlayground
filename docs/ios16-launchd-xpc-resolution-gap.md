@@ -204,7 +204,7 @@ PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
 
 ### 被解释的读数
 
-`build-state.md:396-405`（Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` + `JavaScriptCore` 作固定基数）：
+`build-state.md:465-472`（Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` + `JavaScriptCore` 作固定基数）：
 
 | 覆盖目录内容 | 端点 | 已知缺陷 |
 | --- | --- | --- |
@@ -436,7 +436,7 @@ launchd_flat_mach_namespace = false;
 
 真正支撑这一步的是两条设备读数：
 
-- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:199`），Chrome 基线 8 条（`build-state.md:396`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
+- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:199`），Chrome 基线 8 条（`build-state.md:465`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
 - 四个 WebKit 服务名在 `system`/`user/501`/`gui/501` 三域都查不到（`build-state.md:371`）。
 
 这两条只说明「`print pid/N` 看到的那个集合很小」，不能单独证明「这个集合来自 XPC 域」，也不能排除「来自某个很小的非 XPC 域」。9.9 第 1 条是能把它定案的读数。
@@ -525,7 +525,20 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
 
 补丁之所以要重写，是因为 `xpc_main` 在公开 iOS SDK 下不可用。重写出来的语义与 `xpc_main` 相同：连到 launchd 放进环境里的那个端点，把第一条入站消息当成 launchd 递来的 peer。**「launchd 是唯一进口」这个语义来自 libxpc 的 `xpc_main`，不是本仓库新造的行为**，这条结论的证据强度标为「有源码支撑」——`xpc_main` 的实现未开源。
 
-另有一处可以反过来验证 helper 不走 Mach 服务名这条路：18.3 全树（`Source/` 下 `*.mm`/`*.cpp`/`*.m`，排除 `XPCSPI.h` 里的原型声明）`xpc_connection_create_mach_service` 只有四处调用，`Source/WebKit` 下三处（`Shared/Daemon/DaemonUtilities.mm:40`、`Platform/IPC/cocoa/DaemonConnectionCocoa.mm:68`、`webpushd/WebPushToolConnection.mm:80`），`Source/JavaScriptCore` 一处（`inspector/remote/cocoa/RemoteInspectorCocoa.mm:333`）；`RemoteInspectorCocoa.mm:351` 是同名的日志字符串，不是调用。四处**全部包在 `#if PLATFORM(MAC)` 里**：`DaemonUtilities.mm:39`、`DaemonConnectionCocoa.mm:67`、`WebPushToolConnection.mm:79`、`RemoteInspectorCocoa.mm:332`，iOS 上一行都不编译。其中只有 `DaemonUtilities.mm:40` 带 `XPC_CONNECTION_MACH_SERVICE_LISTENER`（即「登记成服务等连接」），它的调用者只有 `webpushd/WebPushDaemonMain.mm:179` 与 `Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm:147`，两者本身也都在 `#if PLATFORM(MAC)` 内。**四处调用在 iOS 上全部不生效，WebKit helper 不在其中。**
+上面那段手写等价物在**本仓库打过补丁的树**里是 `Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm:329-340`（`:329` 是 `xpc_connection_create(nullptr, nullptr)`，`:340` 是 `XPCServiceEventHandler(peer)`）。这是补丁产物行号，由 `patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +268,32 @@` hunk 把上游的 `xpc_main(XPCServiceEventHandler)` 换成 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 分支加这段等价物；上游同一文件里 `xpc_connection_create` 出现次数为 0，没有这一段。
+
+另有一处可以反过来验证 helper 不走 Mach 服务名这条路。**分上游与本仓库树两种口径，行号不能混用：三处差一行，一处相同。**
+
+**上游 18.3**（`refs/tags/releases/Apple/Safari-18.3.1-iOS-18.3.2`）在 `Source/` 下（`*.mm`/`*.cpp`/`*.m`，排除 `XPCSPI.h` 里的原型声明）有四处 `xpc_connection_create_mach_service` 调用：`Shared/Daemon/DaemonUtilities.mm:39`、`Platform/IPC/cocoa/DaemonConnectionCocoa.mm:67`、`webpushd/webpushtool/WebPushToolConnection.mm:80`、`inspector/remote/cocoa/RemoteInspectorCocoa.mm:332`。**这四个文件在上游里 `PLATFORM(MAC)` 出现次数均为 0**，也就是这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。四者的编译归属不同：`DaemonUtilities.mm` 列在 `Source/WebKit/SourcesCocoa.txt:196`，`DaemonConnectionCocoa.mm` 列在 `Source/WebKit/Platform/SourcesCocoa.txt:15`，`RemoteInspectorCocoa.mm` 列在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30`，这三份列表里 `#if` 行数均为 0；`WebPushToolConnection.mm` 不在任何 `Sources*.txt` 列表里，只出现在 `Source/WebKit/WebKit.xcodeproj/project.pbxproj` 的 Sources 构建阶段，它是否参与 iOS 构建取决于那个 Xcode target，本文件不对它作断言。
+
+**本仓库树**里这四处都多了 `#if PLATFORM(MAC)` 守卫。加入的行在调用之前，所以调用行号各下移一行：`DaemonUtilities.mm:40`、`DaemonConnectionCocoa.mm:68`、`RemoteInspectorCocoa.mm:333`。**`WebPushToolConnection.mm` 是例外，调用仍是 `:80`**：那个 patch 把调用上方原本空着的一行替换成 `#if PLATFORM(MAC)`，没有净增行数（`patches/ios18-public-sdk-webpushtool-mach-service.patch` 的 `@@ -76,7 +76,7 @@` hunk 是 `-<空行>` / `+#if PLATFORM(MAC)`）。守卫由四个 patch 分别加入：`patches/ios18-public-sdk-daemon-xpc-activity.patch`（`DaemonUtilities.mm`）、`patches/ios18-public-sdk-xpc-pid-and-mach-service.patch`（`DaemonConnectionCocoa.mm`）、`patches/ios18-public-sdk-webpushtool-mach-service.patch`、`patches/ios18-public-sdk-remoteinspector.patch`。同理，`webpushd/WebPushDaemonMain.mm:179` 与 `Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm:147` 那两个调用点（行号按本仓库树）外面那层 `#if PLATFORM(MAC)` 也是 `patches/ios18-public-sdk-webpushd-and-daemon-entry.patch` 加的，上游这两个文件在函数入口没有这层守卫。
+
+**两种口径下结论相同，但论证要分清是哪一条：**
+
+- **本仓库树**：四处调用都被 `#if PLATFORM(MAC)` 排除在 iOS 编译之外（文件本身是否参与 iOS 构建是另一回事），其中只有 `DaemonUtilities.mm:40` 带 `XPC_CONNECTION_MACH_SERVICE_LISTENER`（即「登记成服务等连接」），其调用者 `WebPushDaemonMain.mm:179` 与 `PCMDaemonEntryPoint.mm:147` 也都在守卫内。
+- **上游**：这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。其中 `DaemonUtilities.mm:39` 服务于 webpushd（`ENABLE_WEB_PUSH_NOTIFICATIONS` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:243-245` 对 `PLATFORM(IOS)` 默认 1），`RemoteInspectorCocoa.mm:332` 属于 JavaScriptCore 的 `RemoteInspector`，连的是 webinspectord relay（`ENABLE_REMOTE_INSPECTOR` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:765-767` 默认 1，文件在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30` 收录）。这两个都不是 WebKit 的 WebContent/Networking/GPU helper；另两个 `DaemonConnectionCocoa.mm:67` 与 `WebPushToolConnection.mm:80` 是客户端侧，flag 为 `0`（`docs/ios16-all-18.3-xpc-endpoint-audit.md:107`）。
+
+**所以「WebKit helper 不走 Mach 服务名」这个结论在两种口径下都成立**，只是它不能靠「iOS 上一行都不编译」这个断言来支撑——上游这四个调用点都没有平台守卫。支撑它的是：四处调用没有一处出现在 WebKit helper 的入口路径上（`XPCServiceMain.mm` 走的是本仓库树里那段 `xpc_main` 等价物或上游的 `xpc_main`，两者都只等 launchd 递 peer）。
 
 launchd 只在有 `waiting4attach` 记录时才走 `xpcproxy` 做端点递送，`core.c:4561-4574`：
 
@@ -694,7 +707,7 @@ tail -n +$((B+1)) $L | grep -c 'failed lookup'
 tail -n +$((B+1)) $L | grep -c 'com.example.machprobe'
 ```
 
-预期：`failed lookup` 随应用转圈增长（曾到 265，`build-state.md:401`），且**不出现** `com.example.machprobe`。必须先记行号再触发，只看差值，否则历史记录会被算进本次结果。
+预期：`failed lookup` 随应用转圈增长（曾到 265，`build-state.md:469`），且**不出现** `com.example.machprobe`。必须先记行号再触发，只看差值，否则历史记录会被算进本次结果。
 
 **第 4 条：闭合「私有域条目由 app 的 libxpc 提供」这一步**（旁证）
 
