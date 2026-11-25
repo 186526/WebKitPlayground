@@ -3,8 +3,8 @@
 本文回答三个问题，一条比一条重要：
 
 1. `/var/jb` 下那七个 18.3 镜像，在一个普通 app 身份的进程里到底能不能 `dlopen` 成功，需要什么条件。
-2. 成功后进程里生效的是哪一份镜像。答案与本仓库此前的预期不同：程序向 dyld 要系统路径，拿回的是自建那份。
-3. 因此「先注入再替换」这条路线为什么不再必要，以及剩下那一处真正未解决的阻断是什么。
+2. 成功后 dyld 把自建镜像与系统镜像当成一个身份还是两个。答案是同一个：程序向 dyld 要系统路径，拿回的是已经在场的那份，与请求的路径无关。
+3. 这条身份规则对「先注入再替换」这条路线的后果是什么。后果是它走不通，而替代路线必须改变绑定发生的时刻。constructor 那条替代路线已在真实 app 形态上被证否（6.3），剩下的是在 dyld 绑定之前让覆盖目录生效。
 
 全部读数来自 2026-11-25 在 iPad Pro 11 英寸 M2（`iPad14,4`）、iPadOS 16.1（20B82）、Dopamine rootless 上的实测，设备地址 `192.168.2.136`。本轮只做读取与自建探针，没有 root，没有写 `/var/jb` 之外的任何路径，没有重启，没有改签名，没有挂载。命令输出一律原文照抄，未做重排。
 
@@ -105,7 +105,7 @@ JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy �
 
 ### 2.4 这两条只覆盖「能加载」
 
-两个条件合起来给出的是「这七个镜像可以进入一个普通进程」。它们对「进入后生效的是不是 18.3」没有直接说，但第四、六两节给出的读数说明，在一个 constructor 先行的宿主里，这件事也成立。
+两个条件合起来给出的是「这七个镜像可以进入一个普通进程」。它们对「进入后生效的是不是 18.3」没有直接说。第四、六两节给出的读数说明，只有在一个**不链接 `WebKit`** 的宿主里、让 constructor 先行，这件事才成立；真实 app 形态下 constructor 晚于主依赖解析，已证否（6.3）。
 
 ---
 
@@ -176,7 +176,7 @@ image count 458 -> 458 (delta 0)
 dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW | RTLD_GLOBAL);
 ```
 
-也就是说，**宿主自己要的是系统路径**。而一个 constructor 在宿主的依赖解析之前已经把 `/var/jb` 那七个镜像按顺序映射进来。设备输出原文：
+也就是说，**宿主自己要的是系统路径**。而一个 constructor 在宿主的依赖解析之前已经把 `/var/jb` 那七个镜像按顺序映射进来。**这个宿主的形态有前提：它的主可执行文件不链接 `WebKit`，第一次 `dlopen` 发生在 `main` 里。** 链接了 `WebKit` 的宿主上同一套 constructor 无效，读数与原因见 6.3。设备输出原文：
 
 ```
 [claim] constructor pid=31682
@@ -204,15 +204,16 @@ dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW | RTLD_GLO
 
 | 已映射的 | 请求的路径 | 得到的 |
 | --- | --- | --- |
-| 自建（先） | 自建 | 自建那份的 handle，delta 0 |
-| 自建（先） | `/System` | **自建那份的 handle**，delta 0 |
-| 系统（先，未测） | 自建 | 按同一规则应返回系统那份，本轮未测 |
+| 自建（先，宿主不链接 `WebKit`） | 自建 | 自建那份的 handle，delta 0 |
+| 自建（先，宿主不链接 `WebKit`） | `/System` | **自建那份的 handle**，delta 0 |
+| 系统（先，宿主链接 `WebKit`） | 自建 | **系统那份**。6.3 的反例里 constructor 进入时已是 `already: SYSTEM`，自建那份没有成为对手 |
+| 系统（先，靠运行期 `dlopen`） | 自建 | 按同一规则应返回系统那份，本轮未直接测 |
 
-前两行已确证，第三行是同一规则的推论，标**有源码支撑**。判重依据是 install name，不是路径；4.1 的六个镜像与系统镜像共享同一个 install name，所以它们是同一个身份，先映射的那份留下。
+第三行现在有实测支撑（6.3），不再是推论；第四行仍是推论，标**有源码支撑**。判重依据是 install name，不是路径；4.1 的六个镜像与系统镜像共享同一个 install name，所以它们是同一个身份，先映射的那份留下。
 
 **这条对「先注入再替换」的直接后果。** 宿主进程（Safari、Chrome）启动时已经把系统 `WebKit` 映射进来，此后任何一次 `dlopen("/var/jb/.../WebKit")` 都在既有身份上做加引用，返回值非空、`dlerror()` 为空、日志里一切正常，而实际生效的仍是系统那份。这条路线的问题在于它是**静默的**：没有任何错误可看，只有镜像清单能揭穿它。
 
-反过来说，只要自建那份在宿主自己的依赖解析之前先进场，宿主后面无论是按路径要、还是按依赖要，都落到自建那份上。第二节的 constructor 探针做的就是这件事，而且它是有效的，见第六节。
+反过来说，只有自建那份在宿主自己的依赖解析之前先进场，宿主后面按路径要、按依赖要才都落到自建那份上。**但「注入的 dylib 的 constructor 早于主依赖解析」这个前提在真实 app 形态上不成立**：`__mod_init_func` 在所有依赖映射之后才跑，链接 `WebKit` 的宿主里 constructor 进入时系统 `WebKit` 已在外场（6.3）。所以第四节这条规则本身成立，它同时说明了「先注入再替换」为什么走不通，而不是给出替代路线。替代路线必须改变绑定发生的时刻，见第六节末。
 
 ### 4.4 与「第四轮双份 WebKit 共存」那条读数如何并存
 
@@ -225,13 +226,20 @@ dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW | RTLD_GLO
 
 两份 `WebKit`。同一份文档的第四节还把「不是两份镜像共存」列为已排除项，理由是同配置下端点仍有 5 个。
 
-这两条与 4.2 的判重结果并存需要解释，本轮**没有**解开，三种可能：
+这两条与 4.2 的判重结果并存需要解释。**6.3 的反例给出了最可能的一种，并且它是可测的形态差异，不再是纯推论。**
 
-1. 启动期的依赖解析与运行期的 `dlopen` 走不同的判重路径。主可执行文件的依赖图由 dyld 直接解析，`dlopen` 查已加载镜像表，后者按 install name 判，前者可能不查同一张表。这是本文认为最可能的一种，标**假设**。
-2. 那次实验里覆盖目录内的 `WebKit` 与系统那份的 install name 不同。4.1 的读数取自当前设备上的 `/var/jb/Library/Frameworks`，与 `WebKitOverride` 里的复制件是同一批文件，所以这一条要成立需要那次实验前文件被换过。
-3. `[ 20]` 与 `[891]` 是同一个镜像的两条登记（例如符号链接的两种路径形态各建一条 loader）。`docs/dopamine-basebin-webkit-override.md:139` 记录 `JustInTimeLoader::matchesPath` 的路径去重可以因此失效，同一个文件以两种路径字符串各建一份 loader，这一条有源码支撑。
+那次实验的宿主是 Chrome：一个**链接 `WebKit`** 的真实 app。按 6.3 的读数，这类宿主的 `WebKit` 在主依赖解析阶段就已映射，而且那时的判重发生在 dyld 的启动期绑定路径上，与运行期 `dlopen` 在同一个进程里运行但不是同一次查找。覆盖目录是通过 `DYLD_FRAMEWORK_PATH` 交给启动期绑定的，所以启动期解析覆盖目录那份、运行期再 `dlopen` 自建那份时按 install name 命中，两条登记并存。4.2 的探针测的是运行期 `dlopen` 对运行期 `dlopen`，两次都查已加载镜像表，所以只有一份。
 
-判别实验：在同一个进程里按两种顺序各跑一次，每次都打印 `_dyld_image_count` 与每个 `WebKit` 镜像的路径、`LC_UUID`。两个方向都是同一 handle 与 delta 0，则第 1 种解释成立；若某个方向出现两条不同 uuid 的登记，则 4.3 的规则需要收窄。这个实验不需要 root，第八节的源码改两行即可。
+因此 4.2 与 `build-state.md:515` 不矛盾，它们测的是两个不同的查找入口：
+
+| 测量 | 谁在查找 | 结果 |
+| --- | --- | --- |
+| 4.2 两次 | 运行期 `dlopen` | 按 install name 命中，只有一份，delta 0 |
+| `build-state.md:515` | 启动期依赖绑定 + 运行期 `dlopen` | 两条登记并存 |
+
+这一条标**假设**：它把「启动期绑定不查运行期那张已加载镜像表」当成前提，而这一步本轮没有直接读数。判别实验仍按下一段做，并且要额外打印宿主是不是链接了 `WebKit`——这是两组的唯一差别。
+
+判别实验：在同一个进程里按两种顺序各跑一次，每次都打印 `_dyld_image_count` 与每个 `WebKit` 镜像的路径、`LC_UUID`。两个方向都是同一 handle 与 delta 0，则「两种查找入口」这条解释需要靠第四个用例（链接 `WebKit` 的宿主）来补，而 6.3 已经给出了那个用例的形态。这个实验不需要 root，第八节的源码改两行即可。
 
 ---
 
@@ -281,28 +289,46 @@ dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW | RTLD_GLO
 
 ---
 
-## 六、启动时序：constructor 路线已证明，真实 helper 未证明
+## 六、启动时序：constructor 只在不链接 `WebKit` 的宿主上成立
 
-### 6.1 已证明的部分
+### 6.1 成立的那一半，以及它成立的条件
 
 一个把 `dlopen` 放进 `__attribute__((constructor))` 的 dylib，只要它的 constructor 在宿主自己的依赖解析之前执行，第二节的两个条件就能在宿主进程里同时满足，并且宿主最终生效的是自建那份，不是系统那份。证据是 4.2 那次反方向测量：宿主 `main` 里要的是 `/System` 路径，`[host] idx=266 VARJB` 与 `dup count 0` 说明拿到的是自建那份，进程里也没有第二份。
 
-这条回答的是「机制是否成立」：成立。宿主先被注入，镜像先进场，后面按路径解析或按依赖解析都落到自建那份上。
+**那次测量的宿主有一个限定条件，原稿漏写了：它的 `main` 里才第一次 `dlopen` `WebKit`，主可执行文件本身不链接 `WebKit`。** 6.3 记录了一个链接 `WebKit` 的宿主上的反例，那条反例把这一路线在真实 app 形态上的可行性直接否掉。
 
 ### 6.2 未证明的部分
 
 真实场景里，Safari 的 `WebContent` 是 **launchd 先起进程、再被 ellekit 注入**的，而且它一启动就带着沙盒 profile。两个差别让 6.1 的读数不能直接搬过去：
 
-1. **注入时机。** 6.1 的 constructor 在宿主依赖解析之前跑。`WebContent` 的 `WebKit` 是主可执行文件自己的依赖，launchd 起进程、dyld 解析主依赖、然后才轮到注入的 dylib 的 constructor。若注入确实晚于主依赖解析，那么 `WebKit` 已经以系统身份在场，按 4.3 的规则，之后无论怎么 `dlopen` 都是系统那份。**这一条本轮没有取到 `WebContent` 的读数**：Safari 的 `WebContent` 进程在启动后，`lldb image list -o -f` 读到的是
+1. **注入时机。** `WebContent` 的 `WebKit` 是主可执行文件自己的依赖，`__mod_init_func` 在**所有**依赖映射完成之后才跑（6.3 的反例直接测到了这一点）。所以注入的 dylib 的 constructor 执行时，`WebKit` 已经以系统身份在场，按 4.3 的规则，之后无论怎么 `dlopen` 都是系统那份。**这一条不是「没取到读数」，6.3 已在链接 `WebKit` 的宿主上直接测到它的反面**（`already: SYSTEM` 加四个 `Symbol not found`）。Safari 的 `WebContent` 进程在启动后，`lldb image list -o -f` 读到的是
    ```
    [86] /System/Library/Frameworks/WebKit.framework/WebKit
    [113] /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
    [115] /System/Library/PrivateFrameworks/WebCore.framework/WebCore
    ```
-   三份都来自 `/System`，与注入晚于依赖解析一致。但这是「注入没有生效」还是「注入生效也晚了一步」，这份清单分不出来，因为同一时刻没有同时取镜像清单与注入日志。
-2. **沙盒与 entitlement 继承。** `WebContent` 在 `initializeSandbox` 期间进入沙盒，iOS 上这条路径是 `RELEASE_ASSERT_REACHED`（`Source/WebKit/Shared/ios/AuxiliaryProcessIOS.mm:45-48`，行号来自塔的记录，本文未在本机核对源码树）。在一个已经进入沙盒、并且继承了一套 JIT 与 `dynamic-codesigning` entitlement 的进程里，`proc_set_debugged` 的效果、以及自建镜像的映射是否被沙盒拒绝，都没有读数。
+   三份都来自 `/System`，与反例的机制解释一致：不是「注入没生效」，而是「注入生效了，但 constructor 天然晚于主依赖解析」。
+2. **沙盒与 entitlement 继承。** `WebContent` 在 `initializeSandbox` 期间进入沙盒，iOS 上这条路径是 `RELEASE_ASSERT_NOT_REACHED()`（`Source/WebKit/Shared/ios/AuxiliaryProcessIOS.mm:45-48`）。本轮在本机的 18.3 源码树 `/tmp/wkpre18.3.1` 核对了这一段：第 47 行确实是 `RELEASE_ASSERT_NOT_REACHED();`，`RELEASE_ASSERT_REACHED` 在整个 `Source/` 下命中 0 次，`RELEASE_ASSERT_NOT_REACHED` 命中 2274 次。在一个已经进入沙盒、并且继承了一套 JIT 与 `dynamic-codesigning` entitlement 的进程里，`proc_set_debugged` 的效果、以及自建镜像的映射是否被沙盒拒绝，都没有读数。
 
-所以这一项的准确说法是：**constructor 机制已证明；真实 helper 的沙盒与 JIT entitlement 继承未证明。** 第二段测量要同时取三样东西并让时间戳对齐：`launchctl print pid/<PID>` 的 `environment` 段落、`lldb image list -o -f` 的镜像清单、注入器的日志。三者同时指向自建那份才算这一项解决。
+### 6.3 反例：宿主链接 `WebKit` 时 constructor 无效
+
+塔用一个**链接时依赖 `WebKit`** 的宿主复测了同一套 constructor，读数原文：
+
+```
+WebKit images already present = 1
+already: SYSTEM
+Symbol not found: __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyENSt3__14spanIKDsLm18446744073709551615EEE
+```
+
+（`WebCore`、`WebKitLegacy`、`WebGPU`、`WebKit` 四个都因这条符号失败，`JavaScriptCore` 与两条 dylib 之外的顺序无法补救。）
+
+三行读数说明：
+
+- **constructor 进入时 `WebKit` 已经在场，而且是系统那份。** `__mod_init_func` 在 dyld 映射完主可执行文件的全部依赖之后才运行，所以链接了 `WebKit` 的宿主里，constructor 永远晚于 `WebKit` 的映射。
+- **`Symbol not found` 是同一条依赖顺序失败，不是签名失败。** 与 2.2 的单独加载失败同一个符号：`WebCore` 拿不到 `JavaScriptCore` 提供的 `WTF` 符号。区别在于这一次 `JavaScriptCore` 也没能替换成自建那份。
+- 因此 6.1 的成立条件要写全：**constructor 先行只在「宿主不链接 `WebKit`、而由 constructor 自己第一个 `dlopen` 它」时有效。** 真实 app 的形态（主可执行文件链接 `WebKit`）不满足这个条件。
+
+所以这一项的准确说法是：**constructor 机制只在不链接 `WebKit` 的宿主上被证明；真实 `WebContent` 的形态下它被证明无效（6.3），沙盒与 JIT entitlement 继承则是连读数都还没有。** 下一步不该再试 constructor，应当回到「在 dyld 绑定之前让覆盖目录生效」这条路（`DYLD_FRAMEWORK_PATH` 注入），它与 constructor 无关。
 
 ---
 
@@ -330,6 +356,7 @@ dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW | RTLD_GLO
 /* selfauth.c — authorize this process, then dlopen the seven images in dependency order. */
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <string.h>
@@ -427,6 +454,28 @@ C
 4.2 那两次测量需要同一个进程里做两次 `dlopen` 并比较 handle，以及数一遍重复类告警。在上面源码的 `main` 里改用：
 
 ```c
+static void print_image_uuid(uint32_t index) {
+    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(index);
+    if (!header || header->magic != MH_MAGIC_64) {
+        printf("  uuid=<no header>");
+        return;
+    }
+    const unsigned char *cursor = (const unsigned char *)header + sizeof(struct mach_header_64);
+    const unsigned char *end = cursor + header->sizeofcmds;
+    for (uint32_t n = 0; n < header->ncmds && cursor + sizeof(struct load_command) <= end; n++) {
+        const struct load_command *command = (const struct load_command *)cursor;
+        if (command->cmd == LC_UUID) {
+            const unsigned char *uuid = cursor + 8;
+            printf("  uuid=%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                   uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+                   uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+            return;
+        }
+        cursor += command->cmdsize;
+    }
+    printf("  uuid=<no LC_UUID>");
+}
+
 uint32_t before = _dyld_image_count();
 void *handle_jb = dlopen("/var/jb/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW);
 printf("jbKit    %s\n", handle_jb ? "LOADED" : dlerror());
@@ -438,27 +487,50 @@ printf("image count %u -> %u (delta %d)\n", before, after, (int)(after - before)
 for (uint32_t i = 0; i < after; i++) {
     const char *name = _dyld_get_image_name(i);
     if (name && strstr(name, "WebKit.framework/WebKit")) {
-        const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
-        const unsigned char *uuid = header ? (const unsigned char *)header + 8 : NULL;
-        printf("  idx=%u  uuid=%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X  %s\n",
-               i, uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
-               uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15], name);
+        printf("  idx=%u", i);
+        print_image_uuid(i);
+        printf("  %s\n", name);
     }
 }
 ```
 
-uuid 直接读 `mach_header_64` 的 `uuid` 字段（偏移 8，在 `load_commands` 之前），不需要额外头文件。重复类告警由 libobjc 在第二次实现被映射时打印到 stderr，计数时把 stderr 与 stdout 合并后 `grep -c 'is implemented in both'`。
+**`LC_UUID` 是一条 load command（`cmd == 0x1b`），不是 `mach_header_64` 的字段。** 头结构只有 `magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved` 共 32 字节，`header + 8` 落在 `cpusubtype`，把那里当 uuid 打印出来是垃圾值。要拿 uuid 必须从 `header->sizeofcmds` 之前的那段 `load_commands` 里逐条走，跳过 `cmdsize`，命中 `cmd == 0x1b` 时读它 `+8` 起的 16 字节。上面这段就是按这个写的，`<mach-o/loader.h>` 提供 `struct mach_header_64`、`struct load_command`、`LC_UUID` 与 `MH_MAGIC_64`。
 
-反方向那一组（宿主先要 `/System`）把这段放进一个 constructor 里，`main` 只留一句 `dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW|RTLD_GLOBAL)`，就是 4.2 第二部分那次测量。
+这处错在本轮的原稿里出现过一次，并在评审时用真实 arm64 Mach-O 实测抓到。用同一份文件比较两种读法（`/home/real186/webkit-work/paytest/` 下 `/var/jb` 那份的两个 dylib，本机 `llvm-objdump --macho --private-headers` 给出真值）：
+
+| 文件 | `header + 8` 读法 | 遍历 `LC_UUID` 读法 | `llvm-objdump` |
+| --- | --- | --- | --- |
+| `libANGLE-shared.dylib` | `02000080-0600-0000-1E00-0000F80C0000` | `277DB473-669B-3F0D-857A-DF23FEFA73D3` | `277DB473-669B-3F0D-857A-DF23FEFA73D3` |
+| `libwebrtc.dylib` | `02000080-0600-0000-1F00-0000D8110000` | `B22027E7-83B0-395C-9CDC-2FD3059FAB14` | `B22027E7-83B0-395C-9CDC-2FD3059FAB14` |
+
+左列的两个值与真值无关，而它恰好是「按原稿写法编译运行会打印出来的东西」。因此在设备上复跑这一段时，判据是 uuid 必须等于该镜像的 `LC_UUID`（`/var/jb` 那份 `WebKit` 是 `787DFAB1-4DE3-3568-9923-C9409791B728`），不是「打印出了形如 uuid 的字符串」。
+
+重复类告警由 libobjc 在第二次实现被映射时打印到 stderr，计数时把 stderr 与 stdout 合并后 `grep -c 'is implemented in both'`。
+
+反方向那一组（宿主先要 `/System`）把这段放进一个 constructor 里，`main` 只留一句 `dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW|RTLD_GLOBAL)`。**这条路只在宿主不链接 `WebKit` 时成立**，6.3 记录了一个链接 `WebKit` 的宿主上 constructor 失败的反例。
 
 ---
 
 ## 九、仍未验证
 
-- **4.3 表格第三行**：宿主已加载系统 `WebKit` 之后 `dlopen` 自建那份，handle 与镜像数如何。前两行已测，第三行是同一规则的推论。
-- **4.4 的三种解释**：`build-state.md:515` 的双份共存与 4.2 的判重结果如何并存，本轮没有判定。
+- **4.3 表格第四行**：系统那份先以运行期 `dlopen` 进场、之后 `dlopen` 自建那份时返回哪个 handle。表格前三行已有实测（第三行由 6.3 提供），第四行是同一规则的推论。
+- **4.4 的「两种查找入口」解释**：`build-state.md:515` 的双份共存与 4.2 的判重结果如何并存，本文给出的解释是启动期绑定与运行期 `dlopen` 查不同的表，这一步标假设，缺一个链接 `WebKit` 的宿主上的直接读数。
 - **`WebGPU` 剥掉签名 + 以 `JavaScriptCore` 起头的顺序**：本轮记 FAILED，更早一份对照表记未测。两者不冲突，但这一格按「待复核」处理，不要当成两份独立读数。
-- **真实 `WebContent` 的注入时机**：6.2 第 1 点。需要镜像清单、注入日志、`launchctl` 的 `environment` 段落三者时间戳对齐。
-- **真实 `WebContent` 的沙盒与 JIT entitlement 继承**：6.2 第 2 点。`AuxiliaryProcessIOS.mm:45-48` 的 `RELEASE_ASSERT_REACHED` 在自建镜像映射时是否触发，没有读数。
+- **真实 `WebContent` 的注入机制**：6.2 第 1 点与 6.3。constructor 在链接 `WebKit` 的宿主上已被证明无效，所以这不是「注入时机未取到读数」，而是这条路线在真实形态上不适用；剩下未验证的是「在 dyld 绑定之前让覆盖目录生效」那条路能否走通，它需要 basebin 的 `DYLD_FRAMEWORK_PATH` 注入点真正生效。
+- **真实 `WebContent` 的沙盒与 JIT entitlement 继承**：6.2 第 2 点。`AuxiliaryProcessIOS.mm:45-48` 的 `RELEASE_ASSERT_NOT_REACHED()` 在自建镜像映射时是否触发，没有读数。宏名与行号已在本机 18.3 源码树核对（`/tmp/wkpre18.3.1`）。
 - **重复告警的条数口径**：33 与 31 两个读数并存，判据取「是不是 0」。
 - 本文所有设备读数都没有做「同一时刻对齐」的交叉取证。第三节的签名形态对照与第二节的顺序对照各自是独立运行，运行时间戳没有与镜像清单对齐；把镜像清单和 `_dyld_image_count` 收进同一次运行，是下一次复测应当补的一步。
+
+## 十、读这些二进制时不能用 `strings`
+
+设备上**没有 `strings` 二进制**（`which strings` 返回 not found）。任何用 `strings` 取得的判据读数在设备上恒为 0，无论文件里到底有没有那个字符串，所以它不是「读不到」而是「一律读不到」，得不出任何信息。
+
+正确的形式是 `grep -a`，它按字节匹配、不要求文件是文本：
+
+```sh
+grep -a -o '_MACHOMERGER_HOOK_[A-Za-z0-9_$]*' /var/jb/basebin/gen/dyld | sort | uniq -c
+```
+
+用这一条对两个文件各读一次，两个 override hook 的计数都是 `1 0 0 1` 的形状：`/var/jb/basebin/gen/dyld` 与 `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib`。
+
+本文与本次追加到 `build-state.md` 的第八轮都没有任何判据是用 `strings` 取得的（全节只有 `grep -a` 与 `/var/jb/usr/bin/clang` 的用法），所以这一条不需要回溯修正。`build-state.md` 第 115 至 123 行本来就把 `strings` 记为「不存在，替代做法 `grep -a -o 符号 文件 | wc -l`」，与本条一致。
