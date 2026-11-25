@@ -307,6 +307,14 @@ exit as its wait status, and a child that never exits not to hold the
 constructor: the wait is polled a bounded number of times and the images are
 still claimed.
 
+One case pins the shape of a hard-linked host, where the four later loads fail
+and it reads as a broken order unless the test says otherwise: `JavaScriptCore`,
+`libwebrtc` and `libANGLE` load, `WebCore` fails with
+`_WTFSignpostIndirectLoggingEnabled`, and the case requires `loaded` to be 3 and
+`failed_index` to be 4. That pair is the diagnosis for an application that
+links WebKit at load time; the fix for it is the dyld override patch described
+in `src/claim_images.c`, not a change to this sequence.
+
 The script builds the test twice: once plainly and once with AddressSanitizer
 and UndefinedBehaviorSanitizer. The second run only counts when its log holds
 neither a sanitizer error nor a UBSan report. Everything is written under

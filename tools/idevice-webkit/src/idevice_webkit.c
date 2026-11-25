@@ -492,15 +492,21 @@ void idevice_webkit_start(void) {
   report_stage();
 
   /* The seven /var/jb images are claimed here, after the filter match and the
-     host check and before the host's own code asks for WebKit. A process the
-     filter named by neither branch, one that failed the copy check, and one
-     that passed it but failed the host check all return above, so none of them
-     loads an image. The host's own request for
-     /System/Library/Frameworks/WebKit.framework/WebKit then resolves to the
-     /var/jb image by its install name; claim_images.c carries the measured
-     readings for the order and for the reverse direction. The claim is written
-     to the report on its own, because a failure there is the answer a run
-     without a debugger has to read. */
+     host check. A process the filter named by neither branch, one that failed
+     the copy check, and one that passed it but failed the host check all return
+     above, so none of them loads an image.
+
+     What this achieves depends on the host. A host that has not linked WebKit
+     at load time reaches this point before anything asks for WebKit, so the
+     claim wins the dedupe by install name and the host's later request for the
+     system path answers with the /var/jb image. A host that does link WebKit
+     has the system image mapped before this constructor runs; three of the
+     seven then load, four fail with Symbol not found, and that host keeps the
+     system WebKit. claim_images.c records the measurement and the dyld
+     override patch that would be needed instead. The claim stays unconditional
+     among the processes that pass the gates because it is the correct action in
+     the first case and harmless in the second, and its recorded failure is what
+     tells the two apart in the report. */
 
   if (filterMatched) {
     claim_result claim;

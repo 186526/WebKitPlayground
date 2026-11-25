@@ -3,10 +3,57 @@
 #include "textkit.h"
 #include "types.h"
 
-/* The two conditions below were measured on the device (iPad14,4 / iPadOS
-   16.1 / Dopamine rootless, mobile@192.168.2.136, uid 501). Each of them is
-   the reason a position in the list is fixed, and each of them is invisible
-   from the file names.
+/* WHAT THIS MODULE CAN AND CANNOT DO — read this before changing the order.
+
+   The mechanism below was measured on a host that did not link WebKit and only
+   dlopen()ed it inside main(). In that host the constructor ran before the
+   first request for WebKit and all seven images loaded. A real application is
+   not that shape: MobileSafari links WebKit as a load-time hard dependency, so
+   dyld maps the system 16.1 WebKit while preparing the main executable, and
+   __mod_init_func entries run only after that. The tower measured the
+   difference on the device with a host linked against a stub WebKit that no
+   runtime search path reached:
+
+     [ctor] entered; WebKit images already present = 1
+     [ctor]   already: SYSTEM
+     Successfully marked proc of pid 32399 as debugged
+     [ctor] JavaScriptCore LOADED
+     [ctor] libwebrtc.dylib LOADED
+     [ctor] libANGLE-shared.dylib LOADED
+     [ctor] WebCore        FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+     [ctor] WebKitLegacy   FAILED  Symbol not found: __ZN3WTF6Thread5s_keyE
+     [ctor] WebGPU         FAILED  Symbol not found: __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...
+     [ctor] WebKit         FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+     [ctor] after claim, WebKit images = 1
+
+   In that host the first three loads succeed and the last four fail: the
+   daemon's own dlopen of JavaScriptCore succeeds because its symbols do not
+   collide with the resident system ones, but WebCore, WebKitLegacy, WebGPU and
+   WebKit then fail to bind against the system JavaScriptCore that dyld already
+   bound for them. The count of WebKit images stays at 1, and it is the SYSTEM
+   one.
+
+   So this module does not make a hard-linked host use 18.3, and no change to
+   its order, flags or timing can. A constructor cannot run before the main
+   executable's own dependencies are loaded; that is what a constructor is.
+   The survivor path is the dyld layer: a patched dyld that overrides the
+   framework lookup (isOverridablePath / isAlwaysOverridablePath) during
+   dependency resolution, which is before any __mod_init_func entry and before
+   the system image is mapped. That patch is outside this module's reach; see
+   the note at the end of this comment for the device reading that shows it is
+   absent.
+
+   The claim is still the right action in the two cases that do apply: a host
+   that lazily dlopen()s WebKit (it wins the dedupe, as measured), and a host
+   whose constructor runs before WebKit is requested. In a hard-linked host it
+   is harmless — it fails, records which images failed, and leaves the process
+   as dyld built it. The failure itself is the diagnosis: four Symbol not found
+   lines with a loaded count of 3 means the host was hard-linked, and the fix is
+   the dyld patch, not this file.
+
+   The three conditions below are still the reason a position is fixed when the
+   claim can work at all. They were measured on the device (iPad14,4 / iPadOS
+   16.1 / Dopamine rootless, mobile@192.168.2.136, uid 501).
 
    1. libwebrtc and libANGLE must be loaded before WebCore.
 
@@ -65,9 +112,28 @@
    working result into that failure, which is why the payload keeps the system
    names.
 
-   So the claim has to run in the constructor, before the host's own code asks
-   for WebKit; a claim made afterwards loses the dedupe and leaves the system
-   image in the process. */
+   So the claim wins the dedupe only when it runs before anything asks for the
+   system path. A constructor does that only in a host that has not linked
+   WebKit at load time; in a host that has, dyld has already mapped the system
+   image before the constructor runs and there is nothing left to win, as the
+   block at the top of this file records. */
+
+/* The device reading that decides where the survivor path is. The two override
+   hooks live in the dyld layer, and the criterion is the token-filtered count
+   of _MACHOMERGER_HOOK_* names for dlopen_from, isOverridablePath,
+   isAlwaysOverridablePath and __fcntl:
+
+     /var/jb/basebin/gen/dyld                            1 0 0 1
+     /var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib 1 0 0 1
+     basebin/dyldhook_merge.arm64e.iOS16-17.dylib in basebin.tar  1 1 1 1
+
+   The first two are the device's, and the `0 0` in the middle means the two
+   override hooks are absent, so dyld never consults an override directory and
+   the system WebKit wins during dependency resolution no matter what this
+   module does. The tar's hook scores `1 1 1 1`. Making a hard-linked host use
+   18.3 therefore requires installing that hook (a `jbctl update basebin`
+   followed by a reboot), which is a dyld-layer change and outside this module.
+   The claim below cannot substitute for it. */
 
 const char *const claim_image_paths[claim_image_count] = {
     "/var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",

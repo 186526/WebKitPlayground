@@ -102,7 +102,52 @@ The wait for that child is polled for at most half a second, because the
 constructor runs inside the host's launch and an unbounded wait there would
 hold the application at startup.
 
-Two conditions fix the order and neither is visible from the file names:
+### What the sequence cannot do
+
+The sequence loads all seven only in a host that does not link WebKit at load
+time. An application that does — MobileSafari links WebKit as a load-time
+dependency — has the system 16.1 WebKit mapped while dyld prepares the main
+executable, and `__mod_init_func` entries run after that. Measured on the
+device with a host linked against a stub WebKit that no runtime search path
+reached:
+
+```
+[ctor] entered; WebKit images already present = 1
+[ctor]   already: SYSTEM
+Successfully marked proc of pid 32399 as debugged
+[ctor] JavaScriptCore LOADED
+[ctor] libwebrtc.dylib LOADED
+[ctor] libANGLE-shared.dylib LOADED
+[ctor] WebCore        FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+[ctor] WebKitLegacy   FAILED  Symbol not found: __ZN3WTF6Thread5s_keyE
+[ctor] WebGPU         FAILED  Symbol not found: __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...
+[ctor] WebKit         FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+[ctor] after claim, WebKit images = 1
+```
+
+Three load and four fail, because the system `JavaScriptCore` is what dyld has
+already bound for them. The sequence does not replace that image and no order,
+flag or timing change in a constructor can: a constructor runs after the main
+executable's dependencies exist. A loaded count of 3 with `failed_index` 4 is
+this shape rather than a broken order.
+
+The sequence is still the right action in the two hosts it fits. In a host that
+lazily `dlopen`s WebKit it wins the dedupe and loads all seven, which is how the
+7/7 reading was obtained. In a hard-linked host it fails harmlessly and its
+failure is the diagnosis. The path that covers the hard-linked case is the dyld
+layer, not this dylib: the override hooks `isOverridablePath` and
+`isAlwaysOverridablePath` make dyld consult an override directory during
+dependency resolution, before any constructor runs and before the system image
+is mapped. On the device those two hooks are absent — `/var/jb/basebin/gen/dyld`
+and `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` both score `1 0 0 1`
+on the token criterion for `dlopen_from`, `isOverridablePath`,
+`isAlwaysOverridablePath` and `__fcntl`, while the hook dylib inside
+`basebin.tar` scores `1 1 1 1`. Installing that hook is what a hard-linked host
+needs, and it is a basebin change rather than a change to this directory.
+
+### Why each position is fixed
+
+Three conditions fix the order and none is visible from the file names:
 
 - `libwebrtc` and `libANGLE-shared` must come before `WebCore`. The `/var/jb`
   `WebCore` records both as weak dependencies whose install names point at the
@@ -114,22 +159,17 @@ Two conditions fix the order and neither is visible from the file names:
   `/var/jb` copy fails with `Symbol not found:
   _WTFSignpostIndirectLoggingEnabled`, because the 16.1 system
   `JavaScriptCore` does not define the symbol the 18.x `WebKit` needs.
+- The dedupe works because the two identities are equal. The `/var/jb` images
+  already carry the system install names; `/var/jb`'s `WebKit` names itself
+  `/System/Library/Frameworks/WebKit.framework/WebKit`. That equality is what
+  lets a later request for the system path answer with the image already
+  loaded. A rewrite of `LC_ID_DYLIB` that gave the `/var/jb` copy its own
+  identity would map a second image and produce the failure above, which is why
+  the payload keeps the system names.
 
-   dyld dedupes by install name, which is what makes the claim hold.
-
-   The /var/jb images already carry the system install names; /var/jb's
-   WebKit names itself /System/Library/Frameworks/WebKit.framework/WebKit.
-   That equality is what makes the claim hold: once these seven are in the
-   process, a host's own request for the system WebKit path returns the
-   /var/jb image already loaded, not a second one. The order's job is to make
-   the image that wins the dedupe the 18.3 one, by mapping it before anything
-   asks for the system path. It is not enough on its own: if the identities
-   differed, dyld would map a second image and the failure above is what
-   follows, which is why the payload keeps the system names.
-   The claim therefore has to run in the constructor, before the host's code
-   asks for WebKit. It runs only for a process that passed the filter match,
-   the copy check and the host check; a process that failed any of them returns
-   before it loads anything.
+The claim runs only for a process that passed the filter match, the copy check
+and the host check; a process that failed any of them returns before it loads
+anything.
 
 ## Commands
 

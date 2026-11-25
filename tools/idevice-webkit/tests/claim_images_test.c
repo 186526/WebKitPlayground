@@ -299,6 +299,25 @@ int main(void) {
   check("a failure at the first image records position 1", result.failed_index == 1);
   check("  and no image as loaded", result.loaded == 0);
 
+  /* The shape a hard-linked host produces: JavaScriptCore, libwebrtc and
+     libANGLE load, then WebCore fails with the WTF signpost symbol missing
+     because the system JavaScriptCore is what dyld already bound. Three loaded
+     and failed_index 4 is this case, not a broken order; the fix for it is the
+     dyld override patch, so the test pins the two fields that tell them apart.
+     The recorder answers exactly as the device did. */
+  test_reset();
+  fail_at = 3;
+  snprintf(error_text, sizeof(error_text), "%s",
+           "Symbol not found: _WTFSignpostIndirectLoggingEnabled");
+  claim_images_run(&result);
+  check("a hard-linked host loads three and stops at WebCore", result.loaded == 3);
+  check("  the stop is recorded at position 4", result.failed_index == 4);
+  check("  the failing image is WebCore",
+        strcmp(result.failed_path,
+               "/var/jb/Library/Frameworks/WebCore.framework/WebCore") == 0);
+  check("  the missing symbol is the one the hard-linked case reports",
+        strstr(result.error, "_WTFSignpostIndirectLoggingEnabled") != NULL);
+
   /* posix_spawn's return value is the failing errno. A marking that never
      started is recorded with that value instead of being read as success. */
   test_reset();

@@ -59,7 +59,15 @@ typedef struct claim_result {
    first image that fails stops the loop: the images after it are not tried,
    because a later image loaded over a missing predecessor is the mixed state
    the sequence exists to prevent. The caller decides whether to run this at
-   all; this function does not look at the filter. */
+   all; this function does not look at the filter.
+
+   This does not make a hard-linked host use 18.3. An application that links
+   WebKit as a load-time dependency has the system image mapped before any
+   constructor runs, and this sequence then loads three of the seven and fails
+   the rest with Symbol not found. A loaded count of 3 with failed_index 4 is
+   that shape, not a broken order; the fix for it is the dyld override patch,
+   which claim_images.c describes. In a host that lazily dlopen()s WebKit the
+   sequence wins the dedupe and loads all seven. */
 
 void claim_images_run(claim_result *result);
 
