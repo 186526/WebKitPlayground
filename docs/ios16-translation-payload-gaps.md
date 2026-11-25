@@ -60,7 +60,7 @@
 
 **结论：渲染停住这个现象成立，但「进程存活、不产生崩溃报告」只在打了翻译补丁的构建里成立。** 机制要写成「`updateRendering()` 在 `:326-329` 提前返回」，不能写成 `scheduleRenderingUpdate`。进程侧的差别见 2.2 末尾的三情形表：不打补丁时 38 号会先让 helper 崩在 `AuxiliaryProcess::didReceiveInvalidMessage` 的 `CRASH()`，根本走不到「标志永不清」这一步；只有打了补丁、38 号被丢弃，才会出现「标志永不清、渲染停在首帧、进程活着」这个组合。
 
-**另一处需要更正的机制描述。** 被核对文档写「消息随后落到 `WebProcess::didReceiveMessage` 的 `LOG_ERROR`（`WebProcess/WebProcess.cpp:1002`）」。行号本身对（18.3 该文件 `:1002` 确是 `LOG_ERROR("Unhandled web process message ...")`，16.1 在 `:943`），但这条路径不是编号撞车时走的那条，也不是打了补丁的构建里走的那条。把「消息编号 → 接收者键」这一关与「接收者键 → handler」这一关分开，结局有三条：
+**另一处需要更正的机制描述。** 被核对文档写「消息随后落到 `WebProcess::didReceiveMessage` 的 `LOG_ERROR`（`WebProcess/WebProcess.cpp:1002`）」。行号本身对（18.3 该文件 `:1002` 确是 `LOG_ERROR("Unhandled web process message ...")`，16.1 的 `Safari-614.1.9` 在 `:943`，发货 `releases/Apple/Safari-16.1-iOS-16.1` 是 `:941`），但这条路径不是编号撞车时走的那条，也不是打了补丁的构建里走的那条。把「消息编号 → 接收者键」这一关与「接收者键 → handler」这一关分开，结局有三条：
 
 | 构建与情形 | 未映射消息的结局 |
 | --- | --- |
