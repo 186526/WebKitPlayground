@@ -99,7 +99,7 @@ using SDKAlignedBehaviors = WTF::BitSet<static_cast<size_t>(SDKAlignedBehavior::
 
 同一 tag 的枚举有 94 个行为项，`BitSet<94, uint32_t>` 占 3 个 32 位字，`storageLengthInBytes()` 返回 12（`Source/WTF/wtf/BitSet.h:142`）。这个数字由编译进 helper 的枚举项数量决定，16.1 侧无法预知。
 
-这一节的意义是排除一种误判：XPC 启动阶段本身不是这组错配的终止点。16.1 UI 进程发送的 `client-sdk-aligned-behaviors` 是 8 字节，18.3 helper 断言 12 字节，所以这组错配在 `XPCServiceInitializer` 内就中止，比 CoreIPC 更早。第 6 节描述的 CoreIPC 终止是另一条不经过这个断言的路径。
+这一节的意义是确定终止发生的阶段：这组错配在 XPC 启动阶段就终止，比 CoreIPC 更早。16.1 UI 进程发送的 `client-sdk-aligned-behaviors` 是 8 字节，18.3 helper 断言 12 字节，所以 helper 在 `XPCServiceInitializer` 内被中止。第 6 节描述的 CoreIPC 终止是另一条不经过这个断言的路径。
 
 ## 3. 消息号是消息名字符串排序的连续序号
 
