@@ -704,6 +704,10 @@ patches=25 applied=23 skipped=2 fail=0
 
 反序验证：先单独应用 `ios16-xpc-bootstrap-compat.patch`，再应用翻译补丁，两者都成功，`MessageNumberTranslation.h` 存在。
 
+**补丁完整性单独核。** `git apply` 的退出码只说明 hunk 都落了，不说明补丁把该建的文件都建了：新建文件的段在 `git diff` 输出里不出现（需要 `git add -N`），生成补丁时漏掉它，`git apply` 照样报成功。所以逐个核了三点：补丁文件里 `^diff --git` 计数为 11、`^new file mode` 计数为 1，应用后 `Source/WebKit/Platform/IPC/MessageNumberTranslation.h` 落盘 108 行，`MessageName translateOutgoingMessageName` 与 `MessageName translateIncomingMessageName` 在 `Encoder.cpp` 里各命中 1 次定义。
+
+**包含项解析。** 把补丁改到的每个文件里的 `#include "..."` 与 `#import "..."` 逐个按文件名在 `Source/` 下找，以打补丁前的同一棵树为基线做差分，只统计「打补丁后新增的未解析项」。结果只有一条：`MessageNumberTranslation.h` 里的 `#include "MessageNames.h"`。它是构建产物不是源码树里的文件（`Source/WebKit/DerivedSources-output.xcfilelist` 里写作 `$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/MessageNames.h`），基线里 `Encoder.h` 与 `Decoder.h` 在同样的未解析状态下就已经包含它，所以这一条与既有代码同性质，不是本次改动引入的缺口。
+
 `PATCH APPLIED BUT HAS NO EFFECT` 的检查命令 `git grep -q translateOutgoingMessageName -- Source/WebKit/Platform/IPC/Encoder.cpp` 退出 0，改动没有影响这条断言。
 
 ## 8. 未验证项
