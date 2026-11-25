@@ -68,8 +68,8 @@ M63 附录 A 与 `build-state.md` 第四轮的读数都缺第 3、4 项，所以
 ## 三、怎么用
 
 ```sh
-cd WebKitPlayground
-DEVICE_SUDO_PASSWORD='...' scripts/probe-webkit-override-endpoints.sh
+cd WebKitPlayground && DEVICE_SUDO_PASSWORD='...' scripts/probe-webkit-override-endpoints.sh \
+  --ssh-target mobile@192.168.2.136
 ```
 
 可选参数：`--ssh-target <[user@]host>`、`--log-dir <dir>`（默认 `$TMPDIR` 下带时间戳的目录）、`--wait <秒>`（每次拉起后等多久，默认 5）。环境变量 `PROBE_SSH_TARGET`、`PROBE_LOG_DIR`、`PROBE_WAIT_SECONDS` 等价。**`--ssh-target` 这里不写默认值**，理由见下一段。
