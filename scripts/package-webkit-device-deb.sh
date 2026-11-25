@@ -13,6 +13,15 @@
 # libWebKitSwift.dylib is the one dylib that stays inside the
 # framework bundle: WebKit opens it at runtime through the
 # bundle-relative path "Frameworks/libWebKitSwift.dylib".
+#
+# STEP 5 rewrites the framework load paths and STEP 7 verifies
+# them.  A built WebKit links against the system frameworks by
+# absolute path, and production dyld answers an absolute path
+# from the shared cache without ever looking for a file on disk,
+# so a package that keeps those paths never loads its own copies.
+# Each rewritten image instead names its dependency
+# "@rpath/<Name>.framework/<Name>" and carries the two LC_RPATH
+# entries that resolve it inside the install prefix.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -78,6 +87,28 @@ Options:
 Notes:
   Requires 'ldid' in PATH for ad-hoc signing.
   Requires 'dpkg-deb' in PATH (install via: "brew install dpkg").
+  Requires 'python3' in PATH: it rewrites the Mach-O load commands.
+  Uses 'rabin2' as a second opinion when it is in PATH.
+
+  Checking a package that is already built, without a device.  Unpack it
+  first ("dpkg-deb -x pkg.deb root"), then scan every image for a load
+  command that still names a system framework.  Replace <root> with the
+  directory dpkg-deb wrote; a rootless package's images are under
+  <root>/var/jb.  No line printed means no image names a system path:
+    cd <root> && find . -type f | while read -r f; do
+      case "\$(od -An -tx1 -N4 "\$f" | tr -d ' \\n')" in
+        cffaedfe|cefaedfe) ;;
+        *) continue;;
+      esac
+      rabin2 -l "\$f" 2>/dev/null | grep -E '^/System/Library/(Frameworks/\\
+(WebKit|WebCore|JavaScriptCore|WebKitLegacy|WebGPU)\\.framework|\\
+PrivateFrameworks/(WebCore|WebKitLegacy)\\.framework)' \\
+        && echo "STILL SYSTEM: \$f"
+    done
+  One caveat: rabin2 -l does not list LC_REEXPORT_DYLIB, and the shipped
+  WebKit re-exports WebKitLegacy through one.  This script's own STEP 7
+  reads the load commands directly and does catch it; the one-liner above
+  cannot.
 EOF
 }
 
@@ -110,6 +141,11 @@ fi
 
 if ! command -v dpkg-deb >/dev/null 2>&1; then
     log_error "dpkg-deb not found in PATH. Install it first (brew install dpkg)."
+    exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    log_error "python3 not found in PATH. The load-path rewrite and its check are written in it."
     exit 1
 fi
 
@@ -176,7 +212,7 @@ if [[ -z "${OUTPUT_DEB}" ]]; then
     OUTPUT_DEB="${OUTPUT_PKG_DIR}/${PACKAGE_ID}_${PACKAGE_VERSION}_${PACKAGE_ARCH}.deb"
 fi
 
-TOTAL_STEPS=7
+TOTAL_STEPS=9
 
 # ── working directory ────────────────────────────────────────
 WORK_BASE_DIR="$(cd "$(dirname "${PRODUCT_DIR}")" && pwd)"
@@ -359,7 +395,476 @@ while IFS= read -r -d '' dylib; do
 done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type f -name '*.dylib' -print0)
 
 # ══════════════════════════════════════════════════════════════
-# STEP 5 — Sign Mach-O binaries with ldid
+# STEP 5 — Rewrite framework load paths to @rpath
+# ══════════════════════════════════════════════════════════════
+# Runs after STEP 4 so every destination in the install table already exists,
+# and before STEP 6 so the existing ldid pass re-signs the rewritten images.
+# Editing a load command invalidates the existing LC_CODE_SIGNATURE: the
+# command area of the shipped WebKit spans 8.8 KB, inside the code pages the
+# signature hashes, so a rewrite that is not followed by a re-sign ships a
+# broken seal.  Re-signing is ldid's job here rather than a hand-recomputed
+# LC_CODE_SIGNATURE because ldid is already required and already runs over
+# every Mach-O in this payload, and because the XPC services need their
+# entitlements on the new seal.
+#
+# llvm-install-name-tool is not used: it rejects every image in this payload
+# with "unsupported load command", and it has no way to leave a command it does
+# not know alone.  Measured on the shipped payload, the rejected command is
+# 0x1e (LC_SEGMENT_SPLIT_INFO) in WebKit.framework/WebKit and 0x27
+# (LC_DYLD_ENVIRONMENT) in the XPC helpers.  LC_LAZY_LOAD_DYLIB is 0x20 and
+# appears zero times in this payload, so it is not what stops that tool.  The
+# rewrite is a small Mach-O reader below instead, which needs no tool beyond the
+# python3 this script already requires.
+log_step "Rewriting framework load paths to @rpath..."
+
+MACHO_LOAD_PATHS_TOOL="${WORK_DIR}/macho-load-paths.py"
+
+write_macho_load_path_tool() {
+    cat > "${MACHO_LOAD_PATHS_TOOL}" <<'MACHO_LOAD_PATHS_PYTHON'
+"""Rewrite and verify the framework load paths inside a packaged payload.
+
+Modes:
+  rewrite <root> <prefix>   Replace every load command that names one of the
+                            system frameworks this package ships with its
+                            @rpath form, then give the image the LC_RPATH
+                            entries that resolve it.
+  verify  <root> <prefix>   Fail unless every Mach-O under <root> is free of
+                            the system framework prefixes, and unless every
+                            @rpath dependency resolves to a file inside <root>.
+
+<root> is an unpacked package tree, <prefix> the install prefix it targets:
+"/var/jb" for rootless, "" for rootful and roothide.
+
+An image this program cannot parse, a truncated image, a system path with no row
+in the install table, a row whose destination is missing from the payload, and
+an image whose header pad cannot take the LC_RPATH entries all exit non-zero.
+Skipping an image is never a success.  Every check runs before the first write,
+so a rejected payload is left byte-identical.
+"""
+
+import os
+import shutil
+import struct
+import subprocess
+import sys
+
+HEADER_SIZE_64 = 32
+SEGMENT64_SECTIONS_OFFSET = 72
+SECTION64_SIZE = 80
+SECTION64_FILE_OFFSET = 48
+
+MH_MAGIC_64 = 0xFEEDFACF
+THIN_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce")
+FAT_MAGICS = (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf", b"\xbe\xba\xfe\xca", b"\xbf\xba\xfe\xca")
+
+LC_SEGMENT_64 = 0x19
+LC_LOAD_DYLIB = 0xC
+LC_LAZY_LOAD_DYLIB = 0x20
+LC_REEXPORT_DYLIB = 0x8000001F
+LC_LOAD_WEAK_DYLIB = 0x80000018
+LC_RPATH = 0x8000001C
+DYLIB_COMMAND_KINDS = (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB)
+
+# Where each command kind keeps its string offset, and the smallest offset the
+# string can have.  LC_RPATH's fixed part is 12 bytes, a dylib command's is 24.
+# These are floors for validation only; the actual offset is always read from
+# the command's own lc_str field.
+NAME_OFFSETS = {LC_RPATH: 12, LC_LOAD_DYLIB: 24, LC_LOAD_WEAK_DYLIB: 24,
+                LC_REEXPORT_DYLIB: 24, LC_LAZY_LOAD_DYLIB: 24}
+
+# Every install name a linked image can carry.  The check in verify_image uses
+# it as a format test, not a whitelist: a name outside these forms is the tail
+# of a name that a wrong-offset write left behind.
+INSTALL_NAME_PREFIXES = ("/", "@rpath/", "@executable_path/", "@loader_path/")
+
+FORBIDDEN_PREFIXES = (
+    "/System/Library/Frameworks/WebKit.framework/",
+    "/System/Library/Frameworks/WebCore.framework/",
+    "/System/Library/Frameworks/JavaScriptCore.framework/",
+    "/System/Library/Frameworks/WebKitLegacy.framework/",
+    "/System/Library/Frameworks/WebGPU.framework/",
+    "/System/Library/PrivateFrameworks/WebCore.framework/",
+    "/System/Library/PrivateFrameworks/WebKitLegacy.framework/",
+)
+
+# (system install name, @rpath name, path relative to the install prefix).
+# Exact match on purpose: the system copy of WebCore lives under
+# PrivateFrameworks while this package installs it under Library/Frameworks, and
+# libwebrtc/libANGLE sit under the system WebCore bundle while the package lays
+# them flat in usr/lib.  No prefix rewrite expresses those two moves.  WebKitLegacy
+# likewise appears under PrivateFrameworks, as the re-export target of
+# WebKit.framework/WebKit, and under Frameworks, as a plain dependency of WebCore.
+INSTALL_PATHS = (
+    ("/System/Library/Frameworks/WebKit.framework/WebKit",
+     "@rpath/WebKit.framework/WebKit",
+     "Library/Frameworks/WebKit.framework/WebKit"),
+    ("/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+     "@rpath/JavaScriptCore.framework/JavaScriptCore",
+     "Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+    ("/System/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy",
+     "@rpath/WebKitLegacy.framework/WebKitLegacy",
+     "Library/Frameworks/WebKitLegacy.framework/WebKitLegacy"),
+    ("/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy",
+     "@rpath/WebKitLegacy.framework/WebKitLegacy",
+     "Library/Frameworks/WebKitLegacy.framework/WebKitLegacy"),
+    ("/System/Library/Frameworks/WebGPU.framework/WebGPU",
+     "@rpath/WebGPU.framework/WebGPU",
+     "Library/Frameworks/WebGPU.framework/WebGPU"),
+    ("/System/Library/PrivateFrameworks/WebCore.framework/WebCore",
+     "@rpath/WebCore.framework/WebCore",
+     "Library/Frameworks/WebCore.framework/WebCore"),
+    ("/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib",
+     "@rpath/libwebrtc.dylib",
+     "usr/lib/libwebrtc.dylib"),
+    ("/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib",
+     "@rpath/libANGLE-shared.dylib",
+     "usr/lib/libANGLE-shared.dylib"),
+)
+
+# Both are needed: the frameworks resolve through the first, the two flat dylibs
+# through the second.  Procursus uses the same shape in its own binaries, where
+# /var/jb/usr/bin/true carries a single LC_RPATH of /var/jb/usr/lib.
+RPATH_DIRECTORIES = ("Library/Frameworks", "usr/lib")
+
+
+class PayloadError(Exception):
+    """A payload this program refuses to ship."""
+
+
+class Command:
+    __slots__ = ("kind", "offset", "size")
+
+    def __init__(self, kind, offset, size):
+        self.kind = kind
+        self.offset = offset
+        self.size = size
+
+
+class Image:
+    """One thin 64-bit Mach-O, parsed far enough to move its load paths."""
+
+    def __init__(self, path):
+        self.path = path
+        with open(path, "rb") as handle:
+            self.data = bytearray(handle.read())
+        if len(self.data) < HEADER_SIZE_64:
+            raise PayloadError("%s is shorter than a Mach-O header" % path)
+        magic = struct.unpack_from("<I", self.data, 0)[0]
+        if magic in (0xCAFEBABE, 0xCAFEBABF, 0xBEBAFECA, 0xBFBAFECA):
+            raise PayloadError("%s is a universal image; this packager ships thin images only" % path)
+        if magic != MH_MAGIC_64:
+            raise PayloadError("%s is not a 64-bit little-endian Mach-O (magic 0x%08x)" % (path, magic))
+        self.command_count = struct.unpack_from("<I", self.data, 16)[0]
+        self.command_bytes = struct.unpack_from("<I", self.data, 20)[0]
+        if len(self.data) < HEADER_SIZE_64 + self.command_bytes:
+            raise PayloadError("%s is truncated: sizeofcmds says %d command bytes but the file holds %d"
+                               % (path, self.command_bytes, len(self.data) - HEADER_SIZE_64))
+        self.commands = self._parse_commands()
+
+    def _parse_commands(self):
+        commands = []
+        cursor = HEADER_SIZE_64
+        limit = HEADER_SIZE_64 + self.command_bytes
+        for index in range(self.command_count):
+            if cursor + 8 > limit:
+                raise PayloadError("%s: load command %d runs past the command area" % (self.path, index))
+            kind, size = struct.unpack_from("<II", self.data, cursor)
+            if size < 8 or cursor + size > limit:
+                raise PayloadError("%s: load command %d has an impossible size %d" % (self.path, index, size))
+            commands.append(Command(kind, cursor, size))
+            cursor += size
+        if cursor != limit:
+            raise PayloadError("%s: load commands end at %d but sizeofcmds says %d" % (self.path, cursor, limit))
+        return commands
+
+    def _c_string(self, start, end):
+        raw = bytes(self.data[start:end]).split(b"\0", 1)[0]
+        if not raw:
+            raise PayloadError("%s: a load command carries an empty string" % self.path)
+        return raw.decode("utf-8", "surrogateescape")
+
+    def _string_offset(self, command):
+        # The offset is a field, not a constant: the shipped WebKit carries a
+        # 28-byte LC_LOAD_DYLIB beside 24-byte ones, so it is read and bounded
+        # rather than assumed.
+        floor = NAME_OFFSETS[command.kind]
+        if command.size <= floor:
+            raise PayloadError("%s: load command 0x%08x at %d is too small to carry its string"
+                               % (self.path, command.kind, command.offset))
+        offset = struct.unpack_from("<I", self.data, command.offset + 8)[0]
+        if offset < floor or offset >= command.size:
+            raise PayloadError("%s: load command 0x%08x at %d puts its string at %d, outside %d..%d"
+                               % (self.path, command.kind, command.offset, offset, floor, command.size - 1))
+        return offset
+
+    def install_name_commands(self):
+        entries = []
+        for command in self.commands:
+            if command.kind not in DYLIB_COMMAND_KINDS:
+                continue
+            offset = self._string_offset(command)
+            entries.append((command, self._c_string(command.offset + offset,
+                                                    command.offset + command.size)))
+        return entries
+
+    def rpaths(self):
+        values = []
+        for command in self.commands:
+            if command.kind != LC_RPATH:
+                continue
+            offset = self._string_offset(command)
+            values.append(self._c_string(command.offset + offset, command.offset + command.size))
+        return values
+
+    def name_slot(self, command):
+        """The byte range a dylib command's name occupies, read from its own field.
+
+        Both the reader and the writer use this: `lc_str` is a field, not a
+        constant.  The shipped WebKit carries one 28-byte LC_LOAD_DYLIB beside
+        its 24-byte ones, so a writer that assumed 24 would move the name and
+        leave the field pointing at the tail of it.
+        """
+        start = command.offset + self._string_offset(command)
+        return start, command.offset + command.size
+
+    def replace_name(self, command, name):
+        encoded = name.encode("utf-8")
+        start, end = self.name_slot(command)
+        if len(encoded) >= end - start:
+            raise PayloadError("%s: %r does not fit in the %d-byte slot that named a longer path"
+                               % (self.path, name, end - start))
+        self.data[start:end] = encoded + b"\0" * (end - start - len(encoded))
+        # Read the name back the way the loader will, so a write at the wrong
+        # offset fails here rather than shipping an image whose load command
+        # names a file that does not exist.
+        if self._c_string(start, end) != name:
+            raise PayloadError("%s: wrote %r at %d but the command now resolves %r"
+                               % (self.path, name, start, self._c_string(start, end)))
+
+    def _header_pad_end(self):
+        # The gap between the end of the load commands and the first byte of
+        # section data is what can take another command without moving anything.
+        limit = None
+        for command in self.commands:
+            if command.kind != LC_SEGMENT_64:
+                continue
+            sections = struct.unpack_from("<I", self.data, command.offset + 64)[0]
+            cursor = command.offset + SEGMENT64_SECTIONS_OFFSET
+            for _ in range(sections):
+                offset = struct.unpack_from("<I", self.data, cursor + SECTION64_FILE_OFFSET)[0]
+                if offset:
+                    limit = offset if limit is None else min(limit, offset)
+                cursor += SECTION64_SIZE
+        if limit is None:
+            raise PayloadError("%s: no section carries a file offset, so the header pad has no known end"
+                               % self.path)
+        return limit
+
+    def rpath_blob(self, value):
+        encoded = value.encode("utf-8") + b"\0"
+        size = (NAME_OFFSETS[LC_RPATH] + len(encoded) + 7) // 8 * 8
+        blob = struct.pack("<III", LC_RPATH, size, NAME_OFFSETS[LC_RPATH]) + encoded
+        return blob + b"\0" * (size - len(blob))
+
+    def missing_rpath_blobs(self, values):
+        """The LC_RPATH blobs this image still needs, in the order they are appended."""
+        present = self.rpaths()
+        return [self.rpath_blob(value) for value in values if value not in present]
+
+    def check_rpath_capacity(self, blobs):
+        # Checked while planning, before any image is written, so a payload whose
+        # header pad is too small leaves every image untouched.
+        if not blobs:
+            return
+        start = HEADER_SIZE_64 + self.command_bytes
+        end = self._header_pad_end()
+        needed = sum(len(blob) for blob in blobs)
+        if start + needed > end:
+            raise PayloadError("%s: no room for %d LC_RPATH byte(s) at %d; the first section starts at %d"
+                               % (self.path, needed, start, end))
+
+    def append_rpaths(self, blobs):
+        start = HEADER_SIZE_64 + self.command_bytes
+        for blob in blobs:
+            self.data[start:start + len(blob)] = blob
+            start += len(blob)
+            self.command_count += 1
+            self.command_bytes += len(blob)
+        if blobs:
+            struct.pack_into("<II", self.data, 16, self.command_count, self.command_bytes)
+
+    def save(self):
+        mode = os.stat(self.path).st_mode
+        os.chmod(self.path, mode | 0o200)
+        with open(self.path, "wb") as handle:
+            handle.write(self.data)
+        os.chmod(self.path, mode)
+
+
+def is_macho(path):
+    try:
+        with open(path, "rb") as handle:
+            magic = handle.read(4)
+    except OSError:
+        return False
+    return magic in THIN_MAGICS or magic in FAT_MAGICS
+
+
+def payload_images(root):
+    for directory, _, files in os.walk(root):
+        for name in sorted(files):
+            path = os.path.join(directory, name)
+            if is_macho(path):
+                yield path
+
+
+def install_mapping(system_path):
+    for row in INSTALL_PATHS:
+        if row[0] == system_path:
+            return row[1], row[2]
+    raise PayloadError("%s has no row in the install table; add one before shipping this payload"
+                       % system_path)
+
+
+def rewrite(root, prefix):
+    # Planning parses every image, resolves every destination, and checks the
+    # header pad of every image that needs new LC_RPATH bytes, before the first
+    # write.  A payload this program rejects therefore stays byte-identical.
+    plan = []
+    for path in payload_images(root):
+        image = Image(path)
+        replacements = []
+        for command, name in image.install_name_commands():
+            if not name.startswith(FORBIDDEN_PREFIXES):
+                continue
+            rpath_name, relative = install_mapping(name)
+            destination = prefix + "/" + relative
+            if not os.path.exists(os.path.join(root, destination.lstrip("/"))):
+                raise PayloadError("%s names %s, and its install row points at %s, which is not in the payload"
+                                   % (path, name, destination))
+            replacements.append((command, rpath_name))
+        if replacements:
+            blobs = image.missing_rpath_blobs([prefix + "/" + directory for directory in RPATH_DIRECTORIES])
+            image.check_rpath_capacity(blobs)
+            plan.append((path, image, replacements, blobs))
+    if not plan:
+        raise PayloadError("no Mach-O under %s names a system framework path; the install table matched nothing"
+                           % root)
+    total = 0
+    for path, image, replacements, blobs in plan:
+        for command, rpath_name in replacements:
+            image.replace_name(command, rpath_name)
+        image.append_rpaths(blobs)
+        image.save()
+        total += len(replacements)
+        print("  %s: rewrote %d load command(s)" % (os.path.relpath(path, root), len(replacements)))
+    print("Rewrote %d load command(s) across %d image(s)." % (total, len(plan)))
+
+
+def verify_image(image, root, relative, prefix):
+    problems = []
+    entries = image.install_name_commands()
+    for command, name in entries:
+        if name.startswith(FORBIDDEN_PREFIXES):
+            problems.append("%s still names the system path %s" % (relative, name))
+            continue
+        # An install name is an absolute path or an @-prefixed one.  Anything
+        # else is the tail of a name some step overwrote from the wrong offset
+        # (writing "@rpath/..." at 24 into a command whose lc_str is 28 yields
+        # "th/WebKit.framework/WebKit"), and the prefix and resolution checks
+        # below would all wave it through.
+        if not name.startswith(INSTALL_NAME_PREFIXES):
+            problems.append("%s: load command 0x%08x at %d resolves a name that is neither an "
+                            "absolute path nor @-prefixed: %r"
+                            % (relative, command.kind, command.offset, name))
+    dependencies = [name for _, name in entries if name.startswith("@rpath/")]
+    reexports = {name for command, name in entries if command.kind == LC_REEXPORT_DYLIB}
+    if not dependencies:
+        return problems, dependencies, reexports
+    rpaths = image.rpaths()
+    for directory in RPATH_DIRECTORIES:
+        wanted = prefix + "/" + directory
+        if wanted not in rpaths:
+            problems.append("%s loads @rpath dependencies but has no LC_RPATH %s" % (relative, wanted))
+    for dependency in dependencies:
+        tail = dependency[len("@rpath/"):]
+        if not any(os.path.exists(os.path.join(root, value.lstrip("/"), tail))
+                   for value in rpaths if value.startswith("/")):
+            problems.append("%s: %s resolves to no file inside the payload" % (relative, dependency))
+    return problems, dependencies, reexports
+
+
+def verify_with_rabin2(tool, path, relative, dependencies, reexports):
+    # rabin2 -l writes "ERROR: Missing bin header libs" to stderr and still
+    # exits 0 on a file it cannot read, so neither empty output nor the exit
+    # status is a pass signal; both are checked here.  It also never lists an
+    # LC_REEXPORT_DYLIB, so those names are compared against the image's own
+    # parse only: requiring them from rabin2 would fail every real WebKit.
+    result = subprocess.run([tool, "-l", path], capture_output=True, text=True)
+    reported = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or "ERROR" in result.stderr:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        return ["%s: rabin2 -l could not read the image: %s" % (relative, detail[0] if detail else "no output")]
+    problems = ["%s: rabin2 -l still reports %s" % (relative, name)
+                for name in reported if name.startswith(FORBIDDEN_PREFIXES)]
+    problems += ["%s: rabin2 -l does not report the rewritten dependency %s" % (relative, name)
+                 for name in dependencies if name not in reexports and name not in reported]
+    return problems
+
+
+def verify(root, prefix):
+    tool = shutil.which("rabin2")
+    problems = []
+    images = 0
+    for path in payload_images(root):
+        images += 1
+        relative = os.path.relpath(path, root)
+        image = Image(path)
+        image_problems, dependencies, reexports = verify_image(image, root, relative, prefix)
+        problems += image_problems
+        if tool:
+            problems += verify_with_rabin2(tool, path, relative, dependencies, reexports)
+        if not image_problems:
+            print("  %s: no system load paths, %d @rpath dependency(ies)" % (relative, len(dependencies)))
+    if images == 0:
+        problems.append("no Mach-O image found under %s" % root)
+    if not tool:
+        print("Note: rabin2 is not in PATH, so this check used its own Mach-O reader only.")
+    for problem in problems:
+        print("Error: %s" % problem, file=sys.stderr)
+    if problems:
+        return 1
+    print("Verified %d Mach-O image(s) carry no system framework load path." % images)
+    return 0
+
+
+def main(argv):
+    if len(argv) != 4 or argv[1] not in ("rewrite", "verify"):
+        print("usage: macho-load-paths.py rewrite|verify <payload-root> <install-prefix>", file=sys.stderr)
+        return 2
+    try:
+        if argv[1] == "rewrite":
+            rewrite(argv[2], argv[3])
+            return 0
+        return verify(argv[2], argv[3])
+    except PayloadError as error:
+        print("Error: %s" % error, file=sys.stderr)
+        return 1
+    except OSError as error:
+        print("Error: %s" % error, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+MACHO_LOAD_PATHS_PYTHON
+}
+
+write_macho_load_path_tool
+python3 "${MACHO_LOAD_PATHS_TOOL}" rewrite "${DEB_ROOT}" "${PREFIX}"
+
+# ══════════════════════════════════════════════════════════════
+# STEP 6 — Sign Mach-O binaries with ldid
 # ══════════════════════════════════════════════════════════════
 log_step "Signing Mach-O binaries with ldid..."
 
@@ -423,7 +928,18 @@ while IFS= read -r -d '' candidate; do
 done < <(find "${DEB_ROOT}" -type f -print0)
 
 # ══════════════════════════════════════════════════════════════
-# STEP 6 — Generate DEBIAN metadata
+# STEP 7 — Verify the shipped load paths
+# ══════════════════════════════════════════════════════════════
+# This runs on the bytes that will be shipped, after the re-sign, so it also
+# catches a signing step that put a system path back.  The positive signal is
+# "the file was identified as a Mach-O and its hit count is 0", never "rabin2
+# printed nothing": rabin2 -l exits 0 with an empty stdout and an error on
+# stderr for a file it cannot parse.
+log_step "Verifying no Mach-O loads a system framework path..."
+python3 "${MACHO_LOAD_PATHS_TOOL}" verify "${DEB_ROOT}" "${PREFIX}"
+
+# ══════════════════════════════════════════════════════════════
+# STEP 8 — Generate DEBIAN metadata
 # ══════════════════════════════════════════════════════════════
 log_step "Generating DEBIAN control files..."
 DEBIAN_DIR="${DEB_ROOT}/DEBIAN"
@@ -495,7 +1011,7 @@ done
 chmod 0755 "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/prerm"
 
 # ══════════════════════════════════════════════════════════════
-# STEP 7 — Build .deb
+# STEP 9 — Build .deb
 # ══════════════════════════════════════════════════════════════
 log_step "Building .deb package..."
 mkdir -p "$(dirname "${OUTPUT_DEB}")"
