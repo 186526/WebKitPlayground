@@ -323,7 +323,7 @@ reasons: Symbol not found: _WTFSignpostIndirectLoggingEnabled
 | 18.3 框架安装 | 五个 framework 已装，`minos=16.1.0 sdk=18.5.0` | 成立 |
 | UI 进程加载了我们那份二进制 | 本轮 UI 进程三份 framework 全在 `/System` | **不成立**（5.4.4 节） |
 
-**所以拦住路线 B 的是 dyld 这一层，不是 launchd。** 具体形态是：重装带两个新 hook 的 basebin，让 `dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且判定 (b) 变成 `1 1 1 1`、`gen/dyld` 变成 974608、`systemhook.dylib` 变成 234336 且六字符串计数为 `4 2 4 2 4 2`；然后重测 UI 进程的 `environment` 段落与 `lldb image list`。**只有这一步通过之后，launchd 解析四个服务名那一个读数才有意义。** 它现在仍未测，因为前置条件不成立，不是因为已经测出「不解析」。
+**所以拦住路线 B 的是 dyld 这一层，不是 launchd。** 具体形态是：重装带两个新 hook 的 basebin，让 `dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且判定 (b) 变成 `1 1 1 1`、`gen/dyld` 变成 974608、`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（不是 `4 2 4 2 4 2`；那四个数是子串计数，见 `../../webkit-install-runbook.md:1249`）；然后重测 UI 进程的 `environment` 段落与 `lldb image list`。**只有这一步通过之后，launchd 解析四个服务名那一个读数才有意义。** 它现在仍未测，因为前置条件不成立，不是因为已经测出「不解析」。
 
 这件事的顺序不能颠倒，理由是它决定哪一层在报错：dyld 没选中覆盖目录时，端点数与无覆盖目录时相同，这个读数对 launchd 一句话也没说。本文此前把这一项记为「唯一未知」，会让下一个会话在一个测不出结论的配置上取数。
 
@@ -431,7 +431,7 @@ TMPDIR
 
 #### 5.4.6 这一轮的读数和旧记录的关系
 
-本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（先按 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤 token 再按名字计数，`../../webkit-install-runbook.md:669-677`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六字符串计数为 `4 2 4 2 4 2`。
+本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（先按 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤 token 再按名字计数，`../../webkit-install-runbook.md:669-677`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`。**这一条 2026-11-24 当时记的是 `4 2 4 2 4 2`，重装后照那个数去比会判失败**：`systemhook.dylib` 的计数有两种写法，`data.count(s.encode())` 按子串数会把 `__XPC_DYLD_FRAMEWORK_PATH` 里的裸名再算一遍，前四项因此翻倍成 `4 2 4 2`；按整条 entry 比较的真值是 `2 2 2 2`，两种写法在 `234336` 上都非零，所以当时的「通过」结论不受影响，只有发布的数字要换。判据是重跑 `../../webkit-install-runbook.md:1231` 第六阶段那条命令，读它打印的六项，期望值是 `2 2 2 2 4 2`。
 
 **本节这一段在 2026-11-25 13:00–13:03Z 之间被改错过一次，现已按撤回恢复。** 塔先发更正称 `1 0 0 1` 是裸子串计数、应改用带前缀的完整符号名，三分钟后撤回，理由是那个说法测的是另一个量（裸子串），而 runbook 的判定 (b) 从来就用 token 过滤形式。最终形态是 `1 0 0 1` 为正确读数、`1 1 1 1` 为补丁形态。撤回消息里仍成立的部分（hook dylib 74352 对 75952、`systemhook.dylib` 233520 对 234336、`MACHOMERGER` 次数与 mtime 两个陷阱）已并入 5.1 节与本节。
 
@@ -444,7 +444,7 @@ TMPDIR
 | # | 动作 | 判据 | 为何是必需 |
 | --- | --- | --- | --- |
 | 1 | 确认设备可达 | `ssh mobile@192.168.2.136` 成功（11-25 本轮就是在这个地址上取的读数；`AGENTS.md` 记的当前地址正是 `.136`，接手机热点时用 `172.20.10.1`，`.135` 是历史值、现在返回 `No route to host`） | 一切测量的前提。本文原先记「两个地址都不可达」是更早一轮的状态，已不必再跑一遍 |
-| 2 | **重装带两个新 hook 的 basebin，让 dyld 层生效** | `gen/dyld` 变成 974608；判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`；`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`；`systemhook.dylib` 变成 234336 且六字符串计数为 `4 2 4 2 4 2`（`../../webkit-install-runbook.md:113-114`、`:691-692`、`:892-893`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 5.1 节「四个陷阱」 | **这一步是本轮新增的第一项。** 5.1 节第三层今天不成立，后面每一条的前提都是它成立。本条是持久性加破坏性操作：命令为 `jbctl update basebin`，会触发 `reboot3(RB2_USERREBOOT)` 且所有应用退出，须用户确认；回退用 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑同一条命令 |
+| 2 | **重装带两个新 hook 的 basebin，让 dyld 层生效** | `gen/dyld` 变成 974608；判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`；`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`；`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（从前写的 `4 2 4 2 4 2` 是子串计数；`../../webkit-install-runbook.md:113-114`、`:691-692`、`:892-893`，计数写法见同文件 `:1249` 与 `:1258`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 5.1 节「四个陷阱」 | **这一步是本轮新增的第一项。** 5.1 节第三层今天不成立，后面每一条的前提都是它成立。本条是持久性加破坏性操作：命令为 `jbctl update basebin`，会触发 `reboot3(RB2_USERREBOOT)` 且所有应用退出，须用户确认；回退用 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑同一条命令 |
 | 3 | 重测 UI 进程是否拿到覆盖路径并加载覆盖目录的二进制 | `launchctl print pid/<PID>` 的 `environment` 段落出现 `DYLD_FRAMEWORK_PATH` 且指向 `...WebKitOverride`；`lldb image list` 里 `WebKit`、`WebCore`、`JavaScriptCore` 三份的前缀含 `WebKitOverride` | 第 3 步的读数是「dyld 层真的生效」的判据。它不成立时，端点读数对 launchd 一句话也没说 |
 | 4 | 建覆盖目录并跑 CrashReporter 差分，确认 UI 进程不再因 `DYLD` 中止 | 目标应用无新增 `termination.namespace = DYLD` 报告 | 归零读数有两种成因，不排除 dyld 中止就无法归因 |
 | 5 | 在同一次运行里取端点读数：用 5.4.1 的正确启动命令、`killall` 清干净、读 `launchctl print pid/<PID>` 的 `services = {` 段落，**按去重后的基础服务名计数** | 若基础服务名仍为 0 或显著少于 4，且 UI 进程存活、无新增 UI 崩溃报告，则判 (B)。**不要用按行 `grep -c` 的 8 当基线**，它不是常量（5.4.2 节） | 这是路线 B 这一层要判的那一项，且只有在第 2、3 步通过后才有效 |
@@ -499,7 +499,7 @@ TMPDIR
 
 ## 九、未验证项
 
-1. **dyld 层在这台设备上生效**（5.1 节第三层、5.4 节）。这是路线 B 现在的第一项，`gen/dyld` 974016、hook dylib 是原版 74352、判定 (b) 是 `1 0 0 1`（第 2、3 位为 0），三项都说明它不成立。验证方式是重装带两个新 hook 的 basebin 后复跑 runbook 第五阶段判定 (a)、(b) 与第六阶段，正确读数是 hook dylib 75952 且判定 (b) 回到 `1 1 1 1`、`gen/dyld` 974608、`systemhook.dylib` 234336 且六字符串计数 `4 2 4 2 4 2`。**不要用裸子串计数当复现判据**（5.1 节「四个陷阱」）。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。
+1. **dyld 层在这台设备上生效**（5.1 节第三层、5.4 节）。这是路线 B 现在的第一项，`gen/dyld` 974016、hook dylib 是原版 74352、判定 (b) 是 `1 0 0 1`（第 2、3 位为 0），三项都说明它不成立。验证方式是重装带两个新 hook 的 basebin 后复跑 runbook 第五阶段判定 (a)、(b) 与第六阶段，正确读数是 hook dylib 75952 且判定 (b) 回到 `1 1 1 1`、`gen/dyld` 974608、`systemhook.dylib` 234336 且六项整条 entry 计数 `2 2 2 2 4 2`。**这里从前写的是 `4 2 4 2 4 2`，那四个数是子串计数，不是真值**：`234336` 那份里 `__XPC_DYLD_FRAMEWORK_PATH` 含裸名子串，按 `data.count(s.encode())` 数会多算一遍，整条 entry 比较得到的真值是 `2 2 2 2`，见 `../../webkit-install-runbook.md:1249` 与 `:1261`。**不要用裸子串计数当复现判据**（5.1 节「四个陷阱」）。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。
 2. **launchd 的解析行为**（5.3 节）。仍未测，但它现在排在 dyld 层之后：dyld 没选中覆盖目录时，端点数与无覆盖目录时相同，这个读数对 launchd 一句话也没说。本文原先把它记为「唯一的未测项」，那一句已作废。
 3. **`_CodeSignature` 缺失的影响**。覆盖目录版 `WebKit.framework` 没有 `_CodeSignature`（`build-state.md:954`），从未实测排除。
 4. **`__XPC_DYLD_FRAMEWORK_PATH` 的转交行为**。系统桩没有 `LC_DYLD_ENVIRONMENT`，它加载哪份 `WebKit` 只能靠这个转交；launchd、libxpc、xpcproxy 三处都查不到实现。

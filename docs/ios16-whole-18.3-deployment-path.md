@@ -826,7 +826,7 @@ lldb -b -o "process attach --pid 2628" -o "image list -o -f" -o detach -o quit 2
 
 ### B.9 使路线 B 往前走的最小改动清单（按下单顺序）
 
-1. 重装带两个新 hook 的 basebin，让 `gen/dyld` 变成 974608、判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`、`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`、`systemhook.dylib` 变成 234336 且六字符串计数为 `4 2 4 2 4 2`（`../../webkit-install-runbook.md:113-114`、`:691-692`、`:892-893`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 B.1 的四个陷阱。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。
+1. 重装带两个新 hook 的 basebin，让 `gen/dyld` 变成 974608、判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`、`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`、`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（`../../webkit-install-runbook.md:113-114`、`:691-692`、`:892-893` 是字节数与 hook 判据的出处；计数写法以同文件 `:1249` 与 `:1258` 为准，那里已说明 `4 2 4 2 4 2` 是子串计数、真值是 `2 2 2 2`）。**这段从前写把 runbook 当作 `4 2 4 2 4 2` 的出处，那是错的**：runbook `:1261` 已把该值记为「当时按子串计的读数」，整条 entry 的真值写在同一处。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 B.1 的四个陷阱。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。
 2. 重测 UI 进程的 `environment` 段落与 `lldb image list`（第四节的第 4 步），确认 `DYLD_FRAMEWORK_PATH` 出现且三份 framework 的前缀含 `WebKitOverride`。
 3. 只有前两步通过后才执行第 5 步，用 B.3 的正确启动命令、B.4 的去重计数口径判 launchd 解析不解析。
 
