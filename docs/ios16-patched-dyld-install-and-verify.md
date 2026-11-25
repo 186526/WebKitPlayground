@@ -432,8 +432,6 @@ ls /var/jb/Library/WebKitOverride/WebKit.framework/WebKit   # 期望存在，507
 
 第二条更危险：当前 `/usr/lib/dyld` 是软链到 `gen/dyld` 自己，`carbonCopySingle` 在目标存在时先 `removeItemAtPath` 再复制（`carbonCopy.m:50-52`），所以它会把已经打过补丁的那份写成新的 `dyld.orig`，回滚锚点当场失效。所以只用 `jbctl update`。
 
-**`jbctl` 不在 `Systemhook` 的保护范围之外。** 本次实测 `jbctl` 的四个子命令里没有能只刷 `gen/dyld` 的，所以这一次用户空间重启是必需的，不能省。
-
 ### 第 4 步：确认（不需要 root）
 
 重启之后按顺序跑四条，任一条不过就停：
