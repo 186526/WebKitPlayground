@@ -62,7 +62,7 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 
 第二种才是两版 tag 之间实际发生的组合。16.1 UI 进程**发送**这个键，长度为 8（`PL16:209`，见第 2 节与 `ios16-bootstrap-contract.md`），不等于 18.3 helper 期望的 12。所以按两版 tag 原文求值，16.1 UI 配 18.3 helper 不是「位集留零、行为全不启用」，而是 helper 在 `XPCServiceInitializer` 内中止。本工程产物改写了这个函数（见 `ios16-bootstrap-contract.md` 的「修补补丁的现状与缺口」一节）：断言删除，8 字节负载走窄支，记一条日志、位图保持全零、返回真，进程继续初始化。
 
-真正会终止进程的是另一种情况：键存在但长度不符。`RELEASE_ASSERT` 在发布构建里也生效（`Source/WTF/wtf/Assertions.h:654-659`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`）。位集宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
+真正会终止进程的是长度这一条，而不是键缺失。`RELEASE_ASSERT` 在发布构建里也生效（`Source/WTF/wtf/Assertions.h:654-659`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`）。位集宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
 
 ```cpp
 using SDKAlignedBehaviors = WTF::BitSet<static_cast<size_t>(SDKAlignedBehavior::NumberOfBehaviors), uint32_t>;

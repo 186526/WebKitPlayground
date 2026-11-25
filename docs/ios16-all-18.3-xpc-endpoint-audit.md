@@ -44,13 +44,13 @@
 
 三个服务名在两版都是硬编码字面量，没有计算过程，因此不存在「输入变了导致算出的名字不同」。
 
-| 服务 | 16.1（`Safari-614.1.9`，`ProcessLauncherCocoa.mm`） | 18.3（`Safari-18.3.1-iOS-18.3.2`，`ProcessLauncherCocoa.mm`） |
+| 服务 | 16.1（`releases/Apple/Safari-16.1-iOS-16.1`，`ProcessLauncherCocoa.mm`） | 18.3（`releases/Apple/Safari-18.3.1-iOS-18.3.2`，`ProcessLauncherCocoa.mm`） |
 | --- | --- | --- |
-| WebContent | `:57-63` 的 `webContentServiceName`，`:60` 返回 `.CaptivePortal`，`:62` 按是否为非合法注入代码在 `.Development` 与 `"com.apple.WebKit.WebContent"` 之间取一 | `:191-197` 的 `webContentServiceName`，`:194` 返回 `.CaptivePortal`，`:196` 的取法与 16.1 相同 |
-| Networking | `:71` 返回 `"com.apple.WebKit.Networking"` | `:205` 返回 `"com.apple.WebKit.Networking"` |
-| GPU | `:74` 返回 `"com.apple.WebKit.GPU"` | `:208` 返回 `"com.apple.WebKit.GPU"` |
+| WebContent | `:58-64` 的 `webContentServiceName`，`:61` 返回 `.CaptivePortal`，`:63` 按是否为非合法注入代码在 `.Development` 与 `"com.apple.WebKit.WebContent"` 之间取一 | `:191-197` 的 `webContentServiceName`，`:194` 返回 `.CaptivePortal`，`:196` 的取法与 16.1 相同 |
+| Networking | `:72` 返回 `"com.apple.WebKit.Networking"` | `:205` 返回 `"com.apple.WebKit.Networking"` |
+| GPU | `:75` 返回 `"com.apple.WebKit.GPU"` | `:208` 返回 `"com.apple.WebKit.GPU"` |
 
-两版都有 `xpc_connection_create(name, nullptr)`（16.1 `:133`，18.3 `:308`），都不传路径，由 libxpc 自行解析。
+两版都有 `xpc_connection_create(name, nullptr)`（16.1 `:107`，18.3 `:308`），都不传路径，由 libxpc 自行解析。
 
 两处确实变了，但都不影响名字本身：
 
@@ -125,7 +125,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | 3 | 16.1 UI 把 `ContainerEnvironmentVariables` 写在 bootstrap 消息上，18.3 helper 从事件字典读，取到 NULL | `XPCServiceMain.mm` | 两个来源各自独立尝试，取到才 `apply` | helper 不再 `Killed: 9`（退出 137）；`launchd.log` 里出现 `Successfully spawned` | 已覆盖，`ios16-xpc-bootstrap-compat.patch` |
 | 4 | 16.1 的 `pre-bootstrap` 消息在 18.3 无分支，落到 `handleXPCEndpointMessage` 被丢弃 | `XPCServiceMain.mm` | 增加 `pre-bootstrap` 分支并存下 `priorityBoostMessage` | helper 存活期间不因 transaction 提前释放而退出 | 已覆盖，同一补丁 |
 | 5 | `InitializerFunction` 参数个数 16.1 为 3、18.3 为 2 | `XPCServiceEntryPoint.h` | 入口签名加默认第三参数 | helper 能走到 `initializeAuxiliaryProcess`，不因函数指针调用而崩 | 已覆盖，同一补丁 |
-| 6 | `getClientSDKAlignedBehaviors` 两版都收位图，但 16.1 发 8 字节、18.3 期望 12 字节，`RELEASE_ASSERT` 相等比较导致 helper 中止 | `XPCServiceEntryPoint.mm` | 不再断言长度相等：`RELEASE_ASSERT` 删除，长度不等时不再中止，宽度不等的负载一律丢弃、位图保持全零，等宽负载 `memcpy` 进位图并返回真。两版位序不可按位置换算（63 个可比下标里只有 3 个同名），所以 8 字节的负载不被解码 | helper 不再中止，且位集不被按错误位序写入（需在 helper 内打点） | 已覆盖，`ios16-xpc-bootstrap-compat.patch` |
+| 6 | `getClientSDKAlignedBehaviors` 两版都收位图，但 16.1 发 8 字节、18.3 期望 12 字节，`RELEASE_ASSERT` 相等比较导致 helper 中止 | `XPCServiceEntryPoint.mm` | 删除 `RELEASE_ASSERT`，改为按宽度分三支：等宽时 `memcpy` 并返回真（本包部署的组合两端是同一份 framework，位序相同，这一支正确）；窄于本版时丢弃、位图保持全零、记 `RELEASE_LOG_ERROR`、返回真；宽于本版时丢弃、记另一条日志、返回假。两版位序不可按位置换算，所以 8 字节的负载不被解码 | helper 不再中止，8 字节负载走「窄」那一支取默认值；等宽的 12 字节对端（16.4、17.x、18.0–18.2）仍会被按错位序拷贝（需在 helper 内打点） | M85 已落地（`97cfd79`、`ddfaa5f`、`e657b79`、`30ae1b9` 至 `7295bbb`，其中 `e657b79` 恢复等宽拷贝） |
 | 7 | `xpc_main` 在公开 iOS SDK 上不可用 | `XPCServiceMain.mm` | 用 `xpc_connection_create(nullptr,nullptr)` 复现 `xpc_main` 的接线 | helper 能被拉起并回 `process-finished-launching` | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
 | 8 | helper 需要知道去哪找 18.3 的 framework | `BaseXPCService.xcconfig` | `-Wl,-dyld_env,...` 写进 `.xpc` | `otool -l` 里 `.xpc` 有 `LC_DYLD_ENVIRONMENT`；`lldb image list` 里 helper 的 `WebKit` 路径为 `/var/jb` | 已覆盖；路径已与 install 脚本对齐，设备侧未验证，见第七节 |
 | 9 | **launchd 是否为索引外的 `XPCServices` 现扫** | 无（判定项） | 不改代码 | 第四节的判据命令 | **未知，未测** |
@@ -137,12 +137,12 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 ## 六、两个现有补丁覆盖了哪些改动，逐 hunk 对照
 
-### `patches/ios16-xpc-bootstrap-compat.patch`（293 行，7 个 hunk）
+### `patches/ios16-xpc-bootstrap-compat.patch`（215 行，7 个 hunk）
 
 | hunk 位置 | 内容 | 对应上表 |
 | --- | --- | --- |
 | `XPCServiceEntryPoint.h @@ -93,8 +93,14` | 入口签名加默认第三参数 | 第 5 行 |
-| `XPCServiceEntryPoint.mm @@ -90,10 +90,66` | `getClientSDKAlignedBehaviors` 改写后的函数体（`RELEASE_ASSERT` 删除，按数据块宽度分派：等宽 `memcpy` 进位图并返回真，更窄丢弃留全零并返回真，更宽丢弃并返回假；不为 `client-sdk-version` 做回退） | 第 6 行 |
+| `XPCServiceEntryPoint.mm @@ -90,10 +90,66` | `getClientSDKAlignedBehaviors` 改写后的函数体（`RELEASE_ASSERT` 删除，按数据块宽度分派：等宽 `memcpy` 进位图并返回真，更窄丢弃留全零并返回真，更宽丢弃并返回假；不为 `client-sdk-version` 做回退。这一形态由 `97cfd79`、`ddfaa5f`、`e657b79` 这一串提交确定，其中 `e657b79` 恢复等宽拷贝） | 第 6 行 |
 | `XPCServiceMain.mm @@ -124,6 +124,8` | `InitializerFunction` 改三参数 | 第 5 行 |
 | `XPCServiceMain.mm @@ -152,18 +154,49` | `ContainerEnvironmentVariables` 双来源、`OverrideLanguages` 双来源、`pre-bootstrap` 分支 | 第 3、4 行 |
 | `XPCServiceMain.mm @@ -174,11 +207,21` | `ContainerEnvironmentVariables` 取到才 `apply` | 第 3 行 |
@@ -220,11 +220,13 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 ## 附录 B：取源命令
 
-16.1 用 tag `Safari-614.1.9`：
+16.1 用 tag `releases/Apple/Safari-16.1-iOS-16.1`：
 
 ```sh
-curl -sL "https://raw.githubusercontent.com/WebKit/WebKit/Safari-614.1.9/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm"
+git show releases/Apple/Safari-16.1-iOS-16.1:Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
 ```
+
+旧版本这里写的是 `curl` 一个 `raw.githubusercontent.com/WebKit/WebKit/Safari-614.1.9/...` 的地址。`Safari-614.1.9` 是 2022-04-06 的树，不是 16.1，本文 §3 的行号就是按它数的、因此在真实 16.1 上全部错位；现已按上面的真实 tag 重数。
 
 18.3 用 tag `releases/Apple/Safari-18.3.1-iOS-18.3.2`。本地稀疏检出在 `/tmp/pb3`，**其工作树被其他 mission 改过**（含 `MessageNumberTranslation.h` 等 10 个文件的未提交改动），因此本文所有 18.3 引用都以 `git -C /tmp/pb3 show HEAD:<path>` 取原文，不读工作树：
 
