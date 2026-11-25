@@ -17,7 +17,11 @@
    images field tells them apart a second way, because the dedupe case adds no
    image to the process. */
 
-#define chain_step_capacity 8
+/* One record per chain step, one per step and no spare: a trailing entry would be
+   written as an eighth step dictionary, which reads as a step the chain does not
+   have. The count comes from the chain rather than a literal so the two cannot
+   disagree. */
+#define chain_step_capacity load_chain_count
 
 typedef struct report_step {
   char index[8];
@@ -187,8 +191,14 @@ void dylib_report_set_chain(const load_result *result) {
     text_copy(entry->path, load_chain_paths[index], sizeof(entry->path));
     /* A step with no outcome is one the chain never reached. It is left with an
        empty loaded field rather than written as false, so a reader does not
-       count it as a failure. */
-    if (index + 1 < result->stopped || (result->stopped == 0 && result->ran)) {
+       count it as a failure.
+
+       The comparison is `<=` because `stopped` is 1-based and is the position of
+       the step that ran and failed: at that step `index + 1 == result->stopped`,
+       and a strict `<` excluded exactly the one step whose outcome the report
+       exists to carry. Read as `index + 1 <= result->stopped`, it says the steps
+       up to and including the failing one have an outcome and the rest do not. */
+    if (index + 1 <= result->stopped || (result->stopped == 0 && result->ran)) {
       text_copy(entry->loaded, step->loaded ? "true" : "false", sizeof(entry->loaded));
       render_number(entry->images, sizeof(entry->images), (i64)step->images);
       text_copy(entry->uuid, step->uuid, sizeof(entry->uuid));

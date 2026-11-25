@@ -171,6 +171,15 @@ clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
   "$here/load_chain_test.c" -o "$work/load_chain_test"
 "$work/load_chain_test"
 
+# The report's chain section is the only place a device failure is readable
+# without a debugger, and nothing else in this suite calls
+# dylib_report_set_chain. It is checked here against hand-built load_result
+# values: a failure at step 1 has to record both its loaded=false and its error
+# text, and a step the chain never reached has to record neither.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here/fixtures" \
+  "$here/report_chain_test.c" -o "$work/report_chain_test"
+"$work/report_chain_test"
+
 clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" -I"$here/fixtures" \
   "$here/test_main.c" -o "$work/test_main"
 # -fno-sanitize=function: objc_msgSend is one address called through a pointer
