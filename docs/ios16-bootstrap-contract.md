@@ -354,19 +354,21 @@ $ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeA
 
 16.1 的 UI 进程把这些键全部发送，且都不为空：`server-port` 是有效的 mach send（`PL16:194`），`client-identifier` 为空时退到 `*_NSGetProgname()`（`PL16:196`），`process-identifier` 来自 `toUInt64()`（`PL16:198`），`ui-process-name` 来自 `NSProcessInfo.processName`（`PL16:199`）。
 
-所以**键缺失**这条路不会导致退出。但 18.3 helper 依然会死，原因不在 `exitProcess`，而在 `client-sdk-aligned-behaviors` 的宽度断言：
+所以**键缺失**这条路不会导致退出。按两版 tag 原文求值，18.3 helper 依然会死，原因不在 `exitProcess`，而在 `client-sdk-aligned-behaviors` 的宽度断言：
 
 1. **`client-sdk-aligned-behaviors` 的 `RELEASE_ASSERT` 失败，这是 8 字节与 12 字节相撞的直接后果。** 16.1 在 `PL16:209` 发 8 字节，18.3 在 `EPM18:93` 断言长度等于 12，`RELEASE_ASSERT` 在发布构建里也生效，进程中止。触发点在 `EP18:133` 调用 `getClientSDKAlignedBehaviors` 时，位于 `XM18:216` 回完 `process-finished-launching` 之后，所以 UI 进程先看到启动成功，再丢失子进程。**未在设备上实测。**
-2. `ContainerEnvironmentVariables` 未随 `bootstrap` 消息发送，`XM18:177` 得到的 NULL 被 `XM18:178` 直接传给 `xpc_dictionary_apply`，判空在 18.3 侧不存在。
+2. `ContainerEnvironmentVariables` 未随 `bootstrap` 消息发送，按 18.3 原文 `XM18:177` 得到的 NULL 被 `XM18:178` 直接传给 `xpc_dictionary_apply`，判空在 18.3 原文里不存在；本工程产物在两处来源之前各加了判空，见「修补补丁的现状与缺口」。
 3. `pre-bootstrap` 在 iOS 上本来就不发，不构成风险。
 
-反向组合同样会死，且死法相同：18.3 的 UI 进程发 12 字节，16.1 的辅助进程在 `EPM16:91` 断言长度等于 8，中止。这一条对定位混合部署时的进程死亡有用，两个方向都不能靠「某一版有回退逻辑」绕过。
+按两版 tag 原文求值，反向组合同样会死，且死法相同：18.3 的 UI 进程发 12 字节，16.1 的辅助进程在 `EPM16:91` 断言长度等于 8，中止。这一条对定位混合部署时的进程死亡有用，两个方向都不能靠「某一版有回退逻辑」绕过。
+
+以上四条都是 tag 原文的求值结果。本工程产物只构建 18.3 一侧（`.github/workflows/build-webkit.yml:9` 的 `webkit_ref` 默认值为 `releases/Apple/Safari-18.3.1-iOS-18.3.2`），16.1 的辅助进程是设备上的系统二进制，`patches/` 不作用于它，所以产物只改变 16.1 UI 配 18.3 helper 这一个方向。该方向在 `patches/ios16-xpc-bootstrap-compat.patch` 里删掉了这条断言，改成按数据块宽度分派：8 字节走窄支，只记一条日志、位图保持全零、返回真，调用方丢弃返回值，进程继续初始化，不再中止。断言在当前树上的实际形态见「修补补丁的现状与缺口」一节。
 
 ## 未验证项
 
 本文所有结论都来自阅读上表列出的源文件，没有构建 iOS 版 WebKit，也没有在设备上运行。以下几条需要实测确认，不能当作已知事实使用：
 
-- 16.1 UI 进程拉起 18.3 helper 时，helper 是否确实在 `getClientSDKAlignedBehaviors` 的 `RELEASE_ASSERT` 处中止。判据是崩溃报告里 `termination.namespace` 与栈顶是否出现 `XPCServiceInitializer`；本次未取得该报告。同理反向组合也未实测。
+- 16.1 UI 进程拉起 18.3 helper 时，helper 是否确实在 `getClientSDKAlignedBehaviors` 的 `RELEASE_ASSERT` 处中止。判据是崩溃报告里 `termination.namespace` 与栈顶是否出现 `XPCServiceInitializer`；本次未取得该报告。这一条问的是 tag 原文的行为；本工程产物删掉了该断言，同样的判据在产物上应当不再命中，但产物侧也未实测。同理反向组合也未实测。
 - `XM18:178` 在 `ContainerEnvironmentVariables` 缺失时把 `xpc_dictionary_get_value` 返回的 NULL 传给 `xpc_dictionary_apply`，libxpc 在这种情况下是否中止进程，未经实测。
 - `EPM18:117` 之后的子键读取在 `extra-initialization-data` 整个字典缺失时把 NULL 传给 `xpc_dictionary_get_string`，行为未经实测。16.1 恒发送该键，这条路径在本组合下不会发生。
 - 全零或按已知状态初始化的位图能否让 18.3 的 WebKit 与 WebCore 在 16.1 上跑完初始化。位图宽度可以通过长度分派消除中止，两版位序不可按位置换算这一条已经核实（见「8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图」），但各行为的消费点在 WebKit 与 WebCore 里分散多处，本次未逐点核对。
