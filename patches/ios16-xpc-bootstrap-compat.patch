@@ -19,10 +19,10 @@ index 0c1c422..6699031 100644
  
      // We don't want XPC to be in charge of whether the process should be terminated or not,
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-index b8112f7..e2da2ab 100644
+index b8112f7..e36e579 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-@@ -90,10 +90,34 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
+@@ -90,10 +90,42 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
      auto behaviorData = xpc_dictionary_get_data(m_initializerMessage, "client-sdk-aligned-behaviors", &length);
      if (!length || !behaviorData)
          return false;
@@ -30,33 +30,41 @@ index b8112f7..e2da2ab 100644
 -    memcpy(behaviors.storage(), behaviorData, length);
  
 -    return true;
-+    // The data block length is the only generation marker either side has. A UI process in the
-+    // 16.0 to 16.3 range enumerates 63 or 64 behaviors, which is two 32-bit words; 16.4 raises the
-+    // count to 73 and 18.3 this helper compiles has 94, both three words.
++    // No foreign bitmap is copied, at any width, because none of them can be read correctly.
++    // SDKAlignedBehaviors is a bit set indexed by SDKAlignedBehavior, and that enumeration gained,
++    // lost and reordered members between releases, so equal widths do not mean equal layouts.
++    // Measured against this tree's own list:
 +    //
-+    // There is deliberately no fallback on the "client-sdk-version" bootstrap key. WebKit for
-+    // iOS 16.0 stopped writing and reading it, so no 16.x peer has ever sent it to this helper;
-+    // a fallback keyed on it would be unreachable. The length above is what such a peer does say.
++    //   18.3.1 (this build)  94 behaviors, 12 bytes
++    //   18.0                93 behaviors, 12 bytes, same index at 53 of 93 positions, and it both
++    //                       adds NoSearchInputIncrementalAttributeAndSearchEvent off the tail and
++    //                       lacks two names this build has
++    //   17.0                79 behaviors, 12 bytes, same index at 3 of 79
++    //   16.4                73 behaviors, 12 bytes, same index at 3 of 73
++    //   16.2 / 16.3         64 behaviors,  8 bytes, same index at 3 of 64
++    //   16.0 / 16.1         63 behaviors,  8 bytes, same index at 3 of 63
++    //
++    // The width only separates 16.0 through 16.3, which are two words, from 16.4 onwards, which
++    // are three. It does not identify a generation whose bits match this build's, so there is no
++    // width whose payload is safe to copy. memcpy on any of them would leave the helper running
++    // under a near-arbitrary set of unrelated behaviors, which is worse than not crashing.
++    //
++    // What this function therefore guarantees is a defined bitmap, not a translated one: the
++    // argument arrives zero-initialised, so leaving it alone applies the default-off set that
++    // WTF::computeSDKAlignedBehaviors produces for a client linked before every behavior.
++    //
++    // There is deliberately no fallback on the "client-sdk-version" bootstrap key either. WebKit
++    // for iOS 16.0 stopped writing and reading it, so no 16.x peer has ever sent it to this helper.
 +    const size_t ownLength = behaviors.storageLengthInBytes();
 +
-+    if (length == ownLength) {
-+        memcpy(behaviors.storage(), behaviorData, length);
-+        return true;
-+    }
++    if (length <= ownLength)
++        RELEASE_LOG_ERROR(IPC, "UI process sent a %zu-byte SDK aligned behavior bitmap, which is not this build's %zu-byte layout; every SDK aligned behavior stays at its default", length, ownLength);
++    else
++        RELEASE_LOG_ERROR(IPC, "UI process sent a %zu-byte SDK aligned behavior bitmap, wider than this build's %zu bytes, so it comes from a newer generation; every SDK aligned behavior stays at its default", length, ownLength);
 +
-+    // Two words is a UI process from before the enumeration outgrew two words. Its bits are not
-+    // this build's bits and must not be copied: only 3 of the 64 indices that 16.x allocates hold
-+    // the same behavior here, the 16.1 list interleaves names this build places much later, and
-+    // ApplicationCacheDisabledByDefault exists in 16.1 with no enumerator here at all. Copying
-+    // would leave the helper running under a near-arbitrary set of unrelated behaviors. The
-+    // argument arrives zero-initialised, so leaving it alone applies the default-off set.
-+    if (length == 2 * sizeof(uint32_t)) {
-+        RELEASE_LOG_ERROR(IPC, "UI process sent a two-word SDK aligned behavior bitmap, which is a 16.0 to 16.3 enumeration; leaving every behavior at its default");
-+        return true;
-+    }
-+
-+    RELEASE_LOG_ERROR(IPC, "UI process sent a %zu-byte SDK aligned behavior bitmap, but this build's is %zu bytes; leaving every behavior at its default", length, ownLength);
-+    return false;
++    // Reported distinctly so a caller can tell a peer that sent nothing from one whose payload
++    // was rejected. The caller ignores the value, as it always has.
++    return length <= ownLength;
  }
  
  bool XPCServiceInitializerDelegate::getProcessIdentifier(WebCore::ProcessIdentifier& identifier)
