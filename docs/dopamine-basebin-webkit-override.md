@@ -793,6 +793,8 @@ GUI 进程的 stderr 不在终端里，用 `DYLD_PRINT_TO_FILE=/var/mobile/searc
 
 对每个架构切片断言五件事：四个变量名都在；两个目录字符串都在（`/Library/WebKitOverride` 与 `/Library/WebKitOverride/usr/lib`）；`/Library/Frameworks`、`/usr/lib` 及它们的 `/var/jb` 形式都没有作为整条目出现（负向断言，见下）；`DYLD_INSERT_LIBRARIES` 仍在（丢了它等于弄坏 Dopamine 的注入）；文件本身是 Mach-O。
 
+这一节说的是本节交付的 `systemhook.dylib`，即 `--kind systemhook`，它的禁止集是四个根。`--kind launchdhook` 的禁止集少一个 `/usr/lib`，共三个根，原因见十二·二那段。
+
 **这一层不检查「哪个变量配哪个目录」。** 真实产物里四个变量名排在 `__cstring` 的一段、两个目录串排在另一段，中间没有配对关系：补丁把目录存成 `{name, value}` 数组，而 value 字段是运行期的 `jbFrameworkPath`、`jbLibraryPath` 两个指针，目录字面量本身是别处的 `JBROOT_PATH` 实参。所以静态脚本能证明「四个名字在、两个专用目录在、四个共享根不在」，不能证明名字与目录的对应关系，配对要回到写配对的地方查。`logic-harness/run.py` 的 12 项配对断言读 `common.c` 里的两条 `JBROOT_PATH` 与 `searchPathVariables` 数组，检查每个变量名绑定到哪个指针，并核对脚本自己那张表是否相同。实测把 `DYLD_LIBRARY_PATH` 的值改成 `jbFrameworkPath` 后，这一项报 `FAIL: common.c binds DYLD_LIBRARY_PATH to jbLibraryPath`、退出 1。
 
 `llvm-nm` 存在时才额外查未定义符号：`systemhook/Makefile` 没有 `CHECK_SELF_CONTAINED`（该规则只在 `dyldhook/Makefile:12`），所以未定义符号属正常，默认只报数量，给 `--baseline <原版 dylib>` 时才比对有没有新增。
@@ -823,7 +825,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 **未执行**：完整的 `gmake -C BaseBin`（需要 macOS 与 iPhoneOS SDK）与 `jbctl update basebin`（后者会触发用户空间重启）。所以「**打过本补丁**构建出的 `systemhook.dylib` 带着这四个字符串」没有在真实产物上跑过。本 mission 用四件事替代：脚本对真实编译出的 Mach-O 判定正确，脚本对设备上取回的真实官方 dylib 判失败，补丁行为由 25 个静态用例固定，以及由 44 项逻辑与配对断言固定。
 
-**负向断言补的是 reviewer-k2c 指出的一个洞。** 先前只有正向检查（`EXPECTED_DIRS` 里的两个目录在不在），一个把两个专用目录与 `/Library/Frameworks`、`/usr/lib` 一起塞进去的 Mach-O 会照样通过、退出 0。现在每个切片另查一条 `names no shared search root`：四个共享根作为**整条目**出现即失败。用整条目匹配而不是子串，是因为真实 `__cstring` 里有 `/usr/lib/systemhook.dylib` 这类合法文件路径（官方 dylib 的 29 条绝对路径里就有），子串匹配会误报。回归用例里两条都固定了：塞共享根必须退出 1，塞 `/usr/lib/systemhook.dylib` 必须退出 0。
+**负向断言补的是 reviewer-k2c 指出的一个洞。** 先前只有正向检查（`EXPECTED_DIRS` 里的两个目录在不在），一个把两个专用目录与 `/Library/Frameworks`、`/usr/lib` 一起塞进去的 Mach-O 会照样通过、退出 0。现在每个切片另查一条 `names no shared search root`：四个共享根作为**整条目**出现即失败。这里是 `--kind systemhook` 的禁止集，也就是本节交付的那个 dylib；`--kind launchdhook` 的禁止集只有三条，`/usr/lib` 被豁免，原因见十二·二那段。用整条目匹配而不是子串，是因为真实 `__cstring` 里有 `/usr/lib/systemhook.dylib` 这类合法文件路径（官方 dylib 的 29 条绝对路径里就有），子串匹配会误报。回归用例里两条都固定了：塞共享根必须退出 1，塞 `/usr/lib/systemhook.dylib` 必须退出 0。
 
 ## 十二、把三个补丁成员装进 basebin tar：核对、安装、回滚、成功判据
 
@@ -905,7 +907,9 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 要复核本节读数，用合入后 `main` 上的那份脚本跑 `/tmp/basebin-lh.tar`，期望 8 行 `^FAIL`：6 条甲组 + 1 条乙组 + 1 条汇总。同一份脚本跑 CI 产物 tar（`/home/real186/webkit-work/basebin-ci/basebin.tar`，6144000 字节）应得退出 0 与 `Result: PASS`——这一条同时是「拿到的是哪一代脚本」的判别：中间那代在这个 CI tar 上报退出 1。
 
-**六个名字之外还有一项，已经由 M125 加进同一个 gate。** 上面那张表说的是 `verify-dyldhook-merge.sh` 那一组，它只管六个 dyldhook dylib。本 tar 里真正会被这台设备选中的第二个成员 `basebin/launchdhook.dylib` 现在也在断言范围内：M125 的 `dopamine-basebin/verify-basebin-tar.sh` 里有一段专门检查它（从 `# launchdhook is the other binary built from systemhook/src/common/common.c` 那句注释起，到对应的 `fi` 止），实现是复用 `verify-systemhook-search-paths.py --kind launchdhook`，断言它在每个切片的 `__cstring` 里带四个搜索路径名与两个覆盖目录，且不带共享搜索根。这一段不写行号：它在 M125 分支上随每次改动前移，写死会像提交号一样过期，用那段注释原文定位更稳。
+**六个名字之外还有一项，已经由 M125 加进同一个 gate。** 上面那张表说的是 `verify-dyldhook-merge.sh` 那一组，它只管六个 dyldhook dylib。本 tar 里真正会被这台设备选中的第二个成员 `basebin/launchdhook.dylib` 现在也在断言范围内：M125 的 `dopamine-basebin/verify-basebin-tar.sh` 里有一段专门检查它（从 `# launchdhook is the other binary built from systemhook/src/common/common.c` 那句注释起，到对应的 `fi` 止），实现是复用 `verify-systemhook-search-paths.py --kind launchdhook`，断言它在每个切片的 `__cstring` 里带四个搜索路径名与两个覆盖目录。这一段不写行号：它在 M125 分支上随每次改动前移，写死会像提交号一样过期，用那段注释原文定位更稳。
+
+**这道断言对 launchdhook 只禁三个共享根，不是四个。** `KINDS["launchdhook"]` 用的是 `FORBIDDEN_STRINGS_LAUNCHDHOOK`，即 `FORBIDDEN_STRINGS` 滤掉 `/usr/lib` 的结果：`/Library/Frameworks`、`/var/jb/Library/Frameworks`、`/var/jb/usr/lib` 三条仍然禁止，`/usr/lib` 豁免。理由是 `launchdhook/src/spawn_hook.c:36` 的 `ensure_fakelib_mounted()` 要 `statfs("/usr/lib")` 判断 fakelib 是否挂上，所以这个二进制合法地带着该整条目。**本 tar 的 `launchdhook` 正带着它**，两个切片的 `__cstring` 里都有，仍 19 条全 PASS——豁免是它通过的原因之一，不是漏检。拿 `--kind systemhook` 跑同一个文件会失败 2 条（两个切片各一条 `names no shared search root (/usr/lib)`），所以复核时用错 kind 会得到相反的结论。
 
 **本 tar 在这一项上通过。** 用 M125 的脚本跑本 tar，输出里 `PASS: tar ships basebin/launchdhook.dylib` 与 `PASS: launchdhook.dylib carries the four search-path names` 两行。这条通过的断言与乙组那条失败说的是两件事，两者同时成立：`launchdhook` 确实带了四个搜索路径名（这一项通过），而它的 `0x1000` 槽位不在 `basebin.tc` 里（乙组那 4 个未覆盖切片中的两个）。所以本 tar 的 `launchdhook` 既是「按内容该装」的，也是「没被信任缓存覆盖」的。
 
