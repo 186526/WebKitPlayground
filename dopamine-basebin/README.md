@@ -13,7 +13,7 @@ can override the copy inside the dyld shared cache.
 | `verify-basebin-trustcache.py` | Fails when `basebin.tc` and the shipped slices disagree — a slice with no entry, an entry no slice produces, or a right cdhash under the wrong `hash_type` label — which is what `jbctl update basebin` uploads as the basebin trustcache. One cdhash per slice, digest and label both from the CodeDirectory's `hashType`, `0x1000` alternate preferred. Exempts `dyldhook_merge.*.dylib`. Needs only `python3`. |
 | `make-basebin-trustcache.py` | Rebuilds `basebin.tc` from a staging tree's members, applying the same rule as `verify-basebin-trustcache.py` (it loads that module's `member_cdhashes`). Each entry's digest and `hash_type` both come from the chosen CodeDirectory. Entries sorted by cdhash, UUID derived from the set so two builds of the same members produce the same bytes. |
 | `verify-merged-dyld.sh` | Runs `MachOMerger` the way `jbctl update basebin` does and asserts the merged dyld carries all four hooks. |
-| `test-verify-basebin-artifacts.py` | Regression tests for both new verifiers. Needs only `python3`. |
+| `test-verify-basebin-artifacts.py` | Regression tests for both new verifiers, plus six assertions on `make-basebin-trustcache.py` that run it over a staging tree and read the label byte it writes. Needs only `python3`. |
 | `verify-systemhook-search-paths.py` | Asserts the four search-path names and both dedicated directories in a built `systemhook.dylib`, or in `launchdhook.dylib` with `--kind launchdhook`. |
 | `test-verify-systemhook-search-paths.py` | Regression tests for that verifier, including the stock `launchdhook` that must fail. Needs only `python3`. |
 | `macho_fixture.py` | Builds the minimal Mach-O images both test suites use, so neither needs clang or a device. `build_code_directory(hash_type=...)` and `build_macho(code_directories=[...])` can produce the dual-CodeDirectory shape the patched members really have. |
@@ -261,6 +261,12 @@ single `0x0` CodeDirectory declaring SHA-1 with no alternate: hardcode SHA-256 i
 `code_directory_cdhash` and that case fails, naming the SHA-256 digest as one that
 matches no slice. The device's own tar is weaker still — its 28 CodeDirectories
 are all `hashType` 2, so both algorithms read the same there.
+
+The generator's own label byte has its own six assertions, because every case above
+goes through the verifier and never runs `make-basebin-trustcache.py`. That group
+writes a staging tree with one SHA-1 CodeDirectory, runs the generator, and reads the
+entry back: one entry, label 1, the SHA-1 digest, flags 0, and the verifier accepts
+the file. Changing the write site to a constant 2 fails exactly two of them.
 
 `gen/dyld` is deliberately not in the tar. `libjailbreak/src/basebin_gen.m`
 builds it on the device: `jbctl update basebin` copies `/usr/lib/dyld`, patches

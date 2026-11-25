@@ -880,9 +880,11 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 回归用例两个方向都固定了：原版 `launchdhook`（312848 字节，`sha256 449a9606…`，四个名字出现 0 次）必须让脚本退出 1；打过补丁的（330144 字节，`sha256 150270a5…`）必须退出 0。缺成员、`arm64` 侧回退、`/Library/Frameworks` 混入也都各有用例。
 
-同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片完全相等，比对的是 `(cdhash, hash_type)` 二元组：少一条就点名该切片，多一条就点名该 entry，摘要对而标签错则单独点名。回归用例七条：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；单个 `0x0` 槽、`hashType=1`、没有 alternate 的切片写 SHA-1 摘要必须通过；同一个切片写 SHA-256 摘要必须失败并点名孤儿；同一个切片摘要正确但标签写成 2 必须失败并点名「labelled hash_type 2 … CodeDirectory declares 1」；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。为什么这个不匹配必须修而不是解释成无害，见十二·八。
+同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片完全相等，比对的是 `(cdhash, hash_type)` 二元组：少一条就点名该切片，多一条就点名该 entry，摘要对而标签错则单独点名。回归用例七条（对应闸门侧 13 条断言）：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；单个 `0x0` 槽、`hashType=1`、没有 alternate 的切片写 SHA-1 摘要必须通过；同一个切片写 SHA-256 摘要必须失败并点名孤儿；同一个切片摘要正确但标签写成 2 必须失败并点名「labelled hash_type 2 … CodeDirectory declares 1」；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。生成器自身另有用例六条，见下。为什么这个不匹配必须修而不是解释成无害，见十二·八。
 
-那五条里只有「单个 `0x0` 槽、`hashType=1`」这一形状能固定摘要算法。真实数据里所有 `0x1000` alternate 的 `hashType` 都是 2，所以先取 alternate 就把算法选择藏起来了：把 `code_directory_cdhash` 改回硬编码 SHA-256，双 CodeDirectory 的三条用例照样通过，只有这一条会失败（3 条 FAIL，见十二·八 的读数）。标签那一支由「摘要正确、标签写成 2」这条单独固定：只把校验器的比对改成忽略标签，失败的恰好是这条与它配对的命名断言，共 2 条。
+那七条里只有「单个 `0x0` 槽、`hashType=1`」这一形状能固定摘要算法。真实数据里所有 `0x1000` alternate 的 `hashType` 都是 2，所以先取 alternate 就把算法选择藏起来了：把 `code_directory_cdhash` 改回硬编码 SHA-256，双 CodeDirectory 的三条用例照样通过，只有这一条会失败（3 条 FAIL，见十二·八 的读数）。标签那一支由「摘要正确、标签写成 2」这条单独固定：只把校验器的比对改成忽略标签，失败的恰好是这条与它配对的命名断言，共 2 条。
+
+生成器写标签的那一行另有六条断言固定，因为上面七条都只经校验器，不经过生成器：`test_generator` 用 `build_code_directory(hash_type=HASH_TYPE_SHA1)` 造一棵只有 `launchdhook.dylib` 的暂存树，跑 `make-basebin-trustcache.py` 后断言它写出 1 条 entry、标签是 `1`、摘要是该 CodeDirectory 的 SHA-1 值、`flags` 为 `0`，且 `verify-basebin-trustcache.py` 接受这个文件。把 `make-basebin-trustcache.py:87` 的 `bytes([hash_type, ENTRY_FLAGS])` 改回 `bytes([2, ENTRY_FLAGS])`，这六条里恰好 2 条 FAIL：`generator: labels the entry from the CodeDirectory's hashType, not 2 (label 2, expected 1)` 与 `generator: the verifier accepts the file the generator wrote (verifier rc=1)`。
 
 ### 十二·七 交付物：basebin tar、安装与回滚
 
@@ -991,7 +993,7 @@ stock `basebin.tc` 的覆盖范围是实测出来的，不是从注释读来的�
 
 stock `launchdhook.dylib` 的两个切片 cdhash 是 `0e59e39881d8ed7152b5102c87fe3fd2d660818b` 与 `a7438ed3dc79bcda49ec9434b901bf5a73fbaab9`，都在 28 条里。替换后的 `launchdhook.dylib`（`150270a5…`）两个切片 cdhash 是 `f68f9da38e2e761e91a1a56032c411ac12288902` 与 `6f362b32d2aa3550ebf42bd320d12e08e6a39243`，都不在。`systemhook.dylib` 同样：stock 的 `dd3f99c4a4ba13daf631e1f2fd1acd0a84883c35`、`d3c4e949ddb149072bfef1d225eabbd4caab28e7` 在，替换后的 `14d05a3f395a5f28d69a2f61e02a9042fe7d5750`、`d468b1fb963f87126eaa4251e3149ebbf274b601` 不在。这两个补丁版成员每个切片带两个 CodeDirectory：槽 `0x0` 是 `ht=1` 的 SHA-1 blob，槽 `0x1000` 是 `ht=2` 的 SHA-256 blob，信任缓存只收 `0x1000` 那一个，所以上列值都是 SHA-256 的。把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次会得到 `20dcc827a93dafaf540c151e8962fff565e582f1`、`737d23564396d11f3be020d48327bd78bc7781f3`、`8629ee9838e164e74a3600f50d9faddddc615571`、`b0d2a727d3739e24322fe281f22d383159ba87a8` 这四个值，内核不会算出它们，早先一版生成器正是这么写的（见下）。
 
-保留 stock `basebin.tc` 的后果是 `jbctl update basebin` 上传一个描述 4 个已不在 tar 里的切片的信任缓存，而被替换的 4 个切片一个都没被覆盖。所以本 tar 的 `basebin.tc` 按交付目录重新生成，规则与 `BaseBin/Makefile:96-98` 的 `trustcache create .build/basebin.tc .build` 相同：遍历成员，每个切片出一条 entry，摘要算法取该切片 CodeDirectory 偏移 37 的 `hashType`（`1` 用 SHA-1、`2` 用 SHA-256），双 CodeDirectory 的切片取 `0x1000` alternate 那一条，`hash_type` 写 2，按 cdhash 升序排列。
+保留 stock `basebin.tc` 的后果是 `jbctl update basebin` 上传一个描述 4 个已不在 tar 里的切片的信任缓存，而被替换的 4 个切片一个都没被覆盖。所以本 tar 的 `basebin.tc` 按交付目录重新生成，规则与 `BaseBin/Makefile:96-98` 的 `trustcache create .build/basebin.tc .build` 相同：遍历成员，每个切片出一条 entry，摘要与 `hash_type` 标签都取该 CodeDirectory 的同一个 `hashType` 字节（偏移 37，`1` 用 SHA-1、`2` 用 SHA-256），双 CodeDirectory 的切片取 `0x1000` alternate 那一条，按 cdhash 升序排列。
 
 | 项 | stock | 本 tar |
 | --- | --- | --- |

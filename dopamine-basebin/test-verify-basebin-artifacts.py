@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -40,6 +41,7 @@ from macho_fixture import (  # noqa: E402
 HERE = Path(__file__).resolve().parent
 TAR_SCRIPT = HERE / "verify-basebin-tar.sh"
 MERGE_SCRIPT = HERE / "verify-merged-dyld.sh"
+GENERATOR = HERE / "make-basebin-trustcache.py"
 
 H = "_MACHOMERGER_HOOK_"
 OVERRIDABLE = H + "_ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc"
@@ -236,6 +238,68 @@ def healthy_dylibs() -> dict[str, list[str]]:
         ARM64E_18: PATCHED_18,
         ARM64_18: PATCHED_18,
     }
+
+
+def write_staging_tree(root: Path, launchdhook_code_directory: bytes) -> Path:
+    """Write an unpacked basebin/ the generator can run over, as `jbctl` would see it.
+
+    The generator walks a directory, not a tar, so the member has to exist on disk
+    before it runs.  Only launchdhook.dylib is written: the other seven are real Mach-O
+    on a build host and the generator would hash them too, while the fixture's symbol
+    files have no signature to hash and would make it exit 1.
+    """
+    base = root / "staging" / "basebin"
+    base.mkdir(parents=True)
+    image = build_macho(LAUNCHDHOOK_PATCHED, code_directory=launchdhook_code_directory)
+    (base / "launchdhook.dylib").write_bytes(image)
+    return base
+
+
+def trustcache_entries(path: Path) -> list[tuple[str, int, int]]:
+    """Read (cdhash, hash_type, flags) out of a basebin.tc."""
+    blob = path.read_bytes()
+    count = struct.unpack_from("<I", blob, 20)[0]
+    return [
+        (blob[24 + i * 22:24 + i * 22 + 20].hex(), blob[24 + i * 22 + 20], blob[24 + i * 22 + 21])
+        for i in range(count)
+    ]
+
+
+def test_generator(root: Path) -> None:
+    """The generator's own label byte, which no other case reaches.
+
+    verify-basebin-trustcache.py checks a tar's tc against that tar's members, so it
+    catches a wrong label at build time.  Nothing caught the generator writing the
+    label itself: hardcoding 2 there left all three suites green, because every real
+    CodeDirectory declares hashType 2.  A lone SHA-1 CodeDirectory makes the written
+    byte observable.
+    """
+    sha1_cd = build_code_directory(LAUNCHDHOOK_PATCHED[0].encode(), hash_type=HASH_TYPE_SHA1)
+    base = write_staging_tree(root / "generator", sha1_cd)
+    proc = subprocess.run(
+        [sys.executable, str(GENERATOR), str(base.parent)],
+        capture_output=True, text=True, check=False,
+    )
+    check("generator: runs on a staging tree", proc.returncode == 0,
+          proc.stdout + proc.stderr)
+
+    entries = trustcache_entries(base / "basebin.tc")
+    check("generator: writes one entry for the lone SHA-1 slice", len(entries) == 1,
+          str(entries))
+    if len(entries) == 1:
+        cdhash, hash_type, flags = entries[0]
+        check("generator: labels the entry from the CodeDirectory's hashType, not 2",
+              hash_type == HASH_TYPE_SHA1, f"label {hash_type}, expected {HASH_TYPE_SHA1}")
+        check("generator: writes the SHA-1 digest the label claims", cdhash == cdhash_of(sha1_cd).hex(),
+              f"{cdhash} vs {cdhash_of(sha1_cd).hex()}")
+        check("generator: leaves flags at 0", flags == 0, f"flags {flags}")
+
+    rc = subprocess.run(
+        [sys.executable, str(HERE / "verify-basebin-trustcache.py"), str(base.parent)],
+        capture_output=True, text=True, check=False,
+    ).returncode
+    check("generator: the verifier accepts the file the generator wrote", rc == 0,
+          f"verifier rc={rc}")
 
 
 def test_tar_script(root: Path, bin_dir: Path) -> None:
@@ -461,6 +525,7 @@ def main() -> int:
         nm.chmod(nm.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         test_tar_script(root, bin_dir)
+        test_generator(root)
         test_merge_script(root, bin_dir)
 
     if failures:
