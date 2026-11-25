@@ -896,6 +896,16 @@ app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因�
 
 ### 十二·七 交付物：basebin tar、安装与回滚
 
+**外层 gitlink 指向的提交不一定是内层 `main`。** 外层这个仓库把子模块固定在一个提交上，那个提交可能只活在一条特性分支里：2026-11-26 实测外层 `main` 的 gitlink 是 `bb12c3f`，而内层 `main` 是 `61577b6`，`git merge-base --is-ancestor bb12c3f main` 返回 1。`bb12c3f` 是 `merge(c2bec13, 61577b6)`，多出来的 10 个提交带来 `docs/ios16-dyld-identity-and-load-conditions.md`（570 行）。所以合并内层 `main` 到一条特性分支、再把外层指针提起来，会静默丢掉这个文件，而 `build-state.md:997` 仍在引它；`git merge-tree --write-tree main <branch>` 对这种情况退出 0，不会给出任何提示。判断合并是否完整要拿外层 gitlink 当基准，而不是内层 `main`：
+
+```sh
+cd ..                      # 外层
+git ls-tree main WebKitPlayground          # 记下这个 SHA
+cd WebKitPlayground
+git merge-base --is-ancestor <那个 SHA> HEAD; echo rc=$?   # 必须是 0
+git diff --name-status <那个 SHA>..HEAD | grep '^D'        # 必须为空
+```
+
 tar 以设备自带的 `Dopamine.app/basebin.tar` 为底，只替换需要换的成员，条目数保持 31：
 
 | 字段 | 值 |
@@ -949,7 +959,7 @@ cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m
 
 其余**五个** `dyldhook_merge` 成员取 CI 构建：`arm64e.iOS15`、`arm64.iOS15`、`arm64.iOS16-17`、`arm64e.iOS18+`、`arm64.iOS18+`。`verify-dyldhook-merge.sh` 要求每个切片都带两个 override hook，设备自带 tar 里这五个是原版、不带。这台设备只用 `arm64e.iOS16-17`，其余五个不会被加载，替换它们只影响校验结果，不影响运行。
 
-**安装前的前置条件是覆盖目录里放着一代能在 16.1 上加载的 `WebKit`。** `docs/ios16-override-path-alignment.md:127` 记录：app 进程除 basebin 给的目录外没有别的 `/var/jb` 候选；`build-state.md:232` 记录覆盖目录不存在时 dyld 打印的 `found:` 是 `dylib-from-cache`，即回落到共享缓存里的 16.1。所以只装这个 tar 而不建覆盖目录，app 只会拿到一个不存在的搜索目录并回落到 16.1，这一改动不产生任何可见变化。
+**安装前的前置条件是覆盖目录里放着一代能在 16.1 上加载的 `WebKit`，并放一代能提供它所需符号的 `JavaScriptCore`。** `docs/ios16-override-path-alignment.md:127` 记录：app 进程除 basebin 给的目录外没有别的 `/var/jb` 候选；`build-state.md:232` 记录覆盖目录不存在时 dyld 打印的 `found:` 是 `dylib-from-cache`，即回落到共享缓存里的 16.1。所以只装这个 tar 而不建覆盖目录，app 只会拿到一个不存在的搜索目录并回落到 16.1，这一改动不产生任何可见变化。
 
 「能在 16.1 上加载」由三条性质决定，不是由 UUID 决定，也不是由前两条就能定：
 
@@ -957,7 +967,20 @@ cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m
 2. **不链接 `BrowserEngineKit`。** 该 framework 在 `/System/Library/Frameworks` 下不存在，链接它的镜像在依赖解析阶段找不到。
 3. **它强引用的每个符号都能由同代 sibling framework 提供。** 本设备具体到 `JavaScriptCore`：`WebKit` 对 `_WTFSignpostIndirectLoggingEnabled` 是**强**未定义引用，16.1 的系统 `JavaScriptCore` 不导出它，`dyld` 在 `dyld4::prepare` 阶段直接 `halt`。崩溃原文在 `build-state.md:558-562`（`Symbol not found: _WTFSignpostIndirectLoggingEnabled` / `Referenced from: <787DFAB1-…> /Volumes/VOLUME/*/WebKit.framework/WebKit` / `Expected in: <D309AA36-…> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore` / `dyld4::prepare → dyld4::halt → abort_with_payload`），判定在 `build-state.md:631`。
 
-三条里前两条可以从 `WebKit` 这一个文件读出来，第三条读不出来：它取决于同目录里放了哪个 `JavaScriptCore`，所以它是**目录**的性质，不是文件的性质。这也是这个判据最容易判错的地方——一份 `WebKit` 单独放进探针里 `dlopen`，结果与同目录里的 `JavaScriptCore` 直接相关。本文第九章`:293` 记下过一次真实的 `dlopen` 失败原文：`dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001): Symbol not found: _WTFSignpostIndirectLoggingEnabled`，`Expected in: <D309AA36-…> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`；`build-state.md:559` 记的是同一份 `WebKit` 被 launchd 拉起时死在 `dyld4::prepare`。两处是不同入口，缺的符号相同，所以「探针里能不能打开」与「app 启动能不能活到 `main`」都会因缺同代 `JavaScriptCore` 而失败；能证明后者成立的只有 app 真的起来，且活进程 `image list` 里 `WebKit` 与 `JavaScriptCore` 都来自覆盖目录。
+三条里前两条可以从 `WebKit` 这一个文件读出来，第三条读不出来：它取决于同目录里放了哪个 `JavaScriptCore`，所以它是**目录**的性质，不是文件的性质。
+
+「同代」在这里不是形容词，它由可读的数字定义：sibling 自己也必须满足第 1、2 条，即它自己的 `LC_BUILD_VERSION` 的 `minos` 不高于 16.1、且它自己 `BrowserEngineKit` 引用为 0，同时它导出 `WebKit` 需要的那个符号。只验「导出符号」不够：dyld 解析 `WebKit` 的导入时会先按 sibling 自己的 `minos` 判它能不能进这个进程，`minos` 高于 16.1 就拒绝，`dyld4::prepare` 一样死。也就是说，「sibling 导出符号」与「sibling 自己能在 16.1 上加载」是两件事，验收必须两件都量。本机只找到一份 `JavaScriptCore`（`minos 16.1.0`），没有 `minos` 更高的样本可测，这一段是机制陈述而不是实读。
+
+本机实读（自写 Mach-O 解析器，2026-11-26）落在 `webkit-rootless-rpath-lcid_18.3_arm64.deb` 上的这一对是合格样本：
+
+| 文件 | 字节 | `minos` | `sdk` | `BrowserEngineKit` 引用 | 该符号 |
+| --- | --- | --- | --- | --- | --- |
+| `JavaScriptCore.framework/JavaScriptCore` | 38007776 | 16.1.0 | 18.5.0 | 0 | 1 处（定义） |
+| `WebKit.framework/WebKit` | 50552048 | 16.1.0 | 18.5.0 | 0 | 2 处 `grep` 命中，都在 `__LINKEDIT`，是同一个导入：符号表条目 + 字符串表各一次 |
+
+注意 `sdk 18.5.0` 不构成问题：判定看的是 `minos`，这份 `JavaScriptCore` 的 `minos` 是 16.1.0。反过来说，只读 `sdk` 会把它误判成 18 代。
+
+`WebKit` 对 `_WTFSignpostIndirectLoggingEnabled` 的强引用，与它为什么必须靠 sibling 提供，见 `build-state.md:558-562` 的崩溃原文（`Symbol not found: _WTFSignpostIndirectLoggingEnabled` / `Referenced from: <787DFAB1-…> /Volumes/VOLUME/*/WebKit.framework/WebKit` / `Expected in: <D309AA36-…> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore` / `dyld4::prepare → dyld4::halt → abort_with_payload`）与 `build-state.md:631` 的判定。
 
 **设备当前这一代不满足第 1、2 条，第 3 条未核。** 2026-11-26 只读实测：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 是 51654688 字节、`sha256 a5eadac56c8155ce…`、`LC_UUID 7e97b496-db02-3e46-9799-c4bdec869e8e`、`LC_BUILD_VERSION minos 18.5.0 sdk 18.5.0`，`BrowserEngineKit` 引用 5 处（其中绝对路径 2 处）；`/var/jb/Library/Frameworks/WebKit.framework/WebKit` 与它是同一个 inode（60588），即同一份字节。`minos 18.5.0` 已高于 16.1，5 处 `BrowserEngineKit` 引用也在，所以第 1 条与第 2 条都不满足。第 3 条的状态是「未核」而不是「已知不满足」：`build-state.md:574-583` 记录 2026-11-25 那次往覆盖目录里放过同代 `JavaScriptCore` 并加载成功（镜像 #892），而 2026-11-26 那次只读实测只读了 `WebKit` 与 `Frameworks` 下的副本，没有读覆盖目录里的 `JavaScriptCore`，所以今天它还在不在没有读数。装前必须按下面第 1 条的第四条重新核一遍，不能假定它还在。这是装前必须换到 `minos ≤ 16.1` 那一代、并确认同代 `JavaScriptCore` 同在的两件事，与本次 tar 无关。
 
@@ -994,26 +1017,45 @@ ssh -t mobile@192.168.2.136 'echo "<password>" | sudo -S -p "" /var/jb/basebin/j
 
 **不要用 `uiopen` 启动 `MobileSafari` 来验收。** 塔台 2026-11-26 02:27–02:34 CST 实测：`uiopen` 启动 `MobileSafari` 一律失败（进程不出现、无崩溃日志），把过滤器四个 plist 全部改名禁用后仍失败，把 deb 回滚到 `620.2.4-20261120204509` 后仍失败。这是 SpringBoard 侧状态，与 WebKit 无关。也不要拿 `ps -E` 当主读数：它读的是初始栈 `envp`，对 root 拥有的 pid 一律打印 0 条变量，曾经的「`runningboardd` 零 DYLD 变量」就是这条权限假象。
 
-1. **覆盖目录与内容先查。** 四条同时成立才算这一步通过：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 存在；它的 `LC_BUILD_VERSION` 的 `minos` 不高于 16.1（高于 16.1 时 dyld 直接拒绝，与被覆盖的对象无关）；它的 `sha256` 与 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 相同，说明覆盖目录放的就是这一代而不是别的拷贝；`JavaScriptCore.framework/JavaScriptCore` 在覆盖目录与 `/var/jb/Library/Frameworks` 下都存在、两份 `sha256` 相同，且 `grep -a -c _WTFSignpostIndirectLoggingEnabled` 命中非 0。最后这一条是第 3 条性质的落地检查，缺它时前三条全过而 app 仍会死在 `dyld4::prepare`。UUID 只作记录，写进下表说明本次装的是哪一代，不写成常量断言。这一条排在最前，因为覆盖目录不在时后面两条必然失败，原因与本次改动无关。
-2. **app 进程里 WebKit 的实际来源。** 两个读数互验：一个用带 `DYLD_PRINT_LIBRARIES=1` 的直接 exec 看 dyld 打印的解析路径，一个用 `lldb -p <pid> -o "image list"` 看活进程的镜像表。只取前者会得到假阳性：塔台实测打印里出现了 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），而同一进程的 `image list` 里查该 UUID 命中 0 次。判据是活进程镜像表里 `WebKit.framework/WebKit` 的路径在 `/var/jb` 下，且该镜像的 `minos` 不高于 16.1；UUID 记下实际值是哪一代，不与某个常量比对。同一个 `image list` 里也要能看到 `/var/jb` 下的 `JavaScriptCore.framework/JavaScriptCore`，否则第 3 条性质没有兑现。打印里多出一份不算数。
+1. **覆盖目录与内容先查。** 前两条性质对 `WebKit` 与 `JavaScriptCore` 两个文件都要成立，逐条量：`/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 存在；它自己的 `LC_BUILD_VERSION` 的 `minos` 不高于 16.1（高于 16.1 时 dyld 直接拒绝，与被覆盖的对象无关）；它自己的 `BrowserEngineKit` 引用为 0；它的 `sha256` 与 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 相同，说明覆盖目录放的就是这一代而不是别的拷贝。然后同一个 sibling 也照这三条量一遍：`JavaScriptCore.framework/JavaScriptCore` 在覆盖目录与 `/var/jb/Library/Frameworks` 下都存在、两份 `sha256` 相同、它自己的 `minos` 不高于 16.1、它自己的 `BrowserEngineKit` 引用为 0、且 `grep -a -c _WTFSignpostIndirectLoggingEnabled` 命中非 0。最后这一条是第 3 条性质的落地检查，缺它时前面全过而 app 仍会死在 `dyld4::prepare`；只验符号不验 sibling 自己的 `minos` 时，一份 `minos 18.5.0` 但导出该符号的 `JavaScriptCore` 也会让这一步判成通过，而 dyld 导入时照样拒绝。UUID 只作记录，写进下表说明本次装的是哪一代，不写成常量断言。这一条排在最前，因为覆盖目录不在时后面两条必然失败，原因与本次改动无关。
+2. **app 进程里 WebKit 的实际来源。** 两个读数互验：一个用带 `DYLD_PRINT_LIBRARIES=1` 的直接 exec 看 dyld 打印的解析路径，一个用 `lldb -p <pid> -o "image list"` 看活进程的镜像表。只取前者会得到假阳性：塔台实测打印里出现了 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），而同一进程的 `image list` 里查该 UUID 命中 0 次。判据是活进程镜像表里 `WebKit.framework/WebKit` 的路径在 `/var/jb` 下，且该镜像的 `minos` 不高于 16.1；UUID 记下实际值是哪一代，不与某个常量比对。同一个 `image list` 里也要能看到 `/var/jb` 下的 `JavaScriptCore.framework/JavaScriptCore`，且它自己的 `minos` 同样不高于 16.1，否则第 3 条性质没有兑现。打印里多出一份不算数。
 3. **helper 不回退。** `WebContent`、`Networking` 的 `image list` 里 `WebKit.framework/WebKit` 仍在 `/var/jb` 下、`minos` 不高于 16.1，与第 1 条读到的是同一代。这项读数源自 2026-11-25 那次记录（当时该代是 `787DFAB1`），不是常量；若装后读到别的 UUID，先按第 1 条的三条性质判定它能不能加载，再判断是否回退。
 
 验收用的命令：
 
 ```sh
-# 1. 覆盖目录内容，含同代 JavaScriptCore
+# 1. 覆盖目录内容：两个文件各自的 minos、BrowserEngineKit 引用、sha256、符号
 ssh mobile@192.168.2.136 'ls -l /var/jb/Library/WebKitOverride/WebKit.framework/WebKit /var/jb/Library/WebKitOverride/JavaScriptCore.framework/JavaScriptCore'
-ssh mobile@192.168.2.136 'sha256sum /var/jb/Library/WebKitOverride/JavaScriptCore.framework/JavaScriptCore /var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore'
-ssh mobile@192.168.2.136 'LC_ALL=C grep -a -c _WTFSignpostIndirectLoggingEnabled /var/jb/Library/WebKitOverride/JavaScriptCore.framework/JavaScriptCore'
+ssh mobile@192.168.2.136 'python3 - /var/jb/Library/WebKitOverride/WebKit.framework/WebKit /var/jb/Library/WebKitOverride/JavaScriptCore.framework/JavaScriptCore <<"PY"
+import struct, sys
+for path in sys.argv[1:]:
+    d = open(path, "rb").read()
+    if struct.unpack_from("<I", d, 0)[0] != 0xfeedfacf:
+        print(path, "not a thin 64-bit Mach-O"); continue
+    n = struct.unpack_from("<I", d, 16)[0]; p = 32; minos = "?"
+    for _ in range(n):
+        c, s = struct.unpack_from("<II", d, p)
+        if c == 0x32:
+            m = struct.unpack_from("<I", d, p + 12)[0]
+            minos = "%d.%d.%d" % ((m >> 16) & 0xffff, (m >> 8) & 0xff, m & 0xff)
+        p += s
+    print("%s minos=%s BrowserEngineKit=%d symbol=%d" % (
+        path.rsplit("/", 1)[-1], minos,
+        d.count(b"BrowserEngineKit"),
+        d.count(b"_WTFSignpostIndirectLoggingEnabled")))
+PY'
+ssh mobile@192.168.2.136 'sha256sum /var/jb/Library/WebKitOverride/WebKit.framework/WebKit /var/jb/Library/Frameworks/WebKit.framework/WebKit /var/jb/Library/WebKitOverride/JavaScriptCore.framework/JavaScriptCore /var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore'
 
 # 2. 直接 exec，不带 uiopen；先记 dyld 打印，再对同一进程读镜像表
 ssh mobile@192.168.2.136 'cd /Applications/MobileSafari.app && DYLD_PRINT_LIBRARIES=1 ./MobileSafari 2>&1 | grep -i "webkit.framework/WebKit" | head'
 ssh mobile@192.168.2.136 'lldb -b -o "process attach --pid $(ps ax | grep -F MobileSafari.app/MobileSafari | grep -v grep | awk "{print \$1}" | head -1)" -o "image list -o -f" -o detach -o quit 2>/dev/null | grep -E "WebKit.framework/WebKit$|JavaScriptCore.framework/JavaScriptCore$"'
 ```
 
+第一条命令要在两个文件上都打印出 `minos=16.1.0 BrowserEngineKit=0`；`JavaScriptCore` 那一行还要 `symbol` 非 0。任何一行 `minos` 高于 16.1 或 `BrowserEngineKit` 非 0，这一步就不通过，与 `WebKit` 那一行是否合格无关。注意别用 `sdk` 代替 `minos`：本机合格样本的 `sdk` 是 `18.5.0`，`minos` 才是 `16.1.0`。
+
 第三条同样对 `com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent` 的 pid 跑一遍 `image list`。
 
-`grep -a -c` 对 38007776 字节的 `JavaScriptCore` 命中 1 是本机在 `webkit-rootless-rpath-lcid_18.3_arm64.deb` 那份上读到的值；命中 0 说明放进去的不是这一代。整数命中数只能说明字符串在，符号表里的定义还要另看：本机用 `rabin2 -s` 读同一份时该符号是 `GLOBAL NOTYPE 0x0162c004`，`n_type=0x0f`、`n_sect=35`，落在 `__DATA,__common` 段内（地址 `0x162c000`、长度 72328）。
+`grep -a -c` 对 38007776 字节的 `JavaScriptCore` 命中 1 是本机在 `webkit-rootless-rpath-lcid_18.3_arm64.deb` 那份上读到的值；命中 0 说明放进去的不是这一代。整数命中数只能说明字符串在，符号表里的定义还要另看：本机用 `rabin2 -s` 读同一份时该符号是 `GLOBAL NOTYPE 0x0162c004`，`n_type=0x0f`、`n_sect=35`，落在 `__DATA,__common` 段内（地址 `0x162c000`、长度 72328）。字符串命中数不区分「定义」与「引用」：同一 deb 的 `WebKit` 也命中 2 处，但那两处都在 `__LINKEDIT`，指向同一个未定义导入，不是定义。
 
 ### 十二·八 信任缓存：为什么必须按交付的成员重新生成 `basebin.tc`
 
