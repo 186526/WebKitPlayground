@@ -6,7 +6,7 @@
 
 1. **`gen/dyld` 是合成产物，不是装进去的文件。** 它每次由 `gen/dyld.orig` 复制一份、打 `getAMFI` 与 `LC_UUID` 补丁、用 `MachOMerger` 合并 `basebin/dyldhook_merge.<arch>.iOS<ver>.dylib`、再重签名得到。所以「装 hook」等于「换掉那个 `dyldhook_merge` 输入」，不是换 `gen/dyld`。
 2. **这条路在离线证据上成立，但还缺一次重启后的行为读数。** 本次取到的三段读数把「缺什么」钉住了：覆盖目录里放一份 18.3 `WebKit`、`DYLD_FRAMEWORK_PATH` 指向它，未打 hook 时 dyld 连候选行都不打印（对照 `/var/jb/usr/lib/libiosexec.1.dylib` 会打印）；四个 hook 计数在设备上是 `1 0 0 1`、`basebin.tar` 里那份是 `1 1 1 1`；硬链接宿主的开局形态被判据复现（一份 `WebKit`、uuid `743EAFB4…`、来自 `/System`）。缺的是装上之后同一个宿主的 uuid 变成 `787DFAB1…`。
-3. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（设备 `1 0 0 1`）；`systemhook` 是原版、不写那四个搜索路径变量（设备那份 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次，`basebin.tar` 里那份 234336 出现 2 次）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks`）。三处都要补，任缺一处都拿不到 18.3 那份 `WebKit`。
+3. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（设备 `1 0 0 1`）；`systemhook` 是原版、不写那四个搜索路径变量（设备那份 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次，`basebin.tar` 里那份 234336 出现 2 次）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`）。三处都要补，任缺一处都拿不到 18.3 那份 `WebKit`；并且三者的依赖是有序的——hook 是前提，变量是通道，链接是让通道末端有文件（4.4 节）。
 4. **安装需要 root，并且要一次用户空间重启。** 本次没有执行任何需要 root 的写操作，也没有重启。命令整理成清单交回，见第六节。
 
 本文的结论分三档标注，与 `docs/ios16-launchd-xpc-resolution-gap.md` 的约定一致：**已确证**（附设备读数原文）、**有源码支撑**（能指出代码位置，但没有设备行为读数）、**假设**（无直接读数）。一条论断的强度取它最弱的一环。
@@ -218,12 +218,12 @@ dyldhook_merge.arm64e.iOS16-17.dylib   75952  <tar 里那份的 sha>  [1, 1, 1, 
 
 ### 4.2 第二层：运行期，dyld 愿不愿意用磁盘副本
 
-一条命令，不需要 root，不需要改任何文件。命令里的目录要和第五节的布局一致：按第 2 步做了符号链接，用 `/var/jb/Library/WebKitOverride`；没做，就直接用 18.3 实际所在的 `/var/jb/Library/Frameworks`。两种写法等价，因为链接指向后者。
+一条命令，不需要 root，不需要改任何文件。命令里的目录要和第五节的布局一致：按第 2 步建了链接集合，用 `/var/jb/Library/WebKitOverride`；没建，就直接用 18.3 实际所在的 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`。
 
 ```sh
 DIR=/var/jb/Library/Frameworks          # 或 /var/jb/Library/WebKitOverride
-DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=$DIR \
-DYLD_LIBRARY_PATH=$DIR/usr/lib \
+LIBDIR=/var/jb/usr/lib                  # 或 $DIR/usr/lib（链接集合里这一跳同样成立）
+DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=$DIR DYLD_LIBRARY_PATH=$LIBDIR \
   /var/jb/usr/bin/python3 -c 'import ctypes; ctypes.CDLL("/System/Library/Frameworks/WebKit.framework/WebKit")' 2>&1 \
   | grep -A6 'find path "/System/Library/Frameworks/WebKit.framework/WebKit"'
 ```
@@ -324,19 +324,21 @@ dyld[33746]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/Web
 
 这一轮共打印 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，其中 18 条落在 `/var/jb` 下（`systemhook.dylib`、`TweakLoader.dylib`、`libroot.dylib` 等），**但针对 `WebKit.framework/WebKit` 的候选行是 0 条**。这正好是 4.2 节第二种判据的形状：候选行机制本身是通的（非缓存路径上出现了），缺的是缓存项允许被磁盘副本顶替的那两个 hook。所以 18.3 的 `.xpc` 即使自己声明了 `/var/jb/Library/Frameworks`，现在也拿不到那份。
 
-### 4.4 要先把两处路径对齐
+### 4.4 要先把三处路径对齐
 
 本次读到三处路径不一致，装 hook 之前必须解决，否则即使 hook 生效也命中不到 18.3：
 
 | 谁给路径 | 实际给的目录 | 18.3 在哪 |
 | --- | --- | --- |
-| 18.3 的五个 `.xpc`（`LC_DYLD_ENVIRONMENT`，链接期常量） | `/var/jb/Library/Frameworks` | **在**，五个 framework 都在这里 |
-| `basebin.tar` 里打了补丁的 `systemhook.dylib` | `/var/jb/Library/WebKitOverride` | **不在**，该目录不存在 |
+| 18.3 的五个 `.xpc`（`LC_DYLD_ENVIRONMENT`，链接期常量） | `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib` | **在**，五个 framework 在 `Library/Frameworks`，`libwebrtc`/`libANGLE` 在 `usr/lib` |
+| `basebin.tar` 里打了补丁的 `systemhook.dylib` | `/var/jb/Library/WebKitOverride` 与 `…/WebKitOverride/usr/lib` | **不在**，该目录不存在 |
 | `install-webkit-override.sh:66` 的 `OVERRIDE_ROOT` | `/var/jb/Library/WebKitOverride` | 同上 |
 
-`/var/jb/Library/Frameworks` 下有 `WebKit`、`WebCore`、`JavaScriptCore`、`WebGPU`、`WebKitLegacy` 五个 framework 与 `adattributiond`、`webpushd`；`WebKit.framework/WebKit` 是 50758784 字节、`LC_UUID 787DFAB1-4DE3-3568-9923-C9409791B728`。
+`/var/jb/Library/Frameworks` 下有 `WebKit`、`WebCore`、`JavaScriptCore`、`WebGPU`、`WebKitLegacy` 五个 framework 与 `adattributiond`、`webpushd`；`WebKit.framework/WebKit` 是 50758784 字节、`LC_UUID 787DFAB1-4DE3-3568-9923-C9409791B728`。`libwebrtc.dylib`（16182352，`b22027e7…`）与 `libANGLE-shared.dylib`（6801440，`277db473…`）在 `/var/jb/usr/lib`，`systemhook` 给的 library 目录同样是 `WebKitOverride/usr/lib`，所以这两个也要一起对齐。
 
-**最小的对齐办法是给 `systemhook` 那个目录做一个符号链接，而不是移动 18.3。** `dyld` 接受符号链接作为搜索目录，本次实测：
+**顺序不能反：链接只是让变量的取值落在一个有内容的地方，变量本身要等两个 override hook 到位才起作用。** 18.3 这批镜像的 install name 全是绝对路径、且没有 `LC_RPATH`，所以 dyld 解析它们只有两条路：绝对路径直取，或按叶子名在 `DYLD_FRAMEWORK_PATH`/`DYLD_LIBRARY_PATH` 里找。前者对共享缓存里已有的镜像只会命中缓存（这正是 4.2 节基线的运行结果），后者要 dyld 肯去 stat 磁盘副本，也就是 `isOverridablePath` 与 `isAlwaysOverridablePath` 放行。所以三件事的依赖关系是：**hook 是前提，变量是通道，链接是让通道末端有文件**。只做链接而不做 hook，4.2 节仍然是 `found: dylib-from-cache`，本次基线已经证明过。
+
+**对齐的手段是一组符号链接，而不是移动 18.3。** `dyld` 接受符号链接作为搜索目录，本次实测：
 
 ```
 $ ln -s /var/jb/usr/lib /tmp/m121-symtest/linkedlib
@@ -346,15 +348,55 @@ dyld[33774]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/m121-symtest/li
 dyld[33774]:   found: dylib-from-disk: "/tmp/m121-symtest/linkedlib/libiosexec.1.dylib"
 ```
 
-所以一条 `ln -s /var/jb/Library/Frameworks /var/jb/Library/WebKitOverride` 就让两个来源指向同一批文件；回退是删掉这一个链接。这不改变 18.3 的位置，也不动 `/var/jb/Library/Frameworks` 里任何文件。代价是 `install-webkit-override.sh` 之后不能直接再跑：它会往 `WebKitOverride` 里写自己的那份，而那时该路径是一个符号链接，写入会落到 `/var/jb/Library/Frameworks` 上，把现有 18.3 覆盖掉。两条路只能选一条。
+**对齐的形状是「真目录 + 六条链接」，不是整目录一条链接。** `systemhook` 给的 framework 路径是 `/var/jb/Library/WebKitOverride` 本身，library 路径是 `/var/jb/Library/WebKitOverride/usr/lib`，所以 `WebKitOverride` 下面既要直接有 `WebKit.framework`，又要有 `usr`。整目录链接只能满足前者（`WebKitOverride/usr` 就成了 `Frameworks/usr`，不存在）。第五节第 2 步按这个形状给出六条 `ln -s`，回退是一条 `rm -rf`，18.3 本身不动。代价是 `install-webkit-override.sh` 之后不能直接再跑：它会往 `WebKitOverride` 里写自己的那份，与这套链接冲突。两条路只能选一条。
 
-**还有一处缺口：`libwebrtc.dylib`。** 18.3 的 `WebKit` 与 `WebCore` 都链接 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib`，而磁盘上 `/var/jb` 与 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/` 都没有这个文件（后者是空目录），`/var/jb/Library/Frameworks/WebCore.framework/Frameworks` 也不存在。它只可能来自共享缓存。`isAlwaysOverridablePath` 只让 dyld 去看磁盘副本，不能让一个不在磁盘上的文件出现在磁盘上，所以这一项要么随 18.3 一起放进覆盖目录（`WebCore.framework/Frameworks/libwebrtc.dylib` 的相对位置必须保留，dyld 对这类 install name 只取叶子名在 library 列表里找），要么就会继续解析到 16.1 缓存里的那份。4.2 节的三行判据不覆盖这一类；第三层通过之后要再核一次 `libwebrtc` 的 uuid。
+**`libwebrtc.dylib` 与 `libANGLE-shared.dylib` 是弱链接，不在普通依赖列表里。** 18.3 的 `WebKit` 与 `WebCore` 对它们用的是 `LC_LOAD_WEAK_DYLIB`，命令字是 **`0x80000018`**（低位 `0x18`，带 `LC_REQ_DYLD` 位）。这一点容易读错：`rabin2 -l` 只按名字列出、不区分类型，会让人以为它们是强依赖；而按 `0xc` 去匹配 `LC_LOAD_DYLIB` 的解析器会把它们整个漏掉，本次两种错法都出现过一次。判据要用下面这段，它按 `cmd & 0x7fffffff` 归并：
+
+```sh
+/var/jb/usr/bin/python3 - <<'PY'
+import struct
+NAMES={0xc:'LOAD_DYLIB',0x18:'LOAD_WEAK',0x1f:'LOAD_UPWARD',0x23:'REEXPORT',0x20:'LAZY',0xd:'ID_DYLIB'}
+for p in ['/var/jb/Library/Frameworks/WebKit.framework/WebKit',
+          '/var/jb/Library/Frameworks/WebCore.framework/WebCore']:
+    d=open(p,'rb').read(); ncmds=struct.unpack('<I',d[16:20])[0]; off=32
+    for i in range(ncmds):
+        cmd,sz=struct.unpack('<II',d[off:off+8])
+        base=cmd & 0x7fffffff
+        if base in NAMES:
+            noff=struct.unpack('<I',d[off+8:off+12])[0]
+            nm=d[off+noff:off+sz].split(b'\x00')[0].decode('utf-8','replace')
+            if 'webrtc' in nm.lower() or 'ANGLE' in nm:
+                print('%-16s %-12s %s' % (p.split('/')[-1], NAMES[base], nm))
+        off+=sz
+PY
+```
+
+本次读数：
+
+```
+WebKit    LOAD_WEAK    /System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib
+WebCore   LOAD_WEAK    /System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib
+WebCore   LOAD_WEAK    /System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib
+```
+
+**两份磁盘副本都在，位置是 `/var/jb/usr/lib`：**
+
+```
+16182352  /var/jb/usr/lib/libwebrtc.dylib         uuid b22027e7-83b0-395c-9cdc-2fd3059fab14
+ 6801440  /var/jb/usr/lib/libANGLE-shared.dylib   uuid 277db473-669b-3f0d-857a-df23fefa73d3
+```
+
+**这一条最初被我判成缺口，原因是搜索方法错了。** `find /var/jb -name libwebrtc*` 返回 0 条，因为 `/var/jb` 是指向 `/private/preboot/<uuid>/dopamine-ML13U0/procursus` 的符号链接，而 `find` 默认不跟随。`find -L /var/jb` 返回 1 条。后续凡是在 `/var/jb` 下按名字找文件，一律加 `-L`，或者直接搜解析后的真实路径。
+
+**这两份怎么进进程，与 framework 不同。** 它们的 install name 是绝对路径 `/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/…`，而 18.3 的 `.xpc` 声明的 library 路径是 `/var/jb/usr/lib`（`DYLD_LIBRARY_PATH=/var/jb/usr/lib` 那条，另一条是死的 `@executable_path/..`）。dyld 对这类 install name 只取叶子名去 library 搜索列表里找，所以叶子命中与否取决于 `DYLD_LIBRARY_PATH`、不取决于 framework 目录。这与 `WebKit` 本体需要 `DYLD_FRAMEWORK_PATH` 是两条不同的路径。
+
+**五份 18.3 镜像都不带 `@rpath` 依赖，也不带 `LC_RPATH`。** 本次逐份解析：`WebKit` 54 条依赖、`WebCore` 50 条、`JavaScriptCore` 9 条、`WebGPU` 12 条、`WebKitLegacy` 22 条，`@rpath` 计数全为 0，`LC_RPATH` 计数全为 0。所以这一批产物只能靠绝对 install name 加环境变量解析，不存在「靠 rpath 自己找到」的可能；这一点与仓库重新打包的产物不同（那一版把依赖改写成 `@rpath` 并写了 `LC_RPATH`），两者不要混用同一套判据。
 
 ---
 
 ## 五、最小可逆安装步骤
 
-前提：备份必须在改动之前完成，且备份与校验和都落到设备的 `/var/mobile/Documents` 下（`mobile` 可写）。全部步骤改动的是 `/var/jb/basebin` 下两个库文件（由 tar 解包写入）与 `/var/jb/Library` 下一个符号链接，不碰 `/System`、不改 seal、不写 `/usr`。
+前提：备份必须在改动之前完成，且备份与校验和都落到设备的 `/var/mobile/Documents` 下（`mobile` 可写）。全部步骤改动的是 `/var/jb/basebin` 下两个库文件（由 tar 解包写入）与 `/var/jb/Library` 下一个新建目录及其六条符号链接，不碰 `/System`、不改 seal、不写 `/usr`。
 
 ### 第 1 步：记录现状（不需要 root）
 
@@ -399,18 +441,58 @@ d7045cd4850eb0c7498d0a63a4de797aeffc7577a21379fd774c4bc219fbe13f    234336  base
 
 `gen/dyld.orig`（926240，`7eb2e72f…`）是回滚锚点，不要拿 `gen/dyld` 当备份：`basebin_generate` 每次把旧的改名成 `gen/dyld.old`，只保一代，再更新一次就没了（`basebin_gen.m:159-166`）。
 
-### 第 2 步：让 `systemhook` 给的目录指到 18.3 实际所在处（需要 root）
+### 第 2 步：把 `systemhook` 给的目录做成指向 18.3 的链接集合（需要 root）
 
-18.3 在 `/var/jb/Library/Frameworks`，打了补丁的 `systemhook` 给的是 `/var/jb/Library/WebKitOverride`（4.4 节）。两条路径用一个符号链接接上：
+18.3 在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`，打了补丁的 `systemhook` 给的是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/WebKitOverride/usr/lib`（4.4 节）。
+
+需要的形状是：`WebKitOverride` 本身是一个真目录，里面五个 `*.framework` 各自指向 18.3 的同名 framework，再加一个 `usr` 指向 `/var/jb/usr`。`WebKitOverride` 之所以必须是真目录而不能是整目录一条链接：framework 路径要求 `WebKit.framework` 直接位于 `WebKitOverride` 下，library 路径要求 `WebKitOverride/usr/lib` 存在；整目录链接只能满足前者（那样 `WebKitOverride/usr` 就成了 `Frameworks/usr`，不存在）。
 
 ```sh
-# root 执行
-ln -s /var/jb/Library/Frameworks /var/jb/Library/WebKitOverride
-ls -ld /var/jb/Library/WebKitOverride          # 期望 lrwxr-xr-x ... -> /var/jb/Library/Frameworks
-ls /var/jb/Library/WebKitOverride/WebKit.framework/WebKit   # 期望存在，50758784 字节
+# root 执行；写入 /var/jb/Library 下一个新目录与它里面的六条链接
+mkdir /var/jb/Library/WebKitOverride
+for f in WebKit WebCore JavaScriptCore WebGPU WebKitLegacy; do
+  ln -s "/var/jb/Library/Frameworks/$f.framework" "/var/jb/Library/WebKitOverride/$f.framework"
+done
+ln -s /var/jb/usr /var/jb/Library/WebKitOverride/usr
+ls -l /var/jb/Library/WebKitOverride
 ```
 
-这一步不改任何现有文件，只新增一个链接，回退就是 `rm` 掉它。**如果用户更愿意按 `install-webkit-override.sh` 的布局把 18.3 复制进一个真正的新目录，那就跳过这一步，改跑那个脚本；不要两件事都做，符号链接存在时脚本的写入会落到 `/var/jb/Library/Frameworks` 上。**
+五个 framework 都要链接，因为 18.3 这五份镜像互相以绝对路径名依赖，dyld 对这类名字只按叶子名去 `DYLD_FRAMEWORK_PATH` 里找。本次逐份解析出的内部依赖：
+
+| 镜像 | 依赖的 18.3 镜像 |
+| --- | --- |
+| `WebKit` | `WebCore`、`JavaScriptCore`，外加弱链接 `libwebrtc` |
+| `WebCore` | `WebGPU`、`JavaScriptCore`，外加弱链接 `libANGLE-shared`、`libwebrtc` |
+| `WebGPU` | `JavaScriptCore` |
+| `WebKitLegacy` | `JavaScriptCore`、`WebCore` |
+| `JavaScriptCore` | 无 |
+
+`libwebrtc` 与 `libANGLE-shared` 是 `LC_LOAD_WEAK_DYLIB`（命令字 `0x80000018`），按叶子名在 `WebKitOverride/usr/lib` 里找，所以 `usr` 那条链接也是必需的。
+
+验证：
+
+```sh
+ls -l /var/jb/Library/WebKitOverride/WebKit.framework/WebKit          # 50758784
+ls -l /var/jb/Library/WebKitOverride/usr/lib/libwebrtc.dylib          # 16182352
+ls -l /var/jb/Library/WebKitOverride/usr/lib/libANGLE-shared.dylib    # 6801440
+```
+
+这个形状本次在 `/var/jb/tmp/m121ovr/WebKitOverride` 下按同样结构搭过并验证通过：五个 framework 与 `usr` 都能经链接到达，三个文件的字节数与上表一致，测试目录已删除。
+
+**这一步不改变 hook 是否生效。** 同一个链接树上再跑 4.2 那条命令，`WebKit` 与 `libwebrtc` 仍然都是 `found: dylib-from-cache`：
+
+```
+dyld[34200]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[34200]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[34200]: find path "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"
+dyld[34204]:   found: dylib-from-cache: (0x03C3) "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"
+```
+
+两份都在共享缓存里，所以都要等 `isOverridablePath` 与 `isAlwaysOverridablePath` 放行；链接只是让 dyld 在放行之后有东西可 `stat`。
+
+这一步不修改任何现有文件，只新增一个目录与六条链接。回退是 `rm -rf /var/jb/Library/WebKitOverride` 一条命令，18.3 本身不受影响。
+
+**如果用户更愿意按 `install-webkit-override.sh` 的布局把 18.3 真复制进一个新目录，那就跳过这一步、改跑那个脚本；不要两件事都做。**
 
 ### 第 3 步：装上两份库并重建 `gen/dyld`（需要 root，触发用户空间重启）
 
@@ -465,8 +547,8 @@ ps -E -p $(ps -Ao pid=,comm= | awk '/com.apple.WebKit.WebContent$/{print $1; exi
 三件事都要做，顺序不能反：
 
 ```sh
-# ① 删掉第 2 步的符号链接（root）
-rm /var/jb/Library/WebKitOverride
+# ① 删掉第 2 步那个目录与它的六条链接（root）
+rm -rf /var/jb/Library/WebKitOverride
 ```
 
 ```sh
@@ -498,7 +580,7 @@ cp -p /var/mobile/Documents/m121-backup/systemhook.dylib.orig /var/jb/basebin/sy
 | # | 命令 | 作用 | 可逆性 |
 | --- | --- | --- | --- |
 | 1 | 第五节第 1 步的备份（写到 `/var/mobile/Documents`，只需 `mobile`，**不需要 root**） | 建备份与校验和 | 只读证据，删目录即清 |
-| 2 | `ln -s /var/jb/Library/Frameworks /var/jb/Library/WebKitOverride` | 把 `systemhook` 给的目录接到 18.3 实际位置 | 回退：`rm /var/jb/Library/WebKitOverride` |
+| 2 | `mkdir /var/jb/Library/WebKitOverride` + 五条 `ln -s` 指到 18.3 的 framework + 一条 `ln -s /var/jb/usr …/WebKitOverride/usr` | 让 `systemhook` 给的目录有 18.3 可命中 | 回退：`rm -rf /var/jb/Library/WebKitOverride` |
 | 3 | `/var/jb/basebin/jbctl update basebin /var/mobile/Documents/m121-backup/basebin.tar.staged` | 装上打了 hook 的 dyldhook 与打了补丁的 systemhook，并触发用户空间重启重建 `gen/dyld` | 第五节第 5 步 ①②③ |
 
 三步之外没有别的 root 写操作。第 3 步是唯一一次用户空间重启，所有应用会退出。
@@ -532,7 +614,7 @@ cp -p /var/mobile/Documents/m121-backup/systemhook.dylib.orig /var/jb/basebin/sy
 | --- | --- | --- |
 | 装上 hook 后的 4.2 节读数 | 需要 root 写 `/var/jb/basebin`，加一次用户空间重启 | 第五节全流程，约 5 分钟，重启一次 |
 | 4.3 节第 ④ 条的环境读数 | 依赖上一条 | 上一条通过后取一个 `WebContent` 的 pid，跑 4.3 节 ①② |
-| `libwebrtc.dylib` 的来源 | 磁盘上没有，18.3 的两个库都链接它 | 第三层通过后核它的 uuid 是否 18.3 那份；不是就要单独把它放进覆盖目录 |
+| `libwebrtc`/`libANGLE` 在进程里命中哪一份 | 依赖上一条 | 第一层通过后，在 `WebContent` 的 `image list` 里核这两个的 `LC_UUID` 是否为 `b22027e7…`/`277db473…` |
 | 补丁跨重新越狱的存活 | 需要改写 `Dopamine.app/basebin.tar`（归 `_installd`，要 root） | 换它的对应成员，或接受每次重新越狱后重做第五节 |
 | `xpcproxy` 是否转发 `__XPC_` 前缀 | 设备上 `/usr/libexec/xpcproxy` 无该字符串，`libxpc` 源码不公开 | 与本文无关；4.3 节的通过条件是镜像路径，不依赖前缀转发 |
 
