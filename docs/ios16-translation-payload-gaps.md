@@ -263,7 +263,7 @@ InitializeWebProcess(struct WebKit::WebProcessCreationParameters processCreation
 | 位置 | 现有表述 | 核对结果 |
 | --- | --- | --- |
 | `docs/ios16-whole-18.3-deployment-path.md` 1.2 节第二段 | 「`scheduleRenderingUpdate` 在 `:326-329` 每次提前返回」 | `:326-329` 属于 `updateRendering()`；`scheduleRenderingUpdate()` 在 `:557` |
-| 同上，1.2 节第一段 | 「走 `default: return name` 原样透传」 | `translateIncomingMessageName` 与 `translateOutgoingMessageName` 的 `default` 都返回 `MessageName::Invalid`（补丁 4320、7818 行） |
+| 同上，1.2 节第一段 | 「走 `default: return name` 原样透传」 | `translateIncomingMessageName` 与 `translateOutgoingMessageName` 的 `default` 都返回 `MessageName::Invalid`。按函数名定位，不写死行号：补丁里两个函数的定义分别在 `MessageName translateOutgoingMessageName(MessageName name)` 与 `MessageName translateIncomingMessageName(MessageName name)`，各自的 `default` 分支里是 `return MessageName::Invalid;`。行号随补丁版本漂移（内层 `fe0a830` 上是 4320 与 7818，内层 `main` 的 `7b9cf90` 上是 4303 与 7801） |
 | 同上，1.2 节第二条 | 「消息随后落到 `WebProcess::didReceiveMessage` 的 `LOG_ERROR`」 | 该 `LOG_ERROR` 是「接收者这一关过了、没有 handler 认领」时的兜底，不是编号撞车时走的那条；编号撞车时走 `dispatchDidReceiveInvalidMessage` → `AuxiliaryProcess::didReceiveInvalidMessage` 的 `CRASH()`（`Shared/AuxiliaryProcess.cpp:245`） |
 | 同上，1.2 节第二条 | 「消息被静默丢弃，不崩溃」 | 这个组合只在打了翻译补丁的构建里成立；不打补丁时第一个到达的 38 号就会让 helper 崩在 `CRASH()` |
 | 同上，1.2 节第一条的「不可修复」 | 由「参数形状不同」推出不可修复 | 参数形状确实不同，但 38 号可以映射到 `DisplayDidRefresh`，两侧都是空 tuple |

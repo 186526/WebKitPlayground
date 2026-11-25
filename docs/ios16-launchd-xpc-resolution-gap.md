@@ -58,7 +58,7 @@ xpc_connection_set_bootstrap(m_xpcConnection.get(), initializationMessage.get())
 #endif
 ```
 
-16.1 同一份文件里这一段没有条件编译（`:143-144`、`:169`）。
+发货 16.1 同一份文件里这一段没有条件编译：`releases/Apple/Safari-16.1-iOS-16.1` 的 `ProcessLauncherCocoa.mm:117`（`xpc_dictionary_create`）、`:118`（`_CFBundleSetupXPCBootstrap`）、`:143`（`xpc_connection_set_bootstrap`）。`Safari-614.1.9` 是另一棵非发货树，它对应的是 `:143-144` 与 `:169`，不要混用。
 
 `_CFBundleSetupXPCBootstrap` 在 CoreFoundation 的私有头里有声明（`apple-oss-distributions/CF`, `CFBundlePriv.h:259-260`，`CF_AVAILABLE(10_10, 8_0)`），但 CF 开源树只有 CFLite，**实现不在其中**（`grep -c XPCBootstrap CFBundle.c` = 0）。所以「bootstrap 字典里到底带了哪些 framework 路径」无源码可查。
 
@@ -194,7 +194,7 @@ PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
 ...
 ```
 
-而 UI 进程请求的是裸名（`ProcessLauncherCocoa.mm:205`、`:208`，16.1 `:71`、`:74`）。这一处已由 `patches/ios16-xpc-service-bundle-identifier.patch` 处理，M47 的设备读数也确认带后缀的名字查不到、裸名才查得到。**这是另一个独立的、已确证的失败模式**，与本文主问题不重叠：即使解决它，`/var/jb` 的 `.xpc` 仍不在候选集里。
+而 UI 进程请求的是裸名（`ProcessLauncherCocoa.mm:205`、`:208`，发货 16.1 的 `releases/Apple/Safari-16.1-iOS-16.1` 上是 `:72`、`:75`）。这一处已由 `patches/ios16-xpc-service-bundle-identifier.patch` 处理，M47 的设备读数也确认带后缀的名字查不到、裸名才查得到。**这是另一个独立的、已确证的失败模式**，与本文主问题不重叠：即使解决它，`/var/jb` 的 `.xpc` 仍不在候选集里。
 
 ---
 
@@ -237,7 +237,7 @@ PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
 ### 因此本文能给定论的部分
 
 - **已确证**：18.3 的 `.xpc` 在 iOS 上默认不安装进 `WebKit.framework/XPCServices`（`BaseXPCService.xcconfig:45`），16.1 的安装（16.1 无此组行）；`/var/jb/Library/WebKitOverride` 不在 1902 条索引里；app 包内的 `XPCServices` 可以被解析。
-- **有源码支撑**：UI 进程只通过 `xpc_connection_create(name, nullptr)` 请求服务名，不注册（16.1 `:133`，18.3 `:308`）；launchd 与 libxpc 的行为无源码可查。
+- **有源码支撑**：UI 进程只通过 `xpc_connection_create(name, nullptr)` 请求服务名，不注册（发货 16.1 的 `releases/Apple/Safari-16.1-iOS-16.1` 上是 `:107`，18.3 `:308`）；launchd 与 libxpc 的行为无源码可查。
 - **假设**：本节第 3、4 步的「一个 framework 一格、后来者覆盖」。「放二进制让情况变坏」的方向可以由它解释，但它未经验证，且有 `core` 行这一处尚未解释的张力。
 
 ---
