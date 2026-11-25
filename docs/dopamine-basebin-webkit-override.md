@@ -10,6 +10,8 @@
 
 即使这一半补上，Safari 换成自建 WebKit 也只覆盖 UI 进程。网页由系统的 `com.apple.WebKit.WebContent` 进程解析。那个进程带自己的 `LC_DYLD_ENVIRONMENT`，第十一节按设备实测说明它与 app 进程的覆盖手段不同。
 
+**而且「补上这一半」本身在平台签名进程上还没有被验证过。** 更晚的一组设备实测（塔台 2026-11-26 02:27–02:34 CST）显示：把 `DYLD_FRAMEWORK_PATH` 直接交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的镜像表里该 UUID 命中 0 次，`WebKit` 与 `WebCore` 仍来自共享缓存的 16.1 副本（`WebKit` 的 UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。越狱签名二进制上那组读数（`/var/jb/usr/bin/ls` 的候选行、`CoreFoundation` 的缓存命中）证明 dyld 的判定被改对了，它不能替代平台签名进程上的读数。所以本文的第一条结论适用于 dyld 的判定层，不适用于「app 进程最终会加载哪一份 WebKit」——后者在这台设备上至今没有一次成功的读数（十一·六、十一·七）。
+
 ## 二、官方 3.0.13 为什么不能覆盖共享缓存
 
 ### dyld 只对少数路径去磁盘比对
@@ -669,6 +671,10 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 
 真机对照（设备上目录已按十一·三建好、M39 尚未安装）：带 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 跑 `/var/jb/usr/bin/ls`，`libiosexec.1.dylib` 与 `systemhook.dylib` 出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，说明路径变量这一半在工作；同一进程的 `CoreFoundation.framework` 只有 `possible path(original path on disk)` 与 `possible path(original path)` 两条，`found: dylib-from-cache`，没有 `DYLD_FRAMEWORK/LIBRARY_PATH` 候选行，说明缓存项未被磁盘副本顶替——正是 `Loader.cpp:565` 短路的表现。两相对照，缺 M39 那一半时候选不产生、加载仍走缓存，与本节第一段的推导一致。
 
+**这段推导的适用范围只到「dyld 的判定被改对了」，不能推广到「平台签名进程会把自建 WebKit 换进来」。** 上面那个对照用的 `/var/jb/usr/bin/ls` 是越狱签名二进制。平台签名进程上有一组更晚的实测（塔台 2026-11-26 02:27–02:34 CST，设备 `mobile@192.168.2.136`），结论与本节推导的方向相反：把 `DYLD_FRAMEWORK_PATH` 与 `DYLD_PRINT_LIBRARIES=1` 直接交给 `/Applications/MobileSafari.app/MobileSafari`，dyld 打印里 `/var/jb` 那份 `WebKit` 确实出现过（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 **0** 次，`WebKit.framework/WebKit` 仍解析到 `/System`（镜像 #51，UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），`WebCore` 同样在 `/System`（#416）。也就是那份磁盘镜像被映射过又被卸掉，活进程镜像表里只剩 16.1 的系统副本。
+
+所以「两半同时上线就加载磁盘那一份」这个结论，在平台签名进程上**没有被观测到过**。`/var/jb/usr/bin/ls` 那一组读数证明的是 dyld 的候选枚举与缓存短路判定按预期工作，它不能替代平台签名进程上的读数。这条差别对第十二节的判据直接相关：十二·八那条路径读数必须取在平台签名进程上（`MobileSafari` 或 Chrome），取在越狱签名二进制上会得到一个与交付目标无关的「成功」。至于为什么平台签名进程不接受，本节不解释，也没有定位；M126 的范围到「记录这条边界」为止。
+
 两半的回滚手段不同：这一半可以运行时停用（十一·八），那一半要换回旧 `basebin.tar` 并触发一次用户空间重启（第八节）。
 
 ### 十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对
@@ -676,6 +682,8 @@ dyld[45414]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/k2probe/lib/lib
 进程分两类，覆盖手段不同。
 
 **app 进程只认环境变量。** `/Applications/MobileSafari.app/MobileSafari` 的 `LC_DYLD_ENVIRONMENT` 是 0 条，只导入 `MobileSafariUI`、`Foundation`、`libobjc.A.dylib`、`libSystem.B.dylib`。这类进程没有自己的搜索路径声明，dyld 只能从环境里拿到目录，所以四个变量是它们唯一的来源。
+
+**但「唯一的来源」不等于「送进去就能生效」。** 平台签名的 app 进程上有一组实测（塔台 2026-11-26 02:27–02:34 CST）说明这条路目前走不通：直接把 `DYLD_FRAMEWORK_PATH` 交给 `MobileSafari`，dyld 的打印里确实出现过 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程的 `lldb -o "image list"` 里该 UUID 命中 0 次，`WebKit.framework/WebKit` 与 `WebCore.framework/WebCore` 仍分别落在 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）与 #416。也就是那份磁盘镜像被映射过又被卸载。所以四个变量是「唯一的候选来源」，不是「已经可用的手段」；`DYLD_LIBRARY_PATH` 那一侧在同一份通报里另有读数，框架一侧没有成功的读数。本节把这条记录在案，不解释成因——机制没有定位，M126 的范围不含它。
 
 **`.xpc` 服务进程由自身的 load command 覆盖。** 设备上五个 `.xpc`（`com.apple.WebKit.GPU`、`Networking`、`WebContent`、`WebContent.CaptivePortal`、`WebContent.Development`）各带 4 条 `LC_DYLD_ENVIRONMENT`。下面这段是当时设备二进制的读数，后两条已被本仓改动过取值：
 
@@ -816,9 +824,9 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 **本 mission 没有执行任何安装动作，但这份 tar 已经被装过一次，并且失败了。** 两个陈述都要写清楚，因为它们不是同一件事：
 
 - **本 mission 只读**：全部读数在本机对三份 tar 做，没有向设备写入任何文件，没有跑 `jbctl`，没有触发重启。
-- **这份 tar 在别的 mission 里被执行过**：M127 于 2026-11-26 00:50:43 对同一个文件 `/var/mobile/Documents/bb/basebin-lh.tar` 跑过 `jbctl update basebin`，其后 00:51:11 起连续五次内核 panic，用户手动重新越狱才恢复。经过见 `docs/ios16-launchdhook-basebin-install-panic.md`，本节不复述、也不把这些读数当成自己的测量。
+- **这份 tar 在别的 mission 里被执行过**：M127 于 2026-11-26 00:50:43 对同一个文件 `/var/mobile/Documents/bb/basebin-lh.tar` 跑过 `jbctl update basebin`，其后 00:51:11 起连续五次内核 panic（`00:51:11` 一次 `initproc exited -- exit reason namespace 2 subcode 0x5`，随后 `00:56:21`、`00:56:58`、`00:58:58`、`01:00:37` 四次 `pmap_mark_page_as_ppl_page_internal: page still has mappings`），用户手动重新越狱才恢复。经过写在 M127 的 `docs/ios16-launchdhook-basebin-install-panic.md`，**该文件只存在于内层分支 `feat/y2-inner-record-the-launchdhook-panic-outcome`，尚未合入 `main`**；本节不复述它的全部内容、也不把它的读数当成自己的测量，只把与本 mission 判据直接相关的五个时间点抄在上句里，使这一段不依赖那个分支。
 
-**所以「设备上此刻是出厂 basebin」这个读数不是「没人试过」的证据。** 它是「试过、panic 了、重新越狱把 basebin 整包还原了」的结果。设备当前状态照 `AGENTS.md` 第 186、207 行：`launchdhook` 312848 / `449a9606`，`gen/dyld` 判定 (b) 为 `1 0 0 1`。
+**所以「设备上此刻是出厂 basebin」这个读数不是「没人试过」的证据。** 它是「试过、panic 了、重新越狱把 basebin 整包还原了」的结果。设备当前状态分两半记，出处不同：`gen/dyld` 判定 (b) 为 `1 0 0 1`（只带 Dopamine 原有的两个 hook）照 `AGENTS.md` 第 186、207 行；`launchdhook` 312848 / `449a9606` 是 M127 那次安装失败后重新越狱复读的读数，`AGENTS.md` 全文不含 `312848` 与 `449a9606`，这条不挂在它上面，本节的十二·七也把这两个值用作回滚基线。
 
 **M127 对这条路线给出的结论是「不安全，不要在这台设备上安装」。** 本节下面记的安装步骤因此**不是待执行的计划**，而是一份历史记录加一份回滚依据：它说明当时装了什么、怎么装、失败后怎么恢复。要再尝试，先解决 M127 那份文档里未解释的 panic 成因，本节不提供再次安装的依据。
 
@@ -868,6 +876,19 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 | 缺少 `isOverridablePath` hook | `dyldhook_merge.arm64.iOS18+.dylib` |
 | 缺少 `isAlwaysOverridablePath` hook | `dyldhook_merge.arm64.iOS18+.dylib` |
 
+**六个名字之外还有一项，已经由 M125 加进同一个 gate。** 上面这张表说的是 `verify-dyldhook-merge.sh` 那一组，它只管六个 dyldhook dylib。本 tar 里真正会被这台设备选中的第二个成员 `basebin/launchdhook.dylib` 现在也在断言范围内：M125 在 `dopamine-basebin/verify-basebin-tar.sh:103-118` 增加了对它的检查，实现是复用 `verify-systemhook-search-paths.py --kind launchdhook`，断言它在每个切片的 `__cstring` 里带四个搜索路径名与两个覆盖目录，且不带共享搜索根。
+
+**本 tar 在这一项上通过。** 用 M125 的脚本跑本 tar，输出里 `PASS: tar ships basebin/launchdhook.dylib` 与 `PASS: launchdhook.dylib carries the four search-path names` 两行，`^FAIL` 仍然只有那 7 行（6 条 dyldhook 断言 + 1 条汇总），退出码仍是 1。也就是说这一项没有掩盖那六条失败，也没有被它们掩盖。
+
+两个方向都实测过，用的是 M125 分支上的这同一份脚本。下表两行是本 mission 在本机的读数，输入分别是本 tar 里的补丁版与出厂 `orig.tar` 里的原版；M125 自己的 `test-verify-basebin-artifacts.py:165-188` 用合成的 Mach-O fixture 固定了同样两个方向（健康 tar 退出 0、原版 `launchdhook` 退出 1 且提示 `does not set the search paths dyld reads`），那组 fixture 与下表是两回事，不要混为一谈：
+
+| 输入 | `verify-systemhook-search-paths.py --kind launchdhook` 的结果 |
+| --- | --- |
+| 本 tar 里的补丁版 330144 / `150270a5…` | 18 条断言全 PASS，`all assertions hold`，退出 **0** |
+| 出厂原版 312848 / `449a9606…` | **12 条断言失败**（两个切片各 6 条），退出 **1** |
+
+所以这道断言不是空转：换成原版就会被拒。它对本 tar 的意义是一次确认，不是一次免责——本 tar 仍然因为另外六个成员而退出 1。
+
 原因是**六个 dyldhook dylib 里只有一个打过补丁**。按 `_MACHOMERGER_HOOK_` 前缀 token 计数（四位依次是 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl`）：
 
 | 成员 | 本 tar | 原版 | 打补丁后应为 |
@@ -913,9 +934,9 @@ iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` �
 
 `launchdhook` 两版符号完全相同，差 0；`systemhook` 每切片各多 1（补丁版多一个 `__xpc_type_bool`），那个 `+1` 在三种口径下都看得见。十二·三那张表用的是**每切片、去表头**的口径，与十二·四对变量名采用的口径一致。三种数字不可跨口径比较。本节早先写的 `275/275` 与 `134→135` 是**两切片并成一个集合、连表头**的读数，把两个架构的符号合并去重了，已按上表更正。
 
-`systemhook.dylib` 每个切片新增的那一个是 `__xpc_type_bool`。它不是新依赖：`0001-systemhook-set-search-paths.patch:114` 写的是 `xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL`，而 `XPC_TYPE_BOOL` 在 `<xpc/xpc.h>` 里就展开成 `&_xpc_type_bool` 这个导出数据符号。同一条语句里的 `xpc_get_type` 在原版 `systemhook` 里已经是未定义符号（它本来就用 `xpc_get_type` 判断 `DisableTweakInjection` 一类配置），所以多出来的只是取这个对象地址的那一处引用。
+`systemhook.dylib` 每个切片新增的那一个是 `__xpc_type_bool`。它不是新依赖：`0001-systemhook-set-search-paths.patch:114` 写的是 `xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL`，而 `XPC_TYPE_BOOL` 在 `<xpc/xpc.h>` 里就展开成 `&_xpc_type_bool`——`_xpc_type_bool` 是 C 源码里的标识符，链接期在符号表里带前导下划线，所以 `llvm-nm -u` 读到的是 `__xpc_type_bool`。同一条语句里的 `xpc_get_type` 在原版 `systemhook` 里已经是未定义符号（它本来就用 `xpc_get_type` 判断 `DisableTweakInjection` 一类配置），所以多出来的只是取这个对象地址的那一处引用。
 
-这台设备上 `_xpc_type_bool` 确实在 `libxpc` 里导出——`AGENTS.md` 第六节记录过用 `dlsym` 核对 16.1 `libxpc` 的 52 个 `xpc` / `CFBundle` 符号全部可解析，且 `xpc_main`、`sandbox_extension_*_to_process` 在场。**但 `_xpc_type_bool` 这个具体名字没有单独核对过**，所以准确的表述是：它由 `libxpc` 提供，未在本设备上单独用 `dlsym` 验证过；若缺失，表现会是加载 `systemhook.dylib` 时 dyld 报 `Symbol not found: __xpc_type_bool`，而不是静默失败。装机后第一次启动 `launchd` 就会暴露，回滚按十二·七。
+这台设备的 `libxpc` 里确实有这个导出数据符号——`AGENTS.md` 第六节记录过用 `dlsym` 核对 16.1 `libxpc` 的 52 个 `xpc` / `CFBundle` 符号全部可解析，且 `xpc_main`、`sandbox_extension_*_to_process` 在场。**但 `_xpc_type_bool` 这个具体名字没有单独核对过**，所以准确的表述是：它由 `libxpc` 提供，未在本设备上单独用 `dlsym` 验证过；若缺失，表现会是加载 `systemhook.dylib` 时 dyld 报 `Symbol not found: __xpc_type_bool`（报错按符号表里的拼写给出），而不是静默失败。装机后第一次启动 `launchd` 就会暴露，回滚按十二·七。
 
 `launchdhook.dylib` 两个版本都链 **10** 个库，逐条相同：
 
@@ -998,9 +1019,11 @@ EOF
 把新 tar 送上去，再更新。`jbctl update basebin` 必须在 root 下运行：
 
 ```sh
-scp -C /tmp/basebin-lh.tar mobile@192.168.2.136:/var/mobile/Documents/basebin-lh.tar
-ssh -t mobile@192.168.2.136 'echo "<密码>" | sudo -S -p "" /var/jb/basebin/jbctl update basebin /var/mobile/Documents/basebin-lh.tar'
+scp -C /tmp/basebin-lh.tar mobile@192.168.2.136:/var/mobile/Documents/bb/basebin-lh.tar
+ssh -t mobile@192.168.2.136 'echo "<密码>" | sudo -S -p "" /var/jb/basebin/jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar'
 ```
+
+`bb/` 这一层不是本节写作时任取的目录：M127 当时就是把 tar 放在 `/var/mobile/Documents/bb/` 下、并对该路径跑的 `jbctl`（本节开头的记录与十二·九的表都按那次实际执行写），备份四份与回滚用的 `device-basebin-orig.tar` 也在同一目录。历史记录必须与已发生的路径一致，所以命令里的路径照抄现场，不换成别的目录。
 
 **上机后第一件事是核对落地字节，不是看退出码。** `jbctl` 返回 0 只表示它接受了这个 tar。真正要确认的是三个文件已经被替换：
 
@@ -1041,9 +1064,11 @@ EOF
 
 `.safe_mode` 不是回滚手段：它只让 `systemhook` 停止注入，挡不住已经替换的 `gen/dyld` 与 `launchdhook`。真出问题时它是止血带，不是复原。
 
-### 十二·八 失败时的四种读数，其中 `__XPC_` 只有一种的判别
+### 十二·八 失败时的读数分诊，其中 `__XPC_` 只有一种的判别
 
 **判据只有一条，且必须是路径读数，不是端点计数。** 端点计数不能证明覆盖生效：系统 WebKit 正常工作同样会注册 4 个端点。
+
+**判据的适用对象必须写死在平台签名进程上。** 越狱签名二进制上取到的「路径改成 `/var/jb`」不构成本节的判据读数：`/var/jb/usr/bin/ls` 这类进程在 dyld 判定被改对之后就会走磁盘，与交付目标（`MobileSafari` 等平台签名 app 用上自建 WebKit）无关。反过来的实测也支持这条：把 `DYLD_FRAMEWORK_PATH` 交给平台签名的 `MobileSafari`，dyld 打印里出现过 `/var/jb` 的 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），但活进程镜像表里该 UUID 命中 0 次、`WebKit` 仍是 `/System` 的 #51（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`）。所以本节的读数必须在 `MobileSafari`（或 Chrome）这类进程上取；取在越狱二进制上的成功是假阳性。
 
 先启动被测应用，再拿到它的 pid，最后让 `lldb` 列出镜像的完整路径。**启动方法因应用而异，这一步搞错会让后面全部白测**：本设备的默认浏览器是 Chrome，`uiopen <url>` 打开的是 Chrome 而不是 Safari，测 Safari 必须用 `uiopen --path /Applications/MobileSafari.app`；直接 `exec` 浏览器只得到没有页面的 UI 进程，不请求 WebContent。
 
@@ -1064,7 +1089,7 @@ lldb -b -o "process attach --pid $APP" -o "image list -o -f" -o detach -o quit 2
 
 **成功的样子**：`WebKit.framework/WebKit` 那一行的路径前缀不再是 `/System/Library`，而是越狱根下的 `/Library/WebKitOverride/`。因为 `/var/jb` 是指向 preboot 目录的符号链接，这一行的完整形式可能是 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`，也可能是解析后的 `/private/preboot/<uuid>/dopamine-XXXX/procursus/Library/WebKitOverride/WebKit.framework/WebKit`。两种都算成功，判据写成两条同时成立：路径**不以** `/System/Library` 开头，且包含 `/Library/WebKitOverride/`。
 
-**失败的样子**：那行仍是 `/System/Library/Frameworks/WebKit.framework/WebKit`。这时按下面四种情形分诊，先读 app 进程的环境段落：
+**失败的样子**：那行仍是 `/System/Library/Frameworks/WebKit.framework/WebKit`。这时先读 app 进程的环境段落，再按下面这张表分诊。前四行按环境里有哪些变量分，最后一行是环境全对但结果仍不对的情形：
 
 ```sh
 launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
@@ -1077,7 +1102,9 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 四个变量都没有 | `launchdhook` 没写任何东西 | 十二·六的落地字节核对；`launchdhook` 是否真的被换掉 |
 | 只有 `__XPC_` 两个，且值指向覆盖目录 | **补丁运行了，裸名被丢掉了** | 见下一段 |
 | 只有 `__XPC_` 两个，值不是覆盖目录 | 补丁没运行，`__XPC_` 是别处留下的 | `launchdhook` 是否被替换、`config.plist` 的 `DisableJBFrameworkPath` 是否为真 |
-| 四个都在且值正确，路径仍来自 `/System` | 搜索路径到位，但 dyld 不采纳磁盘副本 | `gen/dyld` 的两个 override hook 计数（第九节） |
+| 四个都在且值正确，路径仍来自 `/System` | 搜索路径到位，但 dyld 不采纳磁盘副本，**或平台签名进程不接受这个变量** | 先查 `gen/dyld` 的两个 override hook 计数（第九节）；两个 hook 都在则落到本表下面的第五行 |
+
+**第五行是实测里已经出现过的那种**，不是理论分支：四个变量都送到、值也对，平台签名的 `MobileSafari` 仍加载 `/System` 那份（UUID `743EAFB4-D052-3C44-9307-9246B559B7C0`），而 `/var/jb` 那份（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`）在 dyld 打印里出现过、在活进程镜像表里不存在。这时 `gen/dyld` 的两个 override hook 计数可能是齐的（`1 1 1 1`），所以查完 hook 计数不能就此收尾。这条读数的成因没有定位，本节的判据因此只能报「未达成」，不能报「某个已知原因」。也就是十二·八的成功样子目前没有被观测到过——说明这一点是为了防止把上表前三行当成「只剩这几种可能」。
 
 **中间那一行的判别为什么成立。** 判别靠的是值，不是名字，但这里要先把「`launchd` 会丢 `DYLD_` 名字」这句话收窄到实测覆盖的范围。
 
@@ -1159,7 +1186,13 @@ M135 那版十二·五发布的 cdhash 与本节下表逐条相同（`launchdhoo
 | 补丁版 `systemhook` 234336 | arm64，槽位 `0x1000` | 2 | `14d05a3f395a5f28d69a2f61e02a9042fe7d5750` | 否 |
 | 补丁版 `systemhook` 234336 | arm64e，槽位 `0x1000` | 2 | `d468b1fb963f87126eaa4251e3149ebbf274b601` | 否 |
 
-上表中 `launchdhook` 那六行与 M127 `docs/ios16-launchdhook-basebin-install-panic.md` 第 126 行逐条一致：补丁版的 `fe83a746…`、`6e8952fb…` 与它的两个 `0x1000` 槽位 `f68f9da3…`、`6f362b32…`，原版的 `0e59e398…`、`a7438ed3…`。按 `basebin.tc` 里的记录顺序（从 0 开始数），`0e59e398…` 是第 3 条、`a7438ed3…` 是第 19 条，与那份文档写的「记录 3 与 19」相符。
+本节与 M127 那份文档的对应关系要写明出处，因为那份文档此刻不在 `main` 上。M127 的 `docs/ios16-launchdhook-basebin-install-panic.md`（内层分支 `feat/y2-inner-record-the-launchdhook-panic-outcome`，尚未合入 `main`）关于 `launchdhook` 的原文是：
+
+> 装进 tar 的补丁版 `launchdhook`（`150270a5…`，330144 字节）两个切片的 cdhash 是 `fe83a746…` 与 `6e8952fb…`，**不在** `basebin.tc` 里。原版那两个切片是 `0e59e398…` 与 `a7438ed3…`，在表里的记录 3 与 19。
+
+上表 `launchdhook` 那六行与这句逐条一致：补丁版的 `fe83a746…`、`6e8952fb…` 与它的两个 `0x1000` 槽位 `f68f9da3…`、`6f362b32…`，原版的 `0e59e398…`、`a7438ed3…`。按 `basebin.tc` 里的记录顺序（从 0 开始数），`0e59e398…` 是第 3 条、`a7438ed3…` 是第 19 条，与上引那句的「记录 3 与 19」相符。
+
+那段引用是 M127 分支上的原文，不是本 mission 的测量。**上文抄进来的目的就是让这一条交叉核对不依赖那个分支是否存在**：值本身由本节自己从设备三份文件按 `hashType` 算出，抄原文只用来指出两处结论相同。M127 合入 `main` 之前，读者在本分支上找不到那个路径，这是预期的。
 
 原版 `systemhook` 的两条也在表里，0 起算分别是第 24 条 `d3c4e949…` 与第 25 条 `dd3f99c4…`。这两个值 M127 没有发布；M135 那版十二·五也列了它们。
 
