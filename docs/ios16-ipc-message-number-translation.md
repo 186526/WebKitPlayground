@@ -269,6 +269,26 @@ basename includes from another dir, NOT registered: 3
 1. 新头文件要在 `project.pbxproj` 登记（第 3.2 节的三处）。不登记则 `#include "MessageNumberTranslation.h"` 解析失败。本机统计里 124 处活跃 include 的目标头文件 100% 已登记（54 处同目录 + 70 处跨目录），没有未登记还参与 iOS 编译的先例。
 2. 登记了头文件，但只在 `Encoder.cpp` 里定义、在 `Connection.cpp` 与 `ConnectionCocoa.mm` 里声明使用，还需要这些文件 `#include` 该头文件。这不需要改构建清单，只需要改源码里的 include，不属于构建系统改动。
 
+### 4.2.1 工作流对补丁落盘结果的三条断言
+
+第 3.2 节与 4.2 节讲的是补丁**应当**带来什么。`.github/workflows/build-webkit.yml` 的 `Apply worktree patch` 步骤另外检查补丁**实际**带来了什么，因为 `git apply` 的退出码 0 证明不了这些：
+
+| 断言 | 检查什么 | 失败输出 |
+| --- | --- | --- |
+| `new file mode` 落盘 | 从 `patches/*.patch` 自身读出每条 `new file mode` 对应的路径，逐个要求 `WebKit/<path>` 存在 | `PATCH NEW FILE MISSING: <path> (declared by <patch>)` |
+| 新增 include 可解析 | 对每条已应用的补丁，抽出其新增的 `#include "X.h"` / `#import "X.h"`，要求 `X.h` 能在 `WebKit/Source/` 下找到同名文件 | `PATCH INCLUDE UNRESOLVED:` 后逐行列出名字与来源补丁 |
+| 翻译补丁有效果 | `ios16-ipc-message-number-translation.patch` 应用后 `Encoder.cpp` 里必须出现 `translateOutgoingMessageName` | `PATCH APPLIED BUT HAS NO EFFECT: <patch>` |
+
+第二条断言的可解析集合由两部分组成：`WebKit/Source/` 下现存的所有文件（用文件系统扫描而不是 `git ls-files`，因为补丁刚创建的头文件尚未被 git 跟踪），以及 `WebKit/Source/*/DerivedSources-output.xcfilelist` 里列出的派生源产物。`MessageNames.h` 属于后者：18.3.1 的 `Source/WebKit/DerivedSources-output.xcfilelist` 第 137 行列了 `$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/MessageNames.h`，16.1 的同一文件第 84 行同样列了它。集合按树自身构建，生成器以后新增产物不需要改这一步。
+
+**这个「可解析」是工作流断言的判据，不是「源码树里存在同名文件」。** 第 7.4 节按后者统计过补丁新增的未解析项，结论是只剩 `MessageNames.h` 一条，并判定它「与既有代码同性质，不是本次改动引入的缺口」——那个统计回答的是「补丁有没有引入源码树缺件」，粒度是文件。这一步的断言回答的是「编译时的头映射能不能找到这个名字」，粒度是名字，所以把 DerivedSources 产物也算作可解析，`MessageNames.h` 因此通过。两处结论方向一致：没有任何补丁新增的 include 指向一个既不在源码树、也不是已知产物的名字。
+
+第 7.4 节的三项手工核对里，「`^new file mode` 计数为 1」这一项**仍是手工核对，这一步不检查它**。第一条断言只枚举补丁声明了的那些路径并要求它们存在，没有任何比较计数的代码：这段步骤里 `new file mode` 只在 awk 程序里出现一次，没有 `wc -l`、`-eq` 之类的整数比较。所以声明 2 个新文件的补丁照样通过、打印 `declared new files present: <两个路径>`；而整段 `new file mode` 缺失的补丁（0 条声明）连 `declared new files present` 都不会打印，`if [ -n "$declared_new_files" ]` 直接跳过，退出 0。也就是说声明清单检查**严格弱于**计数检查，计数为 1 恰好是唯一能抓住「补丁丢掉 `new file mode` 段」的判据，而断言 1 在结构上对它视而不见。一个补丁若同时丢掉 new-file 段与对应的 `#include`，断言 1 静默、断言 2 也没有新增 include 需要解析，两条都不响，所以这一项必须保留为人工核对。「`^diff --git` 计数为 9」与「应用后 `MessageNumberTranslation.h` 落盘 105 行」两项这一步同样不检查，`PATCH APPLIED BUT HAS NO EFFECT` 的 grep 也只查 `translateOutgoingMessageName` 在 `Encoder.cpp` 里出现，不查定义几处、行数多少。三项核对都仍需人工重跑。
+
+三条断言覆盖的故障各不相同，一条也省不掉。`git apply` 的退出码说明 hunk 落到了目标行，不说明补丁声明的文件在磁盘上。第一条断言抓「声明了却没落盘」。实测它的触发条件是文件在检查之前又消失了：同一次循环里靠前的补丁删掉了靠后补丁声明的路径，或 `new file mode 120000` 的符号链接目标不存在（`test -f` 跟随链接，悬空链接读作不存在）。`git apply` 本身不会把声明过的普通文件写丢——拿一段路径与 `+++` 不一致的 `new file mode` 试过，`git apply` 直接拒绝，退出 128；用同一份补丁先建后删同名文件，退出 0 且文件留下。第二条断言抓「include 指向不存在的文件」，它是删掉 `MessageNumberTranslation.h` 整段后真正拦下故障的那一条。第三条断言抓「hunk 改对了行但没带来新代码」。三者都要等到编译才暴露就是几小时之后的事，所以都放在应用补丁这一步。
+
+用未删减的 `patches/ios16-ipc-message-number-translation.patch` 在本机 18.3.1 树上跑过一次全部 25 个补丁，三条断言通过，25 个补丁里 23 个应用、2 个 `webkit_iOS_16.*` 按设计跳过。删掉该补丁里 `MessageNumberTranslation.h` 整段后（8 个 `diff --git`、0 个 `new file mode`），第一条断言没有可检查的对象，第二条以 `PATCH INCLUDE UNRESOLVED: MessageNumberTranslation.h (added by patches/ios16-ipc-message-number-translation.patch)` 失败、退出 1。把该文件从应用后的树上删掉再跑第一条断言的同一段代码，输出 `PATCH NEW FILE MISSING: Source/WebKit/Platform/IPC/MessageNumberTranslation.h`、退出 1。
+
 ### 4.3 落点选择：为什么是 Encoder.cpp 而不是 IPCUtilities.cpp
 
 支持把函数与表放进 `Encoder.cpp` 的证据：
@@ -704,7 +724,7 @@ patches=25 applied=23 skipped=2 fail=0
 
 反序验证：先单独应用 `ios16-xpc-bootstrap-compat.patch`，再应用翻译补丁，两者都成功，`MessageNumberTranslation.h` 存在。
 
-**补丁完整性单独核。** `git apply` 的退出码只说明 hunk 都落了，不说明补丁把该建的文件都建了：新建文件的段在 `git diff` 输出里不出现（需要 `git add -N`），生成补丁时漏掉它，`git apply` 照样报成功。所以逐个核了三点：补丁文件里 `^diff --git` 计数为 11、`^new file mode` 计数为 1，应用后 `Source/WebKit/Platform/IPC/MessageNumberTranslation.h` 落盘 108 行，`MessageName translateOutgoingMessageName` 与 `MessageName translateIncomingMessageName` 在 `Encoder.cpp` 里各命中 1 次定义。
+**补丁完整性单独核。** `git apply` 的退出码只说明 hunk 都落了，不说明补丁把该建的文件都建了：新建文件的段在 `git diff` 输出里不出现（需要 `git add -N`），生成补丁时漏掉它，`git apply` 照样报成功。所以逐个核了三点：补丁文件里 `^diff --git` 计数为 9、`^new file mode` 计数为 1，应用后 `Source/WebKit/Platform/IPC/MessageNumberTranslation.h` 落盘 105 行，`MessageName translateOutgoingMessageName` 与 `MessageName translateIncomingMessageName` 在 `Encoder.cpp` 里各命中 1 次定义。这三个数在 M85 之后重测过：M85 把 `XPCServiceEntryPoint.h` 与 `.mm` 两个段落移出翻译补丁，`^diff --git` 从 11 降到 9，落盘行数从 108 降到 105；`^new file mode` 与两个函数定义仍是原值。
 
 **包含项解析。** 把补丁改到的每个文件里的 `#include "..."` 与 `#import "..."` 逐个按文件名在 `Source/` 下找，以打补丁前的同一棵树为基线做差分，只统计「打补丁后新增的未解析项」。结果只有一条：`MessageNumberTranslation.h` 里的 `#include "MessageNames.h"`。它是构建产物不是源码树里的文件（`Source/WebKit/DerivedSources-output.xcfilelist` 里写作 `$(BUILT_PRODUCTS_DIR)/DerivedSources/WebKit/MessageNames.h`），基线里 `Encoder.h` 与 `Decoder.h` 在同样的未解析状态下就已经包含它，所以这一条与既有代码同性质，不是本次改动引入的缺口。
 
