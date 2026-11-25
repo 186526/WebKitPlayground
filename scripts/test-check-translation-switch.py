@@ -43,14 +43,20 @@ _SPEC.loader.exec_module(CHECK)
 BASE = """\
 +bool m_shouldTranslateMessageNames { false };
 +void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }
-+// InitializeConnection is 3076 in this tree and 2478 in the shipped 16.1 enumeration.
-+// case 3076 returns MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged
++// InitializeConnection is 3076 in this tree, and 2444 in the 614.1.9 snapshot whose
++// anchor line reads InitializeConnection 2444 and Last 3139, with
++// firstSynchronousOldMessageNumber 2899.
++// The incoming table answers case 3076 with
++// MessageName::WebPageProxy_RootViewToAccessibilityScreen, while against the shipped
++// 16.1 enumeration it would name
++// MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged.
 +// decoder->messageName() == MessageName::InitializeConnection
 +// Of the 4088 numbers, 5 land on a message with the same name, 3180 land on a different
-+// message, and 903 fall off the end of an enumeration of 3185.
-+// Safari-614.1.9 gives firstSynchronousOldMessageNumber 2899, InitializeConnection 2444,
-+// and Last 3139. The device runs releases/Apple/Safari-16.1-iOS-16.1 with 2946, 2478 and 3184,
-+// a gap of 45 entries.
++// message, and 903 fall off the end of an enumeration of 3185; against 614.1.9 the same
++// reading gives 3135 and 948.
++// Safari-614.1.9 is a 16.0-generation snapshot, not the tag the device runs.
++// The device runs releases/Apple/Safari-16.1-iOS-16.1 with 2946, 2478 and 3184,
++// 45 at Last away from 3139.
 """
 
 CALL = "+    m_connection->setShouldTranslateMessageNames(true);\n"
@@ -93,6 +99,18 @@ CASES = (
         BASE.replace("3180", "many"),
         1,
         "no longer records",
+    ),
+    (
+        "a patch that calls the tables 16.1 without qualifying it fails",
+        BASE + "+// This table is the 16.1 numbering.\n",
+        1,
+        "without saying which 16.1",
+    ),
+    (
+        "the same claim qualified by the tag passes",
+        BASE + "+// This table is the 614.1.9 numbering.\n",
+        0,
+        None,
     ),
     ("a missing patch is reported distinctly", None, 2, None),
 )

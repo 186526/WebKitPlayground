@@ -63,23 +63,31 @@ MEMBER = re.compile(r"\bbool\s+m_shouldTranslateMessageNames\s*\{([^}]*)\}")
 # Text the patch must keep. Each entry is a claim a reader relies on to judge a future change; the
 # substrings are short so that rewrapping a comment does not fail the check, and specific enough that
 # deleting the fact does.
+#
+# Every 16.1 mention in the patch is qualified, because the tables are NOT built on shipped 16.1:
+# they come from the 614.1.9 snapshot, which is the iOS 16.0 generation. The entries below pin both
+# bases and the counts for both, so an edit cannot quietly drop one and leave the patch claiming a
+# basis it does not have.
 REQUIRED_RATIONALE = (
     ("InitializeConnection is 3076 in this tree", "3076"),
-    ("the 16.1 number for InitializeConnection", "2478"),
-    ("the message 3076 is silently renamed to", "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
-    ("the handshake comparison that then never fires", "decoder->messageName() == MessageName::InitializeConnection"),
-    ("the same-name count of the index comparison", "5 land on a message with the same name"),
-    ("the different-message count", "3180"),
-    ("the beyond-16.1-range count", "903"),
-    ("the per-index totals", "4088"),
-    ("the 16.1 enumeration's size", "3185"),
-    ("the tag the 16.1 side of the tables was generated from", "Safari-614.1.9"),
-    ("the anchors that tag produces", "firstSynchronousOldMessageNumber 2899"),
-    ("the second anchor", "InitializeConnection 2444"),
-    ("the third anchor", "Last 3139"),
+    ("the 614.1.9 number for InitializeConnection", "2444 and Last 3139"),
+    ("the message 3076 silently becomes, per the 614.1.9 basis", "WebPageProxy_RootViewToAccessibilityScreen"),
+    ("the message 3076 would become against shipped 16.1", "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
+    ("the handshake comparison that then never fires",
+     "decoder->messageName() == MessageName::InitializeConnection"),
+    ("the same-name count of the index comparison", "5 land on a message"),
+    ("the different-message count against shipped 16.1", "3180"),
+    ("the beyond-range count against shipped 16.1", "903"),
+    ("the different-message count against the 614.1.9 basis", "3135"),
+    ("the beyond-range count against the 614.1.9 basis", "948"),
+    ("the tree's own size", "4088"),
+    ("the shipped 16.1 enumeration's size", "3185"),
+    ("the tag the tables were generated from", "Safari-614.1.9"),
+    ("the statement that the tables are a 16.0-generation snapshot", "16.0-generation snapshot"),
+    ("the first anchor that tag produces", "firstSynchronousOldMessageNumber 2899"),
     ("the tag the device actually runs", "releases/Apple/Safari-16.1-iOS-16.1"),
     ("the anchors the device's build produces", "2946, 2478 and 3184"),
-    ("the size of the gap between the two 16.1 enumerations", "45"),
+    ("the gap at Last between the two enumerations", "45 at"),
 )
 
 # A mention of the setter inside a comment is documentation, not a call. The patch's added lines all
@@ -172,6 +180,38 @@ def check_rationale(patch: str) -> list[Violation]:
     return violations
 
 
+# A bare "16.1" next to the word "table" is the claim this check exists to prevent: the tables come
+# from the 614.1.9 snapshot, which is the iOS 16.0 generation, so calling them 16.1 would tell a
+# reader they cover the build on the device when they do not. A mention is qualified when the same
+# line, or the line after, names the tag, the snapshot, or the fact that it is not 16.1.
+UNQUALIFIED = re.compile(r"\btables?\b", re.IGNORECASE)
+QUALIFIERS = ("Safari-614.1.9", "614.1.9", "16.0-generation", "snapshot", "not 16.1", "NOT built on")
+
+
+def check_no_unqualified_table_claim(patch: str) -> list[Violation]:
+    lines = patch.splitlines()
+    violations = []
+    for index, raw in enumerate(lines):
+        match = ADDED_LINE.match(raw)
+        if not match:
+            continue
+        text = match.group(1)
+        if "16.1" not in text or not UNQUALIFIED.search(text):
+            continue
+        window = " ".join(lines[index:index + 2])
+        if any(qualifier in window for qualifier in QUALIFIERS):
+            continue
+        violations.append(
+            Violation(
+                "the patch calls the translation tables 16.1 without saying which 16.1",
+                "the tables are built on the 614.1.9 snapshot, which is the iOS 16.0 generation, "
+                "and the device runs releases/Apple/Safari-16.1-iOS-16.1; a bare 16.1 reads as the "
+                "latter, which these tables do not cover: %s" % text.strip(),
+            )
+        )
+    return violations
+
+
 def run(patch_path: Path) -> int:
     try:
         patch = patch_path.read_text(encoding="utf-8")
@@ -183,6 +223,7 @@ def run(patch_path: Path) -> int:
     violations += check_no_setter_call(patch)
     violations += check_member_initialiser(patch)
     violations += check_rationale(patch)
+    violations += check_no_unqualified_table_claim(patch)
 
     if violations:
         for violation in violations:

@@ -7819,10 +7819,10 @@ index 5503dfc842d56..a3af9421b6d54 100644
      void reserve(size_t);
 diff --git a/Source/WebKit/Platform/IPC/MessageNumberTranslation.h b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
 new file mode 100644
-index 0000000000000..ccefd0eed6eb5
+index 0000000000000..3c490cdee2bc7
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,182 @@
 +/*
 + * Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 + *
@@ -7874,29 +7874,42 @@ index 0000000000000..ccefd0eed6eb5
 +// what the peer across a live connection actually speaks.
 +//
 +// The deployment target cannot stand in for the peer question. Measured by
-+// numbering every message in this tree and in the shipped 16.1 enumeration and
-+// comparing index by index, with scripts/gen-ipc-message-number-tables.py as the
-+// extractor: this tree has 4088 numbers and the shipped 16.1 has 3185. Of the
-+// 4088, only 5 land on a message with the same name, 3180 land on a different
-+// message, and 903 fall off the end of 16.1's enumeration. `InitializeConnection`
-+// is number 3076 here; the incoming table is a switch over 16.1 numbers, so it
-+// answers case 3076 with
-+// MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged, a real
-+// message that has nothing to do with the handshake. 3076 is not in
-+// isKnownUnmappedIncomingNumber either, so the miss path that would flag the
-+// message is not taken and the rename is silent. ConnectionCocoa.mm's
-+// `decoder->messageName() == MessageName::InitializeConnection` then never fires
-+// and the connection never completes its handshake. Setting the flag for a peer
-+// that already numbers messages this way does not degrade a connection, it
-+// breaks the handshake on the first message.
++// numbering every message in this tree and in an older enumeration and comparing
++// index by index, with scripts/gen-ipc-message-number-tables.py as the extractor.
++// This tree has 4088 numbers. Read against the shipped 16.1 enumeration
++// (releases/Apple/Safari-16.1-iOS-16.1, 3185 numbers) only 5 land on a message
++// with the same name, 3180 land on a different message, and 903 fall off its end.
++//
++// The tables this file loads in are NOT built on that shipped 16.1. They are
++// built on tag Safari-614.1.9, which holds 3140 numbers; see the paragraph on
++// that tag below. Read against 614.1.9 the same measurement gives 5, 3135 and
++// 948. Both readings are here because both matter: the first is the peer a route
++// A deployment would actually meet, the second is what the code in this file
++// would do to it.
++//
++// Either way the handshake breaks, and the exact message it becomes differs by
++// basis, so both are named. `InitializeConnection` is number 3076 in this tree.
++// The incoming table switches over the older numbering and answers case 3076
++// with MessageName::WebPageProxy_RootViewToAccessibilityScreen, the message that
++// occupies 3076 in 614.1.9. Against the shipped 16.1 enumeration the same number
++// instead names MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged,
++// which is what a peer running that build would be misread as. Neither is the
++// handshake. 3076 is in neither isKnownUnmappedIncomingNumber list, so the miss
++// path that would flag the message is not taken and the rename is silent.
++// ConnectionCocoa.mm's `decoder->messageName() == MessageName::InitializeConnection`
++// then never fires and the connection never completes its handshake. Setting the
++// flag for a peer that already numbers messages this way does not degrade a
++// connection, it breaks the handshake on the first message.
 +//
 +// Two deployment routes exist and they differ only in which WebKit.framework the
 +// UI process loads at run time, never in how this binary was compiled:
 +//
-+//   route A, mixed generations: the UI process keeps the system 16.1 framework
-+//     and only the auxiliary processes load this build, so the peer numbers its
-+//     messages with 16.1 and a connection would have to translate. A route-A
-+//     build is the only one that may set the flag.
++//   route A, mixed generations: the UI process keeps the system framework on the
++//     device, which is releases/Apple/Safari-16.1-iOS-16.1, and only the
++//     auxiliary processes load this build, so the peer numbers its messages with
++//     that enumeration and a connection would have to translate. A route-A build
++//     is the only one that may set the flag, and it needs tables generated from
++//     that tag, not the 614.1.9 ones this file carries.
 +//   route B, same generation: scripts/install-webkit-override.sh puts this
 +//     build's WebKit.framework on the UI process's DYLD_FRAMEWORK_PATH, so both
 +//     sides run this build and number messages identically. The flag must be
@@ -7917,15 +7930,20 @@ index 0000000000000..ccefd0eed6eb5
 +// without keeping its value, so nothing reaches the caller.
 +//
 +// A route-A build is where these tables start being used, and the tables it must
-+// use are not these ones. The 16.1 side of both tables was generated from tag
-+// Safari-614.1.9 (614.1.9.0), whose anchors are
-+// firstSynchronousOldMessageNumber 2899, InitializeConnection 2444 and
-+// Last 3139. The device runs releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10),
-+// whose anchors are 2946, 2478 and 3184. The two enumerations differ by 45
-+// entries, so even under route A these tables would map onto a different 16.1
-+// than the one on the device. Fixing that is separate work; what matters here is
-+// that a route-A build must regenerate the tables before it can rely on them,
-+// and routing a peer to them today would misnumber by up to those 45 entries.
++// use are not these ones. The older side of both tables was generated from tag
++// Safari-614.1.9 (614.1.9.0), a 3140-number snapshot of the iOS 16.0 generation,
++// whose anchors are firstSynchronousOldMessageNumber 2899, InitializeConnection
++// 2444 and Last 3139. That is not the 16.1 the device runs. The device runs
++// releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10), which has 3185 numbers and
++// anchors 2946, 2478 and 3184. Every one of those three numbers differs: 45 at
++// Last, 34 at InitializeConnection and 47 at the first synchronous message.
++//
++// So these tables are a 16.0-generation snapshot, not 16.1. Even under route A
++// they would map a real 16.1 peer onto the wrong numbering above the first
++// insertion point. Fixing that is separate work; what matters here is that a
++// route-A build must regenerate the tables from the tag the peer actually runs
++// before it can rely on them, and that nothing in this file should be read as
++// covering 16.1 as shipped.
 +//
 +// scripts/check-translation-switch.py enforces the part a compiler cannot see:
 +// that no call to setShouldTranslateMessageNames exists in the shipped tree, and
@@ -7973,14 +7991,16 @@ index 0000000000000..ccefd0eed6eb5
 +// is not.
 +extern const uint16_t firstSynchronousOldMessageNumber;
 +
-+// One 16.1 message this build cannot map is worth naming, because dropping it
-+// looks alarming and is not: 16.1's `Terminate` (number 2449) has a receiver-side
-+// handler that calls CRASH(), but neither tree ever constructs it. Grepping the
-+// 16.1 tree for `MessageName::Terminate` finds the receive-side comparison in
-+// Connection.cpp and nothing that sends it, and 18.3 deleted the enumerator
-+// along with that handler. A UI process that needs an auxiliary process gone
-+// closes the connection or calls Connection::kill(), so no sender exists to be
-+// answered.
++// One message this build cannot map is worth naming, because dropping it looks
++// alarming and is not. In the 614.1.9 snapshot `Terminate` is number 2449, and it
++// is in this file's isKnownUnmappedIncomingNumber list at that number. It has a
++// receiver-side handler that calls CRASH(), but neither tree ever constructs it.
++// Grepping the 614.1.9 tree for `MessageName::Terminate` finds the receive-side
++// comparison in Connection.cpp and nothing that sends it, and 18.3 deleted the
++// enumerator along with that handler. A UI process that needs an auxiliary
++// process gone closes the connection or calls Connection::kill(), so no sender
++// exists to be answered. In the shipped 16.1 build the same message sits at 2483
++// instead, which is one more reason the tables cannot be read as covering it.
 +
 +} // namespace IPC
 +
