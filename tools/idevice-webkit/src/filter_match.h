@@ -12,8 +12,14 @@
    are the file dictionary's own keys. A process neither branch names keeps
    match_none in a report of its own: the match is written for every process,
    because a filter this dylib could not read must not stop the host work of a
-   process ellekit did inject. */
+   process ellekit did inject.
 
-void filter_match_report(const char *filterPath);
+   The answer is also returned, because the image claim is gated on it: a
+   process no branch of the filter names has no proof that ellekit meant to
+   load this dylib into it, and the claim maps seven images, so it stays off.
+   false covers both «no branch matched» and «the filter could not be read»,
+   and both cases leave the rest of the constructor exactly as it was. */
+
+bool filter_match_report(const char *filterPath);
 
 #endif
