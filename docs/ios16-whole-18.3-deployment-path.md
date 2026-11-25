@@ -531,8 +531,11 @@ helper 对了不等 UI 对了。UI 进程的 18.3 来自 basebin 注入的环境
 **读 UI 进程的环境要用整条 entry 比较，不能按子串 `grep`。** `__XPC_DYLD_FRAMEWORK_PATH` 含子串 `DYLD_FRAMEWORK_PATH`，所以 `grep -i DYLD` 或 `grep DYLD_FRAMEWORK_PATH` 会把带前缀的拼写报成裸名命中；而 dyld 只读裸名，`__XPC_` 那份由 `xpcproxy` 转交，是另一个未验证的机制。这一节原来的那条命令就是按子串 `grep` 的，已换成下面这个按首字节比较的脚本，它与本次实测的对照见 `../../webkit-install-runbook.md` 的「设备排查：读进程环境变量」一节。
 
 ```sh
-sudo -S -p "" /var/jb/usr/bin/python3 scripts/inspect-process-env.py --check <UI_PID>
+scp WebKitPlayground/scripts/inspect-process-env.py mobile@192.168.2.136:/var/mobile/
+ssh mobile@192.168.2.136 'echo "<密码>" | sudo -S -p "" /var/jb/usr/bin/python3 /var/mobile/inspect-process-env.py --check <UI_PID>'
 ```
+
+脚本在仓库里、不在设备上，所以第一步是传输。直接用仓库相对路径 `scripts/inspect-process-env.py` 在设备上调用会报 `can't open file` 并退出 `2`，而 `2` 的含义是「读不到进程的环境」，于是缺传输会被误读成进程读不出来。`scp` 这一步与本仓把另外三个脚本送到 `/var/mobile/` 的做法相同（`../../webkit-install-runbook.md` 第二阶段开头那组 `scp`）。
 
 这个脚本读的是进程真实的 `envp`（`sysctl(KERN_PROCARGS2)`），不是 `launchctl print` 那个域级列表，两者对同一个 pid 会给出不同答案。它把裸名与前缀名分开计数，并在读不到 `envp` 时报错退出 2 而不是报 0 条：设备对**由 shell 启动**的进程会返回一个不含 `envp` 的完整缓冲区，那种 0 条说明的是启动方式，不是进程没有变量。
 
