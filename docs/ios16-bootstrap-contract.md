@@ -110,7 +110,7 @@ $ git grep -c 'SDKAlignedBehavior' Safari-614.1.9 -- Source | wc -l
 | `stderr` | fd | `PL16:205`，条件同上 | `PL18:420`，条件同上 | `XM16:130` | `XM18:222` | 同上 |
 | `WebKitBundleVersion` | string | `PL16:141`，写进 `initializationMessage` 而非 `bootstrap` 字典，仅 `PLATFORM(MAC)` | `PL18:361`，直接写进 `bootstrap` 字典，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | `XM16:202`，仅 `PLATFORM(MAC)` | `XM18:115`，仅 `PLATFORM(MAC) \|\| PLATFORM(MACCATALYST)` | iOS 两侧都编译掉，无影响 |
 
-上表按两个 tag 的原文求值，不按本工程产物求值。产物在 tag 原文之上还叠了两份补丁，所以有两行的读数会不一样：`client-sdk-version` 在产物里**有**读取点，`main` 上的 `patches/ios16-xpc-bootstrap-compat.patch` 在 `getClientSDKAlignedBehaviors` 里回退读它并调用 `setSDKAlignedBehaviorsFromClientSDKVersion` 重建位图，`main` 上的 `patches/ios16-ipc-message-number-translation.patch` 另有一处读取（M85 分支把这两处都删掉了，见「修补补丁的现状与缺口」）；`client-sdk-aligned-behaviors` 的「缺失后果」按树分两种：`main` 上的产物在长度不等时仍由 `RELEASE_ASSERT` 中止，补丁把该断言与紧随的 `memcpy` 留作未改动的 context line，只在其上方加了 fallback；M85 分支删除该断言，长度不等时不再中止，宽度不等的负载一律丢弃、位图保持全零，等宽负载 `memcpy` 进位图并返回真。
+上表按两个 tag 的原文求值，不按本工程产物求值。产物在 tag 原文之上应用了 `patches/` 下的整组补丁，其中**两份**改动了本表的读数，所以有两行的读数会不一样：`client-sdk-version` 在产物里**有**读取点，`main` 上的 `patches/ios16-xpc-bootstrap-compat.patch` 在 `getClientSDKAlignedBehaviors` 里回退读它并调用 `setSDKAlignedBehaviorsFromClientSDKVersion` 重建位图，`main` 上的 `patches/ios16-ipc-message-number-translation.patch` 另有一处读取（M85 分支把这两处都删掉了，见「修补补丁的现状与缺口」）；`client-sdk-aligned-behaviors` 的「缺失后果」按树分两种：`main` 上的产物在长度不等时仍由 `RELEASE_ASSERT` 中止，补丁把该断言与紧随的 `memcpy` 留作未改动的 context line，只在其上方加了 fallback；M85 分支删除该断言，长度不等时不再中止，宽度不等的负载一律丢弃、位图保持全零，等宽负载 `memcpy` 进位图并返回真。
 
 `client-sdk-version` 在 16.1 这一版里完全消失，确认命令与输出：
 
@@ -242,7 +242,7 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支不进入，控制直接到 `RELEASE_ASSERT`。
 2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），即使进了分支也取不到字符串，回退在第二个 `if` 处返回 false，位图保持全零。
 
-所以 `main` 上的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（内层 `feat/p9-inner-aligned-behaviors-fallback-and-constant`，外层 `feat/p9-make-the-aligned-behaviors-fallback-r`）改为另一种形态：`RELEASE_ASSERT` 删除，长度不等时不再中止进程；宽度不等的负载一律丢弃、位图保持全零；等宽负载 `memcpy` 进位图并返回真。七个提交里，`97cfd79` 删掉 `setSDKAlignedBehaviorsFromClientSDKVersion` 与两个 `client-sdk-version` 读取点，`ddfaa5f` 把分派收成按宽度比较，`e657b79` 把等宽负载改为拷贝并返回真。截至本句写作时这些提交尚未合入 `main`。
+所以 `main` 上的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（内层 `feat/p9-inner-aligned-behaviors-fallback-and-constant`，外层 `feat/p9-make-the-aligned-behaviors-fallback-r`）改为另一种形态：`RELEASE_ASSERT` 删除，长度不等时不再中止进程；宽度不等的负载一律丢弃、位图保持全零；等宽负载 `memcpy` 进位图并返回真。这一形态由 `97cfd79`（删掉 `setSDKAlignedBehaviorsFromClientSDKVersion` 与两个 `client-sdk-version` 读取点）、`ddfaa5f`（把分派收成按宽度比较）、`e657b79`（把等宽负载改为拷贝并返回真）三个提交确定；截至本句写作时这些提交尚未合入 `main`。
 
 ### 8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图
 
