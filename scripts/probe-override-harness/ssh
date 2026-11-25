@@ -42,11 +42,22 @@ helpers = scenario.get("helpers") or []
 stale = scenario.get("stale_helpers") or []
 safari_pid = scenario.get("safari_pid", 7001)
 
-mode = scenario.get("mode")
-if mode == "gui_error" and command == "launchctl print gui/501":
-    reply("Could not find domain for gui/501", 113, stderr=True)
 if command == "launchctl print gui/501":
-    reply("" if scenario.get("gui_empty") else "domain = {\n\ttype = gui\n}")
+    # On iOS 16.1 under Dopamine a healthy device answers this with exit 125 and
+    # no output, because the graphics session lives in user/501 and there is no
+    # gui/501 domain. That is the default here so the harness exercises the
+    # healthy shape; gui_domain_present is the other shape, for a run on a
+    # configuration that does have the domain.
+    if scenario.get("gui_domain_present"):
+        reply("gui/501 = {\n\ttype = gui\n}")
+    reply("", 125)
+if command == "launchctl print user/501/com.apple.SpringBoard":
+    if scenario.get("springboard_absent"):
+        reply("Could not find domain for user/501", 113, stderr=True)
+    reply("user/501/com.apple.SpringBoard = {\n\tactive count = 39\n"
+          "\tpath = /System/Library/LaunchDaemons/com.apple.SpringBoard.plist\n"
+          "\ttype = LaunchDaemon\n\tstate = %s\n}"
+          % scenario.get("springboard_state", "running"))
 if command == "id -u":
     reply("501")
 if command.startswith("test -f"):
@@ -205,8 +216,31 @@ if "install-webkit-override.sh" in command:
     if scenario.get("install_fails"):
         reply("preflight: missing source", 1, stderr=True)
     open(marker, "w").close()
-    reply("  copied     /var/jb/Library/WebKitOverride/WebKit.framework\n"
-          "  pruned     /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices")
+    if scenario.get("override_prunes_xpc_services", True):
+        reply("  copied     /var/jb/Library/WebKitOverride/WebKit.framework\n"
+              "  pruned     /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices")
+    reply("  copied     /var/jb/Library/WebKitOverride/WebKit.framework")
+
+# Step 2 reads the installed shape instead of trusting the install script's name.
+# The probe asks two separate questions, so both are modelled separately and each
+# fails on its own: the three-way existence check first, then the listing. A
+# fixture that answered only one of them would be modelling a pipeline the probe
+# does not run -- the previous form relied on `ls ... 2>/dev/null | wc -l`, where
+# stderr is discarded and the count is a number whatever happens.
+XPC_DIR = "/var/jb/Library/WebKitOverride/WebKit.framework/XPCServices"
+if command.startswith("p=") and "WebKit.framework/XPCServices" in command:
+    if scenario.get("override_xpc_services_unreadable"):
+        reply("unreadable")
+    if scenario.get("override_prunes_xpc_services", True):
+        reply("absent")
+    reply("present")
+
+if command.startswith("ls ") and "WebKit.framework/XPCServices" in command:
+    if scenario.get("override_xpc_listing_fails"):
+        reply("ls: %s: Permission denied" % XPC_DIR, 1, stderr=True)
+    for index in range(int(scenario.get("override_xpc_bundles", 0))):
+        print("%s/com.apple.WebKit.Helper%d.xpc" % (XPC_DIR, index + 1))
+    sys.exit(0)
 
 if "[ -d /var/jb/Library/WebKitOverride ]" in command:
     present = os.path.exists(marker) or scenario.get("override_initial") == "present"
