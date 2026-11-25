@@ -283,7 +283,7 @@ basename includes from another dir, NOT registered: 3
 
 **这个「可解析」是工作流断言的判据，不是「源码树里存在同名文件」。** 第 7.4 节按后者统计过补丁新增的未解析项，结论是只剩 `MessageNames.h` 一条，并判定它「与既有代码同性质，不是本次改动引入的缺口」——那个统计回答的是「补丁有没有引入源码树缺件」，粒度是文件。这一步的断言回答的是「编译时的头映射能不能找到这个名字」，粒度是名字，所以把 DerivedSources 产物也算作可解析，`MessageNames.h` 因此通过。两处结论方向一致：没有任何补丁新增的 include 指向一个既不在源码树、也不是已知产物的名字。
 
-第 7.4 节的三项手工核对里，有一项现在每次构建都会自动执行：「`^new file mode` 计数为 1」等价于这一步第一条断言用的那张声明清单。「`^diff --git` 计数为 11」与「应用后 `MessageNumberTranslation.h` 落盘 108 行」两项这一步不检查，`PATCH APPLIED BUT HAS NO EFFECT` 的 grep 也只查 `translateOutgoingMessageName` 在 `Encoder.cpp` 里出现，不查定义几处、行数多少。这一项的其余部分仍需人工重跑。
+第 7.4 节的三项手工核对里，「`^new file mode` 计数为 1」这一项**仍是手工核对，这一步不检查它**。第一条断言只枚举补丁声明了的那些路径并要求它们存在，没有任何比较计数的代码：这段步骤里 `new file mode` 只在 awk 程序里出现一次，没有 `wc -l`、`-eq` 之类的整数比较。所以声明 2 个新文件的补丁照样通过、打印 `declared new files present: <两个路径>`；而整段 `new file mode` 缺失的补丁（0 条声明）连 `declared new files present` 都不会打印，`if [ -n "$declared_new_files" ]` 直接跳过，退出 0。也就是说声明清单检查**严格弱于**计数检查，计数为 1 恰好是唯一能抓住「补丁丢掉 `new file mode` 段」的判据，而断言 1 在结构上对它视而不见。一个补丁若同时丢掉 new-file 段与对应的 `#include`，断言 1 静默、断言 2 也没有新增 include 需要解析，两条都不响，所以这一项必须保留为人工核对。「`^diff --git` 计数为 11」与「应用后 `MessageNumberTranslation.h` 落盘 108 行」两项这一步同样不检查，`PATCH APPLIED BUT HAS NO EFFECT` 的 grep 也只查 `translateOutgoingMessageName` 在 `Encoder.cpp` 里出现，不查定义几处、行数多少。三项核对都仍需人工重跑。
 
 三条断言覆盖的故障各不相同，一条也省不掉。`git apply` 的退出码说明 hunk 落到了目标行，不说明补丁声明的文件在磁盘上。第一条断言抓「声明了却没落盘」。实测它的触发条件是文件在检查之前又消失了：同一次循环里靠前的补丁删掉了靠后补丁声明的路径，或 `new file mode 120000` 的符号链接目标不存在（`test -f` 跟随链接，悬空链接读作不存在）。`git apply` 本身不会把声明过的普通文件写丢——拿一段路径与 `+++` 不一致的 `new file mode` 试过，`git apply` 直接拒绝，退出 128；用同一份补丁先建后删同名文件，退出 0 且文件留下。第二条断言抓「include 指向不存在的文件」，它是删掉 `MessageNumberTranslation.h` 整段后真正拦下故障的那一条。第三条断言抓「hunk 改对了行但没带来新代码」。三者都要等到编译才暴露就是几小时之后的事，所以都放在应用补丁这一步。
 
