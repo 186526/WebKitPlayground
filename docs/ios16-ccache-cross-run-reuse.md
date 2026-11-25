@@ -2,7 +2,7 @@
 
 > **落地说明。** 本文是 M82 只读调查的落地副本，正文与调查产物逐字节相同。调查时它只存在于 `.tower/worktrees/wt-82/WebKitPlayground/docs/ios16-ccache-cross-run-reuse.md`，那个检出里内层子模组目录未初始化，所以文件从未进入任何提交，源文件 sha256 为 `19a2f07412022cd4a8d347fb85d7ea537216d818b5177103d14937c10d4b6986`。
 >
-> 正文引用的 `.github/workflows/build-webkit.yml`、`scripts/report-ccache-capacity.py`、`Tools/ccache/` 三处行号已在内层 `fe0a830` 上逐条核对；这三个路径在 `41825369` 与 `fe0a830` 上内容相同，行号在两处都成立。第八节里的 `5b5099e` 与 `501c8bd` 是两次运行的 headSha，不是内层 tip。
+> 正文引用的 `.github/workflows/build-webkit.yml` 与 `scripts/report-ccache-capacity.py` 两处行号已在内层 `fe0a830` 上逐条核对；这两个路径在 `41825369` 与 `fe0a830` 上内容相同，行号在两处都成立。`Tools/ccache/` 的行号不属于内层仓库：那四个文件在上游 `WebKit/WebKit` 的 `releases/Apple/Safari-18.3.1-iOS-18.3.2` tag 里，内层仓库的任何提交都没有跟踪过该目录，所以它的行号是按那个 tag 核对的。第八节里的 `5b5099e` 与 `501c8bd` 是两次运行的 headSha，不是内层 tip。
 >
 > 调查另立了两个超出本文范围、尚未处理的 finding：计数器随归档恢复，使每次「构建前命中率」都是上一轮的（medium，证据见第三节）；`if: always()` 让从未编译的运行存下近重复缓存，挤掉真实世代（high，证据见第五节末）。
 
