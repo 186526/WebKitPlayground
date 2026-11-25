@@ -33,7 +33,7 @@ c16486c663b Versioning.
 
 ### `Safari-614.1.9` 不是 16.1 的系统 WebKit
 
-本文旧版把 `Safari-614.1.9` 当作 16.1 的取源，这是错误的，而且整张 16.1 列因此反过来。`Safari-614.1.9`（`SOURCE_VERSION` 614.1.9.0.0，2022-04-06，提交 `694667f7d7c`）是 iOS 16.0 世代的无版本交付主干快照，版本号比 `Safari-16-iOS-16.0` 的 614.1.25.0.30 更早；它不是设备运行的 16.1（`releases/Apple/Safari-16.1-iOS-16.1`，614.2.9.0.10）。
+本文旧版把 `Safari-614.1.9` 当作 16.1 的取源，这是错误的，而且整张 16.1 列因此反过来。它是 iOS 16.0 世代的树：版本号 `614.1.9.0.0` 取自主干 2022-03-28 的 `Versioning.`（`17e33b4a878`），比 `Safari-16-iOS-16.0` 的 614.1.25.0.30 更早；标记提交 `694667f7d7c`（2022-04-06）落在 `safari-614.1.9-branch` 上，距该分支从干线切出的点（`e37b6505103`，2022-04-03）7 个提交，不在 `main` 上。它不是设备运行的 16.1（`releases/Apple/Safari-16.1-iOS-16.1`，614.2.9.0.10）。
 
 ```sh
 $ git show Safari-614.1.9:Source/WebKit/Configurations/Version.xcconfig | grep -E 'MAJOR|MINOR|TINY'
@@ -64,9 +64,27 @@ releases/Apple/Safari-15.6-iOS-15.6: 613.3.9.0.5.
 
 $ git rev-list --count 694667f7d7c..releases/Apple/Safari-16-iOS-16.0^{commit}
 3396
+
+$ git log -1 --format='%B' 694667f7d7c | grep safari
+Canonical link: https://commits.webkit.org/249173.7@safari-614.1.9-branch
+git-svn-id: https://svn.webkit.org/repository/webkit/branches/safari-614.1.9-branch@292500 268f45cc-cd09-0410-ab3c-d52691b4dbfc
+
+$ git for-each-ref --contains 694667f7d7c --format='%(refname)'
+refs/tags/Safari-614.1.9
+
+$ git merge-base --is-ancestor 694667f7d7c origin/main; echo "exit=$?"
+exit=1
+
+$ git rev-list --count e37b6505103..694667f7d7c
+7
+
+$ git log -1 --format='%h %ci %s' 17e33b4a878
+17e33b4a878 2022-03-28 04:34:18 +0000 Versioning.
+$ git log -1 --format='%h %ci %s' 6b20039da9f
+6b20039da9f 2022-09-01 15:26:08 -0700 Versioning.
 ```
 
-`614` 这条线从 16.0 开始：Safari 15.0 到 15.3 是 `612` 线（15.0 的 `MAJOR_VERSION` 是 612），15.4 到 15.6 是 `613` 线（613.1.17、613.2.7、613.3.9），到 16.0 才进入 `614`。`614.1.9` 也不是 `Safari-16-iOS-16.0` 的祖先，两者相距 3396 个提交，是同一版本线上的两次独立 `Versioning.` 快照，所以它同样不能当作 16.0 的取源。
+`614` 这条线从 16.0 开始：Safari 15.0 到 15.3 是 `612` 线（15.0 的 `MAJOR_VERSION` 是 612），15.4 到 15.6 是 `613` 线（613.1.17、613.2.7、613.3.9），到 16.0 才进入 `614`。`614.1.9` 的标记提交也不是 `Safari-16-iOS-16.0` 的祖先，两者相距 3396 个提交。两个版本号来自两个不同的 `Versioning.` 提交：`614.1.9` 的 `17e33b4a878`（2022-03-28）同时是 `Safari-16-iOS-16.0` 的祖先，16.0 的 `6b20039da9f`（2022-09-01）在它之后重新定版号。所以 `614.1.9` 同样不能当作 16.0 的取源。
 
 `614.2.9.0.10` 是 2022-10 的树，与 `614.1.9` 不是同一版，而且 `Safari-614.1.9` 里没有 `SDKAlignedBehavior` 枚举：
 
