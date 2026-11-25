@@ -125,7 +125,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | 3 | 16.1 UI 把 `ContainerEnvironmentVariables` 写在 bootstrap 消息上，18.3 helper 从事件字典读，取到 NULL | `XPCServiceMain.mm` | 两个来源各自独立尝试，取到才 `apply` | helper 不再 `Killed: 9`（退出 137）；`launchd.log` 里出现 `Successfully spawned` | 已覆盖，`ios16-xpc-bootstrap-compat.patch` |
 | 4 | 16.1 的 `pre-bootstrap` 消息在 18.3 无分支，落到 `handleXPCEndpointMessage` 被丢弃 | `XPCServiceMain.mm` | 增加 `pre-bootstrap` 分支并存下 `priorityBoostMessage` | helper 存活期间不因 transaction 提前释放而退出 | 已覆盖，同一补丁 |
 | 5 | `InitializerFunction` 参数个数 16.1 为 3、18.3 为 2 | `XPCServiceEntryPoint.h` | 入口签名加默认第三参数 | helper 能走到 `initializeAuxiliaryProcess`，不因函数指针调用而崩 | 已覆盖，同一补丁 |
-| 6 | `getClientSDKAlignedBehaviors` 只认位图，16.1 只发版本号 | `XPCServiceEntryPoint.mm` | 位图缺失时回退解析 `client-sdk-version` | 行为位图非全零（需在 helper 内打点） | 已覆盖，同一补丁 |
+| 6 | `getClientSDKAlignedBehaviors` 两版都收位图，但 16.1 发 8 字节、18.3 期望 12 字节，`RELEASE_ASSERT` 相等比较导致 helper 中止 | `XPCServiceEntryPoint.mm` | 不再断言长度相等：`RELEASE_ASSERT` 删除，长度不等时不再中止，宽度不等的负载一律丢弃、位图保持全零，等宽负载 `memcpy` 进位图并返回真。两版位序不可按位置换算（63 个可比下标里只有 3 个同名），所以 8 字节的负载不被解码 | helper 不再中止，且位集不被按错误位序写入（需在 helper 内打点） | 已覆盖，`ios16-xpc-bootstrap-compat.patch` |
 | 7 | `xpc_main` 在公开 iOS SDK 上不可用 | `XPCServiceMain.mm` | 用 `xpc_connection_create(nullptr,nullptr)` 复现 `xpc_main` 的接线 | helper 能被拉起并回 `process-finished-launching` | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
 | 8 | helper 需要知道去哪找 18.3 的 framework | `BaseXPCService.xcconfig` | `-Wl,-dyld_env,...` 写进 `.xpc` | `otool -l` 里 `.xpc` 有 `LC_DYLD_ENVIRONMENT`；`lldb image list` 里 helper 的 `WebKit` 路径为 `/var/jb` | 已覆盖；路径已与 install 脚本对齐，设备侧未验证，见第七节 |
 | 9 | **launchd 是否为索引外的 `XPCServices` 现扫** | 无（判定项） | 不改代码 | 第四节的判据命令 | **未知，未测** |
@@ -142,14 +142,15 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | hunk 位置 | 内容 | 对应上表 |
 | --- | --- | --- |
 | `XPCServiceEntryPoint.h @@ -93,8 +93,14` | 入口签名加默认第三参数 | 第 5 行 |
-| `XPCServiceEntryPoint.mm @@ -34,6 +34,7` | 头文件引用 | 支撑第 6 行 |
-| `XPCServiceEntryPoint.mm @@ -84,12 +85,137` | `getClientSDKAlignedBehaviors` 增加 `client-sdk-version` 回退，93 条版本表 | 第 6 行 |
+| `XPCServiceEntryPoint.mm @@ -90,10 +90,66` | `getClientSDKAlignedBehaviors` 改写后的函数体（`RELEASE_ASSERT` 删除，按数据块宽度分派：等宽 `memcpy` 进位图并返回真，更窄丢弃留全零并返回真，更宽丢弃并返回假；不为 `client-sdk-version` 做回退） | 第 6 行 |
 | `XPCServiceMain.mm @@ -124,6 +124,8` | `InitializerFunction` 改三参数 | 第 5 行 |
 | `XPCServiceMain.mm @@ -152,18 +154,49` | `ContainerEnvironmentVariables` 双来源、`OverrideLanguages` 双来源、`pre-bootstrap` 分支 | 第 3、4 行 |
 | `XPCServiceMain.mm @@ -174,11 +207,21` | `ContainerEnvironmentVariables` 取到才 `apply` | 第 3 行 |
 | `XPCServiceMain.mm @@ -201,7 +244,9`、`@@ -230,11 +275,14` | 调用处传第三参数、配平 | 第 5 行 |
 
 覆盖了第 3、4、5、6 行。**未覆盖**第 2 行（那是另一个补丁的事）、第 8 行（`.xpc` 的加载命令）、第 9、10 行。
+
+`patches/ios16-ipc-message-number-translation.patch` 不再触碰 `XPCServiceEntryPoint.mm`：它曾经在该文件末尾插入一段 `getUIProcessSDKVersion`，两个补丁因此在一个 hunk 的插入位置上相争；现在这段被删除，翻译补丁只改 `Platform/IPC` 下的文件、`AuxiliaryProcess.cpp` 与 `project.pbxproj`，两补丁的 hunk 区间不再有任何交集。
 
 ### `patches/ios18-public-sdk-xpc-main.patch`（87 行，4 个 hunk）
 

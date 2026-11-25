@@ -58,7 +58,9 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
         exitProcess(EXIT_FAILURE);
 ```
 
-同一个函数里的其他 delegate 调用（`getConnectionIdentifier`、`getClientIdentifier`、`getProcessIdentifier`、`getClientProcessName`）都以 `if (!...) exitProcess(EXIT_FAILURE);` 收尾，只有 `getClientSDKAlignedBehaviors` 这一条没有。16.1 UI 进程不发 `client-sdk-aligned-behaviors` 键时，18.3 helper 不会退出，`behaviors` 保持默认构造的全零位集继续启动，所有 SDK 对齐行为位都判定为不启用。
+同一个函数里的其他 delegate 调用（`getConnectionIdentifier`、`getClientIdentifier`、`getProcessIdentifier`、`getClientProcessName`）都以 `if (!...) exitProcess(EXIT_FAILURE);` 收尾，只有 `getClientSDKAlignedBehaviors` 这一条没有。所以这条路径的失效方式不是「返回 false 然后退出」，而是**断言中止**：键缺失或长度为 0 时函数返回 false、位集留零、helper 继续启动；键存在但长度不等于 12 时 `EPM18:93` 的 `RELEASE_ASSERT` 直接终止进程。
+
+第二种才是两版 tag 之间实际发生的组合。16.1 UI 进程**发送**这个键，长度为 8（`PL16:209`，见第 2 节与 `ios16-bootstrap-contract.md`），不等于 18.3 helper 期望的 12。所以按两版 tag 原文求值，16.1 UI 配 18.3 helper 不是「位集留零、行为全不启用」，而是 helper 在 `XPCServiceInitializer` 内中止。本工程产物改写了这个函数（见 `ios16-bootstrap-contract.md` 的「修补补丁的现状与缺口」一节）：断言删除，8 字节负载走窄支，记一条日志、位图保持全零、返回真，进程继续初始化。
 
 真正会终止进程的是另一种情况：键存在但长度不符。`RELEASE_ASSERT` 在发布构建里也生效（`Source/WTF/wtf/Assertions.h:654-659`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`）。位集宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
 
@@ -425,12 +427,12 @@ arm64 iOS 上 `size_t` 是 8 字节，`Vector` 的计数宽度两版相同。`Ha
 
 这一节在 CoreIPC 之前，结论是**启动阶段能成功**，因此不能用它解释进程消失。
 
-16.1 `Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:218-243` 的 bootstrap 字典键：
+16.1 `Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:192-216` 的 bootstrap 字典键：
 
 ```
 message-name, server-port, client-identifier, client-bundle-identifier,
-client-sdk-version, process-identifier, ui-process-name, service-name,
-client-linked-on-or-after-override, extra-initialization-data
+client-sdk-aligned-behaviors, process-identifier, ui-process-name, service-name,
+extra-initialization-data
 ```
 
 18.3 同一文件 `:396-431`：
@@ -443,21 +445,21 @@ client-sdk-aligned-behaviors, extra-initialization-data
 
 差异：
 
-- 16.1 发 `client-sdk-version`（`:224`），18.3 不读这个键。
-- 18.3 发 `client-sdk-aligned-behaviors`（`:423-424`），16.1 不发。
-- 16.1 发 `client-linked-on-or-after-override`（`:235-236`），18.3 不发。
+- `client-sdk-version` 两版都不发也不读。它在 15.x 存在，从 16.0 起的每个 tag 都没有；16.1 与 18.3 都在这个键消失之后。
+- `client-sdk-aligned-behaviors` 两版都发：16.1 在 `PL16:209` 发 **8 字节**，18.3 在 `PL18:424` 发 **12 字节**。接收端都是同一个函数，且都做相等断言（`EPM16:91`、`EPM18:93`），所以两版之间互换 UI 进程与 helper 会在断言处中止。
+- `client-linked-on-or-after-override` 两版都不发也不读。同样是 15.x 的机制，16.0 起消失。
 - 18.3 多一个 `disable-logging`（`:413-416`），只在 Web 进程类型时发。
 - 18.3 多一个 `ContainerEnvironmentVariables` 子字典（`:373-382`，条件为 `#if PLATFORM(IOS_FAMILY)`），装 `HOME`、`CFFIXED_USER_HOME`、`TMPDIR`；16.1 没有这一项。
 - 两版都有的测试与调试键 `configure-jsc-for-testing`、`disable-jit`、`enable-shared-array-buffer`、`stdout`、`stderr` 属于开发构建分支，不参与这里的判定。
 - `server-port` 两版都有，它是 UI 进程的接收端口，也就是第 1 节里 helper 发消息的目标。
 
-按第 2 节，16.1 不发 `client-sdk-aligned-behaviors` 时 18.3 helper 不退出，位集留零，`AuxiliaryProcessCocoa.mm:104` 把这份零位集灌进去，后续所有 `linkedOnOrAfterSDKWithBehavior(...)` 判定返回 false。
+按第 2 节，16.1 发的 `client-sdk-aligned-behaviors` 是 **8 字节**，18.3 helper 的 `storageLengthInBytes()` 是 **12**，`EPM18:93` 的 `RELEASE_ASSERT` 在发布构建里也生效。按两版 tag 原文求值，helper 在 `XPCServiceInitializer` 内中止，这组错配在 XPC 阶段就终止了，不会走到 CoreIPC；本工程产物删掉该断言后不再中止，见本节末段。
 
-启动握手两版一致：helper 收到 `message-name == "bootstrap"` 后回 `message-name == "process-finished-launching"`（16.1 `XPCServiceMain.mm:126-128`，18.3 `:214-216`），UI 侧断言这个回复（16.1 `ProcessLauncherCocoa.mm:315`，18.3 `:507`）。
+启动握手两版一致：helper 收到 `message-name == "bootstrap"` 后回 `message-name == "process-finished-launching"`（16.1 `XPCServiceMain.mm:122-124`，18.3 `:214-216`），UI 侧断言这个回复（16.1 `ProcessLauncherCocoa.mm:288`，18.3 `:507`）。两版都在回完这条消息之后才调用初始化函数（16.1 `XM16:134-138`，18.3 `XM18:226-236`），所以断言中止发生在回复入队之后，与回复的实际投递竞争。
 
-16.1 侧另有 `pre-bootstrap` 消息（`ProcessLauncherCocoa.mm:171-175`，只在 `shouldLeakBoost` 为真时发）。18.3 的 `XPCServiceMain.mm:150-241` 没有对应分支，该消息落到 `handleXPCEndpointMessage`，不影响启动成功与否，只影响 QoS boost。
+16.1 侧**在 iOS 上不发** `pre-bootstrap`：`shouldLeakBoost` 在 `PLATFORM(IOS_FAMILY)` 分支直接 `return false`（`PL16:82-86`），注释写明 RunningBoard 的进程断言已提供正确优先级。Mac 上才按 GPU/Network 进程类型返回 true。18.3 的 `XPCServiceMain.mm:150-241` 没有对应分支，即使收到也会落到 `handleXPCEndpointMessage`。
 
-所以 XPC 阶段把这组错配放行到了 CoreIPC，第 6 节的终止发生在它之后。
+按两版 tag 原文求值，XPC 阶段并没有把这组错配放行：宽度断言在 `XPCServiceInitializer` 里就终止了 helper。本工程产物删掉了该断言，同样的 8 字节负载在产物里走窄支、只记一条日志、进程继续初始化，不再中止；进程随后是否因别的原因退出是另一个问题，本文未测。第 6 节描述的 CoreIPC 终止发生在另一条路径上（该路径不经过这个断言），两者不能混为一谈。
 
 ## 10. 是否可能降级
 
