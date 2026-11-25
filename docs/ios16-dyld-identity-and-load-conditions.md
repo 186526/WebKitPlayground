@@ -8,7 +8,7 @@
 
 全部读数来自 2026-11-25 在 iPad Pro 11 英寸 M2（`iPad14,4`）、iPadOS 16.1（20B82）、Dopamine rootless 上的实测，设备地址 `192.168.2.136`。本轮只做读取与自建探针，没有 root，没有写 `/var/jb` 之外的任何路径，没有重启，没有改签名，没有挂载。命令输出一律原文照抄，未做重排。
 
-唯一例外是第十节那条 2026-11-26 的四元组读数：那是塔在设备上取得的读数，写这一节时设备已因另一次 userspace 重启离线，本文没有自己复测，该段就地标注为二手并给出复跑命令。
+唯一例外是第十节那张 2026-11-26 的读数表：那一节记的是设备的 basebin 形态随时间变化，其中 `~00:41` 与 `01:04` 两行分别由塔与 M127 的 worker 读取，`01:07:50` 一行是本文写这一节时的只读复测。同一路径在一天内先后出现过 `1 1 1 1` 与 `1 0 0 1` 两种状态，所以那一节按时间入表，不写「当前」这种没有时间戳的句子。
 
 证据按本仓库既有的三档标注，定义与 `docs/ios16-launchd-xpc-resolution-gap.md` 一致：
 
@@ -518,7 +518,7 @@ for (uint32_t i = 0; i < after; i++) {
 - **4.3 表格第四行**：系统那份先以运行期 `dlopen` 进场、之后 `dlopen` 自建那份时返回哪个 handle。表格前三行已有实测（第三行由 6.3 提供），第四行是同一规则的推论。
 - **4.4 的「两种查找入口」解释**：`build-state.md:515` 的双份共存与 4.2 的判重结果如何并存，本文给出的解释是启动期绑定与运行期 `dlopen` 查不同的表，这一步标假设，缺一个链接 `WebKit` 的宿主上的直接读数。
 - **`WebGPU` 剥掉签名 + 以 `JavaScriptCore` 起头的顺序**：本轮记 FAILED，更早一份对照表记未测。两者不冲突，但这一格按「待复核」处理，不要当成两份独立读数。
-- **真实 `WebContent` 的注入机制**：6.2 第 1 点与 6.3。constructor 在链接 `WebKit` 的宿主上已被证明无效，所以这不是「注入时机未取到读数」，而是这条路线在真实形态上不适用；剩下未验证的是「在 dyld 绑定之前让覆盖目录生效」那条路能否走通。第十节那条读数已把 dyld 侧排除（两个 override hook 都在场），所以这一项剩下的未知是 `DYLD_FRAMEWORK_PATH` 这个名字有没有写进 app 进程的环境。
+- **真实 `WebContent` 的注入机制**：6.2 第 1 点与 6.3。constructor 在链接 `WebKit` 的宿主上已被证明无效，所以这不是「注入时机未取到读数」，而是这条路线在真实形态上不适用；剩下未验证的是「在 dyld 绑定之前让覆盖目录生效」那条路能否走通。第十节那张读数表把这一项拆成两层：override hook 不在场时（当前是这一层，2026-11-26 01:07 读作 `1 0 0 1`）覆盖一定不会生效，问题在 dyld；hook 在场时（同日 ~00:41 读作 `1 1 1 1`）dyld 侧不缺这一环，问题转到 `DYLD_FRAMEWORK_PATH` 有没有写进 app 进程的环境。
 - **真实 `WebContent` 的沙盒与 JIT entitlement 继承**：6.2 第 2 点。`AuxiliaryProcessIOS.mm:45-48` 的 `RELEASE_ASSERT_NOT_REACHED()` 在自建镜像映射时是否触发，没有读数。宏名与行号已在本机 18.3 源码树核对（`/tmp/wkpre18.3.1`）。
 - **重复告警的条数口径**：33 与 31 两个读数并存，判据取「是不是 0」。
 - 本文所有设备读数都没有做「同一时刻对齐」的交叉取证。第三节的签名形态对照与第二节的顺序对照各自是独立运行，运行时间戳没有与镜像清单对齐；把镜像清单和 `_dyld_image_count` 收进同一次运行，是下一次复测应当补的一步。
@@ -533,39 +533,36 @@ for (uint32_t i = 0; i < after; i++) {
 grep -a -o '_MACHOMERGER_HOOK_[A-Za-z0-9_$]*' /var/jb/basebin/gen/dyld | sort | uniq -c
 ```
 
-这一条每个 token 打一行计数，行序由 `sort` 决定，与 hook 的先后无关，所以它不输出四元组。四元组读法用下面这段 `python3` 计数：它先取出全部 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` token，再按固定顺序 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 逐个统计含该名字的 token 数，依次输出四个数字，四元组之前还会打出每个文件的字节数：
+这一条每个 token 打一行计数，行序由 `sort` 决定，与 hook 的先后无关，所以它不输出四元组。四元组读法用下面这段 `python3` 计数：它先取出全部 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` token，再按固定顺序 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 逐个统计含该名字的 token 数；它在四元组之前打出字节数与 `sha256`，末尾打印读取时刻，所以每次跑都可以按自己的时间入表：
 
 ```sh
 python3 -c "
-import re
+import re,hashlib,time
 names=[b'dlopen_from',b'isOverridablePath',b'isAlwaysOverridablePath',b'__fcntl']
 for p in ['/var/jb/basebin/gen/dyld','/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib']:
     d=open(p,'rb').read()
     t=re.findall(rb'_MACHOMERGER_HOOK_[A-Za-z0-9_\$]+', d)
-    print(p.split('/')[-1], len(d), len(t), [sum(1 for x in t if n in x) for n in names])
+    print(p.split('/')[-1], len(d), [sum(1 for x in t if n in x) for n in names], hashlib.sha256(d).hexdigest())
+print('read_at', time.strftime('%Y-%m-%d %H:%M:%S %Z'))
 "
 ```
 
-**这一条是二手读数，不是本文的实测。** 取得时间 2026-11-26，由塔在设备上读取。写这一节时设备正在另一次 userspace 重启，`192.168.2.136`、`192.168.2.135`、`172.20.10.1` 三个地址都不通 ping，本文没有独立复核。上面那段命令就是原始复取方式，读者在设备上跑一次即可自行核对。
+**这一条是读数，不是推断；并且每条读数都必须带时间，因为设备会在数小时内改变状态。** 2026-11-26 这一天里，同一路径先读 `1 1 1 1`、后读 `1 0 0 1`：前者是 `jbctl update basebin` 装好补丁版之后，后者是设备连续五次内核崩溃（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`）后手工重新越狱的结果。**重新越狱会把 basebin 恢复成出厂形态**，所以「设备当前读作 X」这种句子不带时间戳就没有意义。
 
-读数如下。文件身份按字节数与 `sha256` 一并给出，因为这条路径在本仓库的记录里出现过两种状态，只写四元组无法判断指的是哪一份：
+读数按时间排列：
 
-| 文件 | 字节 | `sha256` | 四元组 |
-| --- | --- | --- | --- |
-| `/var/jb/basebin/gen/dyld` | 974608 | `6920d1ddecc00d6a4318f554843e215916465cc86808e854f8550cc0f21afc85` | **`1 1 1 1`** |
-| `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` | 75952 | `9fb3b9c0e2ae128b54ae3151b9f97505622140280152d01e3977a143513970c4` | **`1 1 1 1`** |
+| 时间 | 读者 | `gen/dyld` 字节 | `gen/dyld` 四元组 | `dyldhook_merge` 字节 | `dyldhook_merge` 四元组 |
+| --- | --- | --- | --- | --- | --- |
+| 2026-11-26 ~00:41 | 塔，M127 的 worker 独立复测 | 974608 | `1 1 1 1` | 75952 | `1 1 1 1` |
+| 2026-11-26 01:04（重新越狱后） | 塔 | 974016 | `1 0 0 1` | 74352 | `1 0 0 1` |
+| 2026-11-26 01:07:50 CST | 本节（ssh 只读复测） | 974016 | `1 0 0 1` | 74352 | `1 0 0 1` |
 
-四个数字按上面 `names` 列表的顺序对应下面四个 hook：
+01:07:50 那一行的 `sha256`：`gen/dyld` 是 `486620f0c5ce26e602f0155412375d9c9d564f10b014fee2c369cd58e55751ba`，`dyldhook_merge.arm64e.iOS16-17.dylib` 是 `1e90c5a3840534de61afb78e07308656bb1d63ddbf05eec4383136c61aa7735f`。同一时刻 `gen/` 下只有 `dyld` 与 `dyld.orig` 两项，**`dyld.old` 已不存在**；`dyld` 的 mtime 是 `Nov 26 01:03`。
 
-| 位置 | token | 属于 | `1 1 1 1` 读数 |
-| --- | --- | --- | --- |
-| 第 1 位 | `dlopen_from` | 原生 hook | **1，在场** |
-| 第 2 位 | `isOverridablePath` | **override hook** | **1，在场** |
-| 第 3 位 | `isAlwaysOverridablePath` | **override hook** | **1，在场** |
-| 第 4 位 | `__fcntl` | 原生 hook | **1，在场** |
+四个数字的顺序固定为 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl`，第 2、3 位是 override hook，是唯一的可区分处：打过补丁 `1 1 1 1`，原版 `1 0 0 1`。`AGENTS.md` 的「五之二」一节警告过的正是这个读法——`MACHOMERGER` 的总数与 `_MACHOMERGER_HOOK__` 的出现次数都不构成补丁在场的证据，只有这两个 override token 的计数才算；上表用的是后者。
 
-**两个 override hook 都在场，所以「覆盖目录不会被 dyld 采纳」不是当前设备的读数，这条结论被读数否掉了。** 第 2、3 位是唯一的可区分处：打过补丁是 `1 1 1 1`，原版是 `1 0 0 1`；当前两份文件都是前者。dyld 侧的覆盖判定这两个 hook 都在，覆盖目录能否生效不再卡在「dyld 缺 hook」这一环，剩下的问题是 `DYLD_FRAMEWORK_PATH` 这个名字有没有写进 app 进程的环境。`AGENTS.md` 的「五之二」一节警告过另一个误读：`MACHOMERGER` 的总数与 `_MACHOMERGER_HOOK__` 的出现次数都不构成补丁在场的证据，只有这两个 override token 的计数才算；本条用的是后者。
+**读数与推断分开写。** 读数是：`1 1 1 1` 的那几个小时里两个 override hook 在场，`1 0 0 1` 的当前状态下不在场。推断是：**override hook 在场时，dyld 侧的覆盖判定不缺这一环**，所以「覆盖目录不会被 dyld 采纳」不能挂在「dyld 缺 hook」上；那时覆盖能否真正生效取决于 `DYLD_FRAMEWORK_PATH` 有没有写进 app 进程的环境。hook 不在场时这条推断不适用——覆盖一定不会生效，这正是当前状态。
 
-`1 0 0 1` 这个四元组属于更早的 **974016** 那一代文件（2026-11-25 开机后的状态，见 `AGENTS.md` 第 186、207 行），当前设备上对应的是 `/var/jb/basebin/gen/dyld.old`。它是原版文件的读数，不能用来断言当前设备的覆盖目录状态。
+**当前状态另有一条读数，同样带时间：** 2026-11-26 01:07:58 CST，`/var/jb/basebin/systemhook.dylib`（233520 字节）与 `/var/jb/basebin/launchdhook.dylib`（312848 字节）里 `DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`WebKitOverride` 三个串的出现次数都是 **0**。写这个变量的注入器在出厂形态里不存在，所以当前状态下连「变量能不能送到 app 进程」这一步都没有到达。
 
 本文与本次追加到 `build-state.md` 的第八轮都没有任何判据是用 `strings` 取得的（全节只有 `grep -a` 与 `/var/jb/usr/bin/clang` 的用法），所以这一条不需要回溯修正。`build-state.md` 第 115 至 123 行本来就把 `strings` 记为「不存在，替代做法 `grep -a -o 符号 文件 | wc -l`」，与本条一致。
