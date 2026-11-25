@@ -397,7 +397,16 @@ DYLD_LIBRARY_PATH=<JB>/Library/WebKitOverride/usr/lib
 | `WebContent` 36828 | 1 条 `WebKitOverride` | 1 条 | `/var/jb`（18.3） |
 | `Networking` 37174 | 1 条 `WebKitOverride` | 1 条 | `/var/jb`（18.3） |
 
-两者差的正是 dyld 认的那两个名字。`__XPC_DYLD_FRAMEWORK_PATH` 只在 XPC helper 一侧被转成真正的搜索路径，app 进程里它只是躺着的环境变量，dyld 不读。所以「装了 hook」并不等于「app 自己也换了引擎」：`systemhook` 写入的四个变量里，对 UI 进程有效的那个（裸名）在它自己的 `spawn` 链上没有落地。
+两者差的正是 dyld 认的那两个名字，而且这不是「转交失败」，是 dyld 里根本没有这两个字符串。本次在设备上直接数过：
+
+```
+gen/dyld                              974608  DYLD_FRAMEWORK_PATH=1  __XPC_DYLD_FRAMEWORK_PATH=0
+gen/dyld.orig                         926240  DYLD_FRAMEWORK_PATH=1  __XPC_DYLD_FRAMEWORK_PATH=0
+```
+
+原版 dyld 与打过 hook 的 dyld 都只认裸名一种写法。所以 helper 之所以能拿到 18.3，靠的不是 dyld 读 `__XPC_`，而是 launcher 在把 `__XPC_DYLD_FRAMEWORK_PATH` 交给 XPC 服务时去掉了前缀、写成裸名；本轮 helper 的 envp 里两种写法同时存在，读数与这条一致。app 进程走的是另一条启动路径，前缀没有被去掉，于是它的 envp 里只剩 dyld 不认的那一个。**这是基于两处读数（dyld 里没有该字符串、helper 与 UI 进程的 envp 形态不同）的推断，launcher 一侧的代码本次没有读到。**
+
+所以「装了 hook」并不等于「app 自己也换了引擎」：`systemhook` 写入的四个变量里，对 UI 进程有效的那个（裸名）在它自己的 `spawn` 链上没有落地。
 
 **这与仓库既有的硬约束一致，不是新发现的缺陷。** `docs/ios16-whole-18.3-deployment-path.md:47` 写「UI 进程与每一个 helper 必须同代且同时换到新一代——任何一端落后，都会在 `initializeWebProcess` 处按上面的方式崩」；同文件 `:80` 给出另一种后果：「渲染循环卡死而非进程死亡」，进程存活、没有崩溃报告，页面停在首帧或全白。本次设备正落在后者这一侧的形状里：Safari 与 Chrome 都能起来、helper 稳定存活 30 秒以上、`%cpu` 全程 0.0、页面加载后 72 行 `launchd.log` 增量里 `failed lookup` 与 `WebKit` spawn 都是 0。
 
@@ -726,7 +735,7 @@ dyld[36445]:   found: dylib-from-disk-to-override-cache: "…/procursus/Library/
 | --- | --- | --- |
 | ~~装上 hook 后的 4.2 节读数~~ | **已取得**（2026-11-25 23:5x）：`found: dylib-from-disk-to-override-cache` 8 次，五个 framework 与两个弱链接库全部顶替 | 无需补 |
 | ~~4.3 节的环境读数~~ | **已取得**：helper 的 envp 里有裸名两个变量、全部指向 `WebKitOverride`；`lldb image list` 显示 helper 加载 `/var/jb` | 无需补 |
-| **app 的 UI 进程仍是 16.1** | 本次新取得：`MobileSafari`/`Chrome`/`SpringBoard` 的 envp 只有 `__XPC_DYLD_*`，没有裸名，dyld 不认，于是留在共享缓存那份。与 helper 的 18.3 构成跨代 | 让 UI 进程也拿到裸名变量。`systemhook` 已写四个变量，`__XPC_` 那两个对 app 无效；可行方向是给 UI 进程的 `spawn` 路径单独补裸名，或让 `libxpc` 侧把 `__XPC_` 转成裸名。两者都要改 basebin，超出本文 |
+| **app 的 UI 进程仍是 16.1** | 本次新取得：`MobileSafari`/`Chrome`/`SpringBoard` 的 envp 只有 `__XPC_DYLD_*`，没有裸名；而 `gen/dyld` 与 `dyld.orig` 里 `__XPC_DYLD_FRAMEWORK_PATH` 的字符串计数都是 0，dyld 只认裸名，所以 UI 进程留在共享缓存那份。与 helper 的 18.3 构成跨代 | 让 UI 进程也拿到裸名变量。三种方向：给 UI 进程的启动路径补裸名写入；在 dyldhook 里把 `__XPC_` 名字也当作别名读取（改 dyld，失败会波及所有进程）；或去掉前缀的负责方是 launcher 时改 launcher。都超出本文，已作为独立 finding 报出 |
 | **页面是否真的渲染出来** | 判断需要看屏幕；设备上没有截图工具（`snaputil` 只做 APFS 快照），本轮也没有用户的界面观察。`%cpu` 全程 0.0 与「渲染循环卡死」相容，但相容不等于成立 | 请用户在 Safari/Chrome 里打开一个页面并报告是否出内容；或在设备上装一个能截屏的包 |
 | `libwebrtc`/`libANGLE` 在 helper 进程里的 `LC_UUID` | 4.2 的搜索日志已给出它们从 `WebKitOverride/usr/lib` 顶替，但没有对存活 helper 做逐镜像 uuid 核对 | `lldb` 挂上 helper，`image list -o -f` 后对这两个取 `LC_UUID`，期望 `b22027e7…`/`277db473…` |
 | `launchd` 对每个进程打印 `sent an invalid request` | 23:53 起发生，与装 hook 同一分钟；33 秒窗口 77 条，`xpcproxy` 占多数。`installd` 仍能 spawn、SpringBoard 活着，所以不是全面故障 | 需要单独排查：比对装 hook 前后 `launchd.log` 的归一化增量，确认是 `systemhook` 的 `spawn` 钩子改了请求，还是 basebin 安装本身。跨出本文范围，已单独报出 |
