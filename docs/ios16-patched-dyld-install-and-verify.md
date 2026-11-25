@@ -5,7 +5,7 @@
 结论先写五条：
 
 1. **`gen/dyld` 是合成产物，不是装进去的文件。** 它每次由 `gen/dyld.orig` 复制一份、打 `getAMFI` 与 `LC_UUID` 补丁、用 `MachOMerger` 合并 `basebin/dyldhook_merge.<arch>.iOS<ver>.dylib`、再重签名得到。所以「装 hook」等于「换掉那个 `dyldhook_merge` 输入」，不是换 `gen/dyld`。
-2. **dyld 这一层曾在 2026-11-25 23:51–23:53 装好并验证通过，但它只让 helper 换到 18.3，没让 app 的 UI 进程换；该状态在 2026-11-26 01:03 那次手动重新越狱时被清除。** 那次装上的是两份补丁（`dyldhook_merge` 75952 / 四计数 `1 1 1 1`，`systemhook` 234336 含四个变量），`gen/dyld` 由 974016 变成 974608；`dyld.orig` 仍是 2022-10-19 那份 926240 字节。装上后 4.2 节出现 `found: dylib-from-disk-to-override-cache`（8 次命中），4.3 节直接跑 18.3 的 `WebContent` 得到五个镜像全部来自 `/var/jb`；`uiopen` 真实拉起 Safari 时，launchd 起的 `WebContent`/`Networking` 同样加载 `/var/jb`。装 hook 之前的同一组测试全部是 `found: dylib-from-cache` 或没有候选行，两侧都留了读数。**2026-11-26 01:03 重新越狱之后设备回到 974016 / `1 0 0 1`，所以本节所有「已装上」的描述只对 2026-11-25 23:53 装上到 2026-11-26 01:03 重新越狱这段窗口成立。** 五次 panic 的时刻与 `panicString` 原文见第五节开头；触发它们的是 00:50:43 那次 `bb/basebin-lh.tar` 的安装，与本节描述的 23:53 那次不是同一份 tar，两者差别见第五节开头第二段。
+2. **dyld 这一层曾在 2026-11-25 23:51–23:53 装好并验证通过，但它只让 helper 换到 18.3，没让 app 的 UI 进程换；该状态在 2026-11-26 01:03 那次手动重新越狱时被清除。** 那次装上的是两份补丁（`dyldhook_merge` 75952 / 四计数 `1 1 1 1`，`systemhook` 234336 含四个变量），`gen/dyld` 由 974016 变成 974608；`dyld.orig` 仍是 2022-10-19 那份 926240 字节。装上后 4.2 节出现 `found: dylib-from-disk-to-override-cache`（8 次命中），4.3 节直接跑 18.3 的 `WebContent` 得到五个镜像全部来自 `/var/jb`；`uiopen` 真实拉起 Safari 时，launchd 起的 `WebContent`/`Networking` 同样加载 `/var/jb`。装 hook 之前的同一组测试全部是 `found: dylib-from-cache` 或没有候选行，两侧都留了读数。**2026-11-26 01:03 重新越狱之后设备回到 974016 / `1 0 0 1`，所以本节所有「已装上」的描述只对 2026-11-25 23:53 装上到 2026-11-26 01:03 重新越狱这段窗口成立。** 五次 panic 的时刻与 `panicString` 原文见第五节开头；触发它们的是 00:50:43 那次 `bb/basebin-lh.tar` 的安装，与本节描述的 23:53 那次不是同一份 tar，两者差别见第五节「触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar」那一段。
 3. **同一时刻 `MobileSafari`、`Chrome`、`SpringBoard` 三个 UI 进程仍加载 `/System` 的 16.1。** 它们的 envp 里都没有裸名的 `DYLD_FRAMEWORK_PATH`/`DYLD_LIBRARY_PATH`，dyld 只认这一种写法，所以它们留在共享缓存那份。`__XPC_` 前缀那一对**不是恒定存在的**：`MobileSafari` 在 23:5x 有过 1 条，而 1103 与 2941 两个实例、`SpringBoard` 399 在 2026-11-26 01:5x 复测时都是 0 条。两种形状共同的一点是裸名都不在。于是设备处于跨代形态：UI 是 16.1、helper 是 18.3。这与 `docs/ios16-whole-18.3-deployment-path.md:49` 的硬约束一致——那一节要求 UI 与每个 helper 同代，同文件 `:82` 写明不同代的后果是「渲染循环卡死而非进程死亡」。本次没有取得「页面是否真的渲染」的读数（设备上没有截图工具，也没有用户的界面观察），所以只能记到「进程结构与那条失败形态一致」为止。
 4. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（2026-11-25 装补丁前设备 `1 0 0 1`，974016 字节；装补丁后变 `1 1 1 1` / 974608；2026-11-26 01:03 重新越狱后又回到 `1 0 0 1` / 974016）；`systemhook` 是原版、不写那四个搜索路径变量（原版 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次；`basebin.tar` 里那份 234336，裸名 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 各 4 次，因 `__XPC_` 前缀那两个名字各含一次裸名，换算成去重后的变量名是两个裸名加两个 `__XPC_` 前缀名）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`）。三处补上之后 4.2 与 4.3 两层对 helper 都通过。三者的依赖是有序的——hook 是前提，变量是通道，链接是让通道末端有文件（4.4 节）。**2026-11-26 01:03 重新越狱后设备上三处缺口全部回到原状**：`gen/dyld` 974016 `1 0 0 1`、`systemhook` 233520 裸串 0 次、`launchdhook` 312848 裸串 0 次。
 
@@ -605,7 +605,7 @@ WebCore   LOAD_WEAK    /System/Library/PrivateFrameworks/WebCore.framework/Frame
 
 ## 五、最小可逆安装步骤
 
-**先读这条：这条路线在设备上出过五次内核恐慌，不要直接照做。** 2026-11-26 00:51 到 01:00 的九分钟内设备连续五次 panic，只有手动重新越狱才能恢复；恢复后 basebin 回到出厂形态（`gen/dyld` 974016 / `1 0 0 1`、`dyldhook_merge` 74352 / `1 0 0 1`）。**这五次 panic 跟在 00:50:43 那次 `jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar` 之后，不能算作本节第 3 步那份 tar 的后果。** 两份 tar 在 `launchdhook.dylib` 与另外 19 个成员上不同，下面的第二段给出差别，第三段给出本节那份 tar 自己那次的读数。五份日志在设备的 `/var/mobile/Library/Logs/CrashReporter/panic-full-2026-11-26-*.ips`，`panicString` 原文：
+**先读这条：这条路线在设备上出过五次内核恐慌，不要直接照做。** 2026-11-26 00:51 到 01:00 的九分钟内设备连续五次 panic，只有手动重新越狱才能恢复；恢复后 basebin 回到出厂形态（`gen/dyld` 974016 / `1 0 0 1`、`dyldhook_merge` 74352 / `1 0 0 1`）。**这五次 panic 跟在 00:50:43 那次 `jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar` 之后，不能算作本节第 3 步那份 tar 的后果。** 两份 tar 的成员内容差异不止 `launchdhook` 一处（字节数就能看出来，见本节「触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar」那一段），本文只逐条核过 `launchdhook` 这一个成员，读数在本节「两者在 `basebin/launchdhook.dylib` 上不同」那一段。五份日志在设备的 `/var/mobile/Library/Logs/CrashReporter/panic-full-2026-11-26-*.ips`，`panicString` 原文：
 
 | 时刻 | 文件 | `panicString` 关键片段 |
 | --- | --- | --- |
@@ -617,7 +617,7 @@ WebCore   LOAD_WEAK    /System/Library/PrivateFrameworks/WebCore.framework/Frame
 
 四次 `pmap_mark_page_as_ppl_page_internal` 的 `pa` 各不相同，不是同一个固定页。五次的内核都是 `Darwin Kernel Version 22.1.0`、`OS version: 20B82`。下面的步骤保留下来作为「装了什么、怎么退」的记录，不是待执行的清单。
 
-**触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar，这一点必须读。** 触发它们的是 2026-11-26 00:50:43 的 `jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar`：6103040 字节、`sha256 d5bd3ef3…`、27 个成员。本节第 3 步用的是 `/var/mobile/Documents/basebin.tar`：6144000 字节、`sha256 7fd37934…`，即 GitHub Actions run `45237030318` 的 CI 产物（`webkit-install-runbook.md:255`）。两份都是 27 个成员、文件名同构。`d5bd3ef3…` 由设备那份 `basebin-hybrid.tar`（6092800）换掉 `launchdhook.dylib` 得到，其成员与出厂 tar 的逐条比对记录在 `docs/dopamine-basebin-webkit-override.md`；`7fd37934…` 是与 CI 产物对齐的整包。两者的成员内容差异不止 `launchdhook` 一处，所以本节那份 tar 是否会引发同样后果没有被证明。
+**触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar，这一点必须读。** 触发它们的是 2026-11-26 00:50:43 的 `jbctl update basebin /var/mobile/Documents/bb/basebin-lh.tar`：6103040 字节、`sha256 d5bd3ef3…`、27 个成员。本节第 3 步用的是 `/var/mobile/Documents/basebin.tar`：6144000 字节、`sha256 7fd37934…`，即 GitHub Actions run `45237030318` 的 CI 产物（`webkit-install-runbook.md:255`）。两份都是 27 个成员、文件名同构。`d5bd3ef3…` 由设备那份 `basebin-hybrid.tar`（6092800）换掉 `launchdhook.dylib` 得到；`7fd37934…` 是与 CI 产物对齐的整包。本文对这两份 tar 只有 `launchdhook` 这一处逐位比对读数，在紧接着的「两者在 `basebin/launchdhook.dylib` 上不同」那一段；其余 26 个成员的逐条比对不在本文，也不在本分支的任何文档里。所以「两份 tar 只差 `launchdhook` 一处」这句话本文不作断言，本节那份 tar 是否会引发同样后果也没有被证明。
 
 **两者在 `basebin/launchdhook.dylib` 上不同，这一处差别决定了 panic 的归因边界。** `d5bd3ef3…` 里是打了补丁的 330144 字节 `sha256 150270a5…`；`7fd37934…` 里是原版 312848 字节 `sha256 449a9606…`，因为那份产物早于把 `launchdhook` 纳入 gate 的提交 `64f8834`（2026-11-26 00:47:13），该提交自己的说明写着此前的 tar「carrying the stock launchdhook printed Result: PASS」。所以本节第 3 步那份 tar 装上去时 `launchdhook` 是原版，它不会给 app 进程写搜索路径变量，而这正是 4.3 节 app 进程留在 16.1 的原因之一。
 
@@ -884,7 +884,7 @@ ls: 无法访问 '/var/jb/basebin/.safe_mode': No such file or directory
 
 ## 六、需要 root 的命令清单
 
-**这一节不是待执行清单，而是「已执行过、现在需要重做」的参照，与第五节同一口径：第五节开头与它的第三段都写明在分离出 tar 变量之前不执行。** 第 2 步与第 3 步在设备上已经生效过一次：`/var/jb/Library/WebKitOverride` 建成于 2026-11-25 23:54，`gen/dyld` 在 23:53 变成 974608 `[1,1,1,1]`，`systemhook` 234336。**这几次写操作不是本 mission 执行的**，驱动方没有留下记录；作者本人本轮只做过只读命令与 `/var/jb/tmp` 下的临时文件，临时文件已删。用户的既有约束是「不要做持久性破坏性的操作」，所以这一点不能靠省略带过。
+**这一节不是待执行清单，而是「已执行过、现在需要重做」的参照，与第五节同一口径：第五节「本节第 3 步那份 tar 也装过一次」那一段写明在分离出 tar 变量之前不执行。** 第 2 步与第 3 步在设备上已经生效过一次：`/var/jb/Library/WebKitOverride` 建成于 2026-11-25 23:54，`gen/dyld` 在 23:53 变成 974608 `[1,1,1,1]`，`systemhook` 234336。**这几次写操作不是本 mission 执行的**，驱动方没有留下记录；作者本人本轮只做过只读命令与 `/var/jb/tmp` 下的临时文件，临时文件已删。用户的既有约束是「不要做持久性破坏性的操作」，所以这一点不能靠省略带过。
 
 **当前设备已经不在那个状态。** 2026-11-26 01:03 有一次手动重新越狱，用户在那之后设备才停住连续 panic，这一点与第五节开头一致。那次之后的读数：`gen/dyld` 回到 974016 `[1,0,0,1]`、`gen/dyld.old` 消失、`dyldhook_merge` 回到 74352、`systemhook` 回到 233520、`.fakelib` 被重建，与出厂 tar 比对回到 `same=25 diff=2`（只剩两个 plist）。它实测的是 1.3 节那条结论：重新越狱把 `/var/jb/basebin` 整份换回 `Dopamine.app/basebin.tar` 的内容，两份补丁库一起消失，`gen/dyld` 由恢复后的 74352 那份 hook 重新合成（974016 与 948414 + 2 + 25600 相符）。**它不能判定 `gen/` 与 `.fakelib/` 是哪条分支重建的**：无论哪条分支，`dyld.orig` 都保持 2022-10-19 那份 926240 字节 `7eb2e72f`，理由是 `carbonCopy` 会把 `NSFileModificationDate` 写回目标（`carboncopy.m:14`、`:84`），且 `basebin_gen.m:146` 的源是 `.fakelib` 挂载之前的系统原版 dyld（`DOJailbreaker.m:434` 与 `:456`）。本节读数的用途是确认设备现在处在哪个状态、以及 1.3 节那条结论成立，不涉及分支判定。
 
@@ -946,7 +946,7 @@ NOT writable by mobile
 
 ## 七、否证这条路的那两条读数，以及它们的实测结果
 
-任务 Q4 问的是「这条路不通时给出否证的那一条读数」。这个问题有两个层次，两次都取到了读数，结论相反：dyld 这一层没有被否证，端到端这一层被否证了。
+任务 Q4 问的是「这条路不通时给出否证的那一条读数」。这个问题有两个层次，各取到一组读数：dyld 这一层没有被否证；端到端这一层只有一份**别的** tar 的失败读数，第五节第 3 步那份 tar 没有端到端读数。
 
 **第一层，dyld 愿不愿意用磁盘副本。这条没有被否证。** 在 hook 已经进 `gen/dyld`（四个计数 `1 1 1 1`、974608 字节）的状态下，4.2 节那条命令打印了候选行并且命中覆盖目录：
 
@@ -967,9 +967,9 @@ dyld[36445]:   found: dylib-from-disk-to-override-cache: "…/procursus/Library/
 
 **4.2 通过而 4.3 部分不通过的情形已经出现，落在 app 进程这一层。** dyld 层已能合成，helper 也拿到了 18.3，但 app 的 UI 进程没有：它们的 envp 里没有裸名的 `DYLD_FRAMEWORK_PATH`/`DYLD_LIBRARY_PATH`，dyld 只认这一种写法。`__XPC_` 前缀那一对不是每个进程都有，2026-11-26 01:5x 复测的三个实例都是 0 条。这不是 dyld 这条路失败，缺的是把变量交给 UI 进程的那一环节（4.3 节的表与第八节）。两者要分开记，不要混成「这条路线失败」。
 
-**第二层，端到端把这条路线走完。这一层被否证了，判据是设备连续五次内核 panic。** 装上之后不到一小时，2026-11-26 00:51:11 出现 `initproc exited -- exit reason namespace 2 subcode 0x5`，随后 00:56:21、00:56:58、00:58:58、01:00:37 各出现一次 `pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`，四次 `pa` 值各不相同（`0x8d4d18000`、`0xa80b8c000`、`0xaaf89c000`、`0x9d75c0000`）。每次用户空间重启之后再 panic 一次，设备进不到能登录的状态，最后靠用户手动重新越狱才停下。五份 `.ips` 在设备的 `/var/mobile/Library/Logs/CrashReporter/` 下，文件名与各自的时刻对应；这五次 panic 跟在 00:50:43 那次 `bb/basebin-lh.tar` 的安装之后，不是本节这份 tar 的后果，两份 tar 的差别见第五节开头。
+**第二层，端到端把这份 tar 装上去。这一层只有 00:50:43 那份 `bb/basebin-lh.tar` 的读数，判据是设备连续五次内核 panic；本节第 3 步那份 tar 没有端到端读数。** 装上之后不到一小时，2026-11-26 00:51:11 出现 `initproc exited -- exit reason namespace 2 subcode 0x5`，随后 00:56:21、00:56:58、00:58:58、01:00:37 各出现一次 `pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`，四次 `pa` 值各不相同（`0x8d4d18000`、`0xa80b8c000`、`0xaaf89c000`、`0x9d75c0000`）。每次用户空间重启之后再 panic 一次，设备进不到能登录的状态，最后靠用户手动重新越狱才停下。五份 `.ips` 在设备的 `/var/mobile/Library/Logs/CrashReporter/` 下，文件名与各自的时刻对应；这五次 panic 跟在 00:50:43 那次 `bb/basebin-lh.tar` 的安装之后，**是那份 tar 的实测后果**，本节第 3 步那份 tar 是否会引发同样后果没有被证明，两份 tar 的差别见第五节「触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar」那一段。
 
-这条读数否证的是「可以照第五节把这份补丁装到这台设备上走完」这个整体做法，不是 dyld 层的机制：第一层的读数在五次 panic 之前就已取到，两者不冲突。任务 Q4 的答案因此分两层——**dyld 的 override 判定成立，交付这条路线的端到端做法不成立**，后者以设备不可用为代价。第五节开头与第六节「最坏情况的边界」按这一条写。第一层的读数只能证明 dyld 会为 `WebKit` 合成覆盖候选并命中，不能证明装完之后设备还能用；第二层是唯一一次端到端实测，它证明后者不成立。所以第五节的步骤保留为记录，不是可执行清单。
+这条读数否证的是「可以照第五节用 `bb/basebin-lh.tar` 那份补丁把设备走完」，不是 dyld 层的机制，也不是本节第 3 步那份 tar：第一层的读数在五次 panic 之前就已取到，两者不冲突。任务 Q4 的答案因此分两层——**dyld 的 override 判定成立；端到端这一层只有一份别的 tar 的失败读数，本节那份 tar 既没有被否证也没有被证明**，已知的代价是那份 tar 让设备不可用。第五节开头与第六节「最坏情况的边界」按这一条写。第一层的读数只能证明 dyld 会为 `WebKit` 合成覆盖候选并命中，不能证明装完之后设备还能用；第二层是唯一一次端到端实测，它测的是 `bb/basebin-lh.tar`，不能直接套到本节那份 tar 上。所以第五节的步骤保留为记录，不是可执行清单。
 
 ---
 
@@ -988,4 +988,4 @@ dyld[36445]:   found: dylib-from-disk-to-override-cache: "…/procursus/Library/
 
 **`launchctl print` 的 `environment` 段不能当 envp 用。** 本次在同一个 pid（33349）上对照过两种读法，`launchctl print` 只显示四项，而 `ps -E` 与 `sysctl KERN_PROCARGS2` 都显示 21 项、其中含 `DYLD_INSERT_LIBRARIES`，`lldb image list` 也确认 `systemhook.dylib` 已映射进该进程。这条修正影响三份文档的读法：本文 4.3 节已改；`docs/ios16-whole-18.3-deployment-path.md:154/:192/:193` 与 `docs/ios16-all-18.3-xpc-endpoint-audit.md:209` 里「`environment` 段落含 `DYLD_FRAMEWORK_PATH`」这类记载不是否认能成立的证据，因为反向（段落为空）不代表进程里没有。它们要重取一次 `ps -E` 才能定案。
 
-**一处已改的既有记录。** 外层 `AGENTS.md` 曾经写「用设备上那份 hook dylib 合并得到 948414 字节，比 `gen/dyld` 的 974016 小。这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的，设备上的 hook 已被换回 74352 的原版」。前半句对，结论错：974016 减去 2 字节填充与 25600 的签名正好是 948414，差额全部来自重签名，所以 974016 那份 `gen/dyld` 是用 **74352 原版**合成的；974608 才是 75952 那份的结果。`dyldhook_merge` 本身是否被换回过，判据只能是第二节的四位计数，不是尺寸差。外层 `AGENTS.md` 的那句已按本文 1.1 节的字节模型改正（M130，2026-11-26）。
+**一处没有改的既有记录。** 外层 `AGENTS.md:224` 写「用设备上那份 hook dylib 合并得到 948414 字节，比 `gen/dyld` 的 974016 小。这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的，设备上的 hook 已被换回 74352 的原版」。前半句对，结论错：974016 减去 2 字节填充与 25600 的签名正好是 948414，差额全部来自重签名，所以 974016 那份 `gen/dyld` 是用 **74352 原版**合成的；974608 才是 75952 那份的结果。`dyldhook_merge` 本身是否被换回过，判据只能是第二节的四位计数，不是尺寸差。**这句在分支 tip 上仍是错的，本文只指出它，没有改它**：`AGENTS.md` 不在本 mission 的改动范围内，本文 1.1 节的字节模型与 `:69` 那段是它与事实的差异记录。
