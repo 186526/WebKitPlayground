@@ -6,7 +6,7 @@
 
 **第一段：已确证的机制。** UI 进程不注册端点，端点是为它做解析的。WebKit 的 UI 进程里没有任何一处把自己注册成 XPC 服务端：`Source/WebKit/` 全树的 `XPC_CONNECTION_MACH_SERVICE_LISTENER` 只有 `Shared/Daemon/DaemonUtilities.mm:39` 一处，服务于 `adattributiond` 与 `webpushd` 两个守护进程；`UIProcess/` 目录下 `xpc_connection_create_mach_service`、`bootstrap_register`、`bootstrap_check_in` 三个调用点一个都没有。UI 进程只做客户端（`UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:307-308`）。四个端点出现在 `launchctl print pid/<PID>` 的 `services = {` 里，是 launchd 按「该 pid 域里已加载的 framework 目录」替它算出来的。`WebKit.framework` 自己的 `Source/WebKit/Info.plist` 里没有 `XPCService` 键，服务清单只存在于各个 `.xpc` 的 `Info-iOS.plist:31` 的 `XPCService` 字典。
 
-**第二段：端点消失有两种候选机制，设备上还没分开，而且两者覆盖的记录不同。** 第一种是 launchd 拿 `/var/jb/.../WebKit.framework/WebKit` 去查它在 `/System/Library/xpc/launchd.plist` 的 1902 条预计算索引里查不到，于是这个 framework 贡献的服务集合为空。第二种是进程在注册端点之前就被 dyld 中止，端点根本没机会出现。第二种有确凿的崩溃报告支撑（`_WTFSignpostIndirectLoggingEnabled` 缺失，`termination.namespace = DYLD`，`build-state.md:451-466`），但它只解释**没有补自建 `JavaScriptCore`** 的那几次读数；第四轮修正表里每一次「放进 `WebKit` 二进制端点归零」都是在 `JavaScriptCore` 已补上的前提下取得的，那时进程不崩，dyld 中止解释不了它。所以「归零」这个观察本身还没有被归因，区分两种情形的单条命令写在第四节，还没执行。
+**第二段：端点消失有两种候选机制，设备上还没分开，而且两者覆盖的记录不同。** 第一种是 launchd 拿 `/var/jb/.../WebKit.framework/WebKit` 去查它在 `/System/Library/xpc/launchd.plist` 的 1902 条预计算索引里查不到，于是这个 framework 贡献的服务集合为空。第二种是进程在注册端点之前就被 dyld 中止，端点根本没机会出现。第二种有确凿的崩溃报告支撑（`_WTFSignpostIndirectLoggingEnabled` 缺失，`termination.namespace = DYLD`，`build-state.md:555-570`），但它只解释**没有补自建 `JavaScriptCore`** 的那几次读数；第四轮修正表里每一次「放进 `WebKit` 二进制端点归零」都是在 `JavaScriptCore` 已补上的前提下取得的，那时进程不崩，dyld 中止解释不了它。所以「归零」这个观察本身还没有被归因，区分两种情形的单条命令写在第四节，还没执行。
 
 **第三段：全 18.3 的落点。** 无论上面哪一种成立，「UI 进程换 18.3」都不是充分条件。18.3 的 helper 由 `.xpc` 桩尾调用 `WKXPCServiceMain` 起动，加载哪份 `WebKit` 取决于 dyld 看到的搜索路径；而 helper 与 UI 之间还要过 `WebKitPlayground/docs/ios16-ipc-layer-audit.md` 量过的消息编号差异（WebPage 402 对 492）。所以全 18.3 的必要条件有三层：UI 进程加载 18.3、helper 从 18.3 的 `.xpc` 起动并加载 18.3、两侧对同一份 IPC 协议。前两层本文给出判据，第三层不属于本文范围。
 
@@ -14,15 +14,15 @@
 
 ## 一、271 次 failed lookup 与端点数 0 是两个不同方向的失败
 
-`build-state.md` 把这两件事写在同一段（第 479-481 行），但它们的发起方向相反，判据也不同。
+`build-state.md` 把这两件事写在同一段（第 574-585 行），但它们的发起方向相反，判据也不同。
 
 **failed lookup 是 UI 进程向 launchd 要不到东西。** 发起方是 UI 进程。`ProcessLauncherCocoa.mm:307-308` 调 `xpc_connection_create(name, nullptr)`，`name` 来自同文件 `:199-215` 的 `serviceName()`，对 Network 返回字面量 `"com.apple.WebKit.Networking"`（`:205`）。libxpc 拿这个名字去 launchd 查，查不到就记一条 `failed lookup`。这条路径上 UI 进程是**客户端**。
 
 **端点数是 launchd 替 UI 进程算出来的服务集合大小。** 判据是 `launchctl print pid/<PID>` 里 `services = {` 段落中包含几个 `com.apple.WebKit.*` 条目。这个数字反映 launchd 认为「这个 pid 域可以使用哪些服务」，不是 UI 进程主动注册的结果——UI 进程没有注册的代码，见开头第一段。
 
-两者可以在不同时间点各自成立：UI 进程已经发出请求（lookup 在涨），而 launchd 找不到候选（返回错误）。`build-state.md` 第 481 行记录的「累计 271 次」是在进程中已经存在两份 18.3 镜像的情况下测的，那时 `_WTFSignpostIndirectLoggingEnabled` 已经由自建 `JavaScriptCore` 补上，所以进程活着，能发出请求。
+两者可以在不同时间点各自成立：UI 进程已经发出请求（lookup 在涨），而 launchd 找不到候选（返回错误）。`build-state.md` 第 585 行记录的「累计 271 次」是在进程中已经存在两份 18.3 镜像的情况下测的，那时 `_WTFSignpostIndirectLoggingEnabled` 已经由自建 `JavaScriptCore` 补上，所以进程活着，能发出请求。
 
-**读数的可信度要打折。** `build-state.md` 自己说明（第 383 行）`failed lookup` 的计数取决于应用转圈多久，不能单独用作判据；第四轮因此改用端点计数。本文同样以端点计数为主判据，lookup 计数只用作方向指示。
+**读数的可信度要打折。** `build-state.md` 自己说明（第 454 行）`failed lookup` 的计数取决于应用转圈多久，不能单独用作判据；第四轮因此改用端点计数。本文同样以端点计数为主判据，lookup 计数只用作方向指示。
 
 ---
 
@@ -30,13 +30,13 @@
 
 这两件事独立，原因在于它们发生在进程生命周期的不同阶段，且由不同代码判定。
 
-**dyld 中止发生在进程启动的最早期，早于 main。** `WebKit` 从 `JavaScriptCore` 强引用 `_WTFSignpostIndirectLoggingEnabled`，16.1 的系统 `JavaScriptCore` 没有这个导出符号，dyld 在 `dyld4::prepare` 阶段直接 `halt`。崩溃报告的 `termination.namespace = "DYLD"`、`code = 4`、`reasons: Symbol not found` 是这条判定（`build-state.md:451-466`）。补上自建 `JavaScriptCore` 之后符号能解析，这一段不再触发，Chrome 不再崩溃。
+**dyld 中止发生在进程启动的最早期，早于 main。** `WebKit` 从 `JavaScriptCore` 强引用 `_WTFSignpostIndirectLoggingEnabled`，16.1 的系统 `JavaScriptCore` 没有这个导出符号，dyld 在 `dyld4::prepare` 阶段直接 `halt`。崩溃报告的 `termination.namespace = "DYLD"`、`code = 4`、`reasons: Symbol not found` 是这条判定（`build-state.md:555-570`）。补上自建 `JavaScriptCore` 之后符号能解析，这一段不再触发，Chrome 不再崩溃。
 
 **端点集合由 launchd 在另一个时刻决定。** 端点出现在 `launchctl print pid/<PID>` 里，取决于 launchd 如何为这个 pid 域计算服务候选集，与 dyld 是否成功启动进程无关——严格说，launchd 的面板可以在进程运行、尚未请求任何服务时就已经有内容（塔今天在不加覆盖目录的对照组里读到六条，见附录 A）。
 
-所以「补上 JSC 后进程活、端点仍 0」不构成「两个故障是同一个」的证据，反而正好说明它们是两个独立的层次：符号解析层（dyld）与服务解析层（launchd）。`build-state.md` 第四轮的修正表（第 396-404 行）里，`WebKit` 二进制一进场端点就归零，而 `_WTFSignpostIndirectLoggingEnabled` 缺失只在五个 framework 不齐时触发（第 321-327 行），两个变量在这张表里各自独立变化，也支持这个划分。
+所以「补上 JSC 后进程活、端点仍 0」不构成「两个故障是同一个」的证据，反而正好说明它们是两个独立的层次：符号解析层（dyld）与服务解析层（launchd）。`build-state.md` 第四轮的修正表（第 500-509 行）里，`WebKit` 二进制一进场端点就归零，而 `_WTFSignpostIndirectLoggingEnabled` 缺失只在五个 framework 不齐时触发（第 390-396 行），两个变量在这张表里各自独立变化，也支持这个划分。
 
-**一处必须在硬件上确认的空白。** 第四轮修正表每次都用「自建 `WebCore` + `JavaScriptCore`」作固定基数（第 394 行明写「去掉 `JavaScriptCore` 不是有效用例」），所以那张表里「放进 `WebKit` 二进制端点归零」的每一次读数，都是在 JSC 已补上的前提下取得的。这意味着归零**不能**用 dyld 中止解释——那时进程不崩了。这一条是本文最重要的未决点，判定方法与预期结果见第四节。
+**一处必须在硬件上确认的空白。** 第四轮修正表每次都用「自建 `WebCore` + `JavaScriptCore`」作固定基数（第 498 行明写「去掉 `JavaScriptCore` 不是有效用例」），所以那张表里「放进 `WebKit` 二进制端点归零」的每一次读数，都是在 JSC 已补上的前提下取得的。这意味着归零**不能**用 dyld 中止解释——那时进程不崩了。这一条是本文最重要的未决点，判定方法与预期结果见第四节。
 
 ---
 
@@ -173,7 +173,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 **路径不一致（已修，设备未验证）。** `ios18-public-sdk-xpc-main.patch` 原先第 12 行给每个 `.xpc` 链接期写死 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`，而 `install-webkit-override.sh` 把 framework 复制到 `/var/jb/Library/WebKitOverride`。M69 之后补丁写成两处搜索列表都以覆盖目录开头：`:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride`，`:22` 的 `DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib`；`install-webkit-override.sh:66` 与 `check-webkit-override.sh:27` 各写一次同一字面量，所以三处的目录名可以 `grep` 比对。覆盖目录存在时 helper 与 UI 都首先解析到它，`/var/jb/Library/Frameworks` 只作后备。**剩下的是设备侧验证，不是源码缺口**：补丁改后必须重建并重新打包才会进 `.xpc` 的 `LC_DYLD_ENVIRONMENT`，而这一步还没做；`iOS` 上没有版本检查（`WebKitBundleVersion` 的比对在 `XPCServiceMain.mm:107-123` 的 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 内，iOS 编译掉），所以两侧字节是否同代只能靠 `shasum` 与 `image list` 直接比，不能靠版本号推断。
 
-**`build-state.md` 内部有一处未处理的冲突。** 第二轮记录覆盖目录带 `XPCServices` 时 GPU 有过三次 `Successfully spawned` 且有崩溃报告 `procPath` 指向覆盖目录（第 267 行）；第三轮的 A/B 表（第 309-315 行）却记录同一配置 spawn 为 0；第四轮判定第三轮的错因是设备没有 `pkill`、测的都是旧进程（第 371-390 行）。一个没重启的旧进程不会产生新的 `.ips`，所以第二轮那次崩溃不可能由这个错因造成，两份记录不能同时成立。这直接影响第四节 (A)/(B) 的判定，已作为 finding 提交。
+**`build-state.md` 内部有一处未处理的冲突。** 第二轮记录覆盖目录带 `XPCServices` 时 GPU 有过三次 `Successfully spawned` 且有崩溃报告 `procPath` 指向覆盖目录（第 336 行）；第三轮的 A/B 表（第 377-384 行）却记录同一配置 spawn 为 0；第四轮判定第三轮的错因是设备没有 `pkill`、测的都是旧进程（第 442-461 行）。一个没重启的旧进程不会产生新的 `.ips`，所以第二轮那次崩溃不可能由这个错因造成，两份记录不能同时成立。这直接影响第四节 (A)/(B) 的判定，已作为 finding 提交。
 
 ---
 
@@ -187,9 +187,9 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 **3. UI 进程与 helper 是否加载同一份 18.3。** 用 `lldb -b -o "process attach --pid <UI_PID>" -o "image list -o -f"` 与对 helper 的同一条命令，比对 `WebKit.framework/WebKit` 的完整路径前缀。M69 之后两处搜索列表都以 `/var/jb/Library/WebKitOverride` 开头，所以**预期两侧前缀相同**；若两者分别是 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/Frameworks`，说明 helper 的首项没命中、落到了后备项，即第七节所述情形又出现，此时要查覆盖目录是否缺该镜像，而不是查补丁写了什么。`lldb` 的 ObjC 表达式在这台设备上不可用（`couldn't install checkers`），只用 `image list`。
 
-**4. helper 起来之后的第一条 IPC 是否成功。** 端点存在只说明 launchd 解析成功，不说明 UI 与 helper 能通信。预期失败点是 `WebKitPlayground/docs/ios16-ipc-layer-audit.md` 记录的消息编号差异。验证方式：`launchctl print pid/<helper_pid>` 存在后，观察 helper 存活时长与是否有 `PAC_EXCEPTION` 崩溃报告；`build-state.md:344-355` 记录过混合配置下 WebContent 在收到第一条 IPC 后以 `PAC_EXCEPTION, code 1` 崩溃，那是 16.1 UI 配 18.3 `WebCore` 的签名，全套 18.3 是否仍出现需要实测。
+**4. helper 起来之后的第一条 IPC 是否成功。** 端点存在只说明 launchd 解析成功，不说明 UI 与 helper 能通信。预期失败点是 `WebKitPlayground/docs/ios16-ipc-layer-audit.md` 记录的消息编号差异。验证方式：`launchctl print pid/<helper_pid>` 存在后，观察 helper 存活时长与是否有 `PAC_EXCEPTION` 崩溃报告；`build-state.md:410-423` 记录过混合配置下 WebContent 在收到第一条 IPC 后以 `PAC_EXCEPTION, code 1` 崩溃，那是 16.1 UI 配 18.3 `WebCore` 的签名，全套 18.3 是否仍出现需要实测。
 
-**5. `_CodeSignature` 目录缺失的影响。** 塔提出的第 5 点。系统 `/System/Library/Frameworks/WebKit.framework/` 有 `_CodeSignature` 与 `preferences.sb`，`install-webkit-override.sh` 的 `copy_framework_tree` 用 `cp -a "${path_source}/."` 复制整目录，是否带上这两项取决于 deb 里那份有没有。源码侧可判的部分：`preferences.sb` 是 `Source/WebKit/Shared/Sandbox/preferences.sb`，被 `GPUProcess/mac/com.apple.WebKit.GPUProcess.sb.in:25`、`WebProcess/com.apple.WebProcess.sb.in:25` 等以 `#include` 引用，是沙箱配置模板，不参与 XPC 服务清单；`WebKit.framework` 的 `Source/WebKit/Info.plist` 也没有 `XPCService` 键。所以 `preferences.sb` 缺失不影响端点解析。`_CodeSignature` 目录是否影响端点解析没有实测覆盖：`build-state.md:338` 排除的「代码签名因复制失效」比的是二进制内嵌的 `LC_CODE_SIGNATURE` 偏移与大小（两边同为 49536 / 21856），不是这个目录。需在设备上 `ls -la` 两个目录对比，并在缺目录时补测端点计数。
+**5. `_CodeSignature` 目录缺失的影响。** 塔提出的第 5 点。系统 `/System/Library/Frameworks/WebKit.framework/` 有 `_CodeSignature` 与 `preferences.sb`，`install-webkit-override.sh` 的 `copy_framework_tree` 用 `cp -a "${path_source}/."` 复制整目录，是否带上这两项取决于 deb 里那份有没有。源码侧可判的部分：`preferences.sb` 是 `Source/WebKit/Shared/Sandbox/preferences.sb`，被 `GPUProcess/mac/com.apple.WebKit.GPUProcess.sb.in:25`、`WebProcess/com.apple.WebProcess.sb.in:25` 等以 `#include` 引用，是沙箱配置模板，不参与 XPC 服务清单；`WebKit.framework` 的 `Source/WebKit/Info.plist` 也没有 `XPCService` 键。所以 `preferences.sb` 缺失不影响端点解析。`_CodeSignature` 目录是否影响端点解析没有实测覆盖：`build-state.md:407` 排除的「代码签名因复制失效」比的是二进制内嵌的 `LC_CODE_SIGNATURE` 偏移与大小（两边同为 49536 / 21856），不是这个目录。需在设备上 `ls -la` 两个目录对比，并在缺目录时补测端点计数。
 
 **未验证的判定：第四节 (A)/(B) 都还没定。** 本文不替它下结论，因为两种情形所需的源代码证据（launchd 是否现扫索引外目录）在公开材料里不存在——`libxpc` 与 `launchd` 的源码不在 `apple-oss-distributions`（`WebKitPlayground/docs/dopamine-basebin-webkit-override.md:712` 记录过这一点）。
 
@@ -205,7 +205,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 - `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 50758784 字节，`Nov 24 18:06`，`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；五个 `.xpc` 的 `minos` 同为 `16.1.0`，各自二进制含 `DYLD_FRAMEWORK_PATH` 2 次、`/var/jb/Library/Frameworks` 1 次；系统桩这两个串均为 0。
 - `/var/jb/Library/WebKitOverride` 为 `ABSENT`。
 
-`build-state.md` 的第四轮修正表（第 396-404 行，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数。这一节第 371-390 行先撤回了第三轮的旧 A/B 表，理由是设备没有 `pkill`、每次测的都是未重启的旧进程；本文只引用撤回后的表）：
+`build-state.md` 的第四轮修正表（第 500-509 行，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数。这一节第 442-461 行先撤回了第三轮的旧 A/B 表，理由是设备没有 `pkill`、每次测的都是未重启的旧进程；本文只引用撤回后的表）：
 
 | 覆盖目录内容 | 端点 | spawn | lookup 失败 |
 | --- | --- | --- | --- |
