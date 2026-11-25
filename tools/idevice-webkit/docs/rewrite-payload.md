@@ -172,6 +172,9 @@ symbol error:
   outside a rewritten slot changed;
 - the source payload is byte-identical before and after;
 - every `LC_ID_DYLIB` names the path it occupies;
+- WebCore's three `LC_LOAD_WEAK_DYLIB` commands on the other six come back naming
+  `/var/jb`, none still naming `/System` — the set the load order exists to
+  satisfy, read out of the written file rather than taken from the plan;
 - a slot too small is refused before anything is copied;
 - `--deps-only` keeps the identity and `verify` treats that as the probe's intent;
 - both CodeDirectories describe the bytes after the repair.
