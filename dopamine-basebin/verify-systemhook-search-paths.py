@@ -44,8 +44,25 @@ symbol check is separate: systemhook/Makefile has no CHECK_SELF_CONTAINED rule (
 dyldhook/Makefile does), so undefined symbols are normal and are reported, and with
 --baseline they are compared against a stock build to catch a symbol the patch introduced.
 
+The same translation unit reaches a second binary.  BaseBin/launchdhook/Makefile lists
+../systemhook/src/common/*.[cSm] as a dependency, so launchdhook compiles common.c too and
+installs its own posix_spawn interposer (spawn_hook.c:197).  That is the interposer inside
+launchd, the process that performs the final exec for an app: every app launched by
+runningboardd carries DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib, and the only string in
+the jailbreak that writes that value is HOOK_DYLIB_PATH in common.h:7.  A stock launchdhook
+therefore writes only that one variable, which is why an app gets __XPC_DYLD_FRAMEWORK_PATH
+inherited from launchd's environ but never the plain name dyld reads.  --kind launchdhook
+applies the same four-name assertion to that binary, so a tar that ships a stock launchdhook
+fails here instead of reaching the device.
+
+One string is excused for launchdhook and not for systemhook: spawn_hook.c:36-37 calls
+statfs("/usr/lib") to decide whether fakelib is mounted, so the bare root is a legitimate
+entry there.  The three broad search roots stay forbidden, because those are what a search
+path must never name.
+
 Usage:
   dopamine-basebin/verify-systemhook-search-paths.py <systemhook.dylib>
+  dopamine-basebin/verify-systemhook-search-paths.py --kind launchdhook <launchdhook.dylib>
   dopamine-basebin/verify-systemhook-search-paths.py --baseline stock/systemhook.dylib new/systemhook.dylib
   dopamine-basebin/verify-systemhook-search-paths.py --self-contained new/systemhook.dylib
 
@@ -97,7 +114,16 @@ FORBIDDEN_STRINGS = (
     "/var/jb/Library/Frameworks",
     "/var/jb/usr/lib",
 )
+# spawn_hook.c:36-37 statfs()es the bare "/usr/lib" to decide whether fakelib is mounted, so
+# launchdhook legitimately carries that one entry.  The broader roots stay forbidden for it.
+FORBIDDEN_STRINGS_LAUNCHDHOOK = tuple(name for name in FORBIDDEN_STRINGS if name != "/usr/lib")
 PRESERVED_STRINGS = ("DYLD_INSERT_LIBRARIES",)
+
+# Each kind names a binary built from the same common.c, with the forbidden set it may carry.
+KINDS = {
+    "systemhook": FORBIDDEN_STRINGS,
+    "launchdhook": FORBIDDEN_STRINGS_LAUNCHDHOOK,
+}
 
 
 def read_slices(data: bytes) -> list[bytes]:
@@ -186,7 +212,13 @@ def undefined_symbols(binary: Path) -> list[str] | None:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("binary", type=Path, help="the built systemhook.dylib")
+    parser.add_argument("binary", type=Path, help="the built systemhook.dylib or launchdhook.dylib")
+    parser.add_argument(
+        "--kind",
+        choices=sorted(KINDS),
+        default="systemhook",
+        help="which binary this is; launchdhook is built from the same common.c and excuses /usr/lib",
+    )
     parser.add_argument("--baseline", type=Path, help="stock systemhook.dylib to compare undefined symbols against")
     parser.add_argument(
         "--self-contained",
@@ -194,6 +226,8 @@ def main(argv: list[str]) -> int:
         help="also fail when any undefined symbol exists; systemhook/Makefile does not require this",
     )
     args = parser.parse_args(argv)
+
+    forbidden_strings = KINDS[args.kind]
 
     failures: list[str] = []
 
@@ -239,7 +273,7 @@ def main(argv: list[str]) -> int:
             check(f"{arch}: contains the directory {wanted}", wanted in entries)
         # The dedicated directories exist so the shared roots are never named.  Exact entries, so a
         # legitimate file path under /usr/lib is not mistaken for the directory itself.
-        forbidden = [name for name in FORBIDDEN_STRINGS if name in entries]
+        forbidden = [name for name in forbidden_strings if name in entries]
         check(
             f"{arch}: names no shared search root",
             not forbidden,
