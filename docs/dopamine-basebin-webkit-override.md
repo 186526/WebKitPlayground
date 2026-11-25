@@ -813,7 +813,14 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 第十一节交付了让 `systemhook` 与 `launchdhook` 写四个搜索路径变量的源码改动。要让它上设备，还差一次 `jbctl update basebin`，而那次更新用的 tar 必须是**设备的 tar 加上补丁成员**，不是 CI 的整包 tar。本节给出一份这样的 tar 的逐字节核对、安装步骤、回滚步骤与成功判据。
 
-**本节没有执行任何安装动作。** 设备上此刻仍是出厂 basebin，补丁一个都没生效：`launchdhook` 312848 / `449a9606`，`gen/dyld` 判定 (b) 为 `1 0 0 1`（两个 override hook 为 0），这两条见根目录 `AGENTS.md` 第 186、207 行。每一步在下面都标注了「已执行」或「未执行」。
+**本 mission 没有执行任何安装动作，但这份 tar 已经被装过一次，并且失败了。** 两个陈述都要写清楚，因为它们不是同一件事：
+
+- **本 mission 只读**：全部读数在本机对三份 tar 做，没有向设备写入任何文件，没有跑 `jbctl`，没有触发重启。
+- **这份 tar 在别的 mission 里被执行过**：M127 于 2026-11-26 00:50:43 对同一个文件 `/var/mobile/Documents/bb/basebin-lh.tar` 跑过 `jbctl update basebin`，其后 00:51:11 起连续五次内核 panic，用户手动重新越狱才恢复。经过见 `docs/ios16-launchdhook-basebin-install-panic.md`，本节不复述、也不把这些读数当成自己的测量。
+
+**所以「设备上此刻是出厂 basebin」这个读数不是「没人试过」的证据。** 它是「试过、panic 了、重新越狱把 basebin 整包还原了」的结果。设备当前状态照 `AGENTS.md` 第 186、207 行：`launchdhook` 312848 / `449a9606`，`gen/dyld` 判定 (b) 为 `1 0 0 1`。
+
+**M127 对这条路线给出的结论是「不安全，不要在这台设备上安装」。** 本节下面记的安装步骤因此**不是待执行的计划**，而是一份历史记录加一份回滚依据：它说明当时装了什么、怎么装、失败后怎么恢复。要再尝试，先解决 M127 那份文档里未解释的 panic 成因，本节不提供再次安装的依据。
 
 ### 十二·一 这份 tar 是怎么来的，逐字节核对了什么
 
@@ -888,15 +895,25 @@ iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` �
 
 三个成员的依赖加载命令（`LC_LOAD_DYLIB` / `LC_LOAD_WEAK_DYLIB` / `LC_REEXPORT_DYLIB`）在两个版本里逐条相同，`systemhook.dylib` 与 `dyldhook_merge.arm64e.iOS16-17.dylib` 的每个切片都比对过。所以三个文件都不带进新的库依赖。
 
-未定义符号的比对结果是**三个成员分两种情形，不能概括成一句「完全相同」**：
+未定义符号的比对结果是**三个成员分两种情形，而且必须按架构分别读**：
 
-| 成员 | 未定义符号（补丁版 / 原版） | 新增 | 移除 |
+| 成员 | 每个切片的未定义符号（补丁版 / 原版） | 新增 | 移除 |
 | --- | --- | --- | --- |
-| `launchdhook.dylib` | 275 / 275 | 0 | 0 |
+| `launchdhook.dylib` | arm64 273 / 273，arm64e 273 / 273 | 0 | 0 |
 | `dyldhook_merge.arm64e.iOS16-17.dylib` | 0 / 0（`dyldhook/Makefile` 要求自包含） | 0 | 0 |
-| `systemhook.dylib` | 135 / 134 | **1** | 0 |
+| `systemhook.dylib` | arm64 **131 / 130**，arm64e **126 / 125** | 各 1 | 0 |
 
-`systemhook.dylib` 新增的那一个是 `__xpc_type_bool`。它不是新依赖：`0001-systemhook-set-search-paths.patch:114` 写的是 `xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL`，而 `XPC_TYPE_BOOL` 在 `<xpc/xpc.h>` 里就展开成 `&_xpc_type_bool` 这个导出数据符号。同一条语句里的 `xpc_get_type` 在原版 `systemhook` 里已经是未定义符号（它本来就用 `xpc_get_type` 判断 `DisableTweakInjection` 一类配置），所以多出来的只是取这个对象地址的那一处引用。
+**计数口径要先说清，否则同一条命令会报出四个不同的数。** `llvm-nm -u` 对每个架构切片先打印一个空行、再打印一行 `file (for architecture arm64):` 这样的表头，然后列该切片的符号。三种数法在本机的读数，按「补丁版 / 原版」写：
+
+| 数法 | `launchdhook` | `systemhook` arm64 | `systemhook` arm64e | `systemhook` 两切片并集 |
+| --- | --- | --- | --- | --- |
+| 每切片、去表头（本节采用） | 273 / 273 | **131 / 130** | **126 / 125** | 133 / 132 |
+| 每切片、连表头一起数 | 274 / 274 | 132 / 131 | 127 / 126 | — |
+| 并成一个集合、连表头 | — | — | — | 135 / 134 |
+
+`launchdhook` 两版符号完全相同，差 0；`systemhook` 每切片各多 1（补丁版多一个 `__xpc_type_bool`），那个 `+1` 在三种口径下都看得见。十二·三那张表用的是**每切片、去表头**的口径，与十二·四对变量名采用的口径一致。三种数字不可跨口径比较。本节早先写的 `275/275` 与 `134→135` 是**两切片并成一个集合、连表头**的读数，把两个架构的符号合并去重了，已按上表更正。
+
+`systemhook.dylib` 每个切片新增的那一个是 `__xpc_type_bool`。它不是新依赖：`0001-systemhook-set-search-paths.patch:114` 写的是 `xpc_get_type(disableSearchPath) == XPC_TYPE_BOOL`，而 `XPC_TYPE_BOOL` 在 `<xpc/xpc.h>` 里就展开成 `&_xpc_type_bool` 这个导出数据符号。同一条语句里的 `xpc_get_type` 在原版 `systemhook` 里已经是未定义符号（它本来就用 `xpc_get_type` 判断 `DisableTweakInjection` 一类配置），所以多出来的只是取这个对象地址的那一处引用。
 
 这台设备上 `_xpc_type_bool` 确实在 `libxpc` 里导出——`AGENTS.md` 第六节记录过用 `dlsym` 核对 16.1 `libxpc` 的 52 个 `xpc` / `CFBundle` 符号全部可解析，且 `xpc_main`、`sandbox_extension_*_to_process` 在场。**但 `_xpc_type_bool` 这个具体名字没有单独核对过**，所以准确的表述是：它由 `libxpc` 提供，未在本设备上单独用 `dlsym` 验证过；若缺失，表现会是加载 `systemhook.dylib` 时 dyld 报 `Symbol not found: __xpc_type_bool`，而不是静默失败。装机后第一次启动 `launchd` 就会暴露，回滚按十二·七。
 
@@ -951,9 +968,11 @@ iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` �
 
 原版的两个也不在，这一条比「补丁版不在」更有说服力：同名的原版文件本来就以不在表里的状态在这台设备上正常工作。`systemhook.dylib` 上一次被单独换掉时同样不在，那次用户空间重启成功了。两者都由 `launchd` 或 `dyld` 在越狱环境下加载，走的是 basebin 的信任路径，不是这张表的 cdhash 匹配。
 
-### 十二·六 安装步骤（**未执行**）
+### 十二·六 安装步骤（**本 mission 未执行；M127 已执行且失败**）
 
-**这一节整体未执行。** 设备上仍是原版 basebin，`launchdhook` 仍是 312848 / `449a9606`。
+**本 mission 没有执行这一节，但这一节描述的动作已经在 M127 里被执行过一次，结果见其文档第一节与第二节。** 本节记录的是当时的安装方法，供理解失败现场与执行回滚，**不是待执行的计划**。
+
+设备现在是出厂 basebin，`launchdhook` 312848 / `449a9606`——这是 panic 之后重新越狱把 basebin 整包还原的结果，不是「没装过」的状态。
 
 先备份。回滚要靠下面四份，缺任何一份都会让回滚变复杂：
 
@@ -1000,7 +1019,9 @@ for name,(size,digest) in want.items():
 EOF
 ```
 
-**用户空间重启是什么意思，怎么触发。** `jbctl update basebin` 不直接替换 `gen/dyld`。它把 tar 暂存，然后按 `BaseBin/jbctl/src/main.m:211-216` 触发一次 `reboot3(RB2_USERREBOOT)`——用户空间重启，不是整机重启。屏幕上所有应用退出，SpringBoard 重建，但内核不重启、Dopamine 不重启。重启过程中 `BaseBin/launchdhook/src/update.m:223` 调 `basebin_generate(YES)` 用 `dyld.orig` 加上 tar 里的 `dyldhook_merge.arm64e.iOS16-17.dylib` 现场合成新的 `gen/dyld`。两处行号与根目录 `AGENTS.md` 第 286、292 行的记录一致。
+**用户空间重启是什么意思，怎么触发。** `jbctl update basebin` 不直接替换 `gen/dyld`。它把 tar 暂存，然后按 `BaseBin/jbctl/src/main.m:211-216` 触发一次 `reboot3(RB2_USERREBOOT)`——用户空间重启，不是整机重启。屏幕上所有应用退出，SpringBoard 重建，但内核不重启、Dopamine 不重启。重启过程中 `BaseBin/launchdhook/src/update.m:223` 调 `basebin_generate(YES)` 用 `dyld.orig` 加上 tar 里的 `dyldhook_merge.arm64e.iOS16-17.dylib` 现场合成新的 `gen/dyld`。
+
+两处行号的出处不同，要分清：`update.m:223` 与根目录 `AGENTS.md` 第 292 行一致；`main.m:211-216` **在本仓库里只出现在本文（第七节 `:266` 与本处），`AGENTS.md` 没有这一条**——该文件全文不含 `main.m`，其第 286 行是 `basebin_gen.m:172`。所以这条行号目前只有源码侧的引用，没有仓库内第二处印证。本节复述的是原有的记录，没有重新核对 `main.m` 的那几行。
 
 所以**触发就是那条 `jbctl` 命令本身**，不需要另跑一条重启命令。若想核对 `gen/dyld` 是否真的重建过，重启后用第九节「安装后确认 `gen/dyld` 真的重建过」那三条只读命令：新 `gen/dyld` 里 `_MACHOMERGER_HOOK_` 前缀的 `isOverridablePath` 与 `isAlwaysOverridablePath` 应各为 1（此前自身为 0）。
 
@@ -1058,11 +1079,19 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 只有 `__XPC_` 两个，值不是覆盖目录 | 补丁没运行，`__XPC_` 是别处留下的 | `launchdhook` 是否被替换、`config.plist` 的 `DisableJBFrameworkPath` 是否为真 |
 | 四个都在且值正确，路径仍来自 `/System` | 搜索路径到位，但 dyld 不采纳磁盘副本 | `gen/dyld` 的两个 override hook 计数（第九节） |
 
-**中间那一行的判别为什么成立。** 两个读数来自同一条观测，所以必须靠值而不是名字区分：`launchd` 静默丢弃以 `DYLD_` 精确前缀开头的变量名，但保留 `__XPC_` 前缀的。**这一条来自本轮任务上下文记录的实测**（`DYLD_FOO` 读回空，`dyld_FOO`、`XDYLD_FOO`、`__XPC_DYLD_FOO`、`DYLDX`、`DYLD` 都读回 `yes`；`/sbin/launchd` 里 13 个 `DYLD_` 字符串全是 `DYLD_PRINT_*`），仓库内没有对应文档，本节也未重测。所以 `__XPC_DYLD_FRAMEWORK_PATH` 的值等于覆盖目录，说明**是这份补丁写的**，裸名在写入之后被下一层丢掉；值不是覆盖目录，说明这份补丁没写到这一层，`__XPC_` 那个变量来自别处。两种情形的修法完全不同，所以不能只看「有 `__XPC_` 就以为补丁生效了」。
+**中间那一行的判别为什么成立。** 判别靠的是值，不是名字，但这里要先把「`launchd` 会丢 `DYLD_` 名字」这句话收窄到实测覆盖的范围。
+
+实测的形态是：**通过 `launchctl setenv` 一类途径放进 `launchd` 自身环境的变量，名字以精确前缀 `DYLD_` 开头时被丢掉**（`DYLD_FOO` 读回空），而 `dyld_FOO`、`XDYLD_FOO`、`__XPC_DYLD_FOO`、`DYLDX`、`DYLD` 都读回 `yes`；`/sbin/launchd` 里 13 个 `DYLD_` 字符串全是 `DYLD_PRINT_*`。这一条来自本轮任务上下文记录的实测，仓库内没有对应文档，本节也未重测。
+
+**这句话不能推广成「所有 `DYLD_` 名字都进不了子进程」。** 同一个 `environment` 段落里就有反例：`DYLD_INSERT_LIBRARIES` 在场，而它同样以 `DYLD_` 开头。它的来源不同——它由 `launchdhook` 在 `spawn_exec_hook_common()` 里直接写进子进程 `envp`，不经过 `launchd` 自身环境那一步。所以两件事要分开：一条是「`launchctl setenv` 那条路丢 `DYLD_` 名字」，另一条是「spawn 钩子在 exec 时写进去的变量会不会也被后一层丢掉」，后者本节没有读数。
+
+**这决定了中间那一行能证到多少。** 补丁写四个变量用同一段代码、同一个时机（`jbSearchPathSet` 一次写四条），所以「裸名被丢、`__XPC_` 保留」这种选择性丢弃，要么发生在写入之后的某一层，要么根本没发生、只是补丁没写到。能把两者分开的对照就在同一段落里：`DYLD_INSERT_LIBRARIES` 一直是在的，所以若四个变量由同一次 spawn 写入、而只有两个裸搜索路径名不在，说明写入确实发生了，丢弃发生在写入之后；若 `__XPC_` 两条的值不是覆盖目录，说明这份补丁根本没写到这一层。
+
+判别仍然只看值：`__XPC_DYLD_FRAMEWORK_PATH` 的值等于覆盖目录，说明是这份补丁写的；指向别处或没有，说明不是它写的。**覆盖目录这个字符串只由这份补丁写进环境**，这是这条判别成立的全部依据，不依赖「`launchd` 丢所有 `DYLD_` 名字」这个更强的说法。
 
 顺带一个容易误判的点：`.xpc` 类型的 helper 自带 4 条 `LC_DYLD_ENVIRONMENT`，所以它们的候选路径即使补丁完全没生效也会出现。app 进程没有这类加载命令，所以**对 app 进程「路径来自哪里」才是这份补丁是否生效的判据**。
 
-**中间那一行具体长什么样。** 假设补丁写入了变量，但 `launchd` 把裸名丢掉、只把 `__XPC_` 那对传下来，则 `launchctl print pid/$APP` 的 `environment` 段落会是这样（其余条目照旧）：
+**中间那一行具体长什么样。** 假设补丁写入了变量，但裸名在写入之后被某一层丢掉、只把 `__XPC_` 那对传下来，则 `launchctl print pid/$APP` 的 `environment` 段落会是这样（其余条目照旧；注意 `DYLD_INSERT_LIBRARIES` 在场）：
 
 ```
 	environment = {
@@ -1076,7 +1105,7 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 
 三处可以读出结论：
 
-1. `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 两条**不在**；
+1. `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 两条**不在**，而同段里 `DYLD_INSERT_LIBRARIES` 在；
 2. `__XPC_` 两条的值**正好是** `/var/jb/Library/WebKitOverride` 与它下面的 `usr/lib`，与 `0001-systemhook-set-search-paths.patch` 里那两条 `JBROOT_PATH(...)` 拼接结果一致；
 3. `launchctl print` 里 `path = /System/Library/...` 仍然成立，即路径读数失败。
 
@@ -1086,18 +1115,56 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 
 ### 十二·九 本节各步的执行状态
 
-| 步骤 | 状态 |
-| --- | --- |
-| 三份 tar 的 sha256、尺寸、成员数与逐成员比对 | **已执行**（本机） |
-| 六个 dyldhook 成员的 hook token 计数 | **已执行**（本机） |
-| 两个 `launchdhook` 版本的变量计数（三种口径） | **已执行**（本机） |
-| 三个成员的依赖加载命令逐切片比对 | **已执行**（本机），逐条相同 |
-| 三个成员的未定义符号比对 | **已执行**（本机）：`launchdhook` 275/275、hook dylib 0/0、`systemhook` 134→135（新增 `__xpc_type_bool`） |
-| `basebin.tc` 的 28 条 cdhash 核对 | **已执行**（本机） |
-| 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：6 条具体断言失败 + 1 条汇总行，见十二·二 |
-| 把 tar 送到设备 | **未执行** |
-| `jbctl update basebin` | **未执行** |
-| 用户空间重启 | **未执行** |
-| 落地字节核对、`lldb` 路径读数 | **未执行** |
+「本 mission」一列只说我自己的动作。M127 执行过的步骤单独标在最后一列，因为把它们算成「未执行」会掩盖一次真实的设备事故。
 
-**所以此刻设备上没有任何补丁生效**，`launchdhook` 仍是 312848 / `449a9606` 的原版，`gen/dyld` 仍只带 Dopamine 原有的两个 hook。十二·八的成功判据在被真正执行之前，不能用于宣布任何结论。
+| 步骤 | 本 mission | M127 |
+| --- | --- | --- |
+| 三份 tar 的 sha256、尺寸、成员数与逐成员比对 | **已执行**（本机） | 未做 |
+| 六个 dyldhook 成员的 hook token 计数 | **已执行**（本机） | 未做 |
+| 两个 `launchdhook` 版本的变量计数（三种口径） | **已执行**（本机） | 未做 |
+| 三个成员的依赖加载命令逐切片比对 | **已执行**（本机），逐条相同 | 未做 |
+| 三个成员的未定义符号比对 | **已执行**（本机，每切片去表头）：`launchdhook` 273 / 273、hook dylib 0 / 0、`systemhook` arm64 131 / 130 与 arm64e 126 / 125，见十二·三 | 未做 |
+| 四个成员（两版各两个）的 cdhash 与 `basebin.tc` 的比对 | **已执行**（本机），含 11 个槽位的反面对照，见十二·十 | 未做 |
+| 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：6 条具体断言失败 + 1 条汇总行，见十二·二 | 未做 |
+| 把 tar 送到设备 | **未执行** | **已执行**，`/var/mobile/Documents/bb/basebin-lh.tar` |
+| `jbctl update basebin` | **未执行** | **已执行**，2026-11-26 00:50:43 |
+| 用户空间重启 | **未执行** | **已执行**，由 `jbctl` 触发，随后五次内核 panic |
+| 落地字节核对 | **未执行** | 未取到（设备进入 panic 循环） |
+| `lldb` 路径读数（十二·八的成功判据） | **未执行** | **未取到，判据记为失败**，见其文档第三节 |
+
+**此刻设备上是出厂 basebin**，`launchdhook` 312848 / `449a9606`，`gen/dyld` 只带 Dopamine 原有的两个 hook。这个状态来自 panic 之后的手动重新越狱，不来自「从未安装」。十二·八的成功判据至今**没有被观测到过**，因此不能用于宣布任何结论。
+
+### 十二·十 信任缓存这一节，本 mission 的独立复算
+
+十二·五由 M135 负责改写，本节不重复它的结论，也不修改它。这里只记录本 mission 自己按 cdhash 复算的读数，用途是交叉核对：两份文档若在同一个文件上得出不同的 cdhash，其中至少一份算错了。
+
+**这一节所在分支上的十二·五仍是按文件 sha1 去查表的那一版，而本节用的是 cdhash。** 两种量不同，所以在合并 M135 的改写之前，本文件里这两节会在「原版在不在表里」这一点上给出相反的答案：十二·五说原版两个都不在，本节说原版每个切片都命中。**以本节和下表的读数为准，十二·五的结论待 M135 那版替换。**
+
+M135 把十二·五改成了按 cdhash 比对，那一节发布的 cdhash 与本节下表逐条相同（`launchdhook` 的 `0e59e398…`、`a7438ed3…`、`fe83a746…`、`6e8952fb…`，`systemhook` 的 `dd3f99c4…`、`d3c4e949…`、`8d580b85…`、`bd93fa08…`），所以两处合并之后不矛盾。
+
+**取法**：按每个架构切片读出 `LC_CODE_SIGNATURE`（load command `0x1d`），进入它指向的 SuperBlob，走索引取槽位 `0x0`，读 CodeDirectory 偏移 **37** 处的 `hashType`，`1` 取 `SHA1`、`2` 取 `SHA256`，都截到 20 字节。表文件 `basebin.tc` 是 640 字节、版本 `1`、uuid `a3e4647f…`、28 条记录，它自己的 sha256 是 `12bdb75e6962…`。
+
+| 文件 | 切片 | `hashType` | cdhash（前 40 位） | 在 28 条里 |
+| --- | --- | --- | --- | --- |
+| 原版 `launchdhook` 312848 | arm64 | 2 | `0e59e39881d8ed7152b5102c87fe3fd2d660818b` | 是 |
+| 原版 `launchdhook` 312848 | arm64e | 2 | `a7438ed3dc79bcda49ec9434b901bf5a73fbaab9` | 是 |
+| 补丁版 `launchdhook` 330144 | arm64 | 1 | `fe83a746623ac9ccb21c32305c750ecbb22833c2` | 否 |
+| 补丁版 `launchdhook` 330144 | arm64e | 1 | `6e8952fb386181b0c5edcd0f619db2aa76f290c0` | 否 |
+| 补丁版 `launchdhook` 330144 | arm64，槽位 `0x1000` | 2 | `f68f9da38e2e761e91a1a56032c411ac12288902` | 否 |
+| 补丁版 `launchdhook` 330144 | arm64e，槽位 `0x1000` | 2 | `6f362b32d2aa3550ebf42bd320d12e08e6a39243` | 否 |
+| 原版 `systemhook` 233520 | arm64 | 2 | `dd3f99c4a4ba13daf631e1f2fd1acd0a84883c35` | 是 |
+| 原版 `systemhook` 233520 | arm64e | 2 | `d3c4e949ddb149072bfef1d225eabbd4caab28e7` | 是 |
+| 补丁版 `systemhook` 234336 | arm64 | 1 | `8d580b8510297956b4071972a11cc1dc05215c09` | 否 |
+| 补丁版 `systemhook` 234336 | arm64e | 1 | `bd93fa08208960d6d1f205853e3e385712aa05a8` | 否 |
+| 补丁版 `systemhook` 234336 | arm64，槽位 `0x1000` | 2 | `14d05a3f395a5f28d69a2f61e02a9042fe7d5750` | 否 |
+| 补丁版 `systemhook` 234336 | arm64e，槽位 `0x1000` | 2 | `d468b1fb963f87126eaa4251e3149ebbf274b601` | 否 |
+
+上表中 `launchdhook` 那六行与 M127 `docs/ios16-launchdhook-basebin-install-panic.md` 第 126 行逐条一致：补丁版的 `fe83a746…`、`6e8952fb…` 与它的两个 `0x1000` 槽位 `f68f9da3…`、`6f362b32…`，原版的 `0e59e398…`、`a7438ed3…`。按 `basebin.tc` 里的记录顺序（从 0 开始数），`0e59e398…` 是第 3 条、`a7438ed3…` 是第 19 条，与那份文档写的「记录 3 与 19」相符。
+
+原版 `systemhook` 的两条也在表里，0 起算分别是第 24 条 `d3c4e949…` 与第 25 条 `dd3f99c4…`。这两个值 M127 没有发布，本节首次给出。
+
+**反面对照**：同一套取法作用在设备 `basebin.tc` 里有记录的其他 basebin 文件上，11 个槽位 `0x0` 期望全部命中——`libjailbreak.dylib` 两切片 `4afef8bc…`/`6334958e…`，`jbctl` 两切片 `f5a7287e…`/`68ae65f9…`，`dopamine` 单切片 `4d2be50b…`，`hookd` 两切片 `00b60595…`/`ab5b18f1…`，`boomerang` 两切片 `61124285…`/`03eed9f8…`，`libchoma.dylib` 两切片 `f6ab2aea…`/`4f31e186…`。11 个期望、11 个命中，说明这套取法会读到「在」，不会一律读成「不在」。
+
+**一处与 M127 发布范围的差别，记为本节的读数**：补丁版 `systemhook` 与补丁版 `launchdhook` 同形，每个切片也各多一个槽位 `0x1000`，它的 cdhash `14d05a3f…`/`d468b1fb…` 同样不在 28 条里。M127 第 126 行只发布了 `launchdhook` 的 `0x1000` 槽位。本节不改那份文档；十二·五的论证不依赖 `0x1000` 槽位的个数。
+
+**这个结果不足以解释 panic。** 「补丁版不在 `basebin.tc` 里」证到的只是它不是**加载失败**的充分原因：有不在表里的二进制在这台设备上照常工作过，而 Dopamine 3.0.13 的设备准入走 `pmap_cs_allow_invalid`（`BaseBin/libjailbreak/src/kernel.c:339`，对 arm64e 无条件执行），与这张表的 cdhash 匹配无关。反过来说「与 panic 无关」同样没有依据：补丁版确实不在那 28 条里，而这条链确实参与信任判定，两边不能互推。**panic 的病因在这条轴线上仍记为未知。**
