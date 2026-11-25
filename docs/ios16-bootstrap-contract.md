@@ -33,7 +33,7 @@ c16486c663b Versioning.
 
 ### `Safari-614.1.9` 不是 16.1 的系统 WebKit
 
-本文旧版把 `Safari-614.1.9` 当作 16.1 的取源，这是错误的，而且整张 16.1 列因此反过来。它是 Safari 15 世代的一个 tag：
+本文旧版把 `Safari-614.1.9` 当作 16.1 的取源，这是错误的，而且整张 16.1 列因此反过来。`Safari-614.1.9`（`SOURCE_VERSION` 614.1.9.0.0，2022-04-06，提交 `694667f7d7c`）是 iOS 16.0 世代的无版本交付主干快照，版本号比 `Safari-16-iOS-16.0` 的 614.1.25.0.30 更早；它不是设备运行的 16.1（`releases/Apple/Safari-16.1-iOS-16.1`，614.2.9.0.10）。
 
 ```sh
 $ git show Safari-614.1.9:Source/WebKit/Configurations/Version.xcconfig | grep -E 'MAJOR|MINOR|TINY'
@@ -43,9 +43,32 @@ TINY_VERSION = 9;
 
 $ git log -1 --format='%ci %s' Safari-614.1.9
 2022-04-06 20:47:33 +0000 Fix the CG_DISPLAY_LIST_BACKED_IMAGE_BUFFER build
+
+$ for t in Safari-614.1.9 releases/Apple/Safari-16-iOS-16.0 releases/Apple/Safari-16.1-iOS-16.1 \
+>          releases/Apple/Safari-15-iOS-15.0 releases/Apple/Safari-15.3-iOS-15.3.1 \
+>          releases/Apple/Safari-15.4-iOS-15.4 releases/Apple/Safari-15.5-iOS-15.5 \
+>          releases/Apple/Safari-15.6-iOS-15.6; do
+>   printf '%s: ' "$t"
+>   git show $t:Source/WebKit/Configurations/Version.xcconfig \
+>     | grep -E '^(MAJOR|MINOR|TINY|MICRO|NANO)_VERSION' | sed -E 's/[A-Z_]+ = ([0-9]+);/\1/' | tr '\n' '.'
+>   echo
+> done
+Safari-614.1.9: 614.1.9.0.0.
+releases/Apple/Safari-16-iOS-16.0: 614.1.25.0.30.
+releases/Apple/Safari-16.1-iOS-16.1: 614.2.9.0.10.
+releases/Apple/Safari-15-iOS-15.0: 612.1.27.0.31.
+releases/Apple/Safari-15.3-iOS-15.3.1: 612.4.9.0.4.
+releases/Apple/Safari-15.4-iOS-15.4: 613.1.17.0.7.
+releases/Apple/Safari-15.5-iOS-15.5: 613.2.7.0.7.
+releases/Apple/Safari-15.6-iOS-15.6: 613.3.9.0.5.
+
+$ git rev-list --count 694667f7d7c..releases/Apple/Safari-16-iOS-16.0^{commit}
+3396
 ```
 
-`614.1.9` 的日期是 2022-04-06，`614.2.9.0.10` 是 2022-10。两者不是同一版，而且 `Safari-614.1.9` 里没有 `SDKAlignedBehavior` 枚举：
+`614` 这条线从 16.0 开始：Safari 15.0 到 15.3 是 `612` 线（15.0 的 `MAJOR_VERSION` 是 612），15.4 到 15.6 是 `613` 线（613.1.17、613.2.7、613.3.9），到 16.0 才进入 `614`。`614.1.9` 也不是 `Safari-16-iOS-16.0` 的祖先，两者相距 3396 个提交，是同一版本线上的两次独立 `Versioning.` 快照，所以它同样不能当作 16.0 的取源。
+
+`614.2.9.0.10` 是 2022-10 的树，与 `614.1.9` 不是同一版，而且 `Safari-614.1.9` 里没有 `SDKAlignedBehavior` 枚举：
 
 ```sh
 $ git grep -c 'SDKAlignedBehavior' Safari-614.1.9 -- Source | wc -l
