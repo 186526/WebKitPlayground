@@ -12,10 +12,16 @@ cases are the ways the switch can come back and the ways the check could pass by
   declaration;
   a macro initialiser must fail, because Connection.h cannot see MessageNumberTranslation.h;
   deleting the wrong-16.1-tag fact must fail, because that is the defect a reader has to see;
-  a missing patch must be reported distinctly, so a read error is not read as a pass.
+  a missing patch must be reported distinctly, so a read error is not read as a pass;
+  a count or tag drifted back to a wrong value must fail, so a needle cannot be a marker that also
+  occurs somewhere else in the file;
+  a table entry retargeted or renumbered must fail, because the prose check reads comments only and
+  the tables are what a translated connection dispatches on.
 
 The "as committed" case reads the real patch, so a patch edited without updating this check fails
-here rather than in the build.
+here rather than in the build. Two further passes read the real patch too: every rationale needle
+must occur exactly once in its prose, and deleting any one needle must fail the checker. Together
+those make "the needle is unique and necessary" an executable invariant instead of a reading.
 
 Usage: python3 scripts/test-check-translation-switch.py
 """
@@ -40,7 +46,9 @@ _SPEC.loader.exec_module(CHECK)
 
 # A patch fixture with every anchor the checker requires, so a case that targets one rule is not
 # failed by an unrelated one. The prose is quoted from the patch itself, line breaks and all, so a
-# needle that only matches the real wording cannot pass here by coincidence.
+# needle that only matches the real wording cannot pass here by coincidence. The trailing code lines
+# are the table anchors check_table_anchors reads, in the shape the patch writes them: without them
+# every fixture would fail on a rule the case is not about.
 BASE = """\
 +bool m_shouldTranslateMessageNames { false };
 +void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }
@@ -66,7 +74,14 @@ BASE = """\
 +// anchors 2946, 2478 and 3184. Every one of those three numbers differs: 45 at
 +// Last, 34 at InitializeConnection and 47 at the first synchronous message.
 +// So these tables are a 16.0-generation snapshot, not 16.1.
-"""
++    case MessageName::InitializeConnection: return static_cast<MessageName>(2444);
++    case MessageName::WebPageProxy_RootViewToAccessibilityScreen: return static_cast<MessageName>(3076);
++    case MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged: return static_cast<MessageName>(3024);
++    case MessageName::WrappedAsyncMessageForTesting: return static_cast<MessageName>(3139);
++    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;
++    case 3024: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;
++    case 2899: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;
++"""
 
 CALL = "+    m_connection->setShouldTranslateMessageNames(true);\n"
 CALL_NO_ARGUMENT = "+    m_connection->setShouldTranslateMessageNames();\n"
@@ -88,6 +103,46 @@ VIDEO_FRAME = "MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfCha
 SWAPPED_NAMES = (
     BASE.replace("with " + ROOT_VIEW, "with " + VIDEO_FRAME)
     .replace("names " + VIDEO_FRAME, "names " + ROOT_VIEW)
+)
+
+# The bare markers that stayed behind when the first five needles were fixed. Each must now fail on a
+# sentence deletion or a value change, which is what "the needle is unique and necessary" means.
+SENTENCE_NEEDLES = (
+    (
+        "a patch that deletes the InitializeConnection-is-3076 sentence fails",
+        "// basis, so both are named. `InitializeConnection` is number 3076 in this tree.\n",
+        "// basis, so both are named. The connection handshake is the message discussed here.\n",
+        "InitializeConnection is 3076 in this tree",
+    ),
+    (
+        "a patch that drifts 3180 to 3181 fails",
+        "+// with the same name, 3180 land on a different message",
+        "+// with the same name, 3181 land on a different message",
+        "the different-message count against shipped 16.1",
+    ),
+    (
+        "a patch that retags Safari-614.1.9 fails",
+        "+// built on tag Safari-614.1.9, which holds 3140 numbers",
+        "+// built on tag Safari-614.2.0, which holds 3140 numbers",
+        "the tag the tables were generated from",
+    ),
+)
+
+# P2-2's two cases: the table can be retargeted or renumbered while the prose still reads correctly,
+# which is exactly the silent rename this check exists to prevent.
+TABLE_CASES = (
+    (
+        "a patch that retargets incoming case 3076 at another real message fails",
+        "+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;\n",
+        "+    case 3076: return MessageName::WebPageProxy_RootViewToScreen;\n",
+        "3076 declares WebPageProxy_RootViewToAccessibilityScreen",
+    ),
+    (
+        "a patch that renumbers incoming case 3076 to 3075 fails",
+        "+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;\n",
+        "+    case 3075: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;\n",
+        "no entry for 3076 declares WebPageProxy_RootViewToAccessibilityScreen",
+    ),
 )
 
 
@@ -164,6 +219,77 @@ CASES += (
     ),
 )
 
+for description, old_text, new_text, needle_description in SENTENCE_NEEDLES:
+    CASES += ((description, BASE.replace(old_text, new_text), 1, "no longer records %s" % needle_description),)
+
+for description, old_text, new_text, expected_message in TABLE_CASES:
+    CASES += ((description, BASE.replace(old_text, new_text), 1, expected_message),)
+
+
+def check_needles_are_unique_and_necessary() -> int:
+    """Assert each rationale needle occurs exactly once in the real patch's prose, and is necessary.
+
+    Uniqueness is what makes a needle a guard. A bare number or tag name occurs several times in this
+    patch, so deleting the sentence the needle was taken from leaves another occurrence matching and
+    the check passes: that was the defect in `"3076"`, which occurs six times. Necessity is the same
+    property from the other side and is tested by deleting the needle from the prose and running the
+    checker, which has to exit 1. Both halves run against the committed patch's own text, so a rewrite
+    that reintroduces a shared marker fails here rather than at review time.
+    """
+    if not REAL_PATCH.exists():
+        print("FAIL: the real patch is missing: %s" % REAL_PATCH)
+        return 1
+    real_text = REAL_PATCH.read_text(encoding="utf-8")
+    prose = CHECK.added_comment_prose(real_text)
+    failures = 0
+    for description, needle in CHECK.REQUIRED_RATIONALE:
+        count = prose.count(needle)
+        if count != 1:
+            failures += 1
+            print("FAIL: %r occurs %d times in the prose, not once" % (needle, count))
+            print("  needle for %s; a second occurrence means deleting its sentence still passes"
+                  % description)
+    if failures:
+        return failures
+    print("ok: every rationale needle occurs exactly once (%d needles)"
+          % len(CHECK.REQUIRED_RATIONALE))
+
+    # The fixture is the real patch's prose on one line plus the code the other rules need, so an
+    # edit here cannot be confounded by where a comment happens to wrap.
+    scaffold = "\n".join([
+        "+bool m_shouldTranslateMessageNames { false };",
+        "+void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }",
+        "+// " + prose,
+        "+    case MessageName::InitializeConnection: return static_cast<MessageName>(2444);",
+        "+    case MessageName::WebPageProxy_RootViewToAccessibilityScreen: return static_cast<MessageName>(3076);",
+        "+    case MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged: return static_cast<MessageName>(3024);",
+        "+    case MessageName::WrappedAsyncMessageForTesting: return static_cast<MessageName>(3139);",
+        "+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;",
+        "+    case 3024: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;",
+        "+    case 2899: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;",
+        "",
+    ])
+    if run(scaffold).returncode != 0:
+        print("FAIL: the scaffold built from the real prose does not pass on its own")
+        result = run(scaffold)
+        print("  stdout: %s" % result.stdout.strip())
+        print("  stderr: %s" % result.stderr.strip())
+        return 1
+
+    for description, needle in CHECK.REQUIRED_RATIONALE:
+        result = run(scaffold.replace(needle, "", 1))
+        if result.returncode != 1:
+            failures += 1
+            print("FAIL: deleting %r for %s left the checker at exit %d, not 1"
+                  % (needle, description, result.returncode))
+            print("  stdout: %s" % result.stdout.strip())
+            print("  stderr: %s" % result.stderr.strip())
+    if failures:
+        return failures
+    print("ok: deleting any one needle fails the check (all %d tried)"
+          % len(CHECK.REQUIRED_RATIONALE))
+    return 0
+
 
 def main() -> int:
     failures = 0
@@ -219,6 +345,9 @@ def main() -> int:
     if not REAL_PATCH.exists():
         print("FAIL: the real patch is missing: %s" % REAL_PATCH)
         failures += 1
+        return 1
+
+    failures += check_needles_are_unique_and_necessary()
 
     if failures:
         print("%d case(s) failed" % failures)

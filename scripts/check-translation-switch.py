@@ -29,7 +29,14 @@ What it refuses, and why each combination is a defect rather than a preference:
 
   - Removal of the rationale. The patch's own comment is the only place that names the measured
     numbers and the wrong-16.1-tag defect. A future edit that deletes the comment and re-adds the
-    switch would look like a small change; the anchors checked below make that edit fail here.
+    switch would look like a small change; the anchors checked below make that edit fail here. Each
+    anchor is a phrase that occurs exactly once in the prose, and the tests assert that, because a
+    bare number occurs many times and would keep matching after its sentence was rewritten.
+
+  - A table entry that disagrees with the prose. The prose check reads comments only, so a renumbered
+    `case` or a mapping retargeted at another real message would otherwise pass. The tables are what
+    a translated connection dispatches on, so the anchor pairs the prose names are read back out of
+    the added code and compared.
 
 The script reads the patch file, not a checkout, so it runs before the build has a tree and cannot
 be satisfied by a tree that happens to be patched differently from the deb.
@@ -38,8 +45,8 @@ Usage:
   scripts/check-translation-switch.py
   scripts/check-translation-switch.py --patch patches/ios16-ipc-message-number-translation.patch
 
-Exit 0 when the switch is absent and the rationale is present, 1 on any violation, 2 when the patch
-cannot be read.
+Exit 0 when the switch is absent, the rationale is present and the table anchors hold; 1 on any
+violation; 2 when the patch cannot be read.
 """
 from __future__ import annotations
 
@@ -62,23 +69,25 @@ DECLARATION_HINTS = ("void setShouldTranslateMessageNames", "bool setShouldTrans
 # Connection.h does not include.
 MEMBER = re.compile(r"\bbool\s+m_shouldTranslateMessageNames\s*\{([^}]*)\}")
 
-# Text the patch must keep. Each entry is a claim a reader relies on to judge a future change; the
-# needles are short so that rewrapping a comment does not fail the check, and specific enough that
-# deleting or altering the fact does.
+# Text the patch must keep. Each entry is a claim a reader relies on to judge a future change.
 #
-# They are matched against the patch's added comment prose only, never against its code. Several of
-# the numbers below are also real case labels in the tables (`case 3135:`, `return 946`), so a
-# search over the whole patch would match them whatever the prose said, and a count that drifted
-# back to a wrong value would still find a match in the code. For the same reason the counts carry
-# the words around them rather than standing alone: `946` on its own still occurs inside the
-# device anchor `2946`, which is a different claim.
+# Every needle must occur exactly once in the patch's added comment prose. A needle that is a bare
+# number or a bare tag name occurs several times in this file, so altering or deleting the sentence
+# it came from would leave other occurrences matching and the check would pass: `3076` alone appears
+# six times, `Safari-614.1.9` twice, and the releases tag three times. Each needle therefore carries
+# the words that make it unique, and `test-check-translation-switch.py` asserts the uniqueness as an
+# invariant rather than leaving it to be re-checked by eye.
+#
+# The needles are matched against the added comment prose only, never against code. Several of the
+# numbers below are also real case labels in the tables (`case 3135:`, `return 946`), so a search
+# over the whole patch would match them whatever the prose said.
 #
 # Every 16.1 mention in the patch is qualified, because the tables are NOT built on shipped 16.1:
 # they come from the 614.1.9 snapshot, which is the iOS 16.0 generation. The entries below pin both
 # bases and the counts for both, so an edit cannot quietly drop one and leave the patch claiming a
 # basis it does not have.
 REQUIRED_RATIONALE = (
-    ("InitializeConnection is 3076 in this tree", "3076"),
+    ("InitializeConnection is 3076 in this tree", "`InitializeConnection` is number 3076 in this tree"),
     ("the 614.1.9 number for InitializeConnection", "2444 and Last 3139"),
     ("the message 3076 silently becomes, per the 614.1.9 basis",
      "case 3076 with MessageName::WebPageProxy_RootViewToAccessibilityScreen"),
@@ -87,19 +96,20 @@ REQUIRED_RATIONALE = (
     ("the handshake comparison that then never fires",
      "decoder->messageName() == MessageName::InitializeConnection"),
     ("the same-name count of the index comparison", "5 land on a message"),
-    ("the different-message count against shipped 16.1", "3180"),
+    ("the different-message count against shipped 16.1", "3180 land on a different message"),
     ("the beyond-range count against shipped 16.1", "and 901 fall off"),
     ("the net growth over the 614.1.9 snapshot", "946 more entries"),
     ("the different-message and beyond-range counts against the 614.1.9 basis",
      "5, 3135 and 946. Both readings"),
     ("the tree's own size", "4086 numbers"),
-    ("the shipped 16.1 enumeration's size", "3185"),
-    ("the tag the tables were generated from", "Safari-614.1.9"),
+    ("the shipped 16.1 enumeration's size and tag",
+     "shipped 16.1 enumeration (releases/Apple/Safari-16.1-iOS-16.1, 3185 numbers)"),
+    ("the tag the tables were generated from", "built on tag Safari-614.1.9"),
     ("the statement that the tables are a 16.0-generation snapshot", "16.0-generation snapshot"),
     ("the first anchor that tag produces", "firstSynchronousOldMessageNumber 2899"),
-    ("the tag the device actually runs", "releases/Apple/Safari-16.1-iOS-16.1"),
+    ("the tag the device actually runs", "device runs releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10)"),
     ("the anchors the device's build produces", "2946, 2478 and 3184"),
-    ("the gap at Last between the two enumerations", "45 at"),
+    ("the gap at Last between the two enumerations", "45 at Last"),
 )
 
 # A mention of the setter inside a comment is documentation, not a call. The patch's added lines all
@@ -214,6 +224,90 @@ def check_rationale(patch: str) -> list[Violation]:
     return violations
 
 
+# The two tables, read from the patch's added code rather than its prose. The prose check above
+# deliberately excludes code, so without this one a table entry can be renumbered and the run stays
+# green. That is the same silent rename this whole check exists to prevent, reachable from the table
+# side: the tables are what a translated connection actually dispatches on.
+OUTGOING = re.compile(r"case\s+MessageName::(\w+)\s*:\s*return\s+static_cast<MessageName>\((\d+)\);")
+INCOMING = re.compile(r"case\s+(\d+)\s*:\s*return\s+MessageName::(\w+);")
+
+# (description, direction, key, expected). `key` is a message name for the outgoing table and a
+# number for the incoming one. These are the mappings the patch's own prose names, so a change to
+# either side of a pair is a change to a claim a reader relies on:
+#
+#   `InitializeConnection` is number 3076 in this tree, and the older numbering it is translated to
+#   is 614.1.9, where it is 2444. The incoming table reads case 3076 as
+#   WebPageProxy_RootViewToAccessibilityScreen, the message that occupies 3076 in 614.1.9, which is
+#   why the handshake comparison stops matching.
+TABLE_ANCHORS = (
+    ("InitializeConnection translates to its 614.1.9 number", "outgoing", "InitializeConnection", 2444),
+    ("3076 declares WebPageProxy_RootViewToAccessibilityScreen, not the handshake", "incoming", 3076,
+     "WebPageProxy_RootViewToAccessibilityScreen"),
+    ("that message's own outgoing number is 3076", "outgoing",
+     "WebPageProxy_RootViewToAccessibilityScreen", 3076),
+    ("RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged translates to 3024", "outgoing",
+     "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged", 3024),
+    ("case 3024 reads back as RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged", "incoming",
+     3024, "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
+    ("the outgoing table's largest number is 614.1.9's Last of 3139", "outgoing",
+     "WrappedAsyncMessageForTesting", 3139),
+    ("the incoming table's first synchronous number is the anchor node", "incoming", 2899,
+     "GPUConnectionToWebProcess_EnsureAudioSession"),
+)
+
+
+def table_entries(patch: str) -> tuple[dict[str, int], dict[int, str]]:
+    """The outgoing and incoming mappings the patch adds, read from its non-comment code lines.
+
+    A patch that carries two different numbers for one name keeps the last one read, which is what
+    the later `case` would do at run time only if the first were unreachable; the anchor check
+    reports the mismatch rather than modelling that, because a duplicate key is itself the defect.
+    """
+    outgoing: dict[str, int] = {}
+    incoming: dict[int, str] = {}
+    for code in added_code_lines(patch):
+        if code.startswith("case") is False:
+            continue
+        found = OUTGOING.match(code)
+        if found:
+            outgoing[found.group(1)] = int(found.group(2))
+            continue
+        found = INCOMING.match(code)
+        if found:
+            incoming[int(found.group(1))] = found.group(2)
+    return outgoing, incoming
+
+
+def check_table_anchors(patch: str) -> list[Violation]:
+    outgoing, incoming = table_entries(patch)
+    violations = []
+    for description, direction, key, expected in TABLE_ANCHORS:
+        if direction == "outgoing":
+            table, label = outgoing, "outgoing"
+        else:
+            table, label = incoming, "incoming"
+        if key not in table:
+            violations.append(
+                Violation(
+                    "the %s table has no entry for %s" % (label, description),
+                    "expected case %s -> %s in the %s table the patch adds; without it the rename "
+                    "this check exists to prevent is unguarded from the table side"
+                    % (key, expected, label),
+                )
+            )
+            continue
+        if table[key] != expected:
+            violations.append(
+                Violation(
+                    "the %s table disagrees with the prose about %s" % (label, description),
+                    "expected %s -> %s, found %s -> %s; the table is what a translated connection "
+                    "dispatches on, so a mismatch here is the rename, not a comment error"
+                    % (key, expected, key, table[key]),
+                )
+            )
+    return violations
+
+
 # A bare "16.1" next to the word "table" is the claim this check exists to prevent: the tables come
 # from the 614.1.9 snapshot, which is the iOS 16.0 generation, so calling them 16.1 would tell a
 # reader they cover the build on the device when they do not. A mention is qualified when the same
@@ -257,6 +351,7 @@ def run(patch_path: Path) -> int:
     violations += check_no_setter_call(patch)
     violations += check_member_initialiser(patch)
     violations += check_rationale(patch)
+    violations += check_table_anchors(patch)
     violations += check_no_unqualified_table_claim(patch)
 
     if violations:
@@ -266,7 +361,7 @@ def run(patch_path: Path) -> int:
         return 1
 
     print("check-translation-switch: no call to setShouldTranslateMessageNames, the flag keeps its "
-          "false initialiser, and the rationale is intact")
+          "false initialiser, the rationale is intact and the table anchors hold")
     return 0
 
 
