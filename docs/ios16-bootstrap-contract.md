@@ -206,7 +206,26 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支不进入，控制直接到 `RELEASE_ASSERT`。
 2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），即使进了分支也取不到字符串，回退在第二个 `if` 处返回 false，位图保持全零。
 
-所以修补后的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。正确的判据是**数据块长度**而不是键是否存在：长度为 8 时按 16.1 的 63 项布局解码，长度为 12 时按 18.3 的 94 项布局解码，都不等于两者时才算非法。这条改动在 mission M85（`feat/p9-inner-aligned-behaviors-fallback-and-constant`）里进行，截至本文写作时该分支尚无提交，所以本文按现状描述。
+所以修补后的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。正确的判据是**数据块长度**而不是键是否存在：长度为 12 时走原路径，长度为 8 时走 16.1 分支，两者都不等于时才算非法。这条改动在 mission M85（`feat/p9-inner-aligned-behaviors-fallback-and-constant`）里进行，截至本文写作时该分支尚无提交，所以本节同时描述现状与 M85 的规则。
+
+### 8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图
+
+两版的枚举项数与顺序毫无对应关系，所以不存在「按位置搬过去」的做法。实测：
+
+```sh
+$ git show releases/Apple/Safari-16.1-iOS-16.1:Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h \
+  | sed -n '/enum class SDKAlignedBehavior/,/^};/p' | grep -E ... | grep -v NumberOfBehaviors | wc -l
+63
+$ git show releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h \
+  | sed -n '/enum class SDKAlignedBehavior/,/^};/p' | grep -E ... | grep -v NumberOfBehaviors | wc -l
+94
+```
+
+按名字逐项比对，**64 个下标里只有 3 个在两版指同一个行为**：`0 AllowsWheelEventGesturesToBecomeNonBlocking`、`2 AuthorizationHeaderOnSameOriginRedirects`、`3 BlanksViewOnJSPrompt`。有 62 个名字两版都存在，但下标不同。另有名字只在 16.1 存在，例如 `ApplicationCacheDisabledByDefault`（16.1 下标 1）在 18.3.1 的枚举里完全没有。
+
+结论：8 字节的负载**无法**按位置映射成 12 字节的位图。若按位置 `memcpy`，绝大多数比特会落到错误的行为上，宁可不启用也不能错误启用。M85 的 16.1 分支因此在长度匹配时**丢弃**该负载、让位图保持已知状态，而不是试图解码它。这不是缺陷，是两版位序无关这一事实的必然结果。
+
+要让 16.1 的位图真正生效，需要一份两版的下标对照表，按名字把 16.1 的每个行为映射到 18.3 的对应项，对 18.3 独有的项取默认值。这份表尚未编写，也不在 M85 范围内。
 
 ## `ContainerEnvironmentVariables` 与 `OverrideLanguages` 的承载字典
 
@@ -314,6 +333,6 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 - 16.1 UI 进程拉起 18.3 helper 时，helper 是否确实在 `getClientSDKAlignedBehaviors` 的 `RELEASE_ASSERT` 处中止。判据是崩溃报告里 `termination.namespace` 与栈顶是否出现 `XPCServiceInitializer`；本次未取得该报告。同理反向组合也未实测。
 - `XM18:178` 在 `ContainerEnvironmentVariables` 缺失时把 `xpc_dictionary_get_value` 返回的 NULL 传给 `xpc_dictionary_apply`，libxpc 在这种情况下是否中止进程，未经实测。
 - `EPM18:117` 之后的子键读取在 `extra-initialization-data` 整个字典缺失时把 NULL 传给 `xpc_dictionary_get_string`，行为未经实测。16.1 恒发送该键，这条路径在本组合下不会发生。
-- 按 16.1 的 63 项布局解码 8 字节数据块能否让 18.3 的 WebKit 与 WebCore 在 16.1 上跑完初始化。位图宽度可以通过长度分支解决，但两版枚举的下标是否逐项对应未核对；若中间有插入或插入位置不同，同一比特位在两版指的不是同一个行为。
+- 全零或按已知状态初始化的位图能否让 18.3 的 WebKit 与 WebCore 在 16.1 上跑完初始化。位图宽度可以通过长度分支解决，两版位序不可按位置换算这一条已经核实（见「8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图」），但各行为的消费点在 WebKit 与 WebCore 里分散多处，本次未逐点核对。
 - 设备上实际运行的 16.1 WebKit 二进制发出的字典是否与 `releases/Apple/Safari-16.1-iOS-16.1` 源码一致，本次未做二进制对照。设备系统 WebKit 是 `8614.2.9.0.10`，与 `614.2.9.0.10` 同版本号，但没有逐键比对二进制。
 - 本文没有解释设备上已观察的两个现象。18.3 三元组配 16.1 `.xpc` 壳时 helper spawn 为 0、lookup 失败 8987 次：该现象在 `XPCServiceMain` 被调用之前就已确定，与本文列出的任何键无关。18.3 全套时 WebContent 收到第一条 IPC 后 `PAC_EXCEPTION`、栈顶 `WebKit::WebProcess::initializeWebProcess`：这发生在 `XPCServiceInitializer` 返回之后，本文的键缺失与宽度断言只影响该函数内的分支选择，不能解释这条崩溃。
