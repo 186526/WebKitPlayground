@@ -882,9 +882,11 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片完全相等，比对的是 `(cdhash, hash_type)` 二元组：少一条就点名该切片，多一条就点名该 entry，摘要对而标签错则单独点名。回归用例七条（对应闸门侧 13 条断言）：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；单个 `0x0` 槽、`hashType=1`、没有 alternate 的切片写 SHA-1 摘要必须通过；同一个切片写 SHA-256 摘要必须失败并点名孤儿；同一个切片摘要正确但标签写成 2 必须失败并点名「labelled hash_type 2 … CodeDirectory declares 1」；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。生成器自身另有用例六条，见下。为什么这个不匹配必须修而不是解释成无害，见十二·八。
 
-那七条里只有「单个 `0x0` 槽、`hashType=1`」这一形状能固定摘要算法。真实数据里所有 `0x1000` alternate 的 `hashType` 都是 2，所以先取 alternate 就把算法选择藏起来了：把 `code_directory_cdhash` 改回硬编码 SHA-256，双 CodeDirectory 的三条用例照样通过，只有这一条会失败（3 条 FAIL，见十二·八 的读数）。标签那一支由「摘要正确、标签写成 2」这条单独固定：只把校验器的比对改成忽略标签，失败的恰好是这条与它配对的命名断言，共 2 条。
+那七条里只有「单个 `0x0` 槽、`hashType=1`」这一形状能固定摘要算法。真实数据里所有 `0x1000` alternate 的 `hashType` 都是 2，所以先取 alternate 就把算法选择藏起来了：把 `code_directory_cdhash` 改回硬编码 SHA-256，双 CodeDirectory 的三条用例照样通过，失败的是这个形状的三条断言，加上经生成器传来的第四条，共 4 条 FAIL（见十二·八 的读数）。第四条由生成器经 `member_cdhashes` 复用同一份 cdhash 产生：改校验器的摘要也就改了生成器写出的内容，所以生成器选摘要这一支同样被这个变异钉住。标签那一支由「摘要正确、标签写成 2」这条单独固定：只把校验器的比对改成忽略标签，失败的恰好是这条与它配对的命名断言，共 2 条。
 
 生成器写标签的那一行另有六条断言固定，因为上面七条都只经校验器，不经过生成器：`test_generator` 用 `build_code_directory(hash_type=HASH_TYPE_SHA1)` 造一棵只有 `launchdhook.dylib` 的暂存树，跑 `make-basebin-trustcache.py` 后断言它写出 1 条 entry、标签是 `1`、摘要是该 CodeDirectory 的 SHA-1 值、`flags` 为 `0`，且 `verify-basebin-trustcache.py` 接受这个文件。把 `make-basebin-trustcache.py:87` 的 `bytes([hash_type, ENTRY_FLAGS])` 改回 `bytes([2, ENTRY_FLAGS])`，这六条里恰好 2 条 FAIL：`generator: labels the entry from the CodeDirectory's hashType, not 2 (label 2, expected 1)` 与 `generator: the verifier accepts the file the generator wrote (verifier rc=1)`。
+
+六条里的第一条同时充当读取的守卫：它断言生成器退出 0 且 `basebin.tc` 确实写出，两者只要有一条不成立就 `return`，后面的读取不再执行。没有这个守卫时，生成器退出非零会让 `trustcache_entries` 对不存在的文件抛 `FileNotFoundError`，`main()` 没有捕获它，套件以 traceback 结束，`test_merge_script` 的 15 条断言一条不跑。加守卫后让生成器在 `collect_entries` 之前 `return 1`，读数是 1 条具名 FAIL（`generator: runs on a staging tree and writes basebin.tc`）、0 条 traceback、15 条 `merge:` 断言照常执行。
 
 ### 十二·七 交付物：basebin tar、安装与回滚
 
@@ -1034,7 +1036,7 @@ print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
 
 `verify-basebin-tar.sh` 原先只断言 `basebin.tc` 存在，不断言它与 tar 里的成员一致，所以一个「换了成员、留着 stock tc」的 tar 会打印 `Result: PASS`。现在脚本调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片的 `(cdhash, hash_type)` 完全相等。三种偏离各自点名并都退出 1：未覆盖的切片、匹配不到任何切片的 entry、摘要正确但标签错误的 entry。
 
-摘要算法与标签这两支各自被一条用例固定，读数如下。把 `code_directory_cdhash` 改回硬编码 SHA-256（保留 `(digest, hashType)` 的返回形状与槽位选择），`test-verify-basebin-artifacts.py` 立即 3 条 FAIL：`a lone SHA-1 CodeDirectory with its SHA-1 cdhash passes`、`that SHA-256 digest is named as an orphan`、`the mislabelled entry is named as such`。把校验器的比对改成忽略标签（覆盖与孤儿都只按摘要判），恰好 2 条 FAIL：`a SHA-1 cdhash labelled hash_type 2 is rejected` 与它的命名断言。两次改回原状后都是 `all cases passed`。
+摘要算法与标签这两支各自被一条用例固定，读数如下。把 `code_directory_cdhash` 改回硬编码 SHA-256（保留 `(digest, hashType)` 的返回形状与槽位选择），`test-verify-basebin-artifacts.py` 立即 4 条 FAIL：`a lone SHA-1 CodeDirectory with its SHA-1 cdhash passes`、`that SHA-256 digest is named as an orphan`、`the mislabelled entry is named as such`、`generator: writes the SHA-1 digest the label claims (85e07834… vs baa262f1…)`。第四条经生成器传来：`make-basebin-trustcache.py:75` 从 `_verifier.member_cdhashes` 取 cdhash，改校验器的摘要也改了生成器写出的内容，于是生成器选摘要这一支同样被这个变异钉住。把校验器的比对改成忽略标签（覆盖与孤儿都只按摘要判），恰好 2 条 FAIL：`a SHA-1 cdhash labelled hash_type 2 is rejected` 与它的命名断言。两次改回原状后都是 `all cases passed`。
 
 ### 十二·九 为什么改写必须在 dyld 路径解析阶段从进程内部发生
 

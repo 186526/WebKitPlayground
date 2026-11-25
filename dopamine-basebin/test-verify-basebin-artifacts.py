@@ -280,10 +280,14 @@ def test_generator(root: Path) -> None:
         [sys.executable, str(GENERATOR), str(base.parent)],
         capture_output=True, text=True, check=False,
     )
-    check("generator: runs on a staging tree", proc.returncode == 0,
+    trustcache = base / "basebin.tc"
+    produced = proc.returncode == 0 and trustcache.is_file()
+    check("generator: runs on a staging tree and writes basebin.tc", produced,
           proc.stdout + proc.stderr)
+    if not produced:
+        return
 
-    entries = trustcache_entries(base / "basebin.tc")
+    entries = trustcache_entries(trustcache)
     check("generator: writes one entry for the lone SHA-1 slice", len(entries) == 1,
           str(entries))
     if len(entries) == 1:
