@@ -44,6 +44,7 @@ static char spawned_path[256];
 static char spawned_arguments[4][256];
 static int spawned_argument_count;
 static i32 spawn_answer;
+static i32 spawned_pid;
 static i32 wait_answer_pid;
 static i32 wait_status;
 static int wait_calls;
@@ -59,13 +60,16 @@ static int sleep_calls;
 static int find_calls;
 static char find_path[256];
 static int find_present;
+static i32 last_waited_pid;
 
 static void test_reset(void) {
   open_calls = 0;
   fail_at = -1;
   spawn_answer = 0;
   wait_calls = 0;
+  spawned_pid = 900;
   wait_answer_pid = 900;
+  last_waited_pid = 0;
   wait_status = 0;
   wait_running_steps = 0;
   spawned_argument_count = 0;
@@ -135,14 +139,14 @@ static i32 test_posix_spawn(i32 *pid, const char *path, const void *fileActions,
   if (spawn_answer != 0) {
     return spawn_answer;
   }
-  *pid = wait_answer_pid;
+  *pid = spawned_pid;
   return 0;
 }
 
 static i32 test_waitpid(i32 pid, i32 *status, i32 options) {
-  (void)pid;
   (void)options;
   wait_calls++;
+  last_waited_pid = pid;
   /* A child told to stay running answers 0, the way a poll with WNOHANG does
      while the child is alive; the status is only written once it exits. */
   if (wait_running_steps > 0) {
@@ -444,6 +448,24 @@ int main(void) {
   check("  the state is the child still running", result.mark_status == mark_child_running);
   check("  the report says the child was left running",
         strstr(result.mark_error, "still running") != NULL);
+  check("  the images are still claimed", result.loaded == 7);
+
+  /* waitpid answering a pid that is not the child is its own failure: the call
+     did not report the child, so nothing about the marking is known. The
+     recorder answers 901 for a child started as 900, which is the only way to
+     reach this branch — with both numbers equal the condition is never true.
+     The case pins the state, so setting it to mark_done the way the errno
+     states once were set cannot pass. */
+  test_reset();
+  spawned_pid = 900;
+  wait_answer_pid = 901;
+  claim_images_run(&result);
+  check("a wait answer for another pid is not recorded as a marking", result.marked == 0);
+  check("  the state is the wait failure", result.mark_status == mark_wait_failed);
+  check("  the error names waitpid and the pid it answered",
+        strstr(result.mark_error, "waitpid returned") != NULL &&
+            strstr(result.mark_error, "901") != NULL);
+  check("  the child asked about was the one spawned", last_waited_pid == 900);
   check("  the images are still claimed", result.loaded == 7);
 
   /* The states are distinct numbers, and none of them is zero: a zero state

@@ -302,11 +302,12 @@ order, 31 with `WebCore` first), `JavaScriptCore` at index 0 and `WebKit` last,
 and every load made with `RTLD_NOW|RTLD_GLOBAL`. The failure cases require the
 loop to stop at the first image that answers nothing, the 1-based position, the
 path and the `dlerror` text to be recorded, and the images after it not to be
-tried. The marking cases require a refused `posix_spawn`, a non-zero child exit
-and a child that never exits to be recorded as their own `mark_*` states, with
-the wait status and the errno kept in `mark_error` where they can still be read;
-they also require the states to be distinct and none of them zero, because a
-zero state would read as the success value in any report that printed it.
+tried. The marking cases require a refused `posix_spawn`, a non-zero child exit,
+a child that never exits and a `waitpid` that answers a pid other than the
+child's to be recorded as their own `mark_*` states, with the wait status and
+the errno kept in `mark_error` where they can still be read; they also require
+the states to be distinct and none of them zero, because a zero state would read
+as the success value in any report that printed it.
 
 Two cases cover the gate. With `library_find` answering a handle the run has to
 be skipped: `skipped` set, `loaded` and `failed_index` at 0, nothing dlopened
@@ -344,13 +345,28 @@ reports zero.
 
 A saturating case covers the buffer limit. Every free-form field is filled with
 `&`, which the escaper turns into five bytes each, so the document cannot fit
-and the writer stops at `document_capacity - 1`. The case requires the stop to
-happen (the written length is the buffer's limit rather than the record's) and
-then requires the six decision fields to be present with their values: the
-`stage` integer and the five claim state fields, all written immediately after
-the plist header and before any free-form text. That is the property the write
-order exists for, and the case fails if a free-form field ever goes back in
-front of them.
+and the writer stops at `document_capacity - 1`. The case takes the length from
+the file itself (`fseek`/`ftell` through `report_file_length`), not from a read
+into a buffer the test sized, because the ordinary read buffers are 4 KiB and a
+`strlen` of one of them would answer 4095 for any document at least that long —
+including one that was never truncated. The case requires the length to equal
+`document_capacity - 1` and to exceed `maximum_report_size - 1`, so raising
+`document_capacity` far enough that nothing is cut turns it red; that pair is
+what makes "truncation happened" a measured claim rather than an assertion
+about the harness. It then requires the six decision fields to be present with
+their values — the `stage` integer and the five claim state fields, all written
+immediately after the plist header and before any free-form text. That is the
+property the write order exists for, and the case fails if a free-form field
+ever goes back in front of them.
+
+The `mark_*` states each have a case that fails when the state is wrong. Five
+were covered from the start; `mark_wait_failed` was not, because the `waitpid`
+recorder answered the child's own pid on every path and so never reached the
+branch that assigns it. `spawned_pid` and `wait_answer_pid` are separate knobs
+now, and one case starts a child as 900 while `waitpid` answers 901: the case
+requires `mark_status == mark_wait_failed`, `marked == 0`, `waitpid returned` in
+`mark_error`, and that the pid waited for was the spawned one. Setting the state
+to `mark_done` turns it red.
 
 The script builds the test twice: once plainly and once with AddressSanitizer
 and UndefinedBehaviorSanitizer. The second run only counts when its log holds

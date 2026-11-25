@@ -76,34 +76,6 @@ static char *escape_text(const char *text, char *out, usize capacity) {
   return out;
 }
 
-static void render_number(char *out, usize capacity, i64 value) {
-  char digits[24];
-  usize count = 0;
-  out[0] = 0;
-  /* The magnitude goes through the unsigned type, so the most negative value
-     renders without the negation overflowing. A negative value used to render
-     as "0", which made a failed call indistinguishable from a successful one
-     reporting zero; the sign is written now, so no negative reads as zero. */
-  bool negative = value < 0;
-  u64 magnitude = negative ? (u64)0 - (u64)value : (u64)value;
-  while (magnitude > 0 && count < sizeof(digits)) {
-    digits[count++] = (char)('0' + (int)(magnitude % 10));
-    magnitude /= 10;
-  }
-  if (count == 0) {
-    digits[count++] = '0';
-  }
-  usize written = 0;
-  if (negative && written + 1 < capacity) {
-    out[written++] = '-';
-  }
-  out[written] = 0;
-  while (count > 0 && written + 1 < capacity) {
-    out[written++] = digits[--count];
-  }
-  out[written] = 0;
-}
-
 static void append(char *document, usize *position, const char *text) {
   usize index = 0;
   while (text[index] != 0 && *position + 1 < document_capacity) {
@@ -142,7 +114,7 @@ void dylib_report_begin(const char *bundleIdentifier) {
   text_copy(record.claim_loaded, "0", sizeof(record.claim_loaded));
   text_copy(record.claim_failed_index, "0", sizeof(record.claim_failed_index));
   if (gettimeofday(&now, NULL) == 0) {
-    render_number(record.timestamp, sizeof(record.timestamp), now.seconds);
+    text_number(record.timestamp, sizeof(record.timestamp), now.seconds);
   } else {
     text_copy(record.timestamp, "0", sizeof(record.timestamp));
   }
@@ -170,16 +142,16 @@ void dylib_report_set_match(const char *via) {
 }
 
 void dylib_report_set_stage(u32 stage) {
-  render_number(record.stage, sizeof(record.stage), (i64)stage);
+  text_number(record.stage, sizeof(record.stage), (i64)stage);
 }
 
 void dylib_report_set_claim(const claim_result *claim) {
   text_copy(record.claim_skipped, claim->skipped ? "true" : "false", sizeof(record.claim_skipped));
   text_copy(record.claim_marked, claim->marked ? "true" : "false", sizeof(record.claim_marked));
-  render_number(record.claim_mark_status, sizeof(record.claim_mark_status), (i64)claim->mark_status);
+  text_number(record.claim_mark_status, sizeof(record.claim_mark_status), (i64)claim->mark_status);
   text_copy(record.claim_mark_error, claim->mark_error, sizeof(record.claim_mark_error));
-  render_number(record.claim_loaded, sizeof(record.claim_loaded), (i64)claim->loaded);
-  render_number(record.claim_failed_index, sizeof(record.claim_failed_index),
+  text_number(record.claim_loaded, sizeof(record.claim_loaded), (i64)claim->loaded);
+  text_number(record.claim_failed_index, sizeof(record.claim_failed_index),
                 (i64)claim->failed_index);
   text_copy(record.claim_failed_path, claim->failed_path, sizeof(record.claim_failed_path));
   text_copy(record.claim_error, claim->error, sizeof(record.claim_error));

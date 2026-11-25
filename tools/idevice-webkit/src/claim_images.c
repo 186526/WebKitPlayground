@@ -218,32 +218,8 @@ static char *const empty_environment[] = {NULL};
 /* errno values are positive, and posix_spawn returns the failing errno, so a
    failed spawn is recorded as the number it returned. The report then names
    the call that failed and the value; a missing file and a refused permission
-   differ in that value alone. */
-
-static void number_text(char *out, usize capacity, i64 value) {
-  char digits[24];
-  usize count = 0;
-  out[0] = 0;
-  if (value < 0) {
-    value = -value;
-    if (capacity > 1) {
-      out[0] = '-';
-      out[1] = 0;
-    }
-  }
-  while (value > 0 && count < sizeof(digits)) {
-    digits[count++] = (char)('0' + (int)(value % 10));
-    value /= 10;
-  }
-  if (count == 0) {
-    digits[count++] = '0';
-  }
-  usize written = text_length(out);
-  while (count > 0 && written + 1 < capacity) {
-    out[written++] = digits[--count];
-  }
-  out[written] = 0;
-}
+   differ in that value alone. This is also how the wait status and the pid a
+   misbehaving waitpid answers reach the report. */
 
 static void append(char *out, usize capacity, const char *text) {
   usize used = text_length(out);
@@ -256,7 +232,7 @@ static void append(char *out, usize capacity, const char *text) {
 
 static void append_number(char *out, usize capacity, i64 value) {
   char number[24];
-  number_text(number, sizeof(number), value);
+  text_number(number, sizeof(number), value);
   append(out, capacity, number);
 }
 
@@ -267,7 +243,7 @@ static void append_number(char *out, usize capacity, i64 value) {
 
 static void mark_this_process(claim_result *result) {
   char pid_text[16];
-  number_text(pid_text, sizeof(pid_text), (i64)getpid());
+  text_number(pid_text, sizeof(pid_text), (i64)getpid());
   char *const arguments[] = {(char *)jbctl_path, (char *)jbctl_argument, pid_text, NULL};
   spawn_attributes attributes;
   spawn_file_actions actions;

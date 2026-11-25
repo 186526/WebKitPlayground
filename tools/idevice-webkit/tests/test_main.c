@@ -231,6 +231,40 @@ static char *read_report(const char *path) {
   return text;
 }
 
+/* The three buffers above take 4 KiB, which is more than any report the writer
+   produces at normal field sizes but less than the writer's own limit. A case
+   that has to judge truncation therefore reads the file twice: once whole, into
+   a buffer of the writer's capacity, and once as a length taken from the file
+   itself. Comparing that length against the writer's capacity is the only way
+   to tell "the document was cut" from "the test's buffer was filled". */
+
+static char whole_text[document_capacity];
+
+static char *read_report_whole(const char *path) {
+  FILE *file = fopen(path, "r");
+  if (file == NULL) {
+    return NULL;
+  }
+  usize length = fread(whole_text, 1, document_capacity - 1, file);
+  whole_text[length] = 0;
+  fclose(file);
+  return whole_text;
+}
+
+static usize report_file_length(const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (file == NULL) {
+    return 0;
+  }
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return 0;
+  }
+  long length = ftell(file);
+  fclose(file);
+  return length < 0 ? 0 : (usize)length;
+}
+
 /* The dylib drops the leading slash and turns every other slash into a dash,
    so a host that starts at /Applications has a file name starting with "-". */
 
@@ -1080,20 +1114,20 @@ int main(void) {
      integers take: small positive, zero, negative, and both ends of the type. */
   {
     char rendered[32];
-    render_number(rendered, sizeof(rendered), 0);
+    text_number(rendered, sizeof(rendered), 0);
     expect("a zero renders as \"0\"", strcmp(rendered, "0") == 0);
-    render_number(rendered, sizeof(rendered), 7);
+    text_number(rendered, sizeof(rendered), 7);
     expect("a positive renders as its digits", strcmp(rendered, "7") == 0);
-    render_number(rendered, sizeof(rendered), -1);
+    text_number(rendered, sizeof(rendered), -1);
     expect("a negative keeps its sign", strcmp(rendered, "-1") == 0);
-    render_number(rendered, sizeof(rendered), 512);
+    text_number(rendered, sizeof(rendered), 512);
     expect("a wait status renders as given", strcmp(rendered, "512") == 0);
-    render_number(rendered, sizeof(rendered), -512);
+    text_number(rendered, sizeof(rendered), -512);
     expect("a negative wait status keeps its sign", strcmp(rendered, "-512") == 0);
-    render_number(rendered, sizeof(rendered), (i64)0 - (i64)9000000000000000000LL);
+    text_number(rendered, sizeof(rendered), (i64)0 - (i64)9000000000000000000LL);
     expect("the most negative magnitude does not overflow",
            strcmp(rendered, "-9000000000000000000") == 0);
-    render_number(rendered, 4, -1234);
+    text_number(rendered, 4, -1234);
     expect("a capacity too small truncates without losing the sign",
            strcmp(rendered, "-12") == 0);
   }
@@ -1129,9 +1163,19 @@ int main(void) {
     char saturate_path[512];
     snprintf(saturate_path, sizeof(saturate_path), "%s/saturate.plist", work_directory);
     expect("a saturated record still writes", dylib_report_write(saturate_path));
-    char *report = read_report(saturate_path);
-    expect("  the document is the buffer's length, not more",
-           report != NULL && strlen(report) == maximum_report_size - 1);
+    /* The length is read from the file, not from a read into a buffer this
+       test sized: the writer's limit is document_capacity and the read buffer
+       above is smaller, so a strlen of the read buffer would answer 4095 for
+       any document at least that long and would still pass if the writer grew
+       its buffer and nothing was truncated at all. */
+    usize written = report_file_length(saturate_path);
+    expect("  the document is cut at the writer's limit, not at the read buffer",
+           written == document_capacity - 1);
+    expect("  and it is longer than the buffer the reader above uses",
+           written > maximum_report_size - 1);
+    const char *report = read_report_whole(saturate_path);
+    expect("  the cut document is what the whole read found",
+           report != NULL && strlen(report) == document_capacity - 1);
     char value[64];
     expect("  the stage survives the truncation",
            report != NULL && field_value(report, "stage", value, sizeof(value)) &&
@@ -1149,6 +1193,8 @@ int main(void) {
     expect("  claimFailedIndex survives the truncation",
            report != NULL && field_value(report, "claimFailedIndex", value, sizeof(value)) &&
                strcmp(value, "0") == 0);
+    expect("  the decision fields are all inside the cut document",
+           report != NULL && found_in(report, "\t<key>claimFailedIndex</key>"));
     remove(saturate_path);
   }
 
