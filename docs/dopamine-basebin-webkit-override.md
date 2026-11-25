@@ -840,7 +840,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 **M127 对这条路线给出的结论是「不安全，不要在这台设备上安装」。** 本节下面记的安装步骤因此**不是待执行的计划**，而是一份历史记录加一份回滚依据：它说明当时装了什么、怎么装、失败后怎么恢复。要再尝试，先解决 M127 那份文档里未解释的 panic 成因，本节不提供再次安装的依据。
 
-**本章的合并裁决，写给合入时解冲突的人。** 本章另有一份较早的快照在内层分支 `feat/m139-inner-union` 上（`9cd84ea`，2026-11-26 05:35，本章 443 行）。它是 M138 联合分支在 `acaa076 Merge M126 round 6` 时把本章整章带进去的第 6 轮版本，此后本分支又改了两轮：第 7 轮在十二·二写明「不引那一行的完整字面量」并把三代断言改写成四代叙述，第 9 轮把 `mislabelled` 补成第三类并给出本 tar 上它为 0 的理由。`git merge-tree --write-tree 9cd84ea b1f00fc` 退出 1，冲突是四条文本，位置如下（行号按合并输出，会变，用段名定位）：
+**本章的合并裁决，写给合入时解冲突的人。** 本章另有一份较早的快照在内层分支 `feat/m139-inner-union` 上（2026-11-26 05:35，本章 443 行）。它是 M138 联合分支在 `acaa076 Merge M126 round 6` 时把本章整章带进去的第 6 轮版本，此后本分支又改了两轮：第 7 轮在十二·二写明「不引那一行的完整字面量」并把三代断言改写成四代叙述，第 9 轮把 `mislabelled` 补成第三类并给出本 tar 上它为 0 的理由。`git merge-tree --write-tree feat/m139-inner-union HEAD` 退出 1，冲突是四条文本，位置如下（行号按合并输出，会变，用段名定位）：
 
 - **十二·二 的两段**（「乙组 1 条是……」与「这条读数的取法要固定在……」）取本分支。union 侧这两行是第 6 轮旧文本：它引整行字面量，且把第 3 代断言说成是最终的那一代。解成它等于同时回退第 7 与第 9 轮。
 - **十二·六「两处行号的出处」那行**取本分支。union 侧写「第七节 `:268`」，而 union 那份文件第 268 行是一条空的代码围栏，`main.m:211-216` 在它那里首次出现在第 272 行；本分支这一行已改成按行首原文定位，两侧的失效原因相同。
@@ -848,24 +848,29 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 **十二·五 与十二·十 不在冲突里，而它们会自动落到 union 侧，这个方向是对的，不要把它们改回来。** 这两节在共同祖先 `34e6eac` 上与本分支相同（本分支自 `dc29926` 起没有再动过它们），union 侧已由 M135 按 cdhash 重写，所以三方合并直接取 union：十二·五 15 行变 46 行，标题从「`launchdhook` 不在 `basebin.tc` 里是预期状态」换成「把 sha1 换成 cdhash 之后，原来的结论不成立」。十二·十 两侧行数只差一行，差异是同段的两句结论句，本分支写「M135 那版尚未合并进来」，union 写「已按 M135 那版落地」——这组句子与十二·五 取哪一侧绑定，既然取 union 的十二·五，就必须同时取 union 的这两句，否则本文会自述一个已经不存在的前置状态。
 
-核对这一段的命令与期望读数：
+核对这一段的命令与期望读数（用分支名，不写提交号：提交号会随依赖分支前进而过期）：
 
 ```sh
 cd WebKitPlayground
-git merge-base 9cd84ea b1f00fc                                              # 34e6eac
-git merge-tree --write-tree 9cd84ea b1f00fc | grep -c '^100644'             # 3，同一个文件的三份 blob
-git show 34e6eac:docs/dopamine-basebin-webkit-override.md | grep -c '^### 十二·五 信任缓存：`launchdhook`'  # 1
-git show 9cd84ea:docs/dopamine-basebin-webkit-override.md | grep -c '^### 十二·五 信任缓存：把 sha1'          # 1
-git show 9cd84ea:docs/dopamine-basebin-webkit-override.md | sed -n '268p'  # ```，即那一侧 `:268` 落在空围栏上
-git show 9cd84ea:docs/dopamine-basebin-webkit-override.md | grep -n 'main.m:211-216' | head -1   # 272:…
+BASE=$(git merge-base feat/m139-inner-union HEAD)
+git merge-tree --write-tree feat/m139-inner-union HEAD | grep -c '^100644'                                # 3，同一个文件的三份 blob
+git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | grep -c '^### 十二·五 信任缓存：把 sha1'   # 1
+git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '^### 十二·五 信任缓存：`launchdhook`'             # 1
+git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | sed -n '268p'                # 三个反引号，即那一侧的 :268 落在空围栏上
+git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | grep -n 'main.m:211-216' | head -1   # 272:…
 ```
 
-两条 `grep -c` 都锚了行首：不锚定会各命中 2 次，因为本句和十二·十 都提到那两个标题。两条标题计数各为 1，说明十二·五 在两侧各只有一节：本分支那一节与共同祖先逐字相同（下面第一条命令退出 0 即可确认），union 那一节已被 M135 重写。
+两条标题计数都锚了行首：不锚定会各多命中一次，因为本节和十二·十 都提到那两个标题（在祖先那份上不锚定读到 2，锚定读到 1）。两条计数各为 1 说明十二·五 在两侧各只有一节。
+
+十二·五 在本分支与共同祖先逐字相同，用下面这条确认（无输出、退出 0）：取本分支那一节与祖先那一节做 `diff`，两者相同，所以三方合并对这一节没有本分支的改动可保，只能取 union 侧。
 
 ```sh
-diff <(git show 34e6eac:docs/dopamine-basebin-webkit-override.md | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f') \
-     <(git show b1f00fc:docs/dopamine-basebin-webkit-override.md | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f')   # 无输出，退出 0
+BASE=$(git merge-base feat/m139-inner-union HEAD)
+diff <(git show "$BASE:docs/dopamine-basebin-webkit-override.md" | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f') \
+     <(git show "HEAD:docs/dopamine-basebin-webkit-override.md"   | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f')   # 无输出
 ```
+
+行数差就是取 union 的收益：本分支十二·五 15 行，union 46 行（本节第一段已写过这一对读数）。
 
 ### 十二·一 这份 tar 是怎么来的，逐字节核对了什么
 
