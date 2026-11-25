@@ -842,7 +842,10 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 **本章的合并裁决，写给合入时解冲突的人。** 本章另有一份较早的快照在内层分支 `feat/m139-inner-union` 上（2026-11-26 05:35，本章 443 行）。它是 M138 联合分支在 `acaa076 Merge M126 round 6` 时把本章整章带进去的第 6 轮版本，此后本分支又改了两轮：第 7 轮在十二·二写明「不引那一行的完整字面量」并把三代断言改写成四代叙述，第 9 轮把 `mislabelled` 补成第三类并给出本 tar 上它为 0 的理由。`git merge-tree --write-tree feat/m139-inner-union HEAD` 退出 1，冲突是四条文本，位置如下（行号按合并输出，会变，用段名定位）：
 
-- **十二·二 的两段**（「乙组 1 条是……」与「这条读数的取法要固定在……」）取本分支。union 侧这两行是第 6 轮旧文本：它引整行字面量，且把第 3 代断言说成是最终的那一代。解成它等于同时回退第 7 与第 9 轮。
+- **十二·二 的两段都取本分支，但两行理由不同，不能合成一句。**
+  - **第一行「乙组 1 条是……」**：union 侧是第 6 轮旧文本，它把明细整行字面量引了。第 7 轮加的「不引那一行的完整字面量」那句、第 9 轮加的把 `mislabelled` 说成第三类的那条，在 union 那份上都没有（两者在 union 版上各命中 0 次，读数与命令见下）。解成它会同时回退第 7 轮与第 9 轮。
+  - **第二行「这条读数的取法要固定在……」**：union 侧写的是四代叙述，并在括号里给出四个版次各自的提交号。本分支从第 7 轮起这一行一个提交号都不写，所以仍取本分支。这一行只关系到追溯用的提交号要不要写进正文，不涉及第 9 轮，解成它回退的只是写法。
+  - **「把第 3 代断言说成是最终的那一代」是共同祖先的句子，不是 union 侧的。** 在祖先那份文件的「这条读数」这一行里，字符串 `最终那代` 出现 1 次；在 union 那份的同一行里出现 0 次。union 那一行用的是 `换过四代`，出现 1 次，并逐个列出四个版次的提交号。所以 union 已经把祖先那句三代断言换成四代叙述，不能用祖先那句当「union 侧是第 6 轮旧文本」的证据。
 - **十二·六「两处行号的出处」那行**取本分支。union 侧那一行把第七节指到第 268 行，而 union 那份文件第 268 行是一条空的代码围栏，`main.m:211-216` 在它那里首次出现在第 272 行；本分支这一行已改成按行首原文定位，两侧的失效原因相同。
 - **十二·九 的两行都要留**。union 侧多出的「运行期 `jbctl trustcache info`」一行是本分支没有的新信息，保留；`verify-basebin-tar.sh` 那一行取本分支的 `(cdhash, hash_type)` 对集合相等写法，union 侧的「双向集合相等」是被第 9 轮取代的旧措辞。
 
@@ -860,7 +863,23 @@ git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | sed 
 git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | grep -n 'main.m:211-216' | head -1   # 272:…
 ```
 
-两条标题计数都锚了行首：不锚定会各多命中一次，因为本节和十二·十 都提到那两个标题（在祖先那份上不锚定读到 2，锚定读到 1）。两条计数各为 1 说明十二·五 在两侧各只有一节。
+十二·二 那三分条里引到的两组计数，读数如下（同样用分支名定位）：
+
+```sh
+U=feat/m139-inner-union
+BASE=$(git merge-base "$U" HEAD)
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '不引那一行'          # 0
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '第三类'              # 0
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '最终那代'            # 0
+git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '最终那代'         # 1
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep -c '换过四代'            # 1
+git show "$BASE:docs/dopamine-basebin-webkit-override.md" | grep -c '换过四代'         # 0
+git show "$U:docs/dopamine-basebin-webkit-override.md" | grep '这条读数的取法要固定' | grep -o '`[0-9a-f]\{7\}`' | wc -l   # 4
+```
+
+最后一条是本分支与 union 在这一行上的实质差别：同一行用同样的命令在 `HEAD` 上读到 0，因为本分支这一行不写提交号。这一行的两个判别词在共同祖先与 union 上是互斥的——`最终那代` 祖先 1、union 0，`换过四代` 祖先 0、union 1——所以「union 侧把第 3 代说成最终那代」这句话可以直接被第一组读数否掉。
+
+两条标题计数都锚了行首，所以每条只命中标题本身，各为 1，说明十二·五 在两侧各只有一节。锚与不锚的差别只出现在本分支这份文件上，而且两个 pattern 的读数不同。「launchdhook 版标题」这条 pattern 不锚定读到 2、锚定读到 1，多出来的那一处是上面命令块里把它抄进正文的那条命令（自指），标题本身只一处。「把 sha1 版标题」这条不锚定读到 1、锚定读到 0：那唯一一处也是同一个自指，本分支这份文件的标题还是 M135 之前的「不在 `basebin.tc` 里是预期状态」，没有 M135 那版标题可命。祖先与 union 两份正文里没抄 pattern，锚与不锚读数一致：祖先的 launchdhook 版是 1 与 1、把 sha1 版是 0 与 0；union 反过来，是 0 与 0、1 与 1。所以「读到 2」不是「十二·十 也提到这两个标题」造成的——十二·十 对这两个标题的命中数是 0。
 
 十二·五 在本分支与共同祖先逐字相同，用下面这条确认（无输出、退出 0）：取本分支那一节与祖先那一节做 `diff`，两者相同，所以三方合并对这一节没有本分支的改动可保，只能取 union 侧。
 
