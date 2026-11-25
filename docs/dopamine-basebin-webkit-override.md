@@ -896,11 +896,19 @@ app 的 `envp` 里四个名字一个都没有（十二·三 的实测），因�
 - `:137-143`：用户配置 `ProcessBlacklist` 里的路径命中时返回 `kSpawnConfigTrust`，只上信任缓存、不注入。
 - `:145`：其余一律返回 `kSpawnConfigInject | kSpawnConfigTrust`，**默认注入**。
 
-`spawn_exec_hook_common` 在 `:245` 取这个结果，`:304` 只把 `!spawnConfig & kSpawnConfigInject` 当停止条件。`:304` 之后还有三条会关掉注入的条件，同样与「这个进程是不是 WebKit 相关」无关：`_SafeMode` / `_MSSafeMode` 为 `1`（`:309-326`）、`POSIX_SPAWN_PROC_TYPE_DRIVER`（`:328-335`）、`HOOK_DYLIB_PATH` 在设备上不存在（`:337-341`）。`DYLD_INSERT_LIBRARIES` 那一处（`:252-260`）不是停止条件，它只决定 `systemHookAlreadyInserted`，进而影响 `:417-418` 的快路径判断。
+`spawn_exec_hook_common` 在 `:245` 取这个结果，`:304` 只在 `!(spawnConfig & kSpawnConfigInject)` 为真时停止注入。括号不能省：C 里 `!` 比 `&` 结合得紧，写成 `!spawnConfig & kSpawnConfigInject` 就变成另一件事。这个判断只看 `kSpawnConfigInject` 那一位，`spawn_config_for_executable` 又只有三处 `return`（`:134` 返回 `0`、`:141` 返回 `kSpawnConfigTrust`、`:145` 返回 `kSpawnConfigInject | kSpawnConfigTrust`），所以 `spawnConfig` 只取 0、2、3 三种值（`common.h:11-12`：`kSpawnConfigInject = 1 << 0`、`kSpawnConfigTrust = 1 << 1`）：
+
+| `spawnConfig` 取值 | 来源 | `!(spawnConfig & kSpawnConfigInject)` | 注入 |
+| --- | --- | --- | --- |
+| `0` | `:125-134` 四条硬编码黑名单命中 | 真 | 停 |
+| `2`（`kSpawnConfigTrust`） | `:137-143` 用户 `ProcessBlacklist` 命中 | 真 | 停 |
+| `3`（`kSpawnConfigInject \| kSpawnConfigTrust`） | `:145` 默认 | 假 | 走 |
+
+`:304` 之后还有三条会关掉注入的条件，同样与「这个进程是不是 WebKit 相关」无关：`_SafeMode` / `_MSSafeMode` 为 `1`（`:309-326`）、`POSIX_SPAWN_PROC_TYPE_DRIVER`（`:328-335`）、`HOOK_DYLIB_PATH` 在设备上不存在（`:337-341`）。`DYLD_INSERT_LIBRARIES` 那一处（`:252-260`）不是停止条件，它只决定 `systemHookAlreadyInserted`，进而影响 `:417-418` 的快路径判断。
 
 所以这次改动**不是**把变量写给「ellekit 过滤器点名的那几个 app」：那个过滤器是黑名单，除四条硬编码路径与用户 `ProcessBlacklist` 之外的每个被 spawn 进程都会拿到四个变量。任务 2 原文里「scoped to the apps the existing ellekit filter already names」如果按字面理解成一份白名单，就要新增一个用不到的配置项；本文按黑名单语义交付，不新增机制。
 
-这条作用域决定了覆盖目录前置条件的严重程度。`十一·二` 的 `:506` 已经写明「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」，两个目录因此必须专用；同样的道理向上提一级：**覆盖目录里放的那一代 `WebKit` 若不能在 16.1 上加载，受影响的是每个被 spawn 的进程，不是只有 app 与 helper**。也就是说下面 `十二·七` 的三条性质是全系统级的前置条件，不是 WebKit 级的。设备当前那一代不满足第 1、2 条，这一句的分量按全系统范围读。
+这条作用域决定了覆盖目录前置条件的严重程度。`十一·二` 的 `:508` 已经写明「搜索路径上的每个名字都会成为每个被 spawn 进程的候选」，两个目录因此必须专用；同样的道理向上提一级：**覆盖目录里放的那一代 `WebKit` 若不能在 16.1 上加载，受影响的是每个被 spawn 的进程，不是只有 app 与 helper**。也就是说下面 `十二·七` 的三条性质是全系统级的前置条件，不是 WebKit 级的。设备当前那一代不满足第 1、2 条，这一句的分量按全系统范围读。
 
 ### 十二·五 helper 进程今天走哪条分支：未核，两侧后果都写明
 
