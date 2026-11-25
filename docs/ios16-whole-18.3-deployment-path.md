@@ -235,7 +235,7 @@ M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 
 
 ## 四、下一次设备测量的完整步骤
 
-按顺序执行。每一步给出命令、预期读数、以及「读数不成立」的判据。前一步不通过时不要进入下一步，否则后一步的数字无法归因。**本节全部步骤待设备回网后执行**：写作时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时，因此本文第四节没有任何一条是按本节命令新取的读数。
+按顺序执行。每一步给出命令、预期读数、以及「读数不成立」的判据。前一步不通过时不要进入下一步，否则后一步的数字无法归因。**「本节全部步骤待设备回网后执行」是本文写作时的状态**：写作时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时。2026-11-25 本轮设备已经回网，本节第 2 步与第 4 步已按本节命令逐字执行并取到读数：第 2 步的 CrashReporter 差分为「97 到 97，无新增」，第 4 步的环境变量段落与 `image list` 给出三份 framework 全在 `/System`。读数见附录 B 的 B.6 与 B.7，启动方式与端点计数口径见 B.3 与 B.4。**这两个读数要按 B.7 末段读**：它们证明的是「dyld 层没生效」，不是路径对齐与否。**「执行过」与「可归因」在这里不是一回事**——命令跑通了、读数拿到了，但第 3b、3d、4、5 步要回答的问题是「加载了哪一份 `WebKit`」，今天的答案一律是系统那一份，所以得不出结论，要等重装 basebin（B.9）之后再跑一遍。
 
 ### 第 0 步：确认设备能拉起应用（不再以 `gui/501` 是否非空为准）
 
@@ -554,7 +554,7 @@ lldb -b -o "process attach --pid <UI_PID>" -o "image list -o -f" -o detach -o qu
 **预期：** 环境变量段落里 `DYLD_FRAMEWORK_PATH` 的值，与 `image list` 里三个 framework 实测路径的前缀**逐字相同**，且该前缀与第 3b 步里 helper 的前缀相同。
 **不成立时：** 若 UI 的路径含 `WebKitOverride`（形态是 preboot 绝对路径，见第三节路径清单表）而 helper 指向 `/var/jb/Library/Frameworks`，就是 3.1 节说明的两项搜索列表在运行时显形：第一项没被选中、只能落到后备目录，此时不要继续读端点。判据同样用「路径含不含 `WebKitOverride`」，不要拿 `/var/jb/Library/WebKitOverride` 字面去比。
 
-**这一步要特别读 `WebKit` 这一项。** 18.3 的 `WebKit` 可以完全不经过 `DYLD_FRAMEWORK_PATH`、由 tweak 的 `dlopen` 直接进宿主（外层仓库 `build-state.md` 的「注入路径的真实面貌」一节，原文「`path = /var/jb/Library/Frameworks/WebKit.framework/WebKit`」），那时环境变量与 `image list` 会不一致，而进程里仍有两份 `WebKit`（系统 `[20]` 与 `JB/Library/Frameworks` 的 `[904]`）。遇到这种情况，以 `image list` 为准并记录两份各自的来源：IPC 编码端由 `WebProcessCreationParameters` 的写者决定，也就是 `WebKit` 里 `WebProcessProxy` 所在的那一份。这一步同样**待设备回网后执行**。
+**这一步要特别读 `WebKit` 这一项。** 18.3 的 `WebKit` 可以完全不经过 `DYLD_FRAMEWORK_PATH`、由 tweak 的 `dlopen` 直接进宿主（外层仓库 `build-state.md` 的「注入路径的真实面貌」一节，原文「`path = /var/jb/Library/Frameworks/WebKit.framework/WebKit`」），那时环境变量与 `image list` 会不一致，而进程里仍有两份 `WebKit`（系统 `[20]` 与 `JB/Library/Frameworks` 的 `[904]`）。遇到这种情况，以 `image list` 为准并记录两份各自的来源：IPC 编码端由 `WebProcessCreationParameters` 的写者决定，也就是 `WebKit` 里 `WebProcessProxy` 所在的那一份。这一步的两条命令 2026-11-25 本轮已对 Safari pid 2628 逐字执行，读数见附录 B 的 B.7，结论是两份都没有出现：三份 framework 全在 `/System`，环境变量段落没有 `DYLD_*`，所以「两份 `WebKit` 并存」这种情形今天没有发生。
 
 ### 第 5 步：测 launchd 能否从这个目录解析四个服务名
 
@@ -646,7 +646,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 
 ## 六、未验证项
 
-按重要性排列。每一条写明验证方式与预期结果。**第四节全部步骤待设备回网后执行**：本文收尾时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时。
+按重要性排列。每一条写明验证方式与预期结果。**「第四节全部步骤待设备回网后执行」是本文写作时的状态**：本文收尾时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时。2026-11-25 本轮设备已经回网，第四节第 2 步与第 4 步已按本节命令逐字执行并取到读数，见附录 B 的 B.6 与 B.7。**这两个读数说明 dyld 层没生效，不说明路径对齐与否**（B.7 末段），所以下面各条的验证方式仍按原文执行，但涉及「helper 或 UI 进程加载了哪一份 `WebKit`」的判据要等重装 basebin 之后（B.9）才给得出结论；第 2 条已按本轮读数改写。
 
 1. **helper 是否拿到覆盖路径。** 这是起点，排在 launchd 解析之前。三种可能（转交生效、只有内嵌生效、都不生效），判据是第四节第 3d-1 至 3d-3 步的候选行与 `image list`，配合 `DisableJBFrameworkPath` 的检查。三者任一结果都直接决定 helper 加载哪一份 `WebKit`，也就直接决定「全 18.3」是否只差 launchd 解析这一步。
 2. **`__XPC_` 前缀版本的转交是否发生。** 机制在 `/usr/libexec/xpcproxy`、`/sbin/launchd`、共享缓存里都查不到实现，`libxpc` 与 `xpcproxy` 源码不公开（`docs/dopamine-basebin-webkit-override.md:712`）。「只透传前缀版本」是按 Lessica 分支推断的（同文件 `:714`）。**这一项原先写「basebin 四个变量都设了，所以这一条是唯一的空格」，那句在 2026-11-25 不成立**：设备上 `systemhook.dylib` 是 233520 字节的原版，`DYLD_FRAMEWORK_PATH` 出现 0 次，四个变量一个都没设（附录 B 的 B.1）。所以转交问题现在排在「重装 basebin」之后。第四节第 3d-3 步靠加载结果反推它；直接跑 `.xpc` 的 3d-1 测不到它，因为从 shell 起的进程不经过 `xpcproxy`。
@@ -804,6 +804,9 @@ lldb -b -o "process attach --pid 2628" -o "image list -o -f" -o detach -o quit 2
 | 第 0 步「`gui/501` 为 0 则任何应用都无法启动」 | 设备健康时 `gui/501` 也是 0 | 已改成两条可成立的判据（B.5） |
 | 附录 A「`gen/dyld` 974608」 | 974016 | 已标注过期并指向 B.1 |
 | 阅读顺序前提（本文第 11 行）「basebin 已设变量」 | 同上，未设 | 已在该处加入「本节之前还有一项」的段落 |
+| 第四节引言「本节全部步骤待设备回网后执行……没有任何一条是按本节命令新取的读数」 | 第 2 步与第 4 步本轮已按本节命令逐字执行 | 已改成「写作时的状态」，并写明这两个读数说明 dyld 层没生效、不是路径对齐的判据（B.7 末段） |
+| 第 4 步末「这一步同样待设备回网后执行」 | 本节两条命令已对 pid 2628 执行 | 已改为记录本轮读数：三份 framework 全在 `/System`，「两份 `WebKit` 并存」今天没有发生 |
+| 第六节引言「第四节全部步骤待设备回网后执行」 | 同上 | 已改成「写作时的状态」，并收窄到「只有第 2 条已按本轮读数改写」，其余各条要等重装 basebin（B.9） |
 
 ### B.9 使路线 B 往前走的最小改动清单（按下单顺序）
 
