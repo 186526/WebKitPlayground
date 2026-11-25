@@ -531,6 +531,17 @@ for (uint32_t i = 0; i < after; i++) {
 grep -a -o '_MACHOMERGER_HOOK_[A-Za-z0-9_$]*' /var/jb/basebin/gen/dyld | sort | uniq -c
 ```
 
-用这一条对两个文件各读一次，两个 override hook 的计数都是 `1 0 0 1` 的形状：`/var/jb/basebin/gen/dyld` 与 `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib`。
+这一条每个 token 打一行计数，行序由 `sort` 决定，与 hook 的先后无关，所以它不输出四元组。四元组读法用的是 `AGENTS.md`「五之二」节那段 `python3` 计数：它先取出全部 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` token，再按固定顺序 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 逐个统计含该名字的 token 数，依次输出四个数字。对 `/var/jb/basebin/gen/dyld` 与 `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` 两份各算一次，两次都是 `1 0 0 1`。
+
+**`1 0 0 1` 不能读成「四个 hook 齐备」，它表示的正好相反。** 这四个数字按上面 `python3` 里 `names` 列表的顺序对应下面四个 hook：
+
+| 位置 | token | 属于 | `1 0 0 1` 读数 |
+| --- | --- | --- | --- |
+| 第 1 位 | `dlopen_from` | 原生 hook | **1，在场** |
+| 第 2 位 | `isOverridablePath` | **override hook** | **0，不在场** |
+| 第 3 位 | `isAlwaysOverridablePath` | **override hook** | **0，不在场** |
+| 第 4 位 | `__fcntl` | 原生 hook | **1，在场** |
+
+在场的是第 1、4 位的 `dlopen_from` 与 `__fcntl`，这两个是 dyld 原生 hook；第 2、3 位那两个 override hook **都不在**，而它们才是「覆盖目录会不会被 dyld 采纳」的判据。打过补丁的版本是 `1 1 1 1`，可区分处只在第 2、3 位。`AGENTS.md` 的「五之二」一节专门警告过这个误读：`MACHOMERGER` 的总数与 `_MACHOMERGER_HOOK__` 的出现次数都不构成补丁在场的证据，只有这两个 override token 的计数才算。
 
 本文与本次追加到 `build-state.md` 的第八轮都没有任何判据是用 `strings` 取得的（全节只有 `grep -a` 与 `/var/jb/usr/bin/clang` 的用法），所以这一条不需要回溯修正。`build-state.md` 第 115 至 123 行本来就把 `strings` 记为「不存在，替代做法 `grep -a -o 符号 文件 | wc -l`」，与本条一致。
