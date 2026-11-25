@@ -667,16 +667,42 @@ if (!strcmp(key, "LaunchDaemons")) {                                     // :38
 
 ### 9.9 设备读数清单：一次定案本节结论
 
-**设备离线，以下五条全部未执行。** 工具限 `ps`/`launchctl`/`lldb`/`killall`/`uiopen`/`ls`/`grep`/`wc`/`tail`/`sed`/`awk`。所有项先过前置检查（`build-state.md:890-894`）：`launchctl print gui/501` 必须非空且退出 0，否则先重启，读数作废。
+**这五条里有四条至今未执行；第 1 条的判据命令本身是错的，已在本节修正并实测。** 工具限 `ps`/`launchctl`/`lldb`/`killall`/`uiopen`/`ls`/`grep`/`wc`/`tail`/`sed`/`awk`。
+
+前置检查原先写成「`launchctl print gui/501` 必须非空且退出 0，否则先重启」。这条判据在 iOS 16.1 加 Dopamine 的设备上恒不成立，且设备健康时也不成立：2026-11-25 20:41 CST 实测，开机 10 小时、Safari pid 622 与 Chrome pid 626 均为开机时启动、23 个 WebKit helper 在跑的设备上，`launchctl print gui/501` 返回 `exit=125`、0 行输出、stderr 也为空，加 `sudo` 与不加 `sudo` 同样是 `exit=125`、0 行（五种写法全部如此：`sudo -S -p ""`、`printf` 喂密码、`sudo -i`、root `bash -c`、`sudo -n`）。同一时刻 `launchctl print system` 的域列表只有 `user/501`（第 300 行），没有 `gui/501`；`launchctl print user/501` 返回 `exit=0`、2135 行、`active count = 573`，其中 `com.apple.SpringBoard` pid 345 与 `com.apple.backboardd` pid 380 都在。iOS 的图形会话落在 `user/501`，`gui/501` 本来就不存在。
+
+所以前置检查改成读图形会话本身：
+
+```sh
+launchctl print user/501/com.apple.SpringBoard | grep -m1 'state = '
+```
+
+判据是 `state = running`。实测该命令返回 `exit=0`，`state = running`，`active count = 39`。job 缺失（`exit=113`）、job 存在但未运行（`state = not running`）、`user/501` 域缺失，三种形态各自给出不同的退出码与 state，都能与「设备正常」区分。`launchctl print gui/501` 仍照记，但只作为诊断读数，不再作为前置条件。
 
 **第 1 条：确认 app 的域是私有域**（直接判据，至今未取过）
 
+原判据命令是 `grep -c ' => '`，这条在该设备上恒为 0：`launchctl print` 的 `services = {` 段是制表符分隔的三列（优先级、`-`、服务名），没有 ` => `。实测 pid 626 该段 14 行、`grep -c ' => '` 得 0，`grep -c "	com\.apple\."` 得 12。改成按服务名计数，并且只数基础名，不数带 UUID 的实例条目：
+
 ```sh
 APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
-launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -c ' => '
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
+  | grep -oE 'com\.apple\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u | wc -l
 ```
 
-预期：服务名条数是个位数（基线 8）。若达到数百条，说明该 pid 的视图来自 `root_jobmgr`，9.1 的结论要重写。
+实测 `launchctl print pid/345` 该段去重后 12 个基础名，其中 WebKit 四个都在。SpringBoard 的域名下挂着十来个别的服务（`MTLCompilerService`、`SiriTTSService.TrialProxy`、`siri.embeddedspeech` 等），所以「个位数」这个预期是错的；有意义的判据是这个数与 `root_jobmgr` 的量级差开，以及 WebKit 那四个在不在：
+
+```sh
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
+```
+
+预期：恰好这四个名字。若该段达到数百条，说明该 pid 的视图来自 `root_jobmgr`，9.1 的结论要重写。
+
+**为什么不能沿用「基线 8」这个数。** 旧的判据是 `grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'`，它数的是**行**，而 launchd 给每个活着的页面各注册一条带 UUID 后缀的实例条目。pid 626 实测：该正则有 9 行命中，其中 5 行带 UUID；去重后的基础名是 4 个（`WebContent`、`GPU`、`Networking`、`WebContent.CaptivePortal`）。另一个时刻同一台设备的 `WebContent` 实例数是 3，所以行数读数随页面数在 4 到 9 以上浮动。`build-state.md` 的「无覆盖目录时该值是 8」是某一次的采样值，不是常量，不能当作「端点全失 = 0」的对照基线。判据应改为四个基础服务名各自在不在，见 `docs/ios16-override-endpoint-probe.md` 第二节与 `docs/ios16-branch-a-deployment-path.md` 第 1.1 节。
 
 **第 2 条（决定项）：确认别的域的 `MachServices` 名不进入 app 视图。** 这一条没有覆盖目录也能做，是本节唯一能直接判定「名字落进 app 可见的域」这件事的读数，也是 9.1 那个前提的判据。`$APP` 取第 1 条的结果。
 

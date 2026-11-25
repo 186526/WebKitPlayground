@@ -181,24 +181,49 @@ expect_status 'b-with-evidence exit' "${CASE_STATUS}" 0
 expect_contains 'b-with-evidence verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
 expect_contains 'b-with-evidence reason' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=services_gone_or_at_most_two_and_no_new_helper_loaded_a_var_jb_framework'
 
-# --- P1-4: the gui/501 gate ------------------------------------------------
+# --- P1-4: the graphics-session gate ---------------------------------------
 
-printf '\n== P1-4 launchd refuses gui/501 on stderr, nothing is written\n'
-new_case gui-error "{\"mode\": \"gui_error\"}"
-run_probe
-expect_status 'gui-error exit' "${CASE_STATUS}" 3
-expect_contains 'gui-error Chinese message' "${CASE_DIR}/stdout.txt" '需要先重启设备，图形域缺失'
-expect_contains 'gui-error aborted verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
-expect_not_contains 'gui-error never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
-expect_contains 'gui-error only one device command' "${CASE_DIR}/state/calls.log" 'launchctl print gui/501'
-expect_count 'gui-error single call' "${CASE_DIR}/state/calls.log" '' 1
+# The gate used to be "gui/501 is non-empty", which is false on iOS 16.1 under
+# Dopamine: there is no gui/501 domain and a healthy device answers it with exit
+# 125 and no output. The gate is now SpringBoard's job under user/501. These two
+# cases pin both halves of that contract: it can still abort, and an empty
+# gui/501 no longer aborts.
 
-printf '\n== gui/501 empty still aborts before any write\n'
-new_case gui-empty "{\"gui_empty\": true}"
+printf '\n== P1-4 user/501 has no running SpringBoard, nothing is written\n'
+new_case sb-missing '{"springboard_absent": true}'
 run_probe
-expect_status 'gui-empty exit' "${CASE_STATUS}" 3
-expect_contains 'gui-empty Chinese message' "${CASE_DIR}/stdout.txt" '需要先重启设备，图形域缺失'
-expect_not_contains 'gui-empty never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
+expect_status 'sb-missing exit' "${CASE_STATUS}" 3
+expect_contains 'sb-missing Chinese message' "${CASE_DIR}/stdout.txt" '需要先重启设备，图形会话缺失'
+expect_contains 'sb-missing aborted verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
+expect_contains 'sb-missing reason names the graphics session' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=graphics_session_missing_reboot_required'
+expect_not_contains 'sb-missing never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
+expect_contains 'sb-missing asks SpringBoard' "${CASE_DIR}/state/calls.log" 'launchctl print user/501/com.apple.SpringBoard'
+
+printf '\n== P1-4b SpringBoard job present but not running still aborts\n'
+new_case sb-stopped '{"springboard_state": "not running"}'
+run_probe
+expect_status 'sb-stopped exit' "${CASE_STATUS}" 3
+expect_contains 'sb-stopped reason' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=graphics_session_missing_reboot_required'
+expect_not_contains 'sb-stopped never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
+
+# The contract change itself. Before this mission an empty gui/501 aborted with
+# exit 3; it no longer does, because on this platform that reading is what a
+# healthy device returns. The assertion is inverted on purpose, not relaxed: the
+# run must now get past the gate and record gui/501 as a diagnostic.
+printf '\n== empty gui/501 does NOT abort (it is the healthy shape on iOS 16.1)\n'
+new_case gui-empty '{}'
+run_probe
+expect_status 'gui-empty no longer aborts' "${CASE_STATUS}" 4
+expect_not_contains 'gui-empty does not claim a missing graphics session' "${CASE_DIR}/stdout.txt" '图形会话缺失'
+expect_contains 'gui-empty records gui/501 as a diagnostic' "${CASE_DIR}/log/probe.log" '(diagnostic, not a gate)'
+expect_contains 'gui-empty records the gate reading' "${CASE_DIR}/log/probe.log" 'state=running (this is the gate)'
+expect_not_contains 'gui-empty is not an abort' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
+
+printf '\n== a configuration that does have gui/501 also passes the gate\n'
+new_case gui-present '{"gui_domain_present": true}'
+run_probe
+expect_status 'gui-present exit' "${CASE_STATUS}" 4
+expect_not_contains 'gui-present is not an abort' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
 
 # --- p2: A must say which mechanism ----------------------------------------
 

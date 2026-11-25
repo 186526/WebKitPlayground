@@ -59,6 +59,8 @@ launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -cE 'com\.appl
 
 M63 审计 `:83`：「先在覆盖目录不存在时取一次基线（塔今天读到六条，见附录 A），再装覆盖目录取一次。」
 
+**上面这条命令按行计数，已被下文第 1.1 节末尾与第 1 步替换。** 它数的是行，每个活着的页面各注册一条带 UUID 后缀的实例条目，所以读数随页面数浮动：2026-11-25 20:41 CST 实测 Chrome pid 626 得 9，去重后的基础名只有 4 个。这里保留原文是为了让 M63 附录 A 的读数（六条）能被追溯，实际执行请用第 1 步的命令。
+
 ### 1.2 两种情形
 
 M63 审计 `:85-86` 逐字：
@@ -89,7 +91,7 @@ M66 的整代部署文档（`c6382d0`，第二节 2.4）把排除条件扩到两
 | 出处 | 应用 | 命令与统计口径 | 无覆盖目录时的读数 |
 | --- | --- | --- | --- |
 | M63 审计 `:85` / 附录 A | Safari（pid 69370） | `services = {` 整段人工计数：全部 6 条，其中 WebKit 名下 4 条 | 「六条或四条」（**已确证**，附录 A 列出六个服务名） |
-| `build-state.md:390`、`:398` | Chrome | 本节 1.1 那条正则，`grep -c` 计行 | 「无覆盖目录时该值是 8」（**已确证**，读数在 `:398`） |
+| `build-state.md:390`、`:398` | Chrome | 本节 1.1 那条正则，`grep -c` 计行 | 「无覆盖目录时该值是 8」（读数在 `:398`）。**这个 8 是采样值不是常量**：同一条命令 2026-11-25 20:41 CST 在 Chrome pid 626 上得 9，同一段去重后基础名只有 4 个。用行数比较读数会随页面数漂移，改用本表第三行的口径 |
 | `scripts/probe-webkit-override-endpoints.sh:59-62`（内层分支 `feat/d3-override-endpoint-probe`，提交 `4bad538`） | Safari | 四个完整服务名逐个计数（`WebContent`、`GPU`、`Networking`、`WebContent.CaptivePortal`），按整词匹配 | 不适用：脚本只给 `PROBE_VERDICT` |
 
 Chrome 的 8 与 Safari 的 6 相差两条，`build-state.md:491` 另记「Chrome 的 per-pid 域有 7 个 WebKit 端点」，三处读数互不相同且都出自同一台设备。**本文不解释这个差值的来源，因为没有一份记录保留了当时的 `services = {` 原段**（M63 附录 A 是唯一保留原段的一份，而它只覆盖 Safari）。
@@ -143,19 +145,22 @@ exception: EXC_BREAKPOINT (SIGTRAP/BPT trap: 5)
 
 本文所有 `.xpc` 与 framework 路径都在 `/var/jb/Library/` 下；`.xpc` 内的 `DYLD_FRAMEWORK_PATH` 见 `patches/ios18-public-sdk-xpc-main.patch:22`，该行的首项由同一补丁 `:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride` 给出。
 
-### 第 0 步：确认图形域存在
+### 第 0 步：确认图形会话在跑
 
 **前置条件**：设备可达。
 
 ```sh
-/var/jb/usr/bin/launchctl print gui/501 | wc -l
+/var/jb/usr/bin/launchctl print user/501/com.apple.SpringBoard | grep -m1 'state = '
+/var/jb/usr/bin/launchctl print gui/501 | wc -l      # 仅诊断，不是判据
 ```
 
-**预期**：明显大于 0（M66 文档第 0 步记 `launchctl print user/501` 为 2056 行作参照）。
+**预期**：第一行输出 `state = running`。2026-11-25 20:41 CST 实测：该命令 `exit=0`、`state = running`、`active count = 39`。
 
-**失败判据**：输出为 0，即图形域缺失。此时任何应用都无法启动，取不到端点读数。**这一步失败必须重启设备**，`sbreload` 恢复不了：M63 记录过 `sbreload` 之后图形域为空，`launchctl kickstart system/com.apple.runningboardd` 与 `launchctl bootstrap gui/501` 都无效（`docs/ios16-override-endpoint-probe.md` 第二节，**已确证**，该事故有记录）。
+**失败判据**：`state` 不是 `running`，或命令非零退出（job 缺失时为 `exit=113`）。此时任何应用都无法启动，取不到端点读数。**这一步失败必须重启设备**，`sbreload` 恢复不了：M63 记录过 `sbreload` 之后图形会话丢失、应用起不来，`launchctl kickstart system/com.apple.runningboardd` 与 `launchctl bootstrap gui/501` 都无效（`docs/ios16-override-endpoint-probe.md` 第二节，**已确证**，该事故有记录）。
 
-> 这一步不是可选的准备，它是全流程的门。`scripts/probe-webkit-override-endpoints.sh` 在图形域为空时于任何写操作之前以状态码 3 退出。
+**`gui/501` 的行数不是判据，不要用它判断设备状态。** 同一台健康设备的同一次读数里，`launchctl print gui/501` 是 0 行、`exit=125`，加 `sudo` 也一样；`launchctl print system` 的域列表只有 `user/501`，没有 `gui/501`。iOS 16.1 加 Dopamine 的图形会话落在 `user/501`，`gui/501` 根本不存在。设备此时正常工作：上线 10 小时，Safari pid 622 与 Chrome pid 626 都是开机时启动的，23 个 WebKit helper 在跑。早先的「`gui/501` 为 0 行即降级」是把 02:05 那次事故的读数当成了通用判据，健康设备同样读到 0 行。
+
+> 这一步不是可选的准备，它是全流程的门。`scripts/probe-webkit-override-endpoints.sh` 在 SpringBoard 的 `state` 不是 `running` 时于任何写操作之前以状态码 3 退出；它不再以 `gui/501` 是否为空作为中止条件。
 
 ### 第 1 步：取基线，并把工具链固定下来
 
@@ -169,10 +174,14 @@ sleep 8
 APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
 /var/jb/usr/bin/launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p'
 /var/jb/usr/bin/launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
-  | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
 ```
 
-**记录两样东西**：`services = {` 整段原文，与那一行的计数。后者记为 `N_before`。
+**记录两样东西**：`services = {` 整段原文，与去重后的基础服务名清单。后者记为 `N_before`。
+
+**计数判据是去重后的基础名，不是行数。** 段里每个活着的页面各注册一条带 UUID 后缀的实例条目，按行 `grep -cE` 随页面数浮动。2026-11-25 20:41 CST 实测 Chrome pid 626：按行 `grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'` 得 **9**（其中 5 条带 UUID），去重后的基础名是 **4** 个（`WebContent`、`GPU`、`Networking`、`WebContent.CaptivePortal`）。`build-state.md` 旧表里的「8」是某一次的采样值，不是常量，不能当「端点全失 = 0」的对照基线。判据看的是这四个名字各自在不在，不是那个数变没变。
 
 **失败判据**：三条，任何一条成立都说明测试台不合格，读数作废（这三条都是 `AGENTS.md` 的「设备侧排查方法」里踩过的坑，**已确证**）：
 
@@ -267,7 +276,9 @@ sleep 8
 APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
 /var/jb/usr/bin/launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p'
 /var/jb/usr/bin/launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
-  | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
 ```
 
 **崩溃差分**（必须与上一步同一时间窗，否则会把历史记录算进本次结果）：
@@ -282,7 +293,7 @@ ls -t /var/mobile/Library/Logs/CrashReporter/*.ips | head -5
 
 **判 (A) 需要三个条件同时成立**：
 
-1. 计数与 `N_before` **相等**（不是「等于某个绝对数」）；
+1. 去重后的四个基础服务名与 `N_before` **相同**（不是「总数等于某个绝对数」，也不是「行数相等」）；
 2. 新增报告里**没有** `namespace = DYLD`，也没有 `exception.type` 含 `PAC_EXCEPTION`；
 3. 至少一个**本轮新起**的 helper 的 `WebKit.framework/WebKit` 来自 `/var/jb`（命令见第三节，只能靠 `lldb image list -o -f`）。
 
@@ -479,13 +490,18 @@ sleep 3
 
 ```sh
 APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
-/var/jb/usr/bin/launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+/var/jb/usr/bin/launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
 ```
 
 **预期读数**（与装覆盖目录之前的同一条命令比较）：
 
-- (A)：与装前相等；
-- (B)：2 或更低。
+- (A)：四个基础名与装前相同；
+- (B)：只剩 2 个或更少。
+
+按行 `grep -cE` 的旧口径不能用来比较：每个活着的页面各注册一条带 UUID 后缀的实例条目，行数随页面数漂移，装前装后即使端点集合完全一样也可能差一条。
 
 **命令本身只读**；`launchctl print` 不动任何状态。但判定需要装/卸覆盖目录这一步写操作，所以判据的完整取法在第二节第 2、4 步。
 

@@ -34,15 +34,17 @@ M63 附录 A 与 `build-state.md` 第四轮的读数都缺第 3、4 项，所以
 
 | 步 | 动作 | 读数 |
 | --- | --- | --- |
-| 1 | 前置状态 | `launchctl print gui/501` 的退出码与行数、覆盖目录是否存在、Safari 与 helper 进程表、本轮之前的 helper 基线 pid 表 |
+| 1 | 前置状态 | `launchctl print user/501/com.apple.SpringBoard` 的退出码与 `state`（这是闸门）、`launchctl print gui/501` 的退出码与行数（仅诊断）、覆盖目录是否存在、Safari 与 helper 进程表、本轮之前的 helper 基线 pid 表 |
 | 2 | `sudo` 跑安装脚本 | 退出码、manifest 行数、目录是否出现 |
 | 3 | `killall -9 MobileSafari`，清理旧 helper，带 URL 拉起 Safari | 每次尝试的命令、退出码、pid |
-| 4 | `launchctl print pid/<pid>` | `services = {` 整段原文，四个 WebKit 服务逐条计数，`BrailleTranslation`、`MTLCompilerService` 与 distinct 名字数 |
+| 4 | `launchctl print pid/<pid>` | `services = {` 整段原文，四个 WebKit 服务逐条计数，`BrailleTranslation`、`MTLCompilerService`、distinct 名字数，以及旧的行数读数与 UUID 实例数 |
 | 5 | helper 统计 | 新起 vs 残留（按第 1 步基线 pid 差集），每个新 helper 的每一条 `WebKit.framework/WebKit` 路径，以及该 helper 的 `.xpc` 可执行路径落在覆盖目录还是系统目录 |
 | 6 | 卸载 | 退出码、目录是否消失 |
 | 7 | 汇总 | 步骤表（含每步新增崩溃报告数与 INVALID 标记）、全部 `PROBE_*` 键值 |
 
-`launchctl print gui/501` 的判定同时看退出码与行数：为空、或 launchd 把 `Could not find domain for gui/501` 写到 stderr 并非零退出，都算图形域缺失。只数行数会把那行拒绝消息当成一行的健康域，从而在必须中止的状态下继续安装。这是 M63 记录过的事故：`sbreload` 之后图形域为空，所有 app 无法启动，`launchctl kickstart system/com.apple.runningboardd` 与 `launchctl bootstrap gui/501` 都恢复不了，只能重启。
+闸门是 SpringBoard 的 job，不是 `gui/501` 域。判据命令是 `launchctl print user/501/com.apple.SpringBoard`，`state = running` 才继续；job 缺失、job 存在但未运行、`user/501` 域缺失，三种形态各自给出不同退出码与 `state`，都能与健康设备区分。2026-11-25 20:41 CST 在健康设备上实测：该命令 `exit=0`、`state = running`、`active count = 39`；同一时刻 `launchctl print user/501` 是 2135 行、`active count = 573`，SpringBoard pid 345 与 backboardd pid 380 都在里面。
+
+`launchctl print gui/501` 只作为诊断读数记录，不参与判定。iOS 16.1 加 Dopamine 的设备上它恒为 0 行、`exit=125`，加 `sudo` 也一样，而设备此时正常工作（上线 10 小时、Safari 与 Chrome 都在、23 个 WebKit helper）。旧版的闸门要求它非空且退出 0，于是探针在这台设备上永远无法运行。§七那次的 `sbreload` 事故只说明「应用起不来」这一种降级状态，不能推出「`gui/501` 为空即降级」：健康设备同样读到 0 行，两者只能用 SpringBoard 的 `state` 区分。
 
 ## 三、怎么用
 
@@ -53,11 +55,11 @@ DEVICE_SUDO_PASSWORD='...' scripts/probe-webkit-override-endpoints.sh
 
 可选参数：`--ssh-target <[user@]host>`（默认 `mobile@192.168.2.135`）、`--log-dir <dir>`（默认 `$TMPDIR` 下带时间戳的目录）、`--wait <秒>`（每次拉起后等多久，默认 5）。环境变量 `PROBE_SSH_TARGET`、`PROBE_LOG_DIR`、`PROBE_WAIT_SECONDS` 等价。
 
-退出码：`0` 读到 A 或 B，`4` UNKNOWN，`3` 图形域缺失（需重启），`2` 用法或环境错误。
+退出码：`0` 读到 A 或 B，`4` UNKNOWN，`3` 图形会话缺失（SpringBoard 未运行，需重启），`2` 用法或环境错误。`gui/501` 的读数不参与退出码。
 
 日志落在 `<log-dir>/probe.log`，就是脚本的 stdout 原文，每条设备命令都以 `$ <命令>  [用途]` / 输出 / `exit=<码>` 三行出现，读数与产生它的退出码不会被拆开。
 
-跑之前确认三件事：设备可达（`ssh` 免密）、`launchctl print gui/501` 正常退出且非空、覆盖目录当前不存在（已存在时第二步拒绝安装，因为那样测不到「从无到有」的转变）。
+跑之前确认三件事：设备可达（`ssh` 免密）、`launchctl print user/501/com.apple.SpringBoard` 报 `state = running`、覆盖目录当前不存在（已存在时第二步拒绝安装，因为那样测不到「从无到有」的转变）。
 
 不接触设备的回归套件在 `scripts/probe-override-harness/`，直接运行即可，产物全部落在临时目录、退出时删除（`HARNESS_KEEP=1` 可保留并打印路径）。它用一个假 `ssh` 冒充设备，那个假 `ssh` 会像真 `ssh` 一样读走 stdin（只有带 `-n` 才不读），并执行脚本自己发过去的那段 `.ips` 解析程序，所以「报告读不出正文」这条路径得到的退出码是真实代码给出的，不是桩猜出来的。
 
@@ -121,12 +123,15 @@ M63 的实测与 `AGENTS.md` 记过设备缺哪些工具：没有 `plutil`、`st
 
 ## 六、局限
 
-- **脚本从未在真机上跑过。** 设备在本轮编写期间不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：26 个场景、115 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形域缺失中止，以及崩溃排除的五条路径（读不出正文、after 列表失败、before 列表失败因而没有基线、读窗口外的报告只记不拦、读窗口内缺基线时连 A 也不给），外加两个理由的优先级（缺基线而 after 成功时取基线那一条，同一步 before 与 after 都失败时取另一条），每条断言检查退出码或日志里的关键行。
+- **完整七步仍未在真机上跑过。** 编写期间设备不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：29 个场景、122 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形会话缺失中止、空 `gui/501` 不中止，以及崩溃排除的五条路径（读不出正文、after 列表失败、before 列表失败因而没有基线、读窗口外的报告只记不拦、读窗口内缺基线时连 A 也不给），外加两个理由的优先级（缺基线而 after 成功时取基线那一条，同一步 before 与 after 都失败时取另一条），每条断言检查退出码或日志里的关键行。
+- **前置闸门已在真机上单独验证过，七步里的其余六步没有。** 2026-11-25 20:41 CST 把脚本里 `read_gui_domain_facts`、`read_springboard_facts`、`graphics_session_healthy`、`abort_graphics_session_missing` 四个函数的原文抽出来，对着 `192.168.2.136` 运行：旧判据（`gui/501` 非空且退出 0）判定中止，新判据判定通过，说明这条修正是真的改变了结论而不是措辞。四个失败形态（SpringBoard job 缺失、`state = not running`、`state = exited`、`user/501` 域缺失）在主机侧用贴写读数逐一验证退出码为 3。第 2 至 6 步在真机上没有执行，因为第 2 步会写覆盖目录。
 - `bash -n` 通过。`shellcheck` 在本机不可用（`which shellcheck` 无输出），**没有跑**，所以本节不声称它通过。
 - 因此下列事实只有 `AGENTS.md` 的间接依据，没有实测：`ps -Ao pid,ppid,comm` 在 iPadOS 16.1 上是否接受 ppid 列；`sudo lldb` 附着 helper 是否被允许；`image list -o -f` 的实际行格式（脚本按「路径是行末字段、可含空格」解析）。
 - 一个 helper 也可能在 lldb 附着前就退出。此时 framework 路径读不到，A 与 B 都不可达，脚本会给出对应的 `..._no_helper_framework_path_read` 而不是猜。
 - 端点数只统计 Safari。`build-state.md` 那张表用的是 Chrome，两者的 per-pid 域结构相同但读数不必一一对应；比对时看的是「四个 WebKit 服务在不在」这个定性结论。
 - 本探针只覆盖安装脚本产出的那一种目录内容。要测「带 `XPCServices` 的覆盖目录」，需要先改安装脚本，那属于另一个实验，本脚本检测到覆盖目录已存在时会拒绝安装。在本探针的配置下 A 只能来自系统桩的 framework 交接，判定 (A) 需要未剪枝的覆盖目录。
+- **两种安装脚本产出的目录不同，不能混用读数。** 设备上那份 `/var/mobile/install-webkit-override.sh`（2026-11-25 实测 13598 字节、mtime `Nov 24 21:27`）只有一条 `cp -a`，**保留** `XPCServices`；仓库里的 `scripts/install-webkit-override.sh` 在 `:259` 定义 `prune_xpc_services()`、`:285` 在 `copy_all()` 里调用，**删除**它。上面那句「A 只能来自系统桩的 framework 交接」只对仓库那份脚本成立；用设备那份跑时覆盖目录里带着 `XPCServices`，launchd 有可能直接从覆盖目录的 `.xpc` 起进程，A 的第一种机制就重新可达。跑之前先记下用的是哪一份、字节数与 `sha256`。
+- **端点数取去重后的基础服务名，不取行数。** `services = {` 段里每个活着的页面各注册一条带 UUID 后缀的实例条目，所以按行 `grep -c` 随页面数浮动。2026-11-25 20:41 CST 实测 Chrome pid 626：按行 `grep -cE` 得 9，其中 5 条带 UUID，去重后基础名 4 个。脚本的 `count_service` 一直按整词边界匹配，从来没数过实例条目，所以脚本读数不受这个影响；日志里额外打印行数与 UUID 实例数，只是为了让新日志与 `build-state.md` 旧表里那个「8」对得上。
 
 ## 七、与 M63 的关系
 

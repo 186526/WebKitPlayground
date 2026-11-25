@@ -104,7 +104,7 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 | 一 | 三个 framework 同代，且 UI 进程与每一个 helper 同代 | 已满足一半。`scripts/package-webkit-device-deb.sh:198-204` 的 `required_items` 把 `WebKit.framework`、`WebCore.framework`、`WebKitLegacy.framework`、`JavaScriptCore.framework` 列为必需，缺一个就 `exit 1`；但「UI 与 helper 同时换」不由任何脚本保证 | 已满足一半。`/var/jb/Library/Frameworks` 下五个 framework 来自同一次构建（`WebKit` 50758784 字节、2026-11-24 18:06、`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；外层仓库 `build-state.md` 的「设备上没有 `strings`，也没有这一组诊断与启动工具」一节早前记的 50758752 是 07:39 的上一版，原文「两处二进制 `WebCore` 93318960 字节、`WebKit` 50758752 字节」）；但 UI 与 helper 从未同时换成 18.3，这正是 PAC 崩溃的成因；方向只能从 22:39 那批推定，且那批的覆盖目录内容与 helper 的 `WebKit` 路径都没有记录（见 1.1 节） |
 | 二 | 三个 framework 的路径唯一，不同时存在系统副本与 `/var/jb` 副本 | **未满足**。`install-webkit-override.sh` 的 `OVERRIDE_ROOT` 把第二份复制到 `/var/jb/Library/WebKitOverride`，与 `/var/jb/Library/Frameworks` 同时可被 dyld 选中 | **未满足**。系统的 `/System/Library/Frameworks` 与 `/var/jb/Library/Frameworks` 两份都在；`/var/jb/Library/WebKitOverride` 当前不存在 |
 | 三 | helper 拿到覆盖路径。途径只有两条：它自己的 `LC_DYLD_ENVIRONMENT`，或 `__XPC_DYLD_FRAMEWORK_PATH` 的转交 | `patches/ios18-public-sdk-xpc-main.patch` 的 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES` 给那五个 `.xpc` 写入了内嵌路径，第一项是 `WK_ROOTLESS_FRAMEWORKS_ROOT`（= `/var/jb/Library/WebKitOverride`），后备项是 `/var/jb/Library/Frameworks`；系统桩零条。basebin 四个变量都设了（`0001-systemhook-set-search-paths.patch:100-103`），但 `__XPC_` 版本的转交行为无实现可查 | **未测**。不仅「是否转交」未测，「转交与内嵌谁优先」也未测：两者第一项现在同为 `/var/jb/Library/WebKitOverride`，但内嵌那串还有 `/var/jb/Library/Frameworks` 作后备，最终命中哪一项没有读数。全部 16 份 `.ips` 中 `usedImages` 含 `/var/jb` 家族 `WebKit`/`WebCore`/`JavaScriptCore` 的为 **0** 份，但 `usedImages` 只收录栈帧引用到的镜像，这个 0 既不证明没加载也不给出路径。判据是第 3b 步的 `lldb image list` 与第 3d 步的 `DYLD_PRINT_SEARCHING` |
-| 四 | launchd 能从该目录为 UI 进程解析出四个服务名 | 无代码可改，这是 launchd 的行为 | **未测**。从未取得一次不含 `DYLD`/`PAC_EXCEPTION` 崩溃的读数；且第 0 步的 `gui/501` 图形域自 M65 起未恢复，任何新读数都还取不到 |
+| 四 | launchd 能从该目录为 UI 进程解析出四个服务名 | 无代码可改，这是 launchd 的行为 | **未测**。从未取得一次不含 `DYLD`/`PAC_EXCEPTION` 崩溃的读数。第 0 步的判据已改为 SpringBoard 的 `state`，那条 2026-11-25 20:41 CST 通过（`state = running`），所以「取不到读数」不再是阻塞点；`gui/501` 为 0 行在这个平台上是健康设备的正常读数，不构成阻塞 |
 
 ### 2.1 第一条：三个 framework 同代，且 UI 与每一个 helper 同代
 
@@ -223,17 +223,19 @@ M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 
 
 按顺序执行。每一步给出命令、预期读数、以及「读数不成立」的判据。前一步不通过时不要进入下一步，否则后一步的数字无法归因。**本节全部步骤待设备回网后执行**：写作时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时，因此本文第四节没有任何一条是按本节命令新取的读数。
 
-### 第 0 步：确认图形域存在
+### 第 0 步：确认图形会话在跑
 
-M65 记录的 `gui/501` 域丢失至今没有恢复。今天实测 `launchctl print gui/501` 返回 0 行，`launchctl print user/501` 返回 2056 行。这个状态下任何应用都无法启动，也就取不到任何端点读数。
+`gui/501` 在这台设备上恒为空，且设备健康时也如此，所以它不是判据。2026-11-25 20:41 CST 实测：`launchctl print gui/501` 返回 0 行、`exit=125`（加 `sudo` 一样），`launchctl print system` 的域列表只有 `user/501`，而同时 `user/501/com.apple.SpringBoard` 是 `state = running`、`active count = 39`。设备此时正常工作：上线 10 小时，Safari pid 622 与 Chrome pid 626 都是开机启动的，23 个 WebKit helper 在跑。M65 记的 `user/501` 2056 行也已是旧读数，今天是 2135 行、`active count = 573`。
 
 ```sh
-launchctl print gui/501 2>&1 | wc -l
-launchctl print user/501 2>&1 | wc -l
+launchctl print user/501/com.apple.SpringBoard | grep -m1 'state = '
+launchctl print gui/501 2>&1 | wc -l      # 仅诊断，不是判据
 ```
 
-**预期：** 第一条远大于 0（正常状态是数千行），第二条同样非零。
-**不成立时：** `gui/501` 为 0 说明图形域仍未重建。已试过并无效的手段见 M65 的 mission 记录（`sbreload` 报 `Operation not permitted`、`kickstart system/com.apple.runningboardd` 成功但域未恢复、`bootstrap gui/501` 报 `125: Domain does not support specified action`）。**只有一次正常重启能重建这个域。** 在这一条通过之前，第四节其余步骤一条都不要执行。
+**预期：** 第一条输出 `state = running`。
+**不成立时：** `state` 不是 `running`，或命令非零退出（job 缺失时为 `exit=113`），说明图形会话丢失，任何应用都无法启动。已试过并无效的手段见 M65 的 mission 记录（`sbreload` 报 `Operation not permitted`、`kickstart system/com.apple.runningboardd` 成功但域未恢复、`bootstrap gui/501` 报 `125: Domain does not support specified action`）。**只有一次正常重启能恢复它。** 在这一条通过之前，第四节其余步骤一条都不要执行。
+
+**不要把 `gui/501` 为 0 行读成「设备处于降级状态」。** 上一条 M65 事故里应用确实起不来，但那是事故本身的读数；健康设备同样读到 0 行。两者的区别只在 SpringBoard 的 `state`。原文「今天实测 `launchctl print gui/501` 返回 0 行 … 这个状态下任何应用都无法启动」这句里，前半句今天仍然成立，后半句不成立。
 
 ### 第 1 步：清掉残留 helper，确认真实基线
 
@@ -557,17 +559,21 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p'
 
 ```sh
 launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
-  | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
 ```
 
 **两种情形：**
 
-- **(A) 覆盖目录建立后仍为四条以上**，说明 launchd 会现扫索引外的 `XPCServices`，启动链在路上；
-- **(B) 缩到两条以内（只剩 `BrailleTranslation` 与 `MTLCompilerService`）**，说明 launchd 只认索引内路径。
+- **(A) 覆盖目录建立后四个基础名仍在**，说明 launchd 会现扫索引外的 `XPCServices`，启动链在路上；
+- **(B) 缩到两个以内（只剩 `BrailleTranslation` 与 `MTLCompilerService` 一类）**，说明 launchd 只认索引内路径。
+
+**不要用按行 `grep -cE` 比较这两个读数。** 段里每个活着的页面各注册一条带 UUID 后缀的实例条目，行数随页面数漂移。2026-11-25 20:41 CST 实测 Chrome pid 626：按行得 9（其中 5 条带 UUID），去重后基础名 4 个。下面那句「无覆盖目录 8 条」是某一次的采样值，不是常量，不能当对照基线；判据是四个基础名各自在不在。
 
 **读这个数字之前必须先排除第 2 步的两类崩溃。** 只有「进程确实活着（`ps ax | grep Chrome` 有宿主进程）且新增报告里没有 `DYLD` 或 `PAC_EXCEPTION`」时，端点归零才是 (B) 的证据。
 
-参照读数（外层仓库 `build-state.md` 的「端点数目表（目标应用 Chrome，每次 `killall` 后重新 `uiopen <url>`）」一节，该表首行是「| 覆盖目录内容 | 端点 | spawn | lookup 失败 |」，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数）：无覆盖目录 8 条；加自建 `WebCore` + `JavaScriptCore` 5 条；再加只含 `WebKit` 二进制的 `WebKit.framework` 为 **0** 条。
+参照读数（外层仓库 `build-state.md` 的「端点数目表（目标应用 Chrome，每次 `killall` 后重新 `uiopen <url>`）」一节，该表首行是「| 覆盖目录内容 | 端点 | spawn | lookup 失败 |」，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数）：无覆盖目录 8 条；加自建 `WebCore` + `JavaScriptCore` 5 条；再加只含 `WebKit` 二进制的 `WebKit.framework` 为 **0** 条。这三个数都是按行计的采样值，各自的页面数不同，只能当量级参照，不能当固定基线。
 
 **必须在测试台之外确认的三件事**（都是踩过的坑，缺一条就得到假数据）：
 
@@ -649,10 +655,10 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 
 ## 附录：本文引用的实测读数（2026-11-25，192.168.2.135，只读）
 
-- `launchctl print gui/501` 为 0 行；`launchctl print user/501` 为 2056 行。
+- `launchctl print gui/501` 为 0 行、`exit=125`（加 `sudo` 一样）；`launchctl print user/501` 为 2135 行、`active count = 573`；`launchctl print user/501/com.apple.SpringBoard` 为 `state = running`。2026-11-25 20:41 CST 复核。
 - `/var/jb/Library/WebKitOverride` 不存在。
 - `/var/jb` 是 `/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus` 的符号链接。
-- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`，974608 字节，`Nov 24 08:44`。
+- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`。2026-11-25 20:41 CST 复核为 **974016 字节**、`sha256 486620f0c5ce26e602f0155412375d9c9d564f10b014fee2c369cd58e55751ba`、`Nov 25 10:37`；runbook 判定 (b) 为 `1 0 0 1`（`isOverridablePath` 与 `isAlwaysOverridablePath` 都是 0），即 basebin 层当前**未**部署。早先记的 974608 字节那一版已不在设备上，`dyld.old` 也不在了。
 - `/var/jb/Library/Frameworks` 含 `AltList.framework`、`CydiaSubstrate.framework`、`JavaScriptCore.framework`、`WebCore.framework`、`WebGPU.framework`、`WebKit.framework`、`WebKitLegacy.framework`、`adattributiond`、`webpushd`。
 - `ps -Ao comm` 里有 3 个 WebKit helper（70750、70751、70753），`ppid` 全为 1，全部来自 `/System/Library/Frameworks/WebKit.framework/XPCServices/...`，没有宿主进程。
 - 对 70753 跑 `lldb image list -o -f`：`[86] /System/Library/Frameworks/WebKit.framework/WebKit`、`[113] /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`、`[115] /System/Library/PrivateFrameworks/WebCore.framework/WebCore`。

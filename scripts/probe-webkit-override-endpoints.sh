@@ -38,8 +38,10 @@
 # header line followed by a JSON body, and AGENTS.md's device tool list has no
 # plist reader to split them.
 #
-# Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when launchctl print
-# gui/501 is empty, 2 for a usage or setup error.
+# Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when SpringBoard's job
+# under user/501 is missing or not running, 2 for a usage or setup error.
+# gui/501 is read as a diagnostic and does not affect the exit status: on
+# iOS 16.1 under Dopamine it is empty with exit 125 on a healthy device.
 #
 set -u
 
@@ -169,8 +171,10 @@ Environment:
   PROBE_WAIT_SECONDS    same as --wait
   PROBE_LOG_DIR         same as --log-dir
 
-Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when launchctl print gui/501
-is empty, 2 for a usage or setup error.
+Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when SpringBoard's job under
+user/501 is missing or not running, 2 for a usage or setup error. gui/501 is
+read as a diagnostic only: on iOS 16.1 under Dopamine it is empty with exit 125
+on a healthy device.
 USAGE
 }
 
@@ -508,14 +512,36 @@ skip_step() {
 # Step 1: preconditions
 # ---------------------------------------------------------------------------
 
-# Counted on the host rather than with the device's wc, so the reading is the
-# line count of what launchctl actually printed and no further device program is
-# needed. The exit status matters as much as the count: when the domain is gone,
-# launchctl prints `Could not find domain for gui/501` to stderr and exits
-# nonzero, and `remote` merges stderr into the output, so a count taken alone
-# would read that one-line refusal as a healthy domain. Both facts are therefore
-# written to GUI_RC and GUI_LINES directly: a caller that captured the count
-# through `$(...)` would get the count in a subshell and lose the status.
+# The health gate is SpringBoard's own job, not the gui/501 domain.
+#
+# On iOS 16.1 under Dopamine there is no gui/501 domain at all, and there is
+# nothing wrong with the device when that is so: the graphics session lives in
+# user/501. Measured 2026-11-25 20:41 CST on the healthy device (uptime 10 h,
+# Safari 622 and Chrome 626 both started at boot, 23 WebKit helpers):
+#
+#   launchctl print gui/501                  -> rc=125, 0 lines, stderr empty
+#   launchctl print gui/501  (under sudo)    -> rc=125, 0 lines, stderr empty
+#   launchctl print system  | grep '^\s*\(gui\|user\)/'
+#                                            -> user/501 only, no gui/501
+#   launchctl print user/501                 -> rc=0, 2135 lines, active 573
+#   launchctl print user/501 | grep -c 'com\.apple\.SpringBoard'
+#                                            -> 1 (pid 345)
+#   launchctl print user/501/com.apple.SpringBoard
+#                                            -> rc=0, state = running
+#
+# Both readings of gui/501 are the same observation and neither means the device
+# is broken: exit 125 with empty output. An earlier revision of this script
+# aborted on exactly that, so it could never run on this device at all. The
+# domain name is still read, because a log that omits it would leave a reader
+# unable to tell this configuration from one where the domain does exist, but
+# the reading is now a diagnostic and never a gate.
+#
+# The gate that does mean something is SpringBoard's job under user/501. It is
+# the process that owns the graphics session, and reading its `state = running`
+# is what separates a working device from a degraded one. A device whose
+# SpringBoard job is missing or not running cannot start an application, so no
+# per-pid domain would carry the endpoints and every reading after this point
+# would be the environment's zero rather than launchd's answer.
 read_gui_domain_facts() {
     remote 'launchctl print gui/501'
     GUI_RC=${REMOTE_RC}
@@ -532,28 +558,50 @@ read_gui_domain_facts() {
     esac
 }
 
-gui_domain_usable() {
-    [ "${GUI_RC}" -eq 0 ] && [ "${GUI_LINES}" -gt 0 ]
+# One reading, three facts: whether launchctl would describe the system domain at
+# all, whether that domain lists user/501, and whether SpringBoard's job under it
+# is running. `launchctl print user/501/com.apple.SpringBoard` is asked directly
+# and its `state = running` is the gate, so a missing user domain, a missing job
+# and a stopped job are three distinct reasons in the log rather than one.
+SPRINGBOARD_STATE=''
+SPRINGBOARD_RC=0
+
+read_springboard_facts() {
+    remote 'launchctl print user/501/com.apple.SpringBoard'
+    SPRINGBOARD_RC=${REMOTE_RC}
+    if [ "${REMOTE_RC}" -eq 255 ]; then
+        die "ssh to ${SSH_TARGET} failed (exit 255): ${REMOTE_OUTPUT}"
+    fi
+    SPRINGBOARD_STATE=$(printf '%s\n' "${REMOTE_OUTPUT}" \
+        | grep -E '^[[:space:]]+state = ' | head -n 1 \
+        | sed -E 's/^[[:space:]]*state = //; s/[[:space:]]+$//')
+    SPRINGBOARD_STATE=${SPRINGBOARD_STATE:-unknown}
 }
 
-abort_gui_domain_missing() {
+graphics_session_healthy() {
+    [ "${SPRINGBOARD_RC}" -eq 0 ] && [ "${SPRINGBOARD_STATE}" = running ]
+}
+
+abort_graphics_session_missing() {
     emit ""
-    emit '需要先重启设备，图形域缺失'
-    emit "launchctl print gui/501 exited ${GUI_RC} and printed ${GUI_LINES} line(s), so the graphics domain is not there and no GUI process can start. Every endpoint reading after this point would be meaningless. Reboot the device, then run this script again. sbreload and launchctl kickstart system/com.apple.runningboardd were both observed failing to restore the domain, so a reboot is the only known fix."
-    if [ "${GUI_RC}" -ne 0 ]; then
-        emit "  the command's output, which is where launchd explains the refusal: ${GUI_OUTPUT}"
+    emit '需要先重启设备，图形会话缺失'
+    emit "SpringBoard's job under user/501 is not running: launchctl exited ${SPRINGBOARD_RC} and reported state=${SPRINGBOARD_STATE}. SpringBoard owns the graphics session, so no application can start and every endpoint reading after this point would be the environment's zero rather than launchd's answer. Reboot the device, then run this script again. sbreload and launchctl kickstart system/com.apple.runningboardd were both observed failing to restore a lost graphics session, so a reboot is the only known fix."
+    emit "  launchctl print gui/501, recorded as a diagnostic and not a gate: exit=${GUI_RC}, ${GUI_LINES} line(s). On iOS 16.1 under Dopamine this is empty with exit 125 on a healthy device, because the graphics session lives in user/501 and there is no gui/501 domain."
+    if [ "${SPRINGBOARD_RC}" -ne 0 ]; then
+        emit "  the SpringBoard command's output, which is where launchd explains the refusal: ${REMOTE_OUTPUT}"
     fi
     emit 'PROBE_VERDICT=ABORTED'
-    emit 'PROBE_REASON=gui_domain_missing_reboot_required'
+    emit 'PROBE_REASON=graphics_session_missing_reboot_required'
     exit 3
 }
 
 step_preconditions() {
     step_begin 1 'record the preconditions'
     # The gate already ran in main, before any device write; this only reports the
-    # same reading, so the log keeps the fact without asking launchd twice.
-    emit "  launchctl print gui/501: exit=${GUI_RC}, ${GUI_LINES} line(s)"
-    gui_domain_usable || abort_gui_domain_missing
+    # same reading, so the log keeps the fact without asking launchd again.
+    emit "  launchctl print gui/501: exit=${GUI_RC}, ${GUI_LINES} line(s) (diagnostic, not a gate)"
+    emit "  launchctl print user/501/com.apple.SpringBoard: exit=${SPRINGBOARD_RC}, state=${SPRINGBOARD_STATE} (this is the gate)"
+    graphics_session_healthy || abort_graphics_session_missing
 
     run 'override directory before' "[ -d ${OVERRIDE_ROOT} ] && echo present || echo absent"
     OVERRIDE_PRESENT_BEFORE=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^(present|absent)$' | tail -n 1)
@@ -851,6 +899,26 @@ report_service() {
     fi
 }
 
+# The line count the older documents published as "8", and the reason it is not a
+# constant. launchctl lists one line per registered instance, and WebContent and
+# Networking also register a UUID-suffixed entry per live page, so a naive
+# `grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'` over the section
+# grows and shrinks with the page count. Measured 2026-11-25 20:41 CST on Chrome
+# pid 626: 9 lines, of which 5 carried a UUID suffix; the bounded count of the
+# same section was 4 (one per base name) and the harness documents still said 8.
+#
+# The script's own count_service is already bounded and never used the line
+# count, so the two can disagree by any number of instances. Both are printed so
+# a new log can be compared with an old reading: the bounded count is the
+# criterion, the line count is what the old documents called the baseline.
+count_webkit_lines() {
+    grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)' "$1" || true
+}
+
+count_webkit_instances() {
+    grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' "$1" || true
+}
+
 step_read_endpoints() {
     step_begin 4 'read the Safari per-pid services section'
     if [ -z "${SAFARI_PID}" ]; then
@@ -888,6 +956,8 @@ step_read_endpoints() {
     report_service com.apple.accessibility.BrailleTranslation.BrailleTranslationService "${SVC_BRAILLE}"
     report_service com.apple.MTLCompilerService "${SVC_MTL}"
     emit "  distinct dotted names in the section: ${SVC_DISTINCT} (M63 appendix A read six with no override directory)"
+    emit "  naive line count, the reading older documents called the baseline: $(count_webkit_lines "${block}"); of those, UUID-instance lines: $(count_webkit_instances "${block}")"
+    emit "  the criterion is the four bounded counts above, not this line count: it grows with the number of live pages, so it is not a constant and the old baseline of 8 was one sample of it"
     step_end
     return 0
 }
@@ -1290,7 +1360,8 @@ step_summary() {
 
     emit ""
     emit 'Facts:'
-    emit "  gui/501 at step 1: exit=${GUI_RC}, ${GUI_LINES} line(s)"
+    emit "  gui/501 at step 1: exit=${GUI_RC}, ${GUI_LINES} line(s) (diagnostic, not a gate)"
+    emit "  SpringBoard under user/501 at step 1: exit=${SPRINGBOARD_RC}, state=${SPRINGBOARD_STATE} (this is the gate)"
     emit "  override directory before: ${OVERRIDE_PRESENT_BEFORE}; install exit: ${INSTALL_RC}"
     emit "  Safari pid: ${SAFARI_PID:-none}; launch: ${SAFARI_LAUNCH_MODE}"
     emit "  WebKit services present: ${webkit_count} of 4 (WebContent=${SVC_WEBCONTENT}, GPU=${SVC_GPU}, Networking=${SVC_NETWORKING}, CaptivePortal=${SVC_CAPTIVEPORTAL})"
@@ -1471,14 +1542,18 @@ main() {
     prepare_log
     trap cleanup EXIT INT TERM
 
-    # The graphics-domain check is the first device action, before anything is
-    # written anywhere. An empty gui/501, or one launchctl refuses to describe,
-    # means no app can start, so every reading would be meaningless; the only
-    # known fix is a reboot.
+    # Graphics-session check, the first device action and before anything is
+    # written anywhere. The gate is SpringBoard's job under user/501; gui/501 is
+    # read too, because a log that omits it could not be told apart from a run on
+    # a configuration that does have that domain, but it never gates.
+
     read_gui_domain_facts
-    printf 'Precondition: launchctl print gui/501 exited %s and printed %s line(s).\n' \
+    printf 'Precondition: launchctl print gui/501 exited %s and printed %s line(s) (diagnostic).\n' \
         "${GUI_RC}" "${GUI_LINES}" >>"${LOG_FILE}"
-    gui_domain_usable || abort_gui_domain_missing
+    read_springboard_facts
+    printf 'Precondition: launchctl print user/501/com.apple.SpringBoard exited %s, state=%s (gate).\n' \
+        "${SPRINGBOARD_RC}" "${SPRINGBOARD_STATE}" >>"${LOG_FILE}"
+    graphics_session_healthy || abort_graphics_session_missing
 
     probe_sudo
     remote "test -f ${INSTALL_SCRIPT} && test -f ${UNINSTALL_SCRIPT} && echo scripts-present"
