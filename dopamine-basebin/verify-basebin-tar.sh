@@ -83,15 +83,18 @@ done
 # the basebin trustcache and nothing recomputes it from the members it just
 # copied, so a stock tc paired with a replaced member describes binaries that
 # are no longer in the tar and leaves the shipped ones uncovered.  Keep the
-# stock tc in such a tar and this assertion is the one that catches it.
+# stock tc in such a tar and this assertion is the one that catches it.  The
+# file must match the shipped slices exactly in both directions: an entry no
+# slice produces is a cdhash the kernel never computes, which a covers-only
+# check would let through.
 if [ -f "$work/basebin/basebin.tc" ]; then
 	pass "tar ships basebin/basebin.tc"
 	if [ -f "$HERE/verify-basebin-trustcache.py" ]; then
 		if python3 "$HERE/verify-basebin-trustcache.py" "$work" > "$work/verify-trustcache.txt" 2>&1; then
-			pass "basebin.tc covers every Mach-O member the tar ships"
+			pass "basebin.tc holds exactly the cdhashes of the Mach-O members the tar ships"
 			sed -n 's/^/    /p' "$work/verify-trustcache.txt"
 		else
-			fail "basebin.tc does not cover the members this tar ships; jbctl would upload the wrong trustcache"
+			fail "basebin.tc and the members this tar ships disagree; jbctl would upload the wrong trustcache"
 			sed -n 's/^/    /p' "$work/verify-trustcache.txt"
 		fi
 	else

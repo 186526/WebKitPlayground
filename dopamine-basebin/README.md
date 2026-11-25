@@ -9,13 +9,14 @@ can override the copy inside the dyld shared cache.
 | `0001-dyldhook-allow-framework-override.patch` | Adds `src/framework_override.c` and its trampoline symbols in `src/main.S`. Applies to tag `3.0.13`. |
 | `verify-dyldhook-merge.sh` | Static assertions on the built `dyldhook_merge.*.dylib` or the merged `gen/dyld`. Needs only `llvm-nm`. |
 | `test-verify-dyldhook-merge.py` | Regression tests for the verifier. Needs only `python3`. |
-| `verify-basebin-tar.sh` | Unpacks a built `basebin.tar` and asserts the six dyldhook dylibs are under the names the device asks for, that `systemhook.dylib` and `launchdhook.dylib` both carry the search-path names, that `basebin.tc` covers every member the tar ships, then re-runs `verify-dyldhook-merge.sh` on the shipped bytes. |
-| `verify-basebin-trustcache.py` | Fails when a member's per-slice cdhash is missing from `basebin.tc`, which is what `jbctl update basebin` uploads as the basebin trustcache. Exempts `dyldhook_merge.*.dylib`. Needs only `python3`. |
+| `verify-basebin-tar.sh` | Unpacks a built `basebin.tar` and asserts the six dyldhook dylibs are under the names the device asks for, that `systemhook.dylib` and `launchdhook.dylib` both carry the search-path names, that `basebin.tc` holds exactly the cdhashes of the members the tar ships, then re-runs `verify-dyldhook-merge.sh` on the shipped bytes. |
+| `verify-basebin-trustcache.py` | Fails when `basebin.tc` and the shipped slices disagree in either direction — a slice with no entry, or an entry no slice produces — which is what `jbctl update basebin` uploads as the basebin trustcache. One cdhash per slice, algorithm from the CodeDirectory's `hashType`, `0x1000` alternate preferred. Exempts `dyldhook_merge.*.dylib`. Needs only `python3`. |
+| `make-basebin-trustcache.py` | Rebuilds `basebin.tc` from a staging tree's members, applying the same rule as `verify-basebin-trustcache.py` (it loads that module's `member_cdhashes`). Entries sorted by cdhash, UUID derived from the set so two builds of the same members produce the same bytes. |
 | `verify-merged-dyld.sh` | Runs `MachOMerger` the way `jbctl update basebin` does and asserts the merged dyld carries all four hooks. |
 | `test-verify-basebin-artifacts.py` | Regression tests for both new verifiers. Needs only `python3`. |
 | `verify-systemhook-search-paths.py` | Asserts the four search-path names and both dedicated directories in a built `systemhook.dylib`, or in `launchdhook.dylib` with `--kind launchdhook`. |
 | `test-verify-systemhook-search-paths.py` | Regression tests for that verifier, including the stock `launchdhook` that must fail. Needs only `python3`. |
-| `macho_fixture.py` | Builds the minimal Mach-O images both test suites use, so neither needs clang or a device. |
+| `macho_fixture.py` | Builds the minimal Mach-O images both test suites use, so neither needs clang or a device. `build_code_directory(hash_type=...)` and `build_macho(code_directories=[...])` can produce the dual-CodeDirectory shape the patched members really have. |
 
 A second patch, `0001-systemhook-set-search-paths.patch`, comes from the
 systemhook work and is applied from the same directory when present. It adds
@@ -214,10 +215,41 @@ basebin trustcache before it copies the members in, `DOJailbreaker.m:348` does
 the same at every jailbreak, and nothing recomputes it from `/var/jb/basebin`
 afterwards. A tar that replaces a member but keeps the stock file therefore
 hands the kernel a trustcache describing binaries it no longer ships. The script
-computes each member's per-slice cdhash the way `BaseBin/Makefile:96-98`
-(`trustcache create .build/basebin.tc .build`) does and fails on any slice that
-is absent from `basebin.tc`. It exempts `dyldhook_merge.*.dylib`, which
-`BaseBin/Makefile:100` keeps out of that trustcache on purpose.
+computes one cdhash per Mach-O slice the way `BaseBin/Makefile:96-98`
+(`trustcache create .build/basebin.tc .build`) does — the digest comes from the
+CodeDirectory's own `hashType` byte at offset 37, so a SHA-1 blob yields a SHA-1
+cdhash, and a slice carrying both a `0x0` and a `0x1000` CodeDirectory
+contributes only the `0x1000` alternate — and it requires the file to hold
+exactly those cdhashes. An entry no slice produces fails the gate as well as a
+missing one: the patched members are dual-CodeDirectory, so a generator that
+hashed every blob with SHA-256 wrote four values no kernel computes alongside
+the 28 correct ones, and a covers-only check passes that tar. It exempts
+`dyldhook_merge.*.dylib`, which `BaseBin/Makefile:100` keeps out of that
+trustcache on purpose.
+
+That rule is checkable against upstream's own output rather than taken on trust.
+Run the generator over the CI build tree, whose two patched members are
+dual-CodeDirectory, and compare with the `basebin.tc` that build shipped:
+
+```sh
+mkdir -p cix && tar -xf basebin-ci.tar -C cix
+python3 dopamine-basebin/make-basebin-trustcache.py cix /tmp/tc_check.bin
+python3 -c "
+import struct
+stock = open('cix/basebin/basebin.tc','rb').read()
+regen = open('/tmp/tc_check.bin','rb').read()
+n = struct.unpack_from('<I', stock, 20)[0]
+m = struct.unpack_from('<I', regen, 20)[0]
+print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
+          == [regen[24+i*22:24+i*22+20] for i in range(m)])
+"
+```
+
+It prints `28 28 True`: same count, same order, same cdhashes, UUID aside. The
+fixed-SHA-256 rule emits 53 entries on that same tree, so this comparison pins
+both the algorithm choice and the `0x1000` preference. The device's own tar
+cannot pin either — its 28 CodeDirectories are all `hashType` 2, so both rules
+read the same there.
 
 `gen/dyld` is deliberately not in the tar. `libjailbreak/src/basebin_gen.m`
 builds it on the device: `jbctl update basebin` copies `/usr/lib/dyld`, patches

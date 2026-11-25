@@ -880,7 +880,7 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 回归用例两个方向都固定了：原版 `launchdhook`（312848 字节，`sha256 449a9606…`，四个名字出现 0 次）必须让脚本退出 1；打过补丁的（330144 字节，`sha256 150270a5…`）必须退出 0。缺成员、`arm64` 侧回退、`/Library/Frameworks` 混入也都各有用例。
 
-同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，逐成员逐切片比对，缺一条就打印该切片 cdhash 并退出 1。回归用例两条：`basebin.tc` 覆盖交付成员的 tar 必须通过；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。为什么这个不匹配必须修而不是解释成无害，见十二·八。
+同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片的 cdhash 集合完全相等：少一条就点名该切片，多一条就点名该 entry。回归用例四条：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。为什么这个不匹配必须修而不是解释成无害，见十二·八。
 
 ### 十二·七 交付物：basebin tar、安装与回滚
 
@@ -889,7 +889,7 @@ tar 以设备自带的 `Dopamine.app/basebin.tar` 为底，只替换需要换的
 | 字段 | 值 |
 | --- | --- |
 | 交付 tar | `/tmp/m125/basebin-m125-full.tar` |
-| 交付 tar sha256 | `db01a9aa2662bf116d3a30620aefac73458c30ce206ec935e1c9ad007a7019c7` |
+| 交付 tar sha256 | `8d3d4810eb01f6763c58c8cef4cc2546367ea17389fb0efbc660682e7b07f27b` |
 | 交付 tar 大小 | 6113280 字节 |
 | 回滚 tar | 设备自带 `Dopamine.app/basebin.tar` 的原样拷贝 `/tmp/m125/rollback-device-basebin.tar` |
 | 回滚 tar sha256 | `52607d787d01efa34a28815cd522b20b05e7e3d648fe94432171abcac3c9e828` |
@@ -978,7 +978,7 @@ ssh mobile@192.168.2.136 'lldb -b -o "process attach --pid $(ps ax | grep -F Mob
 
 `basebin.tc` 不是描述性文件，它是内核信任缓存的输入。`update.m:32-39` 在替换成员**之前**把它上传为 `BASEBIN_TRUSTCACHE_UUID`；`DOJailbreaker.m:348` 每次越狱也上传同一份。之后没有任何一步会按 `/var/jb/basebin` 里的实际文件重算它（`jb_trustcache_add_directory` 在 `BaseBin/` 与 `Application/` 里没有任何调用点）。所以 tar 里的 `basebin.tc` 与实际成员不一致时，内核信任的是另一批二进制。
 
-stock `basebin.tc` 的覆盖范围是实测出来的，不是从注释读来的。解析它的 28 条 entry，按 ChOma 的 `csd_code_directory_calculate_hash` 同一算法（CodeDirectory blob 的 sha256）在每个成员上算 cdhash，逐条对应：
+stock `basebin.tc` 的覆盖范围是实测出来的，不是从注释读来的。解析它的 28 条 entry，在每个成员上按切片的 CodeDirectory 自己的 `hashType` 字节（偏移 37：`1` 是 SHA-1、`2` 是 SHA-256）算 cdhash，逐条对应：
 
 | 项 | 读数 |
 | --- | --- |
@@ -987,29 +987,31 @@ stock `basebin.tc` 的覆盖范围是实测出来的，不是从注释读来的�
 | 覆盖的成员 | `MachOMerger`、`boomerang`、`dopamine`、`fallback/CydiaSubstrate.framework/CydiaSubstrate`、`forkfix.dylib`、`hookd`、`idownloadd`、`jbctl`、`launchdhook.dylib`、`libchoma.dylib`、`libjailbreak.dylib`、`libxpf.dylib`、`opainject`、`rootlesshooks.dylib`、`systemhook.dylib`、`watchdoghook.dylib` |
 | 不在其中的成员 | 六个 `dyldhook_merge.*.dylib`，与 `BaseBin/Makefile:100` 的注释一致（「dyldhook dylibs do not need to be added」） |
 
-stock `launchdhook.dylib` 的两个切片 cdhash 是 `0e59e39881d8ed7152b5102c87fe3fd2d660818b` 与 `a7438ed3dc79bcda49ec9434b901bf5a73fbaab9`，都在 28 条里。替换后的 `launchdhook.dylib`（`150270a5…`）四个切片 cdhash 是 `8629ee98…`、`f68f9da3…`、`b0d2a727…`、`6f362b32…`，都不在。`systemhook.dylib` 同样：stock 的 `dd3f99c4…`、`d3c4e949…` 在，替换后的 `737d2356…`、`14d05a3f…`、`20dcc827…`、`d468b1fb…` 不在。
+stock `launchdhook.dylib` 的两个切片 cdhash 是 `0e59e39881d8ed7152b5102c87fe3fd2d660818b` 与 `a7438ed3dc79bcda49ec9434b901bf5a73fbaab9`，都在 28 条里。替换后的 `launchdhook.dylib`（`150270a5…`）两个切片 cdhash 是 `f68f9da38e2e761e91a1a56032c411ac12288902` 与 `6f362b32d2aa3550ebf42bd320d12e08e6a39243`，都不在。`systemhook.dylib` 同样：stock 的 `dd3f99c4a4ba13daf631e1f2fd1acd0a84883c35`、`d3c4e949ddb149072bfef1d225eabbd4caab28e7` 在，替换后的 `14d05a3f395a5f28d69a2f61e02a9042fe7d5750`、`d468b1fb963f87126eaa4251e3149ebbf274b601` 不在。这两个补丁版成员每个切片带两个 CodeDirectory：槽 `0x0` 是 `ht=1` 的 SHA-1 blob，槽 `0x1000` 是 `ht=2` 的 SHA-256 blob，信任缓存只收 `0x1000` 那一个，所以上列值都是 SHA-256 的。把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次会得到 `20dcc827a93dafaf540c151e8962fff565e582f1`、`737d23564396d11f3be020d48327bd78bc7781f3`、`8629ee9838e164e74a3600f50d9faddddc615571`、`b0d2a727d3739e24322fe281f22d383159ba87a8` 这四个值，内核不会算出它们，早先一版生成器正是这么写的（见下）。
 
-保留 stock `basebin.tc` 的后果是 `jbctl update basebin` 上传一个描述 8 个已不在 tar 里的切片的信任缓存，而被替换的 8 个切片一个都没被覆盖。所以本 tar 的 `basebin.tc` 按交付目录重新生成，规则与 `BaseBin/Makefile:96-98` 的 `trustcache create .build/basebin.tc .build` 相同：遍历成员，取每个切片的 CodeDirectory sha256 前 20 字节，`hash_type` 写 2（sha256），按 cdhash 升序排列。
+保留 stock `basebin.tc` 的后果是 `jbctl update basebin` 上传一个描述 4 个已不在 tar 里的切片的信任缓存，而被替换的 4 个切片一个都没被覆盖。所以本 tar 的 `basebin.tc` 按交付目录重新生成，规则与 `BaseBin/Makefile:96-98` 的 `trustcache create .build/basebin.tc .build` 相同：遍历成员，每个切片出一条 entry，摘要算法取该切片 CodeDirectory 偏移 37 的 `hashType`（`1` 用 SHA-1、`2` 用 SHA-256），双 CodeDirectory 的切片取 `0x1000` alternate 那一条，`hash_type` 写 2，按 cdhash 升序排列。
 
 | 项 | stock | 本 tar |
 | --- | --- | --- |
-| entry 数 | 28 | 32 |
+| entry 数 | 28 | 28 |
 | 移除的 entry | — | 4 条（stock `launchdhook` 2 + stock `systemhook` 2） |
-| 新增的 entry | — | 8 条（补丁版 `launchdhook` 4 + 补丁版 `systemhook` 4） |
-| UUID | `a3e4647f…` | `3dde63f83db4895ea698c03ac74d11d7` |
-| 文件 sha256 | `12bdb75e696230aa…` | `6787037ed378b5b6…` |
+| 新增的 entry | — | 4 条（补丁版 `launchdhook` 2 + 补丁版 `systemhook` 2） |
+| UUID | `a3e4647ff47e46d5a67e53744cb782da` | `084830318de3c6019c723669feadc129` |
+| 文件 sha256 | `12bdb75e696230aa89c941a1e045158341582fb904f27831f42acb8a59878739` | `cabc19f40e5e3be3ca1bade23c6bda3102fbde0f4801630e0bd65723726f00e0` |
 | 生成命令 | 上游 `trustcache create`（不在仓库内） | `dopamine-basebin/make-basebin-trustcache.py` |
+
+条目数不增不减的原因：两个文件各 28 条，交集 24 条，被换掉的 4 个 stock 切片换成 4 个补丁版切片。28 条 entry 的 `hash_type` 字节都是 2、`flags` 都是 0。早先一版生成器把每个 CodeDirectory 一律按 SHA-256 算，给两个补丁版成员各多出两个 entry（`0x0` 槽的 SHA-1 blob 按 SHA-256 算出来的值），于是那一版交付 tar 的 `basebin.tc` 是 32 条：28 条能对上真实切片，4 条是内核不会计算的孤儿值。`verify-basebin-trustcache.py` 现在按集合相等判定，就是为拦住这种「超集」形态——只查覆盖的检查会被它骗过。
 
 UUID 由 cdhash 集合的 sha256 前 16 字节派生，不是随机值，目的是让两次构建得到同一份文件。上游每次建都随机（`_trustcache_file_init` 调 `uuid_generate`），内核只把它当标识，不参与查找。
 
-这条规则可复核。生成器是 `dopamine-basebin/make-basebin-trustcache.py`，校验器是 `dopamine-basebin/verify-basebin-trustcache.py`，两者共用同一份 cdhash 计算：生成器加载校验器的 `member_cdhashes`。把设备自带 tar 展开后跑一次生成器，与自带文件逐条比对：
+这条规则可复核，用上游 CI 树当参照。生成器是 `dopamine-basebin/make-basebin-trustcache.py`，校验器是 `dopamine-basebin/verify-basebin-trustcache.py`，两者共用同一份 cdhash 计算：生成器加载校验器的 `member_cdhashes`。上游 CI 树的成员里有两个补丁版成员，它们的切片都是双 CodeDirectory，所以这棵树能区分「按 `hashType` 取算法」与「一律 SHA-256」两种规则：
 
 ```sh
-tar -xf rollback-device-basebin.tar -C cmpa
-python3 dopamine-basebin/make-basebin-trustcache.py cmpa /tmp/tc_check.bin
+mkdir -p cix && tar -xf basebin-ci.tar -C cix
+python3 dopamine-basebin/make-basebin-trustcache.py cix /tmp/tc_check.bin
 python3 -c "
 import struct
-stock = open('cmpa/basebin/basebin.tc','rb').read()
+stock = open('cix/basebin/basebin.tc','rb').read()
 regen = open('/tmp/tc_check.bin','rb').read()
 n = struct.unpack_from('<I', stock, 20)[0]
 m = struct.unpack_from('<I', regen, 20)[0]
@@ -1018,9 +1020,11 @@ print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
 "
 ```
 
-实测输出 `28 28 True`：条数、顺序、每个 cdhash 都相同，只有 UUID 不同。这既确认生成器与上游 `trustcache create` 同规则，也说明本 tar 的 `basebin.tc` 不是手写的。
+实测输出 `28 28 True`：条数、顺序、每个 cdhash 都相同，只有 UUID 不同。一律按 SHA-256 算的旧规则跑同一棵树会得到 53 条，与上游 28 条对不上，所以这次比对同时固定了算法选择与 `0x1000` 优先这两条规则。
 
-`verify-basebin-tar.sh` 原先只断言 `basebin.tc` 存在，不断言它覆盖 tar 里的成员，所以一个「换了成员、留着 stock tc」的 tar 会打印 `Result: PASS`。这是这次复审发现的漏洞。现在脚本调 `verify-basebin-trustcache.py`，对每个需要信任缓存的成员逐切片查表，缺一条就打印该切片 cdhash 并退出 1。
+设备自带 tar 只能做弱一点的比对：它需要信任缓存的 16 个成员共 28 个 CodeDirectory，`hashType` 全是 2，两种规则在它上面读数相同。跑 `make-basebin-trustcache.py cmpa /tmp/tc_check.bin` 也得到 `28 28 True`，但那次一致不能区分规则。
+
+`verify-basebin-tar.sh` 原先只断言 `basebin.tc` 存在，不断言它与 tar 里的成员一致，所以一个「换了成员、留着 stock tc」的 tar 会打印 `Result: PASS`。现在脚本调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片算出的 cdhash 集合完全相等：少一条就打印该切片 cdhash，多一条就打印该 entry，任一方向都退出 1。
 
 ### 十二·九 为什么改写必须在 dyld 路径解析阶段从进程内部发生
 

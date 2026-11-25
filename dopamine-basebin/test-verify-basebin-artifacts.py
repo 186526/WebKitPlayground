@@ -14,6 +14,7 @@ Usage: python3 dopamine-basebin/test-verify-basebin-artifacts.py
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -25,6 +26,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from macho_fixture import (  # noqa: E402
+    CDHASH_LEN,
+    CSSLOT_ALTERNATE_CODEDIRECTORIES,
+    CSSLOT_CODEDIRECTORY,
+    HASH_TYPE_SHA1,
+    HASH_TYPE_SHA256,
     build_code_directory,
     build_macho,
     build_trustcache,
@@ -119,7 +125,10 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
               extra: dict[str, str] | None = None,
               omit: tuple[str, ...] = (),
               launchdhook_strings: tuple[str, ...] | None = None,
-              tc_covers_launchdhook: bool = True) -> Path:
+              tc_covers_launchdhook: bool = True,
+              dual_code_directories: bool = False,
+              tc_has_sha256_over_sha1: bool = False,
+              tc_has_sha1_primary_slot: bool = False) -> Path:
     """Write a tar the way BaseBin/Makefile's basebin.tar target lays it out.
 
     launchdhook.dylib is a real Mach-O because verify-basebin-tar.sh hands it to
@@ -129,6 +138,14 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
     basebin.tc is written from that image's cdhash, the way `trustcache create` derives it
     from the build output.  tc_covers_launchdhook=False writes an entry-less tc instead, which
     is the shape of the tar that replaced a member but kept the stock file.
+
+    dual_code_directories=True signs launchdhook the way the patched member really is signed:
+    a SHA-1 CodeDirectory at slot 0x0 and a SHA-256 one at 0x1000.  The correct entry for a
+    slice is the 0x1000 alternate's cdhash, so with that shape:
+      tc_has_sha256_over_sha1=True writes the SHA-256 of the SHA-1 blob as well — a value no
+      kernel computes — which is the superset defect round 3's P1 named;
+      tc_has_sha1_primary_slot=True writes only the SHA-1 blob's own cdhash, the
+      right-algorithm-but-wrong-slot mistake.
     """
     staging = root / "staging"
     base = staging / "basebin" if prefixed else staging
@@ -140,11 +157,31 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
     write_symbol_file(base / "systemhook.dylib", LEGACY)
     covered: list[bytes] = []
     if launchdhook_strings is not None:
-        code_directory = build_code_directory(launchdhook_strings[0].encode())
-        image = build_macho(launchdhook_strings, code_directory=code_directory)
-        (base / "launchdhook.dylib").write_bytes(image)
-        if tc_covers_launchdhook:
+        if dual_code_directories:
+            sha1_cd = build_code_directory(launchdhook_strings[0].encode(),
+                                          hash_type=HASH_TYPE_SHA1)
+            sha256_cd = build_code_directory(b"alternate" + launchdhook_strings[0].encode(),
+                                             hash_type=HASH_TYPE_SHA256)
+            image = build_macho(
+                launchdhook_strings,
+                code_directories=[(CSSLOT_CODEDIRECTORY, sha1_cd),
+                                  (CSSLOT_ALTERNATE_CODEDIRECTORIES, sha256_cd)],
+            )
+            correct = cdhash_of(sha256_cd)  # the 0x1000 alternate is the one that is kept
+            orphan = hashlib.sha256(sha1_cd).digest()[:CDHASH_LEN]
+            if tc_has_sha1_primary_slot:
+                covered.extend([cdhash_of(sha1_cd)])
+            else:
+                covered.extend([correct])
+                if tc_has_sha256_over_sha1:
+                    covered.append(orphan)
+        else:
+            code_directory = build_code_directory(launchdhook_strings[0].encode())
+            image = build_macho(launchdhook_strings, code_directory=code_directory)
             covered.append(cdhash_of(code_directory))
+        (base / "launchdhook.dylib").write_bytes(image)
+        if not tc_covers_launchdhook:
+            covered = []
     (base / "basebin.tc").write_bytes(build_trustcache(covered))
     for rel, content in (extra or {}).items():
         target = base / rel
@@ -184,8 +221,8 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
           "jbctl update basebin generates it" in out, out)
     check("tar: healthy tar reports launchdhook carries the search paths",
           "launchdhook.dylib carries the four search-path names" in out, out)
-    check("tar: healthy tar reports basebin.tc covers every member",
-          "basebin.tc covers every Mach-O member the tar ships" in out, out)
+    check("tar: healthy tar reports basebin.tc matches the shipped members",
+          "basebin.tc holds exactly the cdhashes of the Mach-O members the tar ships" in out, out)
 
     # A tar that replaces a member but keeps the stock trustcache is the state the
     # basebin tar was in before this gate existed: the file is present, the members
@@ -197,6 +234,35 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
     check("tar: a trustcache that misses a shipped member fails", rc == 1, out)
     check("tar: an uncovered member is named",
           "launchdhook.dylib slice cdhash" in out and "is not in basebin.tc" in out, out)
+
+    # The patched members are dual-CodeDirectory: a SHA-1 blob at slot 0x0 and a SHA-256
+    # blob at 0x1000. The kernel takes the cdhash digest from the blob's own hashType, so
+    # the 0x0 blob's cdhash is SHA-1. Hashing it with SHA-256 produces a value no kernel
+    # computes, which is what the delivered tar shipped before round 3's fix.
+    dual_ok = build_tar(root / "dual-ok", healthy_dylibs(),
+                        launchdhook_strings=LAUNCHDHOOK_PATCHED,
+                        dual_code_directories=True)
+    rc, out = run(TAR_SCRIPT, [str(dual_ok)], bin_dir)
+    check("tar: a dual-CodeDirectory member with its 0x1000 cdhash passes", rc == 0, out)
+
+    dual_wrong = build_tar(root / "dual-wrong", healthy_dylibs(),
+                           launchdhook_strings=LAUNCHDHOOK_PATCHED,
+                           dual_code_directories=True,
+                           tc_has_sha256_over_sha1=True)
+    rc, out = run(TAR_SCRIPT, [str(dual_wrong)], bin_dir)
+    check("tar: a SHA-256-over-SHA-1-cdhash entry is rejected", rc == 1, out)
+    check("tar: the SHA-256-over-SHA-1 entry is named as an orphan",
+          "matches no slice the tar ships" in out, out)
+
+    # Right algorithm, wrong slot: the 0x0 blob's own cdhash is a correct SHA-1 digest of a
+    # real CodeDirectory, but the slice's cdhash is the 0x1000 alternate's.  Only the slot
+    # choice separates this case from the passing one, so it pins the preference.
+    dual_primary = build_tar(root / "dual-primary", healthy_dylibs(),
+                             launchdhook_strings=LAUNCHDHOOK_PATCHED,
+                             dual_code_directories=True,
+                             tc_has_sha1_primary_slot=True)
+    rc, out = run(TAR_SCRIPT, [str(dual_primary)], bin_dir)
+    check("tar: a dual-CodeDirectory entry taken from the 0x0 slot is rejected", rc == 1, out)
 
     # launchdhook is the one member whose absence leaves every other gate content: it is
     # built from the same common.c, and the stock build writes only DYLD_INSERT_LIBRARIES.

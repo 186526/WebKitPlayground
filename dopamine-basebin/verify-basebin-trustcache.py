@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that basebin/basebin.tc covers every Mach-O the tar ships.
+"""Check that basebin/basebin.tc holds exactly the cdhashes of the Mach-O members the tar ships.
 
 `jbctl update basebin` uploads basebin/basebin.tc as the basebin trustcache
 before it copies the tar's members into /var/jb/basebin (update.m:32-39), and
@@ -8,10 +8,20 @@ recomputes it afterwards, so a member whose cdhash is absent from that file is
 a binary the kernel trustcache does not cover.
 
 BaseBin/Makefile:96-98 builds the file with `trustcache create .build/basebin.tc
-.build`, which hashes every Mach-O in the build output. A tar that replaces a
+.build`, which emits one cdhash per Mach-O slice. Which digest that cdhash is
+comes from the CodeDirectory's own hashType byte, not from a choice the build
+makes: upstream's own basebin.tc keeps the 0x1000 SHA-256 alternate for a
+dual-CodeDirectory slice and none of the 0x0 SHA-1 values. A tar that replaces a
 member but keeps the stock basebin.tc therefore describes binaries that are no
 longer in the tar, and says nothing about the ones that are. That mismatch is
 what this script fails on.
+
+The comparison is set equality in both directions. An entry no shipped slice
+produces is a cdhash the kernel never computes, and it is not harmless: the
+patched members carry a SHA-1 CodeDirectory beside the SHA-256 one, so a
+generator that hashed every blob with SHA-256 produced four such entries next to
+the 28 correct ones. A check that only asked whether every slice is covered would
+pass that file.
 
 dyldhook_merge.*.dylib members are exempt because BaseBin/Makefile:100 says
 they do not belong in the basebin trustcache; they are handled by the dyldhook
@@ -20,7 +30,7 @@ merge path instead.
 Usage:
   verify-basebin-trustcache.py <directory holding basebin/, or basebin itself>
 
-Exit status: 0 when every covered member's cdhash is in basebin.tc, 1 otherwise.
+Exit status: 0 when basebin.tc holds exactly the cdhashes of the shipped members, 1 otherwise.
 """
 
 import hashlib
@@ -39,6 +49,11 @@ FAT_MAGIC_64 = 0xCAFEBABF
 LC_CODE_SIGNATURE = 0x1D
 CSSLOT_CODEDIRECTORY = 0x0
 CSSLOT_ALTERNATE_CODEDIRECTORIES = 0x1000
+
+# Byte 37 of a CodeDirectory is its hashType. The kernel hashes the blob with the
+# algorithm that byte names, so the cdhash of a SHA-1 CodeDirectory is a SHA-1 digest.
+HASH_TYPE_OFFSET = 37
+CDHASH_ALGORITHMS = {1: hashlib.sha1, 2: hashlib.sha256}
 
 
 class TrustcacheError(Exception):
@@ -64,29 +79,53 @@ def read_trustcache(path):
     }
 
 
-def code_directory_hashes(slice_bytes):
+def code_directory_cdhash(blob):
+    """Return the cdhash the kernel computes for one CodeDirectory blob.
+
+    The digest is chosen by the blob's own hashType byte at offset 37, not by this
+    script: a CodeDirectory that declares SHA-1 has a SHA-1 cdhash, and hashing it
+    with SHA-256 produces a value no kernel ever computes.
+    """
+    if len(blob) < HASH_TYPE_OFFSET + 1:
+        return None
+    hash_type = blob[HASH_TYPE_OFFSET]
+    algorithm = CDHASH_ALGORITHMS.get(hash_type)
+    if algorithm is None:
+        return None
+    return algorithm(blob).digest()[:CDHASH_LEN]
+
+
+def slice_cdhash(slice_bytes):
+    """Return one cdhash for this slice, preferring the 0x1000 alternate.
+
+    Every slice carries one cdhash in the trustcache, so a slice that ships both a
+    0x0 and a 0x1000 CodeDirectory contributes only the latter. The alternate is
+    the modern one; upstream's own trustcache create output keeps the 0x1000 pair
+    for a dual-CodeDirectory slice and nothing else.
+    """
     if len(slice_bytes) < 32:
-        return []
+        return None
     if struct.unpack_from("<I", slice_bytes, 0)[0] != MH_MAGIC_64:
-        return []
+        return None
     ncmds = struct.unpack_from("<I", slice_bytes, 16)[0]
     offset = 32
     sig_offset = sig_size = None
     for _ in range(ncmds):
         cmd, cmdsize = struct.unpack_from("<II", slice_bytes, offset)
         if cmdsize < 8:
-            return []
+            return None
         if cmd == LC_CODE_SIGNATURE:
             sig_offset, sig_size = struct.unpack_from("<II", slice_bytes, offset + 8)
         offset += cmdsize
     if sig_offset is None:
-        return []
+        return None
     superblob = slice_bytes[sig_offset:sig_offset + sig_size]
     if len(superblob) < 12:
-        return []
+        return None
     _magic, _length, count = struct.unpack_from(">III", superblob, 0)
     cursor = 12
-    hashes = []
+    primary = None
+    alternate = None
     for _ in range(count):
         if cursor + 8 > len(superblob):
             break
@@ -100,11 +139,18 @@ def code_directory_hashes(slice_bytes):
         blob = superblob[blob_offset:blob_offset + cd_length]
         if len(blob) != cd_length:
             continue
-        hashes.append(hashlib.sha256(blob).digest()[:CDHASH_LEN])
-    return hashes
+        cdhash = code_directory_cdhash(blob)
+        if cdhash is None:
+            continue
+        if blob_type == CSSLOT_ALTERNATE_CODEDIRECTORIES:
+            alternate = cdhash
+        else:
+            primary = cdhash
+    return alternate if alternate is not None else primary
 
 
 def member_cdhashes(path):
+    """Return one cdhash per Mach-O slice in this member."""
     with open(path, "rb") as handle:
         data = handle.read()
     if len(data) < 8:
@@ -115,9 +161,12 @@ def member_cdhashes(path):
         hashes = []
         for index in range(count):
             _cpu, _sub, offset, size, _align = struct.unpack_from(">iiIII", data, 8 + index * 20)
-            hashes.extend(code_directory_hashes(data[offset:offset + size]))
+            cdhash = slice_cdhash(data[offset:offset + size])
+            if cdhash is not None:
+                hashes.append(cdhash)
         return hashes
-    return code_directory_hashes(data)
+    cdhash = slice_cdhash(data)
+    return [cdhash] if cdhash is not None else []
 
 
 def is_trustcached_member(relative_path):
@@ -148,7 +197,7 @@ def main(argv):
         sys.stderr.write("FAIL: %s\n" % error)
         return 1
 
-    missing = []
+    expected = {}
     checked = 0
     for directory, _subdirs, files in os.walk(basebin):
         for name in sorted(files):
@@ -161,23 +210,35 @@ def main(argv):
                 continue
             checked += 1
             for cdhash in hashes:
-                if cdhash not in covered:
-                    missing.append((relative, cdhash.hex()))
+                expected[cdhash] = relative
 
-    for relative, cdhash in missing:
+    missing = [(relative, cdhash.hex()) for cdhash, relative in expected.items()
+               if cdhash not in covered]
+    orphans = sorted(cdhash.hex() for cdhash in covered if cdhash not in expected)
+
+    for relative, cdhash in sorted(missing):
         sys.stderr.write(
             "FAIL: %s slice cdhash %s is not in basebin.tc\n" % (relative, cdhash)
         )
-    if missing:
+    for cdhash in orphans:
         sys.stderr.write(
-            "FAIL: basebin.tc does not cover %d slice(s) of %d members; jbctl would upload a "
-            "trustcache that describes different binaries than the tar ships\n"
-            % (len(missing), checked)
+            "FAIL: basebin.tc entry %s matches no slice the tar ships\n" % cdhash
+        )
+
+    # Exact equality, not mere coverage. An entry the kernel never computes is the
+    # exact defect this gate exists to catch, and a superset hides it: 28 correct
+    # entries plus 4 SHA-256-over-a-SHA-1-CodeDirectory values passes a covers-only
+    # check while shipping four entries no kernel computes.
+    if missing or orphans:
+        sys.stderr.write(
+            "FAIL: basebin.tc and the shipped slices disagree: %d uncovered slice(s), "
+            "%d orphan entry/entries, %d members checked, %d entries in the file\n"
+            % (len(missing), len(orphans), checked, len(covered))
         )
         return 1
 
-    print("PASS: basebin.tc covers all %d Mach-O members that need it (%d entries)"
-          % (checked, len(covered)))
+    print("PASS: basebin.tc is exactly the %d cdhashes of the %d Mach-O members that need it"
+          % (len(expected), checked))
     return 0
 
 

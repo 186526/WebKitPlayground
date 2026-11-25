@@ -4,8 +4,16 @@
 `BaseBin/Makefile:96-98` builds this file with `trustcache create .build/basebin.tc
 .build`, which is not in the repo (see README section 3), so a tar assembled by hand
 needs another way to keep the trustcache and the members in step. This does what that
-tool does: hash every Mach-O slice's CodeDirectory, keep the first 20 bytes, write
-hash_type 2, sort by cdhash.
+tool does: one cdhash per Mach-O slice, the digest taken by the slice's CodeDirectory
+own hashType byte (1 is SHA-1, 2 is SHA-256), the 0x1000 alternate kept when a slice
+carries both, entries sorted by cdhash.
+
+Why the digest must follow hashType rather than being fixed at SHA-256: the two
+patched members are dual-CodeDirectory, with a SHA-1 blob at slot 0x0 and a SHA-256
+blob at 0x1000. Hashing the SHA-1 blob with SHA-256 yields a value no kernel computes,
+so a trustcache built that way carries entries that never match while the slice it was
+meant to cover stays outside. Upstream's own basebin.tc keeps the 0x1000 pair for
+those members and none of the SHA-1 values.
 
 Why it has to be regenerated rather than reused: `update.m:32-39` uploads this file as
 the basebin trustcache before it copies the tar's members in, and nothing recomputes it

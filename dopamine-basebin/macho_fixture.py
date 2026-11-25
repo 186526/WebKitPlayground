@@ -31,32 +31,68 @@ CSTRING_OFFSET = 0x1000
 CSMAGIC_EMBEDDED_SIGNATURE = 0xFADE0CC0
 CSMAGIC_CODEDIRECTORY = 0xFADE0C02
 CSSLOT_CODEDIRECTORY = 0
+CSSLOT_ALTERNATE_CODEDIRECTORIES = 0x1000
+
+# Offset 37 of a CodeDirectory is its hashType. A dual-CodeDirectory signature puts a
+# SHA-1 (hashType 1) blob at slot 0x0 and a SHA-256 (hashType 2) blob at slot 0x1000,
+# and the cdhash of each is the digest that byte names.
+HASH_TYPE_OFFSET = 37
+HASH_TYPE_SHA1 = 1
+HASH_TYPE_SHA256 = 2
 
 TRUSTCACHE_VERSION = 1
 CDHASH_LEN = 20
+MINIMUM_CODE_DIRECTORY = 512
 
 
-def build_code_directory(payload: bytes) -> bytes:
-    """Encode a CodeDirectory blob whose sha256 is the member's cdhash.
+def build_code_directory(payload: bytes,
+                         hash_type: int = HASH_TYPE_SHA256) -> bytes:
+    """Encode a CodeDirectory blob with the given hashType at offset 37.
 
-    Only the magic and the big-endian length matter to the hash: a real signature carries
-    version, flags, identifier and per-page hashes, none of which the cdhash calculation
-    reads separately.  The payload distinguishes one fixture's cdhash from another's.
+    The kernel picks the cdhash algorithm from that byte, so a fixture that wants a
+    SHA-1 cdhash has to carry hashType 1 there. The fields between the header and
+    that byte (version, flags, hashOffset, identOffset, slot counts, codeLimit,
+    hashSize) are zero-filled: cdhash_of hashes the whole blob, and nothing reads
+    them separately. The payload distinguishes one fixture from another.
     """
-    body = payload
-    return struct.pack(">II", CSMAGIC_CODEDIRECTORY, 8 + len(body)) + body
+    # A real CodeDirectory is hundreds of bytes; padding to that size keeps the
+    # fixture above the length any reader checks before trusting offset 37.
+    total = max(MINIMUM_CODE_DIRECTORY, HASH_TYPE_OFFSET + 1)
+    body = bytearray(total - 8)
+    body[0:len(payload)] = payload
+    body[HASH_TYPE_OFFSET - 8 - 1] = CDHASH_LEN  # hashSize, immediately before hashType
+    body[HASH_TYPE_OFFSET - 8] = hash_type
+    return struct.pack(">II", CSMAGIC_CODEDIRECTORY, total) + bytes(body)
 
 
-def build_superblob(code_directory: bytes) -> bytes:
-    """Wrap one CodeDirectory in an embedded-signature superblob."""
-    index_size = 12 + 8
-    total = index_size + len(code_directory)
-    index = struct.pack(">II", CSSLOT_CODEDIRECTORY, index_size)
-    return struct.pack(">III", CSMAGIC_EMBEDDED_SIGNATURE, total, 1) + index + code_directory
+def build_superblob(code_directories: list[tuple[int, bytes]]) -> bytes:
+    """Wrap (slot, CodeDirectory) pairs in an embedded-signature superblob.
+
+    A dual-CodeDirectory signature passes [(CSSLOT_CODEDIRECTORY, sha1_cd),
+    (CSSLOT_ALTERNATE_CODEDIRECTORIES, sha256_cd)], which is the shape the patched
+    launchdhook and systemhook ship.
+    """
+    index_size = 12 + 8 * len(code_directories)
+    total = index_size + sum(len(cd) for _slot, cd in code_directories)
+    index = b""
+    cursor = index_size
+    for slot, cd in code_directories:
+        index += struct.pack(">II", slot, cursor)
+        cursor += len(cd)
+    out = struct.pack(">III", CSMAGIC_EMBEDDED_SIGNATURE, total, len(code_directories))
+    out += index
+    for _slot, cd in code_directories:
+        out += cd
+    return out
+
+
+CDHASH_ALGORITHMS = {1: hashlib.sha1, 2: hashlib.sha256}
 
 
 def cdhash_of(code_directory: bytes) -> bytes:
-    return hashlib.sha256(code_directory).digest()[:CDHASH_LEN]
+    """The cdhash the kernel computes: the algorithm comes from the hashType byte."""
+    algorithm = CDHASH_ALGORITHMS[code_directory[HASH_TYPE_OFFSET]]
+    return algorithm(code_directory).digest()[:CDHASH_LEN]
 
 
 def build_trustcache(cdhashes: list[bytes]) -> bytes:
@@ -70,15 +106,24 @@ def build_trustcache(cdhashes: list[bytes]) -> bytes:
 
 
 def build_macho(strings: tuple[str, ...], arch: str = "arm64e",
-                code_directory: bytes | None = None) -> bytes:
+                code_directory: bytes | None = None,
+                code_directories: list[tuple[int, bytes]] | None = None) -> bytes:
     """Encode a thin 64-bit Mach-O whose __cstring section holds the given strings.
 
-    When code_directory is given the image also carries an LC_CODE_SIGNATURE whose
-    superblob wraps that CodeDirectory, which is what makes cdhash_of(code_directory)
-    the image's cdhash.
+    code_directory signs the image with one CodeDirectory at slot 0x0.
+    code_directories signs it with the given (slot, blob) list instead, which is how
+    a dual-CodeDirectory image — SHA-1 at 0x0, SHA-256 at 0x1000 — gets built; passing
+    both is an error.
     """
+    if code_directory is not None and code_directories is not None:
+        raise ValueError("pass code_directory or code_directories, not both")
     payload = b"\0".join(s.encode() for s in strings) + b"\0"
-    signature = build_superblob(code_directory) if code_directory is not None else b""
+    if code_directories is not None:
+        signature = build_superblob(code_directories)
+    elif code_directory is not None:
+        signature = build_superblob([(CSSLOT_CODEDIRECTORY, code_directory)])
+    else:
+        signature = b""
 
     segment_cmdsize = 72 + 80  # segment_command_64 plus one section_64
     signature_cmdsize = 16 if signature else 0
