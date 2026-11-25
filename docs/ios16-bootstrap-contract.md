@@ -287,9 +287,12 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
 1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，`return false` 那条短路不进入，控制到下面的宽度比较。
 2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），任何按该键的回退都取不到字符串。
 
-`RELEASE_ASSERT` 已删除，函数体改为按数据块宽度分派，`!length || !behaviorData` 时仍直接返回 false：
+`RELEASE_ASSERT` 已删除，函数体改为按数据块宽度分派：
 
 ```c++
+if (!length || !behaviorData)
+    return false;
+
 const size_t ownLength = behaviors.storageLengthInBytes();
 
 if (length == ownLength) {
