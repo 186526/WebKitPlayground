@@ -38,12 +38,22 @@ cases are the ways the switch can come back and the ways the check could pass by
   a guard whose own body does not open where the statement ends must fail — `if (m) { } else if (ok)
   {`, `if (m) { } else {`, `if (m) { x(); } do {` — because the brace belongs to a branch that can
   run with the member false, while an `else if` on the member itself must pass;
-  a braceless guard followed by a comment must pass, because the comment is not part of the shape.
+  a braceless guard followed by a comment must pass, because the comment is not part of the shape;
+  a guard block closed anywhere other than at the start of a statement must end the guard — `return;
+  }`, `pending(); }`, `} }` and `}}` all fail for the call that follows, because the block is closed
+  whether the brace sits at the start, the middle or the end of the line;
+  a branch headed by `} } else if (m) {` must still pass, because closing two blocks and heading the
+  third is how a chain of nested guards is written, and the branch that follows is the guard;
+  an identifier ending in `if` must not be read as a branch head — `m && notif(x)` and
+  `m && find_if(p)` pass, because `notif`/`find_if` are the condition's operands, while
+  `if (check_if(m))` and a `count_if(...)` conjunct still fail, because those conditions cannot be
+  settled.
 
 Open boundary: a call that follows a closed guard block inside the same statement — `if (m) { x();
 } call;` — is currently refused, because the whole statement's block chain is read at the statement's
 start. That is the safe direction (a false reject, not a false accept), and tightening it needs a
-change in how statements are cut.
+change in how statements are cut. A block comment inside the condition — `if (m /* c */)` — is refused
+for the same reason: the condition is read as written and the comment is not stripped there.
 
 The "as committed" case reads the real patch, so a patch edited without updating this check fails
 here rather than in the build. Two further passes read the real patch too: every rationale needle
@@ -411,8 +421,68 @@ COMMENTED_BRACELESS_GUARDS = (
      "+        encoder->setMessageName(translateOutgoingMessageName(name));\n"),
 )
 
-# Round 7's P2-4: the setter's body was matched as one literal line, so a body written on its own lines
-# was read as an assignment outside the setter. The definition line and its `{` are on separate lines.
+# Round 11's P2-1: a `}` closes the block it ends, wherever it sits on the line. Counting only the
+# leading run of `}` left the guard on the stack after `return; }` or `} }` had closed it, so the call
+# that followed read as guarded. Each entry here closes the guard somewhere other than at the start of
+# its own statement.
+GUARD_CLOSED_INLINE = (
+    ("a call after a guard whose body ends with a return on the closing line fails",
+     ["if (m_shouldTranslateMessageNames) {",
+      "    pending();",
+      "    return; }"]),
+    ("a call after a guard and an if both closed with a space between fails",
+     ["if (m_shouldTranslateMessageNames) {",
+      "    if (isSync) {",
+      "        pending();",
+      "    } }"]),
+    ("a call after a guard closed at the end of its body line fails",
+     ["if (m_shouldTranslateMessageNames) {",
+      "    pending(); }"]),
+    ("a call after a guard closed with two braces together fails",
+     ["if (m_shouldTranslateMessageNames) {",
+      "    pending(); }}"]),
+)
+
+# Round 11's P2-1, the other direction. `} } else if (m) {` closes two blocks and heads the branch it
+# opens; the branch is the guard for the call inside it, so this is correct code. Tightening the closer
+# count without this case would refuse it, because the head test saw `} else if` after stripping one
+# brace.
+GUARD_CLOSED_THEN_ELSE_IF_ON_MEMBER = (
+    ("a call under an else-if on the member after two closing braces passes",
+     ["if (m_ready) {",
+      "    pending();",
+      "} } else if (m_shouldTranslateMessageNames) {",
+      "    translateOutgoingMessageName(x);",
+      "}"]),
+    ("a call under an else-if on the member after one closing brace passes",
+     ["if (m_ready) {",
+      "    pending();",
+      "} else if (m_shouldTranslateMessageNames) {",
+      "    translateOutgoingMessageName(x);",
+      "}"]),
+)
+
+# Round 11's P2-2: an identifier ending in `if` is not a branch head. Without the word boundary the
+# `if(` inside `notif(` wins the last-head search and the condition is cut inside the callee's name,
+# which refused `m && notif(x)` — a conjunction that implies the member whatever `notif` returns.
+#
+# Each entry is (description, condition, expected exit code). The refusals are pinned too, and for two
+# different reasons: a call whose own name ends in `if` leaves a condition the evaluator cannot settle,
+# and a `count_if` conjunct is also outside the condition grammar because `::`, `.` and `,` are not
+# tokens. Both are refused today, and pinning them keeps the second reason from being mistaken for a
+# word-boundary defect if the grammar ever widens.
+IDENTIFIER_ENDING_IN_IF = (
+    ("a guard with a conjunct whose callee ends in if passes",
+     "if (m_shouldTranslateMessageNames && notif(x)) {", 0),
+    ("a guard with a conjunct whose callee ends in find_if passes",
+     "if (m_shouldTranslateMessageNames && find_if(p)) {", 0),
+    ("a guard whose whole condition is a call ending in if fails",
+     "if (check_if(m_shouldTranslateMessageNames)) {", 1),
+    ("a guard with a count_if conjunct compared to zero fails",
+     "if (m_shouldTranslateMessageNames && std::count_if(v.begin(), v.end(), p) > 0) {", 1),
+)
+
+
 MULTILINE_SETTER = (
     "+void setShouldTranslateMessageNames(bool shouldTranslate)\n"
     "+{\n"
@@ -810,6 +880,42 @@ for description, guard in COMMENTED_BRACELESS_GUARDS:
         + "+}\n",
         0,
         None,
+    ),)
+
+for description, lines in GUARD_CLOSED_INLINE:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void bad() {\n"
+        + "".join("+    " + line + "\n" for line in lines)
+        + "+    translateOutgoingMessageName(x);\n"
+        + "+}\n",
+        1,
+        "calls the translation outside the member's guard",
+    ),)
+
+for description, lines in GUARD_CLOSED_THEN_ELSE_IF_ON_MEMBER:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + "".join("+    " + line + "\n" for line in lines)
+        + "+}\n",
+        0,
+        None,
+    ),)
+
+for description, guard, expected_code in IDENTIFIER_ENDING_IN_IF:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void f() {\n"
+        + "+    " + guard + "\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+        expected_code,
+        None if expected_code == 0 else "calls the translation outside the member's guard",
     ),)
 
 

@@ -61,10 +61,14 @@ What it refuses, and why each combination is a defect rather than a preference:
     the guarded body right after the condition — nothing at all (the next statement is the body) or an
     opening `{`. A comment between the two is not part of the shape. An `else if (m) {` guards its own
     branch, and the last branch is the one read, so `if (ready) { } else if (m) {` is correctly
-    guarded. A caller added to a third file is checked too, because the rule is a property of the call
-    and not a list of the two files that first had one; only the two functions' own definitions and
-    their header declarations are exempt, and that is decided by the file plus the declaration, so a
-    new caller inside an exempt file still has to be guarded.
+    guarded; the closing braces in front of it are stripped whatever their spacing, so a branch headed
+    by `} } else if (m) {` is read as the same branch. A guard block ends where its `}` sits, not where
+    its line ends: `if (m) { ... return; }` and `if (m) { ... } }` both close the block for the
+    statements after them. An identifier that ends in `if` is not a branch head, so `m && notif(x)` is
+    read as the conjunction it is. A caller added to a third file is checked too, because the rule is a
+    property of the call and not a list of the two files that first had one; only the two functions' own
+    definitions and their header declarations are exempt, and that is decided by the file plus the
+    declaration, so a new caller inside an exempt file still has to be guarded.
 
   - An assignment to the member outside the setter. It may only be written from the setter's own
     parameter. `= true`, a compound `|=`, and a parenthesised `(member) =` all compile and all turn
@@ -312,6 +316,28 @@ DEFINITION_FILES = (
 TRANSLATE_CALL = re.compile(r"\btranslate(?:Outgoing|Incoming)MessageName\s*\(")
 
 
+def count_unmatched_closers(statement: str) -> int:
+    """How many `}` in the statement close a block that was open before the statement started.
+
+    A brace that the same statement opened is matched to it, so a braced initialiser or a one-line
+    function body contributes nothing. Every `}` that survives that pairing closes something outside:
+    `}`, `} else if (m) {`, `x(); }`, `} }` and `}}` all count, which is the point — the closure of a
+    guard block ends a statement wherever the brace sits on the line, and counting only the leading run
+    let a guard stay on the stack after `return; }` had closed it.
+    """
+    unmatched = 0
+    opened = 0
+    for character in statement:
+        if character == "{":
+            opened += 1
+        elif character == "}":
+            if opened:
+                opened -= 1
+            else:
+                unmatched += 1
+    return unmatched
+
+
 def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
     """For each statement, the chain of blocks around it, innermost first.
 
@@ -319,10 +345,13 @@ def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
     guarded, and comparing only the innermost block reported `for (...)` and failed correct code. The
     guard is satisfied when the chain contains it at any depth.
 
-    A statement opens a block when it *ends* with `{`, and closes one when it starts with `}`. That
-    matters: `Locker locker { reportedUnmappedNamesLock };` and `bool m_x { false };` carry braces but
-    end with `;`, so a naive brace count would treat the braced initialiser as a block and report the
-    wrong guard.
+    A statement opens a block when it *ends* with `{`, and closes one for every `}` in it that no `{`
+    of the same statement closes. That matters: `Locker locker { reportedUnmappedNamesLock };` and
+    `bool m_x { false };` carry braces but end with `;`, so a naive brace count would treat the braced
+    initialiser as a block and report the wrong guard. Counting the `}` anywhere rather than only the
+    leading run is what keeps `if (m) { ... return; }` from leaving the guard on the stack: the closure
+    ends the statement, not the line, so a `}` at the end or in the middle closes the block exactly as
+    one at the start does, and `} }` closes two.
 
     A statement can do both. `} else if (m) {` closes the branch above it and opens the branch it heads,
     so the leading `}` is counted and the block is still opened. Treating "starts with `}`" as
@@ -341,8 +370,7 @@ def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
             stack = []
             current_path = path
         blocks.append(list(reversed(stack)))
-        closers = len(statement) - len(statement.lstrip("}"))
-        for _ in range(min(closers, len(stack))):
+        for _ in range(min(count_unmatched_closers(statement), len(stack))):
             stack.pop()
         if statement.endswith("{"):
             opener = statement
@@ -364,8 +392,12 @@ THIS_PREFIX = re.compile(r"\bthis\s*->\s*")
 # pattern matches the head and its opening parenthesis, so `if_parts` can take the last one in the
 # statement: a chain whose last branch is an `else if` on the member is correct code, and it is that
 # branch's condition, not the first one's, that decides whether the call is guarded.
+#
+# The `\b` before `if` is what keeps an identifier that ends in `if` from being read as a branch head.
+# `notif(x)`, `find_if(...)` and `std::count_if(...)` all contain `if(`, and without the boundary the
+# last of them wins `heads[-1]` and the condition is cut inside the callee's name.
 IF_HEAD = re.compile(r"^(?:else\s+)?if\b")
-IF_BRANCH = re.compile(r"(?:else\s+)?if\s*\(")
+IF_BRANCH = re.compile(r"(?:else\s+)?\bif\s*\(")
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 # The three wrappers that return their argument's boolean value, so a guard written with one asks the
@@ -405,7 +437,13 @@ def if_parts(statement: str) -> tuple[str, str] | None:
     # A branch that follows a closing brace starts with it: `} else if (m) {` heads the branch it
     # opens, and the leading `}` belongs to the branch above. Dropping it here is what lets the chain
     # read that branch as a guard; `} else {` still fails the head test below.
-    stripped = stripped.lstrip("}").strip()
+    #
+    # The braces are stripped as a pair, whitespace and all, because the statement joiner puts a space
+    # between two lines: `} } else if (m) {` closes two blocks and heads the third, and `lstrip("}")`
+    # left the space and the second brace in place, so the head test saw `} else if` and refused the
+    # branch that guards the call.
+    while stripped[:1] == "}":
+        stripped = stripped[1:].lstrip()
     if not IF_HEAD.match(stripped):
         return None
     heads = list(IF_BRANCH.finditer(stripped))
