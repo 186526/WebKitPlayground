@@ -880,7 +880,9 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 回归用例两个方向都固定了：原版 `launchdhook`（312848 字节，`sha256 449a9606…`，四个名字出现 0 次）必须让脚本退出 1；打过补丁的（330144 字节，`sha256 150270a5…`）必须退出 0。缺成员、`arm64` 侧回退、`/Library/Frameworks` 混入也都各有用例。
 
-同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片的 cdhash 集合完全相等：少一条就点名该切片，多一条就点名该 entry。回归用例四条：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。为什么这个不匹配必须修而不是解释成无害，见十二·八。
+同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片完全相等，比对的是 `(cdhash, hash_type)` 二元组：少一条就点名该切片，多一条就点名该 entry，摘要对而标签错则单独点名。回归用例七条：双 CodeDirectory 成员取 `0x1000` alternate 的 tar 必须通过；同一镜像改取 `0x0` 槽必须失败；把 `0x0` 那个 SHA-1 blob 按 SHA-256 再哈希一次必须失败并点名 `matches no slice the tar ships`；单个 `0x0` 槽、`hashType=1`、没有 alternate 的切片写 SHA-1 摘要必须通过；同一个切片写 SHA-256 摘要必须失败并点名孤儿；同一个切片摘要正确但标签写成 2 必须失败并点名「labelled hash_type 2 … CodeDirectory declares 1」；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。为什么这个不匹配必须修而不是解释成无害，见十二·八。
+
+那五条里只有「单个 `0x0` 槽、`hashType=1`」这一形状能固定摘要算法。真实数据里所有 `0x1000` alternate 的 `hashType` 都是 2，所以先取 alternate 就把算法选择藏起来了：把 `code_directory_cdhash` 改回硬编码 SHA-256，双 CodeDirectory 的三条用例照样通过，只有这一条会失败（3 条 FAIL，见十二·八 的读数）。标签那一支由「摘要正确、标签写成 2」这条单独固定：只把校验器的比对改成忽略标签，失败的恰好是这条与它配对的命名断言，共 2 条。
 
 ### 十二·七 交付物：basebin tar、安装与回滚
 
@@ -1000,11 +1002,13 @@ stock `launchdhook.dylib` 的两个切片 cdhash 是 `0e59e39881d8ed7152b5102c87
 | 文件 sha256 | `12bdb75e696230aa89c941a1e045158341582fb904f27831f42acb8a59878739` | `cabc19f40e5e3be3ca1bade23c6bda3102fbde0f4801630e0bd65723726f00e0` |
 | 生成命令 | 上游 `trustcache create`（不在仓库内） | `dopamine-basebin/make-basebin-trustcache.py` |
 
-条目数不增不减的原因：两个文件各 28 条，交集 24 条，被换掉的 4 个 stock 切片换成 4 个补丁版切片。28 条 entry 的 `hash_type` 字节都是 2、`flags` 都是 0。早先一版生成器把每个 CodeDirectory 一律按 SHA-256 算，给两个补丁版成员各多出两个 entry（`0x0` 槽的 SHA-1 blob 按 SHA-256 算出来的值），于是那一版交付 tar 的 `basebin.tc` 是 32 条：28 条能对上真实切片，4 条是内核不会计算的孤儿值。`verify-basebin-trustcache.py` 现在按集合相等判定，就是为拦住这种「超集」形态——只查覆盖的检查会被它骗过。
+条目数不增不减的原因：两个文件各 28 条，交集 24 条，被换掉的 4 个 stock 切片换成 4 个补丁版切片。28 条 entry 的 `hash_type` 字节都是 2、`flags` 都是 0，因为被选中的 28 个 CodeDirectory 全部声明 `hashType=2`。早先一版生成器把每个 CodeDirectory 一律按 SHA-256 算，给两个补丁版成员各多出两个 entry（`0x0` 槽的 SHA-1 blob 按 SHA-256 算出来的值），于是那一版交付 tar 的 `basebin.tc` 是 32 条：28 条能对上真实切片，4 条是内核不会计算的孤儿值。`verify-basebin-trustcache.py` 现在按集合相等判定，就是为拦住这种「超集」形态——只查覆盖的检查会被它骗过。
+
+每条 entry 的 `hash_type` 标签取自被选中 CodeDirectory 的同一个 `hashType` 字节，不是常量。`update.m:32-39` 调 `trustcache_file_build_from_path`（`trustcache.c:396-420`）把这个文件整份读进内核再上传，条目的标签字节原样进内核，不会按摘要重算。所以「SHA-1 摘要 + 标签 2」是一种独立缺陷，校验器把它单列为 `mislabelled`，与「未覆盖切片」「孤儿 entry」并列计数。
 
 UUID 由 cdhash 集合的 sha256 前 16 字节派生，不是随机值，目的是让两次构建得到同一份文件。上游每次建都随机（`_trustcache_file_init` 调 `uuid_generate`），内核只把它当标识，不参与查找。
 
-这条规则可复核，用上游 CI 树当参照。生成器是 `dopamine-basebin/make-basebin-trustcache.py`，校验器是 `dopamine-basebin/verify-basebin-trustcache.py`，两者共用同一份 cdhash 计算：生成器加载校验器的 `member_cdhashes`。上游 CI 树的成员里有两个补丁版成员，它们的切片都是双 CodeDirectory，所以这棵树能区分「按 `hashType` 取算法」与「一律 SHA-256」两种规则：
+这条规则可复核，用上游 CI 树当参照。生成器是 `dopamine-basebin/make-basebin-trustcache.py`，校验器是 `dopamine-basebin/verify-basebin-trustcache.py`，两者共用同一份 cdhash 计算：生成器加载校验器的 `member_cdhashes`。上游 CI 树需要信任的 16 个成员共 53 个 CodeDirectory，这棵树能区分「每个切片只出一条」与「每条 CodeDirectory 都出一条」：
 
 ```sh
 mkdir -p cix && tar -xf basebin-ci.tar -C cix
@@ -1020,11 +1024,15 @@ print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
 "
 ```
 
-实测输出 `28 28 True`：条数、顺序、每个 cdhash 都相同，只有 UUID 不同。一律按 SHA-256 算的旧规则跑同一棵树会得到 53 条，与上游 28 条对不上，所以这次比对同时固定了算法选择与 `0x1000` 优先这两条规则。
+实测输出 `28 28 True`：条数、顺序、每个 cdhash 都相同，只有 UUID 不同。这次比对固定的是「每个切片只出一条」与「双 CodeDirectory 取 `0x1000` alternate」这两条规则。上游 CI 树需要信任的 16 个成员共 53 个 CodeDirectory，分布是 `(0x0,1)` 25 个、`(0x0,2)` 3 个、`(0x1000,2)` 25 个；如果改成每个 CodeDirectory 都出一条，同一棵树得到 53 条，与上游 28 条对不上。
 
-设备自带 tar 只能做弱一点的比对：它需要信任缓存的 16 个成员共 28 个 CodeDirectory，`hashType` 全是 2，两种规则在它上面读数相同。跑 `make-basebin-trustcache.py cmpa /tmp/tc_check.bin` 也得到 `28 28 True`，但那次一致不能区分规则。
+摘要算法这一条**不由这次比对固定**。把算法固定成 SHA-256、保留每切片一条与 `0x1000` 优先，同一棵树同样得到 28 条且与上游同序相同，因为所有 `0x1000` 槽的 `hashType` 都是 2。固定算法选择的是 `test-verify-basebin-artifacts.py` 里那条「单个 `0x0` 槽、`hashType=1`、没有 `0x1000` alternate」的用例：把 `code_directory_cdhash` 改回硬编码 SHA-256，那条用例立即失败，并点名 SHA-256 摘要 `matches no slice the tar ships`。
 
-`verify-basebin-tar.sh` 原先只断言 `basebin.tc` 存在，不断言它与 tar 里的成员一致，所以一个「换了成员、留着 stock tc」的 tar 会打印 `Result: PASS`。现在脚本调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片算出的 cdhash 集合完全相等：少一条就打印该切片 cdhash，多一条就打印该 entry，任一方向都退出 1。
+设备自带 tar 只能做更弱的比对：它需要信任缓存的 16 个成员共 28 个 CodeDirectory，`hashType` 全是 2，两种算法在它上面读数相同。跑 `make-basebin-trustcache.py cmpa /tmp/tc_check.bin` 也得到 `28 28 True`，那次一致不能区分算法。
+
+`verify-basebin-tar.sh` 原先只断言 `basebin.tc` 存在，不断言它与 tar 里的成员一致，所以一个「换了成员、留着 stock tc」的 tar 会打印 `Result: PASS`。现在脚本调 `verify-basebin-trustcache.py`，要求 `basebin.tc` 与 tar 里各成员切片的 `(cdhash, hash_type)` 完全相等。三种偏离各自点名并都退出 1：未覆盖的切片、匹配不到任何切片的 entry、摘要正确但标签错误的 entry。
+
+摘要算法与标签这两支各自被一条用例固定，读数如下。把 `code_directory_cdhash` 改回硬编码 SHA-256（保留 `(digest, hashType)` 的返回形状与槽位选择），`test-verify-basebin-artifacts.py` 立即 3 条 FAIL：`a lone SHA-1 CodeDirectory with its SHA-1 cdhash passes`、`that SHA-256 digest is named as an orphan`、`the mislabelled entry is named as such`。把校验器的比对改成忽略标签（覆盖与孤儿都只按摘要判），恰好 2 条 FAIL：`a SHA-1 cdhash labelled hash_type 2 is rejected` 与它的命名断言。两次改回原状后都是 `all cases passed`。
 
 ### 十二·九 为什么改写必须在 dyld 路径解析阶段从进程内部发生
 

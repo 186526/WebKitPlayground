@@ -95,13 +95,17 @@ def cdhash_of(code_directory: bytes) -> bytes:
     return algorithm(code_directory).digest()[:CDHASH_LEN]
 
 
-def build_trustcache(cdhashes: list[bytes]) -> bytes:
-    """Encode basebin/basebin.tc the way `trustcache create` lays it out."""
-    out = struct.pack("<I16sI", TRUSTCACHE_VERSION, b"\x01" * 16, len(cdhashes))
-    for cdhash in cdhashes:
+def build_trustcache(entries: list[tuple[bytes, int]]) -> bytes:
+    """Encode basebin/basebin.tc the way `trustcache create` lays it out.
+
+    Each entry is (cdhash, hash_type): the label is the chosen CodeDirectory's own
+    hashType, so a SHA-1 cdhash carries 1 rather than a constant 2.
+    """
+    out = struct.pack("<I16sI", TRUSTCACHE_VERSION, b"\x01" * 16, len(entries))
+    for cdhash, hash_type in entries:
         if len(cdhash) != CDHASH_LEN:
             raise ValueError("cdhash must be %d bytes" % CDHASH_LEN)
-        out += cdhash + b"\x02\x00"
+        out += cdhash + bytes([hash_type, 0])
     return out
 
 

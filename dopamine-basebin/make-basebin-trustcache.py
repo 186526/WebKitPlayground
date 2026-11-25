@@ -8,6 +8,12 @@ tool does: one cdhash per Mach-O slice, the digest taken by the slice's CodeDire
 own hashType byte (1 is SHA-1, 2 is SHA-256), the 0x1000 alternate kept when a slice
 carries both, entries sorted by cdhash.
 
+The entry's own hash_type byte carries that same value rather than a constant 2, so the
+digest and the label always agree. `update.m:32-39` reads this file with
+trustcache_file_build_from_path and uploads it unchanged, so the label reaches the
+kernel as written; a SHA-1 digest labelled 2 would be a mismatch nothing downstream
+repairs.
+
 Why the digest must follow hashType rather than being fixed at SHA-256: the two
 patched members are dual-CodeDirectory, with a SHA-1 blob at slot 0x0 and a SHA-256
 blob at 0x1000. Hashing the SHA-1 blob with SHA-256 yields a value no kernel computes,
@@ -47,12 +53,18 @@ _verifier = SourceFileLoader(
 ).load_module()
 
 TRUSTCACHE_VERSION = 1
-ENTRY_SUFFIX = b"\x02\x00"
+ENTRY_FLAGS = 0
 
 
-def collect_cdhashes(basebin):
-    """Return the sorted cdhash set for every member that belongs in the trustcache."""
-    hashes = []
+def collect_entries(basebin):
+    """Return the sorted (cdhash, hash_type) entries for every member needing trust.
+
+    The hash_type is the one the chosen CodeDirectory declares, not a constant: a
+    slice whose only CodeDirectory is SHA-1 gets a SHA-1 digest and the label 1, so
+    the digest and the label cannot disagree. `update.m:32-39` uploads this file
+    verbatim through trustcache_file_build_from_path, which copies the byte through.
+    """
+    entries = []
     unreadable = []
     for directory, _subdirs, files in os.walk(basebin):
         for name in sorted(files):
@@ -64,14 +76,15 @@ def collect_cdhashes(basebin):
             if not member:
                 unreadable.append(relative)
                 continue
-            hashes.extend(member)
-    return sorted(hashes), unreadable
+            entries.extend(member)
+    return sorted(entries), unreadable
 
 
-def encode(cdhashes):
-    uuid = hashlib.sha256(b"".join(cdhashes)).digest()[:16]
-    out = struct.pack("<I16sI", TRUSTCACHE_VERSION, uuid, len(cdhashes))
-    out += b"".join(hash_ + ENTRY_SUFFIX for hash_ in cdhashes)
+def encode(entries):
+    uuid = hashlib.sha256(b"".join(cdhash for cdhash, _hash_type in entries)).digest()[:16]
+    out = struct.pack("<I16sI", TRUSTCACHE_VERSION, uuid, len(entries))
+    for cdhash, hash_type in entries:
+        out += cdhash + bytes([hash_type, ENTRY_FLAGS])
     return out, uuid
 
 
@@ -86,20 +99,20 @@ def main(argv):
         return 1
     output = argv[2] if len(argv) == 3 else os.path.join(basebin, "basebin.tc")
 
-    cdhashes, unreadable = collect_cdhashes(basebin)
+    entries, unreadable = collect_entries(basebin)
     if unreadable:
         for relative in unreadable:
             sys.stderr.write("FAIL: %s has no code signature to hash\n" % relative)
         return 1
-    if not cdhashes:
+    if not entries:
         sys.stderr.write("FAIL: no members found under %s\n" % basebin)
         return 1
 
-    blob, uuid = encode(cdhashes)
+    blob, uuid = encode(entries)
     with open(output, "wb") as handle:
         handle.write(blob)
     print("%s: %d entries, %d bytes, uuid %s, sha256 %s"
-          % (output, len(cdhashes), len(blob), uuid.hex(),
+          % (output, len(entries), len(blob), uuid.hex(),
              hashlib.sha256(blob).hexdigest()))
     return 0
 

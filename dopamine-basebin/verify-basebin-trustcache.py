@@ -16,12 +16,15 @@ member but keeps the stock basebin.tc therefore describes binaries that are no
 longer in the tar, and says nothing about the ones that are. That mismatch is
 what this script fails on.
 
-The comparison is set equality in both directions. An entry no shipped slice
-produces is a cdhash the kernel never computes, and it is not harmless: the
-patched members carry a SHA-1 CodeDirectory beside the SHA-256 one, so a
-generator that hashed every blob with SHA-256 produced four such entries next to
-the 28 correct ones. A check that only asked whether every slice is covered would
-pass that file.
+The comparison is set equality over `(cdhash, hash_type)` pairs. Three departures each
+fail on their own line: a shipped slice with no entry; an entry no shipped slice
+produces — a cdhash the kernel never computes; and a right cdhash under the wrong
+label. The first two are not harmless. The patched members carry a SHA-1
+CodeDirectory beside the SHA-256 one, so a generator that hashed every blob with
+SHA-256 produced four entries no kernel computes next to the 28 correct ones, and a
+check that only asked whether every slice was covered passed that file. The label
+matters because `trustcache_file_build_from_path` copies the byte straight into the
+uploaded file.
 
 dyldhook_merge.*.dylib members are exempt because BaseBin/Makefile:100 says
 they do not belong in the basebin trustcache; they are handled by the dyldhook
@@ -73,18 +76,20 @@ def read_trustcache(path):
         raise TrustcacheError(
             "%s declares %d entries (%d bytes) but is %d bytes" % (path, length, expected, len(blob))
         )
-    return {
-        blob[HEADER_SIZE + i * TRUSTCACHE_ENTRY_SIZE: HEADER_SIZE + i * TRUSTCACHE_ENTRY_SIZE + CDHASH_LEN]
-        for i in range(length)
-    }
+    entries = set()
+    for index in range(length):
+        start = HEADER_SIZE + index * TRUSTCACHE_ENTRY_SIZE
+        entries.add((blob[start:start + CDHASH_LEN], blob[start + CDHASH_LEN]))
+    return entries
 
 
 def code_directory_cdhash(blob):
-    """Return the cdhash the kernel computes for one CodeDirectory blob.
+    """Return (cdhash, hashType) for one CodeDirectory blob, or None.
 
     The digest is chosen by the blob's own hashType byte at offset 37, not by this
     script: a CodeDirectory that declares SHA-1 has a SHA-1 cdhash, and hashing it
-    with SHA-256 produces a value no kernel ever computes.
+    with SHA-256 produces a value no kernel ever computes. The same byte is the
+    trustcache entry's own hash_type field, so both travel together.
     """
     if len(blob) < HASH_TYPE_OFFSET + 1:
         return None
@@ -92,7 +97,7 @@ def code_directory_cdhash(blob):
     algorithm = CDHASH_ALGORITHMS.get(hash_type)
     if algorithm is None:
         return None
-    return algorithm(blob).digest()[:CDHASH_LEN]
+    return algorithm(blob).digest()[:CDHASH_LEN], hash_type
 
 
 def slice_cdhash(slice_bytes):
@@ -209,31 +214,57 @@ def main(argv):
             if not hashes:
                 continue
             checked += 1
-            for cdhash in hashes:
-                expected[cdhash] = relative
+            for cdhash, hash_type in hashes:
+                expected[(cdhash, hash_type)] = relative
 
-    missing = [(relative, cdhash.hex()) for cdhash, relative in expected.items()
-               if cdhash not in covered]
-    orphans = sorted(cdhash.hex() for cdhash in covered if cdhash not in expected)
+    # The entry's own hash_type byte is part of the tuple: `update.m:32-39` hands the
+    # tar's file to trustcache_file_build_from_path, which reads it verbatim and uploads
+    # it, so a SHA-1 digest labelled 2 reaches the kernel labelled 2. A slice whose hash
+    # is present under the wrong label is reported apart from an entry no slice produces.
+    expected_by_hash = {}
+    for (cdhash, hash_type), relative in expected.items():
+        expected_by_hash[cdhash] = (relative, hash_type)
 
-    for relative, cdhash in sorted(missing):
+    missing = [(relative, cdhash.hex(), hash_type)
+               for (cdhash, hash_type), relative in expected.items()
+               if (cdhash, hash_type) not in covered]
+    mislabelled = []
+    orphans = []
+    for cdhash, hash_type in sorted(covered):
+        if (cdhash, hash_type) in expected:
+            continue
+        if cdhash in expected_by_hash:
+            relative, wanted = expected_by_hash[cdhash]
+            mislabelled.append((relative, cdhash.hex(), wanted, hash_type))
+        else:
+            orphans.append((cdhash.hex(), hash_type))
+
+    for relative, cdhash, hash_type in sorted(missing):
         sys.stderr.write(
-            "FAIL: %s slice cdhash %s is not in basebin.tc\n" % (relative, cdhash)
+            "FAIL: %s slice cdhash %s (hash_type %d) is not in basebin.tc\n"
+            % (relative, cdhash, hash_type)
         )
-    for cdhash in orphans:
+    for relative, cdhash, wanted, found in sorted(mislabelled):
         sys.stderr.write(
-            "FAIL: basebin.tc entry %s matches no slice the tar ships\n" % cdhash
+            "FAIL: %s slice cdhash %s is labelled hash_type %d in basebin.tc, "
+            "but its CodeDirectory declares %d\n" % (relative, cdhash, found, wanted)
+        )
+    for cdhash, hash_type in orphans:
+        sys.stderr.write(
+            "FAIL: basebin.tc entry %s (hash_type %d) matches no slice the tar ships\n"
+            % (cdhash, hash_type)
         )
 
     # Exact equality, not mere coverage. An entry the kernel never computes is the
     # exact defect this gate exists to catch, and a superset hides it: 28 correct
     # entries plus 4 SHA-256-over-a-SHA-1-CodeDirectory values passes a covers-only
     # check while shipping four entries no kernel computes.
-    if missing or orphans:
+    if missing or mislabelled or orphans:
         sys.stderr.write(
             "FAIL: basebin.tc and the shipped slices disagree: %d uncovered slice(s), "
-            "%d orphan entry/entries, %d members checked, %d entries in the file\n"
-            % (len(missing), len(orphans), checked, len(covered))
+            "%d mislabelled entry/entries, %d orphan entry/entries, "
+            "%d members checked, %d entries in the file\n"
+            % (len(missing), len(mislabelled), len(orphans), checked, len(covered))
         )
         return 1
 

@@ -127,8 +127,11 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
               launchdhook_strings: tuple[str, ...] | None = None,
               tc_covers_launchdhook: bool = True,
               dual_code_directories: bool = False,
+              lone_sha1_code_directory: bool = False,
               tc_has_sha256_over_sha1: bool = False,
-              tc_has_sha1_primary_slot: bool = False) -> Path:
+              tc_has_sha1_primary_slot: bool = False,
+              tc_has_sha1_digest_labelled_sha256: bool = False,
+              tc_hashes_lone_sha1_with_sha256: bool = False) -> Path:
     """Write a tar the way BaseBin/Makefile's basebin.tar target lays it out.
 
     launchdhook.dylib is a real Mach-O because verify-basebin-tar.sh hands it to
@@ -144,8 +147,14 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
     slice is the 0x1000 alternate's cdhash, so with that shape:
       tc_has_sha256_over_sha1=True writes the SHA-256 of the SHA-1 blob as well — a value no
       kernel computes — which is the superset defect round 3's P1 named;
-      tc_has_sha1_primary_slot=True writes only the SHA-1 blob's own cdhash, the
-      right-algorithm-but-wrong-slot mistake.
+      tc_has_sha1_primary_slot=True writes the SHA-1 blob's own cdhash, the
+      right-algorithm-but-wrong-slot mistake;
+      tc_has_sha1_digest_labelled_sha256=True writes that same digest under the label 2.
+
+    lone_sha1_code_directory=True signs launchdhook with one SHA-1 CodeDirectory at 0x0 and no
+    alternate.  Only that shape makes the digest algorithm observable, because every real
+    0x1000 alternate is SHA-256; tc_hashes_lone_sha1_with_sha256=True writes the SHA-256
+    digest instead, which is what a hardcoded-SHA-256 verifier would accept.
     """
     staging = root / "staging"
     base = staging / "basebin" if prefixed else staging
@@ -155,7 +164,7 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
             continue
         write_symbol_file(base / name, symbols)
     write_symbol_file(base / "systemhook.dylib", LEGACY)
-    covered: list[bytes] = []
+    covered: list[tuple[bytes, int]] = []
     if launchdhook_strings is not None:
         if dual_code_directories:
             sha1_cd = build_code_directory(launchdhook_strings[0].encode(),
@@ -167,18 +176,34 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
                 code_directories=[(CSSLOT_CODEDIRECTORY, sha1_cd),
                                   (CSSLOT_ALTERNATE_CODEDIRECTORIES, sha256_cd)],
             )
-            correct = cdhash_of(sha256_cd)  # the 0x1000 alternate is the one that is kept
-            orphan = hashlib.sha256(sha1_cd).digest()[:CDHASH_LEN]
+            # The 0x1000 alternate is the one kept, and its label is its own hashType.
+            correct = (cdhash_of(sha256_cd), HASH_TYPE_SHA256)
+            orphan = (hashlib.sha256(sha1_cd).digest()[:CDHASH_LEN], HASH_TYPE_SHA256)
+            sha1_entry = (cdhash_of(sha1_cd), HASH_TYPE_SHA1)
             if tc_has_sha1_primary_slot:
-                covered.extend([cdhash_of(sha1_cd)])
+                covered.append(sha1_entry)
             else:
-                covered.extend([correct])
+                covered.append(correct)
                 if tc_has_sha256_over_sha1:
                     covered.append(orphan)
+        elif lone_sha1_code_directory:
+            # One 0x0 CodeDirectory declaring SHA-1, no 0x1000 alternate. Only this
+            # shape makes the digest algorithm observable: the alternate is SHA-256 in
+            # every real member, so choosing 0x1000 first hides the choice.
+            sha1_cd = build_code_directory(launchdhook_strings[0].encode(),
+                                          hash_type=HASH_TYPE_SHA1)
+            image = build_macho(launchdhook_strings, code_directory=sha1_cd)
+            if tc_hashes_lone_sha1_with_sha256:
+                covered.append((hashlib.sha256(sha1_cd).digest()[:CDHASH_LEN], HASH_TYPE_SHA256))
+            elif tc_has_sha1_digest_labelled_sha256:
+                # Right digest, wrong label: only the entry's own hash_type byte differs.
+                covered.append((cdhash_of(sha1_cd), HASH_TYPE_SHA256))
+            else:
+                covered.append((cdhash_of(sha1_cd), HASH_TYPE_SHA1))
         else:
             code_directory = build_code_directory(launchdhook_strings[0].encode())
             image = build_macho(launchdhook_strings, code_directory=code_directory)
-            covered.append(cdhash_of(code_directory))
+            covered.append((cdhash_of(code_directory), HASH_TYPE_SHA256))
         (base / "launchdhook.dylib").write_bytes(image)
         if not tc_covers_launchdhook:
             covered = []
@@ -263,6 +288,36 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
                              tc_has_sha1_primary_slot=True)
     rc, out = run(TAR_SCRIPT, [str(dual_primary)], bin_dir)
     check("tar: a dual-CodeDirectory entry taken from the 0x0 slot is rejected", rc == 1, out)
+
+    # Every real 0x1000 alternate is SHA-256, so choosing the alternate first hides the
+    # digest choice: hardcoding SHA-256 and reading hashType agree on every real member.
+    # A lone SHA-1 CodeDirectory at 0x0 with no alternate is the shape that separates them.
+    lone_sha1 = build_tar(root / "lone-sha1", healthy_dylibs(),
+                          launchdhook_strings=LAUNCHDHOOK_PATCHED,
+                          lone_sha1_code_directory=True)
+    rc, out = run(TAR_SCRIPT, [str(lone_sha1)], bin_dir)
+    check("tar: a lone SHA-1 CodeDirectory with its SHA-1 cdhash passes", rc == 0, out)
+
+    lone_sha256 = build_tar(root / "lone-sha256", healthy_dylibs(),
+                            launchdhook_strings=LAUNCHDHOOK_PATCHED,
+                            lone_sha1_code_directory=True,
+                            tc_hashes_lone_sha1_with_sha256=True)
+    rc, out = run(TAR_SCRIPT, [str(lone_sha256)], bin_dir)
+    check("tar: a lone SHA-1 CodeDirectory hashed with SHA-256 is rejected", rc == 1, out)
+    check("tar: that SHA-256 digest is named as an orphan",
+          "matches no slice the tar ships" in out, out)
+
+    # The entry's own hash_type byte is uploaded verbatim by trustcache_file_build_from_path,
+    # so a right digest under the wrong label is its own defect, not a pass. The lone SHA-1
+    # slice isolates that byte: the digest is correct and only the label is wrong.
+    dual_label = build_tar(root / "dual-label", healthy_dylibs(),
+                           launchdhook_strings=LAUNCHDHOOK_PATCHED,
+                           lone_sha1_code_directory=True,
+                           tc_has_sha1_digest_labelled_sha256=True)
+    rc, out = run(TAR_SCRIPT, [str(dual_label)], bin_dir)
+    check("tar: a SHA-1 cdhash labelled hash_type 2 is rejected", rc == 1, out)
+    check("tar: the mislabelled entry is named as such",
+          "but its CodeDirectory declares 1" in out, out)
 
     # launchdhook is the one member whose absence leaves every other gate content: it is
     # built from the same common.c, and the stock build writes only DYLD_INSERT_LIBRARIES.
