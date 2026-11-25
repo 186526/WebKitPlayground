@@ -41,15 +41,18 @@ WebCore is why the two dylibs sit where they do. Its load commands carry
 three are the whole of the set this chain relates to. A weak import does not block
 the load. In the payload as shipped the three strings are `/System` paths, so a
 WebCore loaded first bound the resident 16.1 copies and the later `/var/jb` load
-mapped a second copy. The ordering experiment varied `libwebrtc` and
-`libANGLE-shared` against `WebCore` — steps 2 and 3 against step 4 — and that
-reorder is what took the count to 0. The 31 itself comes from `libwebrtc` alone:
-the count is `Class WK_RTC... is implemented in both` warnings, `libwebrtc` carries
-466 `WK_RTC` strings, `WebGPU` carries none, and `libANGLE-shared` defines no
-classes at all (it has `__objc_classname` and `__objc_classrefs` but no
-`__objc_classlist`), so neither of the other two can enter it. `WebGPU` is the
-third weak dependency and is untested as a variable: it is step 6, after `WebCore`
-at step 4, so no run has moved it. In the rewritten tree all three strings are
+mapped a second copy. Two of the three were then reordered and the third was not:
+`libwebrtc` and `libANGLE-shared` are steps 2 and 3 against WebCore's step 4, and
+moving them ahead is what took the duplicate count to 0, while `WebGPU` is step 6,
+after WebCore, so no run has varied it. Both of the reordered two belong in the
+experiment because both are weak imports WebCore would otherwise bind to the
+system copies; the count is what only one of them can report. The 31 belongs to
+`libwebrtc` alone — it is `Class WK_RTC... is implemented in both` warnings,
+`libwebrtc` carries 466 `WK_RTC` strings, `WebGPU` carries none, and
+`libANGLE-shared` defines no classes at all (it has `__objc_classname` and
+`__objc_classrefs` but no `__objc_classlist`), so a second copy of it raises no
+`Class ... is implemented in both` warning and cannot appear in this count even
+though the second mapping is real. In the rewritten tree all three strings are
 `/var/jb/.../WebKit18`, so the System string is gone and no weak import of the
 three can name the system image — which is why the rewrite, not the ordering
 alone, is what makes the weak set safe.
