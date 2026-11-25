@@ -8,10 +8,12 @@ and inert. This script fails when that stops being true.
 
 What it refuses, and why each combination is a defect rather than a preference:
 
-  - Any call to setShouldTranslateMessageNames(true) in the patched tree. The UI process on this
-    deployment loads our own WebKit.framework through scripts/install-webkit-override.sh, so both
-    sides of the connection are this build and already number messages identically. Switching
-    translation on renumbers messages that were correct. `InitializeConnection` is number 3076 in
+  - Any call to setShouldTranslateMessageNames(true) in the patched tree, including a call split
+    across lines. The check reads whole statements, not lines, so folding the call after the opening
+    parenthesis does not hide it. The UI process on this deployment loads our own WebKit.framework
+    through scripts/install-webkit-override.sh, so both sides of the connection are this build and
+    already number messages identically. Switching translation on renumbers messages that were
+    correct. `InitializeConnection` is number 3076 in
     this tree, and the incoming table switches over the older numbering the tables were generated
     from, so case 3076 answers MessageName::WebPageProxy_RootViewToAccessibilityScreen - the message
     that occupies 3076 in the Safari-614.1.9 snapshot, and a real message with no relation to the
@@ -36,7 +38,16 @@ What it refuses, and why each combination is a defect rather than a preference:
   - A table entry that disagrees with the prose. The prose check reads comments only, so a renumbered
     `case` or a mapping retargeted at another real message would otherwise pass. The tables are what
     a translated connection dispatches on, so the anchor pairs the prose names are read back out of
-    the added code and compared.
+    the added code and compared. Two of the seven pairs are not named in the prose at all: they are
+    read from the tables themselves and pinned because they are the neighbours of the pairs the prose
+    does name, and a silent rename would move them instead.
+
+  - A read site that stops asking the member. The flag is a setter call and two reads; guarding only
+    the call leaves the reads, and a read is the cheapest place to make translation unconditional.
+    The two reads must stay `if (m_shouldTranslateMessageNames)`: a bare `{` runs the block always,
+    and `IOS_16_MESSAGE_NUMBER_TRANSLATION` is 1 in this build because the deployment target is 16.1,
+    so substituting the macro is the same as a bare brace with a reassuring name. The member may only
+    be assigned from the setter's own parameter, so a direct `= true` is refused.
 
 The script reads the patch file, not a checkout, so it runs before the build has a tree and cannot
 be satisfied by a tree that happens to be patched differently from the deb.
@@ -45,8 +56,8 @@ Usage:
   scripts/check-translation-switch.py
   scripts/check-translation-switch.py --patch patches/ios16-ipc-message-number-translation.patch
 
-Exit 0 when the switch is absent, the rationale is present and the table anchors hold; 1 on any
-violation; 2 when the patch cannot be read.
+Exit 0 when the switch is absent, the reads ask the member, the rationale is present and the table
+anchors hold; 1 on any violation; 2 when the patch cannot be read.
 """
 from __future__ import annotations
 
@@ -143,21 +154,167 @@ def added_code_lines(patch: str) -> list[str]:
     return lines
 
 
+# A statement is what a call has to be read as: `setShouldTranslateMessageNames` and its argument may
+# sit on different lines, and a check that reads one line at a time misses the call the moment it is
+# wrapped. The added code is joined back into statements with the usual continuation shapes: an
+# unclosed parenthesis, a trailing comma or arrow, or a next line that opens with a call or member
+# access. This set was measured against the committed patch: it joins two lines there, both of them
+# benign (a licence header and a project.pbxproj list), and it never joins a table `case` label.
+CONTINUES_AFTER = (",", "\\", "&&", "||", "->", ".", "=")
+CONTINUES_BEFORE = ("(", ".", "->", ",")
+FILE_HEADER = re.compile(r"^diff --git a/(\S+) b/")
+
+
+def added_code_statements(patch: str) -> list[tuple[str, str]]:
+    """The patch's added code as (file, statement) pairs, with wrapped statements joined.
+
+    Statements are joined within one file only: a call split across a file boundary is not a call.
+    """
+    per_file: list[tuple[str, str]] = []
+    path = ""
+    for raw in patch.splitlines():
+        header = FILE_HEADER.match(raw)
+        if header:
+            path = header.group(1)
+            continue
+        match = ADDED_LINE.match(raw)
+        if not match:
+            continue
+        code = strip_comment(match.group(1)).strip()
+        if code:
+            per_file.append((path, code))
+
+    statements: list[tuple[str, str]] = []
+    current_path, current, depth = "", "", 0
+    for index, (line_path, code) in enumerate(per_file):
+        if current and line_path != current_path:
+            statements.append((current_path, current))
+            current, depth = "", 0
+        current_path = line_path
+        current = code if not current else current + " " + code
+        depth = max(0, depth + code.count("(") - code.count(")"))
+        following = per_file[index + 1][1] if index + 1 < len(per_file) and per_file[index + 1][0] == line_path else ""
+        if depth > 0 or current.endswith(CONTINUES_AFTER) or (following and following.startswith(CONTINUES_BEFORE)):
+            continue
+        statements.append((current_path, current))
+        current, depth = "", 0
+    if current:
+        statements.append((current_path, current))
+    return statements
+
+
 def check_no_setter_call(patch: str) -> list[Violation]:
     violations = []
-    for code in added_code_lines(patch):
-        if not SETTER.search(code):
+    for path, statement in added_code_statements(patch):
+        if not SETTER.search(statement):
             continue
-        if any(hint in code for hint in DECLARATION_HINTS):
+        if any(hint in statement for hint in DECLARATION_HINTS):
             continue
         violations.append(
             Violation(
                 "the patch calls setShouldTranslateMessageNames",
                 "this deployment runs one WebKit build on both sides of the connection, so turning "
                 "translation on renumbers messages that already agree and the InitializeConnection "
-                "handshake never completes: %s" % code,
+                "handshake never completes: %s: %s" % (path, statement),
             )
         )
+    return violations
+
+
+# The flag is read at exactly these two places, and each read guards one translation call. Pinning the
+# guard by the call it wraps rather than by a line number is what makes "the condition is unchanged"
+# a fact about the code: replacing the condition with a bare `{` removes the `if` statement, and
+# replacing it with IOS_16_MESSAGE_NUMBER_TRANSLATION keeps an `if` but not this one.
+READ_SITES = (
+    ("Source/WebKit/Platform/IPC/Connection.cpp", "translateOutgoingMessageName(",
+     "the send path that rewrites an outgoing message number"),
+    ("Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm", "translateIncomingMessageName(",
+     "the receive path that rewrites an incoming message number"),
+)
+
+# The member may be written from one place only: the setter's own body, from its parameter. Any other
+# assignment reaches the same state without a call, which is the path check_no_setter_call cannot see.
+ASSIGNMENT = re.compile(r"\bm_shouldTranslateMessageNames\s*=(?!=)\s*([^=;]+);")
+SETTER_BODY = "void setShouldTranslateMessageNames(bool shouldTranslate)"
+
+
+def enclosing_blocks(statements: list[tuple[str, str]]) -> list[str | None]:
+    """For each statement, the statement that directly opened the block it sits in, or None.
+
+    A statement opens a block when it *ends* with `{`, and closes one when it starts with `}`. That
+    matters: `Locker locker { reportedUnmappedNamesLock };` and `bool m_x { false };` carry braces but
+    end with `;`, so a naive brace count would treat the braced initialiser as a block and report the
+    wrong guard. The nesting is tracked so the answer is the innermost block, not the outermost: the
+    translation call in the send path sits inside a second `if` that closes above it.
+    """
+    blocks: list[str | None] = []
+    stack: list[str] = []
+    current_path = None
+    for path, statement in statements:
+        if path != current_path:
+            stack = []
+            current_path = path
+        blocks.append(stack[-1] if stack else None)
+        if statement.startswith("}"):
+            if stack:
+                stack.pop()
+            continue
+        if statement.endswith("{"):
+            stack.append(statement)
+    return blocks
+
+
+def check_read_sites(patch: str) -> list[Violation]:
+    statements = added_code_statements(patch)
+    blocks = enclosing_blocks(statements)
+    violations = []
+
+    def guards_for(path: str, call: str) -> list[str | None]:
+        """The enclosing block of every statement in `path` that calls `call`.
+
+        Every occurrence is returned, not just the first: a second, unguarded call site added next to
+        the guarded one would otherwise pass on the strength of the guarded one.
+        """
+        return [blocks[index] for index, (line_path, statement) in enumerate(statements)
+                if line_path == path and call in statement]
+
+    for path, call, description in READ_SITES:
+        guards = guards_for(path, call)
+        if not guards:
+            violations.append(
+                Violation(
+                    "%s no longer calls %s" % (description, call),
+                    "expected %s in %s; the translation has to happen somewhere, and this check pins "
+                    "that it happens under the member" % (call, path),
+                )
+            )
+            continue
+        for guard in guards:
+            if guard == "if (m_shouldTranslateMessageNames) {":
+                continue
+            found = "no enclosing block" if guard is None else "`%s`" % guard
+            violations.append(
+                Violation(
+                    "%s is guarded by something other than the member" % description,
+                    "expected `if (m_shouldTranslateMessageNames) {` to open the block holding %s in "
+                    "%s, found %s; IOS_16_MESSAGE_NUMBER_TRANSLATION is 1 in this build because the "
+                    "deployment target is 16.1, so a macro condition here is a bare brace with a "
+                    "reassuring name" % (call, path, found),
+                )
+            )
+
+    for path, statement in statements:
+        for found in ASSIGNMENT.finditer(statement):
+            if SETTER_BODY in statement and found.group(1).strip() == "shouldTranslate":
+                continue
+            violations.append(
+                Violation(
+                    "the patch assigns m_shouldTranslateMessageNames outside the setter",
+                    "the flag may only be set from the setter's parameter, so that every route to "
+                    "translation is a call this check can see; found `%s` in %s"
+                    % (statement.strip(), path),
+                )
+            )
     return violations
 
 
@@ -232,13 +389,22 @@ OUTGOING = re.compile(r"case\s+MessageName::(\w+)\s*:\s*return\s+static_cast<Mes
 INCOMING = re.compile(r"case\s+(\d+)\s*:\s*return\s+MessageName::(\w+);")
 
 # (description, direction, key, expected). `key` is a message name for the outgoing table and a
-# number for the incoming one. These are the mappings the patch's own prose names, so a change to
-# either side of a pair is a change to a claim a reader relies on:
+# number for the incoming one.
+#
+# Five of these seven pairs are named in the patch's prose, so a change to either side is a change to
+# a claim a reader relies on:
 #
 #   `InitializeConnection` is number 3076 in this tree, and the older numbering it is translated to
 #   is 614.1.9, where it is 2444. The incoming table reads case 3076 as
 #   WebPageProxy_RootViewToAccessibilityScreen, the message that occupies 3076 in 614.1.9, which is
 #   why the handshake comparison stops matching.
+#
+# The other two pairs are not in the prose at all: `3024` and `WrappedAsyncMessageForTesting` and
+# `GPUConnectionToWebProcess_EnsureAudioSession` each occur zero times there (`3139` and `2899` do
+# occur, but as "Last 3139" and "firstSynchronousOldMessageNumber 2899", not as these pairs). Those
+# pairs are pinned because they are what the tables actually hold next to the named ones, and a
+# silent rename shifts them even when the prose still reads correctly. They are the stronger half of
+# the check, so they are kept and the reason states where they come from.
 TABLE_ANCHORS = (
     ("InitializeConnection translates to its 614.1.9 number", "outgoing", "InitializeConnection", 2444),
     ("3076 declares WebPageProxy_RootViewToAccessibilityScreen, not the handshake", "incoming", 3076,
@@ -349,6 +515,7 @@ def run(patch_path: Path) -> int:
 
     violations = []
     violations += check_no_setter_call(patch)
+    violations += check_read_sites(patch)
     violations += check_member_initialiser(patch)
     violations += check_rationale(patch)
     violations += check_table_anchors(patch)
@@ -360,8 +527,9 @@ def run(patch_path: Path) -> int:
             print("  %s" % violation.detail, file=sys.stderr)
         return 1
 
-    print("check-translation-switch: no call to setShouldTranslateMessageNames, the flag keeps its "
-          "false initialiser, the rationale is intact and the table anchors hold")
+    print("check-translation-switch: no call to setShouldTranslateMessageNames, both reads ask the "
+          "member, the flag keeps its false initialiser, the rationale is intact and the table "
+          "anchors hold")
     return 0
 
 

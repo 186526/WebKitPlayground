@@ -16,7 +16,14 @@ cases are the ways the switch can come back and the ways the check could pass by
   a count or tag drifted back to a wrong value must fail, so a needle cannot be a marker that also
   occurs somewhere else in the file;
   a table entry retargeted or renumbered must fail, because the prose check reads comments only and
-  the tables are what a translated connection dispatches on.
+  the tables are what a translated connection dispatches on;
+  a read site that stops asking the member must fail, in either of the two shapes a bypass takes (a
+  bare `{` and the deployment macro), because the setter call is only one of the switch's three
+  sites;
+  an assignment to the member outside the setter must fail, because it reaches the same state
+  without a call the check could see;
+  a setter call folded across two lines must fail, because the check has to read statements and not
+  lines.
 
 The "as committed" case reads the real patch, so a patch edited without updating this check fails
 here rather than in the build. Two further passes read the real patch too: every rationale needle
@@ -46,12 +53,15 @@ _SPEC.loader.exec_module(CHECK)
 
 # A patch fixture with every anchor the checker requires, so a case that targets one rule is not
 # failed by an unrelated one. The prose is quoted from the patch itself, line breaks and all, so a
-# needle that only matches the real wording cannot pass here by coincidence. The trailing code lines
-# are the table anchors check_table_anchors reads, in the shape the patch writes them: without them
-# every fixture would fail on a rule the case is not about.
+# needle that only matches the real wording cannot pass here by coincidence. The table code lines are
+# the ones check_table_anchors reads, in the shape the patch writes them. The last two sections carry
+# the read sites check_read_sites pins; both rules key on the file path, so the `diff --git` headers
+# are part of the fixture and not decoration.
 BASE = """\
+diff --git a/Source/WebKit/Platform/IPC/Connection.h b/Source/WebKit/Platform/IPC/Connection.h
 +bool m_shouldTranslateMessageNames { false };
 +void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }
+diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp
 +// dense enumeration over every message in the tree, so 946 more entries inserted
 +// anywhere before a name reassigns the numbers after them.
 +// This tree has 4086 numbers. Read against the shipped 16.1 enumeration
@@ -81,12 +91,69 @@ BASE = """\
 +    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;
 +    case 3024: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;
 +    case 2899: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;
+diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp
++    if (m_shouldTranslateMessageNames) {
++        auto name = encoder->messageName();
++        encoder->setMessageName(translateOutgoingMessageName(name));
++    }
+diff --git a/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm b/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm
++    if (m_shouldTranslateMessageNames) {
++        auto translated = translateIncomingMessageName(decoder->messageName());
++        decoder->setMessageName(translated);
++    }
 +"""
 
 CALL = "+    m_connection->setShouldTranslateMessageNames(true);\n"
 CALL_NO_ARGUMENT = "+    m_connection->setShouldTranslateMessageNames();\n"
 DECLARATION = "+    void setShouldTranslateMessageNames(bool shouldTranslate);\n"
 MACRO_INITIALISER = "+    bool m_shouldTranslateMessageNames { IOS_16_MESSAGE_NUMBER_TRANSLATION };\n"
+
+# The two guards, quoted with the line beneath them: the guard line alone occurs twice (once per read
+# site), and replacing the first match would silently test the send path every time.
+SEND_GUARD = (
+    "+    if (m_shouldTranslateMessageNames) {\n"
+    "+        auto name = encoder->messageName();\n"
+)
+RECEIVE_GUARD = (
+    "+    if (m_shouldTranslateMessageNames) {\n"
+    "+        auto translated = translateIncomingMessageName(decoder->messageName());\n"
+)
+
+# Round 5's P2-1: the switch is a call and two reads, and only the call was guarded. Each entry
+# replaces a guard with the shape a bypass took, and must land on exit 1. The folded call is the
+# exception: it appends, because the committed patch carries no call for it to replace.
+READ_SITE_CASES = (
+    (
+        "a patch whose send path runs the block with no condition fails",
+        SEND_GUARD,
+        "+    {\n+        auto name = encoder->messageName();\n",
+        "guarded by something other than the member",
+    ),
+    (
+        "a patch whose send path guards on the deployment macro fails",
+        SEND_GUARD,
+        "+    if (IOS_16_MESSAGE_NUMBER_TRANSLATION) {\n+        auto name = encoder->messageName();\n",
+        "guarded by something other than the member",
+    ),
+    (
+        "a patch that assigns the member directly on the send path fails",
+        SEND_GUARD,
+        "+    m_shouldTranslateMessageNames = true;\n"
+        "+    if (m_shouldTranslateMessageNames) {\n"
+        "+        auto name = encoder->messageName();\n",
+        "assigns m_shouldTranslateMessageNames outside the setter",
+    ),
+    (
+        "a patch that changes only the receive path's guard fails",
+        RECEIVE_GUARD,
+        "+    {\n+        auto translated = translateIncomingMessageName(decoder->messageName());\n",
+        "the receive path that rewrites an incoming message number",
+    ),
+)
+
+# Appended rather than substituted: the committed patch carries no setter call, so there is nothing to
+# replace. This is the wrap the line-at-a-time check used to miss.
+FOLDED_CALL = "+    m_connection->setShouldTranslateMessageNames\n+        (true);\n"
 
 # The five needles that used to be bare numbers, and the wrong value each must now fail on. Every
 # number here is also a real case label in the tables, which is why a needle that searched the whole
@@ -225,6 +292,18 @@ for description, old_text, new_text, needle_description in SENTENCE_NEEDLES:
 for description, old_text, new_text, expected_message in TABLE_CASES:
     CASES += ((description, BASE.replace(old_text, new_text), 1, expected_message),)
 
+for description, old_text, new_text, expected_message in READ_SITE_CASES:
+    CASES += ((description, BASE.replace(old_text, new_text, 1), 1, expected_message),)
+
+CASES += (
+    (
+        "a patch that folds the setter call across two lines still fails",
+        BASE + FOLDED_CALL,
+        1,
+        "calls setShouldTranslateMessageNames",
+    ),
+)
+
 
 def check_needles_are_unique_and_necessary() -> int:
     """Assert each rationale needle occurs exactly once in the real patch's prose, and is necessary.
@@ -257,8 +336,10 @@ def check_needles_are_unique_and_necessary() -> int:
     # The fixture is the real patch's prose on one line plus the code the other rules need, so an
     # edit here cannot be confounded by where a comment happens to wrap.
     scaffold = "\n".join([
+        "diff --git a/Source/WebKit/Platform/IPC/Connection.h b/Source/WebKit/Platform/IPC/Connection.h",
         "+bool m_shouldTranslateMessageNames { false };",
         "+void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }",
+        "diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp",
         "+// " + prose,
         "+    case MessageName::InitializeConnection: return static_cast<MessageName>(2444);",
         "+    case MessageName::WebPageProxy_RootViewToAccessibilityScreen: return static_cast<MessageName>(3076);",
@@ -267,6 +348,16 @@ def check_needles_are_unique_and_necessary() -> int:
         "+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;",
         "+    case 3024: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;",
         "+    case 2899: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;",
+        "diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp",
+        "+    if (m_shouldTranslateMessageNames) {",
+        "+        auto name = encoder->messageName();",
+        "+        encoder->setMessageName(translateOutgoingMessageName(name));",
+        "+    }",
+        "diff --git a/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm b/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm",
+        "+    if (m_shouldTranslateMessageNames) {",
+        "+        auto translated = translateIncomingMessageName(decoder->messageName());",
+        "+        decoder->setMessageName(translated);",
+        "+    }",
         "",
     ])
     if run(scaffold).returncode != 0:
