@@ -940,7 +940,7 @@ iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` �
 
 `basebin.tc` 640 字节，结构是 4 字节版本（实测 `1`）、16 字节 uuid、4 字节条目数（实测 `28`），随后 28 条 22 字节记录（20 字节 cdhash + 2 字节 flags）。`24 + 28 × 22 = 640`，长度自洽。设备上这份的 uuid 是 `a3e4647f…`。
 
-**这张表存的是 CodeDirectory 的 cdhash，不是文件 sha1。** 两者不是同一个量：文件 sha1 覆盖整个文件，cdhash 覆盖签名里那个 CodeDirectory blob，长度也不同。用文件 sha1 去查这张表，无论文件在不在表里都会读成「不在」。本节原先就是这么比的，下面按正确的量重算。
+**这张表存的是 CodeDirectory 的 cdhash，不是文件 sha1。** 两者不是同一个量，差别在于被哈希的输入是哪段字节：文件 sha1 的输入是整个文件（本节四份是 312848、330144、233520、234336 字节），cdhash 的输入是签名里那个 CodeDirectory blob（本节八个 `0x0` 槽位是 645 到 1354 字节）。两者被哈希的输入长度差两个多数量级，但两个摘要本身都是 20 字节、十六进制都是 40 个字符，所以**长度不能用来区分这两种量**，只能看这个 40 字符是从哪段字节算出来的。用文件 sha1 去查这张表，无论文件在不在表里都会读成「不在」——本节实测的四个文件 sha1 一个都不在那 28 条里。本节原先就是这么比的，下面按正确的量重算。
 
 2026-11-25T17:23Z 设备实测，用 `/var/jb/usr/bin/python3` 从每个架构切片里取出 `LC_CODE_SIGNATURE` 的 `0x0` 槽位 CodeDirectory，按它自己的 `hashType` 求哈希，再查 `basebin.tc` 的 28 条：
 
@@ -952,6 +952,60 @@ iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` �
 | `systemhook.dylib` | 补丁版 234336 | `f4367ca8ad93…` | `8d580b8510297956…`、`bd93fa08208960d6…`（1） | 否 |
 
 cdhash 按 CodeDirectory 自己的 `hashType` 算：`hashType` 为 2 时取 `SHA256(CodeDirectory)` 的前 20 字节，为 1 时取 `SHA1(CodeDirectory)` 的前 20 字节，两者都截到 20 字节，所以表里的 cdhash 都是 40 个十六进制字符。原版两份是 `hashType` 2，补丁版两份是 `hashType` 1，这是替换签名时换了算法，不是同一个量算了两遍。补丁版两个切片还各多一个 `0x1000` 槽位，那也是 `hashType` 2，它的 cdhash 同样不在表里。
+
+上面这套取法可用下面这段脚本复跑，参数依次是 `basebin.tc` 与要比对的文件；它按同一个 `LC_CODE_SIGNATURE` 槽位取 CodeDirectory、按其 `hashType` 求哈希、截前 20 字节，同时打印「被哈希的输入有多少字节」和「摘要的十六进制有多少字符」两项，用来看清长度指的是哪一层。`in_table` 是拿那 20 字节的十六进制去 `basebin.tc` 里逐条比。
+
+```python
+import hashlib, struct, sys
+
+def slices(data):
+    if struct.unpack('>I', data[0:4])[0] in (0xcafebabe, 0xcafebabf):
+        count, = struct.unpack('>I', data[4:8])
+        return [struct.unpack('>II', data[16 + i * 20:24 + i * 20]) for i in range(count)]
+    return [(0, len(data))]
+
+def code_directories(image):
+    magic, = struct.unpack('<I', image[0:4])
+    if magic not in (0xfeedface, 0xfeedfacf):
+        return []
+    ncmds, = struct.unpack('<I', image[16:20])
+    p = 32 if magic == 0xfeedfacf else 28
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack('<II', image[p:p + 8])
+        if cmd == 0x1d:
+            dataoff, datasize = struct.unpack('<II', image[p + 8:p + 16])
+            blob = image[dataoff:dataoff + datasize]
+            count, = struct.unpack('>I', blob[8:12])
+            out = []
+            for k in range(count):
+                slot, offset = struct.unpack('>II', blob[12 + k * 8:20 + k * 8])
+                cd = blob[offset:]
+                cd = cd[:struct.unpack('>I', cd[4:8])[0]]
+                digest = hashlib.sha1 if cd[37] == 1 else hashlib.sha256
+                out.append((slot, cd[37], len(cd), digest(cd).hexdigest()[:40]))
+            return out
+        p += cmdsize
+    return []
+
+data = open(sys.argv[1], 'rb').read()
+count, = struct.unpack('<I', data[20:24])
+table = [data[24 + i * 22:44 + i * 22].hex() for i in range(count)]
+print('table bytes=%d count=%d record_hexlen=%s' % (len(data), count, sorted({len(h) for h in table})))
+
+for path in sys.argv[2:]:
+    data = open(path, 'rb').read()
+    sha1 = hashlib.sha1(data).hexdigest()
+    print('%s bytes=%d sha1=%s sha1_hexlen=%d in_table=%s'
+          % (path, len(data), sha1, len(sha1), sha1 in table))
+    for index, (offset, size) in enumerate(slices(data)):
+        for slot, hash_type, cd_length, cdhash in code_directories(data[offset:offset + size]):
+            if slot not in (0x0, 0x1000):
+                continue
+            print('    slice=%d slot=0x%x hashType=%d CodeDirectory_bytes=%d cdhash=%s hexlen=%d in_table=%s'
+                  % (index, slot, hash_type, cd_length, cdhash, len(cdhash), cdhash in table))
+```
+
+2026-11-25T22:10Z 在本机用同一段脚本重跑，输入是两组能与本节读数逐字节对应的副本。补丁版两份取自 tar `d5bd3ef3…`（与下方「先看磁盘这一层」引用的 tar 是同一个 sha256）：`launchdhook` 为 `150270a5…`/330144、`systemhook` 为 `d7045cd4…`/234336。原版两份取自工厂 tar `52607d78…`/6082560（与 §十二·一 那张 tar 表第三行记的出厂包同一个 sha256）：`launchdhook` 为 `449a9606…`/312848、`systemhook` 为 `6f16c545…`/233520。两份 tar 里的 `basebin.tc` 都是 `12bdb75e…`/640，与设备上那份相同，所以四份二进制是拿同一张表比对的。脚本输出的三个长度字段给出本节开头那句「被哈希的输入长度差两个多数量级，摘要都是 40 个字符」的读数：`CodeDirectory_bytes` 落在 645 到 1354，`sha1_hexlen` 全为 40，`record_hexlen=[40]`。同一轮重跑里，表复现为 640 字节 / `count=28`，八个 `0x0` 槽位的 cdhash 与上表逐位相同（原版两条都命中，补丁版都不在），四个文件 sha1 的 `in_table` 全为 `False`。
 
 同一套取法作用在设备上另外两个 basebin 文件上，`libjailbreak.dylib` 与 `jbctl` 的各两个切片也都命中 `basebin.tc`，所以这套取法本身是对的，不是只会读到「不在」。
 
