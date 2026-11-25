@@ -17,6 +17,12 @@ rm -f "$work"/com.websafe.idevice.plist "$work"/com.websafe.idevice.ready \
 # every host decision below moot, so a broken signer stops the run first.
 "$python" "$here/signature_test.py"
 
+# The rewrite the seven images need is checked against a synthetic payload, so
+# it runs before the slice checks and without the package's 50 MB install. Its
+# first two checks read the seven paths out of src/load_chain.c, which is what
+# keeps the tree the tweak loads and the tree the rewrite writes one list.
+"$python" "$here/rewrite_payload_test.py"
+
 # The package carries one arm64 slice, and two properties of it decide whether
 # the device runs the constructor at all.
 #
@@ -153,10 +159,26 @@ clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
 # string. The host cases replace it, so the scan itself is checked here against
 # a synthetic image: which load command a segment is, how wide a section record
 # is, and that a section's address is a virtual address rather than a pointer.
-clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" \
   "$here/macho_image_test.c" "$here/../src/macho_image.c" "$here/../src/textkit.c" \
   -o "$work/macho_image_test"
 "$work/macho_image_test"
+
+# The seven-image chain is what the tweak does on the device, so it is held to
+# the order, the flags, the absolute paths and the stop-on-JavaScriptCore rule
+# on the host, with dlopen recorded instead of called.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
+  "$here/load_chain_test.c" -o "$work/load_chain_test"
+"$work/load_chain_test"
+
+# The report's chain section is the only place a device failure is readable
+# without a debugger, and nothing else in this suite calls
+# dylib_report_set_chain. It is checked here against hand-built load_result
+# values: a failure at step 1 has to record both its loaded=false and its error
+# text, and a step the chain never reached has to record neither.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here/fixtures" \
+  "$here/report_chain_test.c" -o "$work/report_chain_test"
+"$work/report_chain_test"
 
 clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" -I"$here" -I"$here/fixtures" \
   "$here/test_main.c" -o "$work/test_main"
