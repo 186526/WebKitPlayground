@@ -190,7 +190,7 @@ WEBKIT_IMAGES=1
 
 补丁本身在 `dopamine-basebin/0001-dyldhook-allow-framework-override.patch`，两个函数都是裸 `return true`。CI 在 `.github/workflows/basebin-build.yml:216-241` 对构建出的 hook 跑 `verify-dyldhook-merge.sh`，`:331` 断言 mangled 名字，`:344` 跑 `verify-merged-dyld.sh`。设备上 `basebin.tar` 里那份 hook 的 `dylibhook_merge.arm64e.iOS16-17.dylib` 是 75952 字节、判定 `1 1 1 1`，即已经带上两个新 hook。
 
-**所以这条路在离线证据上是通的**：hook 产物在场、四个调用点可改、AMFI 已放行路径变量（`getAMFI` 被覆写成 `0xff`，本机 `gen/dyld` 的 `LC_UUID` 前缀是 `444F5041332E302E3133`，即 `DOPA3.0.13`）。缺的只有一次安装与重启后的行为读数，那是一次 root 写操作加一次用户空间重启，本次不做。
+**本节写的是装之前的推演，装之后的结果见第四节。** 离线证据在当时指向「这条路是通的」：hook 产物在场、四个调用点可改、AMFI 已放行路径变量（`getAMFI` 被覆写成 `0xff`，本机 `gen/dyld` 的 `LC_UUID` 前缀是 `444F5041332E302E3133`，即 `DOPA3.0.13`）。当时缺的是一次安装与重启后的行为读数；设备在 2026-11-25 23:51–23:53 装上之后，4.2 节与 4.3 节都取得了通过态读数，这一推断得到确认。留这一节是为了保留「装之前根据什么判断值得装」，判断本身已由 4.2 的实测替换。
 
 ---
 
