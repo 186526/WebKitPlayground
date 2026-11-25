@@ -2,12 +2,41 @@
 
 本文判定一件事：UI 进程是 iOS 16.1 的 Safari、三个 WebKit helper（WebContent、GPU、Networking）是 18.3 的 framework 时，CoreIPC 会不会直接崩，还是能降级。结论是**直接终止，不存在降级路径，而且终止发生在第一条 IPC 消息上**。
 
-所有源码取自两个 tag，正文行号对应这两份文本：
+本文的读数（消息条数、编号、同步起点、接收者数）取自下面两个 tag；正文里的**源码行号**另有一套来源，见下：
 
-- 16.1：`Safari-614.1.9`
-- 18.3：`releases/Apple/Safari-18.3.1-iOS-18.3.2`
+- 16.1：`releases/Apple/Safari-16.1-iOS-16.1`（`Version.xcconfig` 为 `614.2.9.0.10`，tag 指向 `d81f16c5eee`）
+- 18.3：`releases/Apple/Safari-18.3.1-iOS-18.3.2`（`620.2.4.10.8`，tag 指向 `1b670a0c038`）
 
-取证方式是用 `curl -sS https://raw.githubusercontent.com/WebKit/WebKit/<tag>/<path>` 逐文件拉取。两版的全部 `.messages.in`（16.1 有 188 个，18.3 有 215 个）也一并取到，用各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器在本机生成 `MessageNames.h` 与 `MessageNames.cpp`。本文所有消息号与接收者归属都是这两份生成结果的实际值，不是推算。
+16.1 一列取自设备实际运行的版本。设备报 `8614.2.9.0.10`，去掉 iOS 构建系统的前缀 `8` 后与 `614.2.9.0.10` 逐段相同。
+
+本文早先的版本把 16.1 一列写成 `Safari-614.1.9`，那是错的。`Safari-614.1.9` 的 `Version.xcconfig` 是 `614.1.9.0.0`（2022-04-06，提交 `694667f7d7c`），即 `MICRO`/`NANO` 两段都是 0 的交付主干快照；它落在 `614.1` 线上、早于 `releases/Apple/Safari-16-iOS-16.0` 的 `614.1.25`。按版本号归属，它是 iOS 16.0 世代的早期快照，不是 Safari 15（15 对应 612/613：`Safari-15-iOS-15.0` 是 `612.1.27`，`Safari-15.5-iOS-15.5` 是 `613.2.7`），也不是设备运行的 16.1（`614.2.9.0.10`）。它与发货 16.1 的 tag 无祖先关系（`git merge-base --is-ancestor Safari-614.1.9 releases/Apple/Safari-16.1-iOS-16.1` 判否），也不是 16.0 tag 的祖先。
+
+取证方式是用 `curl -sS https://raw.githubusercontent.com/WebKit/WebKit/<tag>/<path>` 逐文件拉取。两版的 `.messages.in`（16.1 tag 内 196 个，其中 `DerivedSources.make` 的 `MESSAGE_RECEIVERS` 列出 181 个；18.3 有 233 个，`MESSAGE_RECEIVERS` 列出 211 个）也一并取到，用各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器在本机生成 `MessageNames.h` 与 `MessageNames.cpp`。本文所有消息号与接收者归属都是这两份生成结果的实际值，不是推算。
+
+**正文行号的归属要分开读。** 消息号、同步起点、条目数这类读数一律按上表两个 tag 重算，复算命令见下。但第 1 至 11 节里引用的**源码行号**（`Connection.cpp:767`、`ConnectionCocoa.mm:562` 这类）取自 `Safari-614.1.9` 快照，不是 `releases/Apple/Safari-16.1-iOS-16.1`。这两个快照在本文引用的范围内（`Source/WebKit/Platform/IPC`、`Shared`、`UIProcess/Launcher`）相差 178 个文件、3498 行新增、2149 行删除，`Connection.cpp`（1313 行对 1323 行）与 `ConnectionCocoa.mm`（677 行对 706 行）内部都发生了位移，同一个符号在发货 tag 上普遍后移：`processIncomingMessage` 从 `:767` 到 `:779`，`dispatchSyncMessage` 从 `:967` 到 `:976`，`canSendOutgoingMessages` 从 `:941` 到 `:950`，`messageName() == MessageName::InitializeConnection` 从 `:562` 到 `:595`。本文 101 处行号引用中有 42 处落在两个快照同位置同内容的行上，两种读法都对；其余 59 处只在 614.1.9 上成立。把 59 处逐一按发货 tag 重编不在本次范围内，所以按符号查找时用名字，不要用本文的行号：`git grep -n 'void Connection::dispatchSyncMessage' <tag> -- Source/WebKit/Platform/IPC/Connection.cpp`。
+
+复算命令（两棵树同一条，`<tag>` 换成对应 tag，`$TREE` 是该 tag 的检出目录）：
+
+```sh
+$ cd $TREE && PYTHONPATH=Source/WebKit/Scripts python3 Source/WebKit/Scripts/generate-message-receiver.py \
+    Source/WebKit $(sed -n '/^MESSAGE_RECEIVERS = /,/^#/p' Source/WebKit/DerivedSources.make \
+    | sed '1d;$d' | tr -d '\\' | grep .)
+```
+
+拿不到整棵树时，`git ls-tree -r --name-only <tag> -- Source/WebKit | grep -c '\.messages\.in$'` 给出该 tag 内的 `.messages.in` 总数（16.1 是 196），`MESSAGE_RECEIVERS` 只列出其中的 181 个，生成器只读这 181 个。用通配符喂全部 196 个会报 `Duplicate message receiver names: UserMediaCaptureManager`（cocoa 与 glib 两个目录同名），所以不能按文件数推条目数。
+
+生成后的条目数、编号范围与同步起点不是靠数文件行数得到的，而是把枚举体单独编译一遍让编译器给值：
+
+```sh
+$ # 取出 enum class MessageName { ... } 之间的行，套上 printf，再用 g++ -std=c++17 编译运行
+$ ./enum_probe
+16.1 (releases/Apple/Safari-16.1-iOS-16.1): count_entries=3185  EnsureAudioSession=2946  InitializeConnection=2478  Last=3184
+614.1.9 (Safari-614.1.9):                    count_entries=3140  EnsureAudioSession=2899  InitializeConnection=2444  Last=3139
+```
+
+本文的「消息条数」指 `MessageNames.h` 枚举体里去掉 `Last = WrappedAsyncMessageForTesting` 别名条目后的消息名个数，也就是 `Last + 1`。「编号范围」是该枚举的最大值。两个口径在头文件里的读数差 1，原因是 `Last` 只是给最后一条消息起的别名，不是新消息。
+
+**本文早先版本里的「3147 条、编号 0–3146、同步起点 2906」是错的，本文已不再使用这组数。** 那份 3147 条的头文件既不是 `Safari-614.1.9` 生成的（该 tag 是 3140 条、同步起点 2899），也不是发货 16.1 生成的（3185 条、2946）。它与 614.1.9 相比多出 7 个消息名（`AudioMediaStreamTrackRendererInternalUnitManager_AudioStorageChanged`、`RemoteWCLayerTreeHost_Update` 及其 Reply、`UserMediaCaptureManager_GetMediaStreamDevices` 及其 Reply、`UserMediaCaptureManager_ValidateUserMediaRequestConstraints` 及其 Reply），说明生成时喂进了不属于 `MESSAGE_RECEIVERS` 的接收者。全文不再引用该文件；凡原先标 `MessageNames16.h` 的地方，现一律写明是哪棵树的生成结果（发货 tag 写 `MessageNames.h`，614.1.9 写「614.1.9 的 `MessageNames.h`」）。
 
 ## 1. 结论
 
@@ -15,16 +44,16 @@ helper 被终止的链路有四步，缺一步都不成立，四步都在本文�
 
 1. **角色分工。** UI 进程是 CoreIPC 的 server，helper 是 client。UI 侧在 `AuxiliaryProcessProxy::didFinishLaunching` 里调用 `IPC::Connection::createServerConnection`（16.1 `Source/WebKit/UIProcess/AuxiliaryProcessProxy.cpp:255-266`，18.3 同文件 `:329-352`）。helper 侧在 `AuxiliaryProcess::initialize` 里调用 `createClientConnection`（16.1 `Source/WebKit/Shared/AuxiliaryProcess.cpp:105`，18.3 `:108`）。
 2. **`InitializeConnection` 由 client 发往 server。** 16.1 的 `Connection::open()` 只在非 server 分支里构造并发送这条消息（`Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm:197-224`，发送语句在 `:218-223`）。18.3 把同一段逻辑搬到了 `Connection::platformOpen()`（`ConnectionCocoa.mm:158-193`，发送语句在 `:188-192`），分支条件仍是 `if (m_isServer)`。因此这个场景里发这条消息的是 18.3 helper，收它的是 16.1 UI 进程。
-3. **编号不等，server 跳过取端口的代码。** 18.3 helper 发的编号是 3064，16.1 的 `MessageName::InitializeConnection` 是 2448。16.1 的接收端做的是 `if (decoder->messageName() == MessageName::InitializeConnection)`（`ConnectionCocoa.mm:562`），3064 与 2448 不等，整个分支被跳过，`m_sendPort` 留在 `MACH_PORT_NULL`，`m_isConnected` 留在 `false`（该分支内的赋值在 `:573` 与 `:593`，`sendOutgoingMessages()` 在 `:596`）。
-4. **这条消息随后被判为非法，触发终止。** 消息继续进入 `Connection::processIncomingMessage`（`Source/WebKit/Platform/IPC/Connection.cpp:767`）。3064 在 16.1 的枚举里是 `WebPageProxy_DictationAlternatives`，而 16.1 的同步消息区从 2906 起（`MessageNames16.h:3379-3382`），所以 16.1 把它当同步消息处理，进入 `dispatchSyncMessage`（`:967`）。该函数第一步就在消息体里解 `SyncRequestID`，而这条消息体里只有一个 mach 端口描述符、没有字节，解码失败，`decoder` 被标成 invalid。回到 `dispatchMessage(std::unique_ptr<Decoder>)`，`m_didReceiveInvalidMessage |= !message->isValid()`（`:1142`）置位，紧接着 `m_client.didReceiveInvalidMessage(...)`（`:1153-1154`）落到 `WebProcessProxy::didReceiveInvalidMessage`（`Source/WebKit/UIProcess/WebProcessProxy.cpp:963-980`），后者调用 `terminate()`，再经 `AuxiliaryProcessProxy::terminate()` 的 `m_connection->kill()`（`Source/WebKit/UIProcess/AuxiliaryProcessProxy.cpp:116-127`）结束 helper。
+3. **编号不等，server 跳过取端口的代码。** 18.3 helper 发的编号是 3076，16.1 的 `MessageName::InitializeConnection` 是 2478。16.1 的接收端做的是 `if (decoder->messageName() == MessageName::InitializeConnection)`（`ConnectionCocoa.mm:562`，发货 tag 为 `:595`），3076 与 2478 不等，整个分支被跳过，`m_sendPort` 留在 `MACH_PORT_NULL`，`m_isConnected` 留在 `false`（该分支内的赋值在 `:573` 与 `:593`，`sendOutgoingMessages()` 在 `:596`；发货 tag 分别为 `:609`、`:619`、`:622`）。
+4. **这条消息随后被判为非法，触发终止。** 消息继续进入 `Connection::processIncomingMessage`（`Source/WebKit/Platform/IPC/Connection.cpp:767`，发货 tag 为 `:779`）。3076 在发货 16.1 的枚举里是 `RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged`，而 16.1 的同步消息区从 2946 起（`MessageNames.h:3410-3413`），所以 16.1 把它当同步消息处理，进入 `dispatchSyncMessage`（`:967`，发货 tag 为 `:976`）。该函数第一步就在消息体里解 `SyncRequestID`，而这条消息体里只有一个 mach 端口描述符、没有字节，解码失败，`decoder` 被标成 invalid。回到 `dispatchMessage(std::unique_ptr<Decoder>)`，`m_didReceiveInvalidMessage |= !message->isValid()`（`:1142`，发货 tag 为 `:1152`）置位，紧接着 `m_client.didReceiveInvalidMessage(...)`（`:1153-1154`，发货 tag 为 `:1163-1164`）落到 `WebProcessProxy::didReceiveInvalidMessage`（`Source/WebKit/UIProcess/WebProcessProxy.cpp:963-980`），后者调用 `terminate()`，再经 `AuxiliaryProcessProxy::terminate()` 的 `m_connection->kill()`（`Source/WebKit/UIProcess/AuxiliaryProcessProxy.cpp:116-127`）结束 helper。
 
 所以答案不是「能降级」，也不是「消息被静默丢弃」。**18.3 helper 在连上 UI 进程后收到的第一条消息处理完，就被 UI 进程主动 kill 掉。**
 
 还有一条独立成立的次要结论：即使第 3、4 步不发生终止，UI 进程的发送通道也从未建立。`Connection::canSendOutgoingMessages()` 要求 `m_isConnected` 为真（`Connection.cpp:941-944`），而 server 侧的 `m_isConnected` 只在 `InitializeConnection` 分支里被置真。既然该分支被跳过，`InitializeWebProcess` 以及其后所有 UI→helper 消息都只堆在 `m_outgoingMessages` 里，一条也发不出去。
 
-这条次要结论让答案对第 4 步的细节不敏感。第 4 步有两种可能：3064 在 16.1 是合法编号（`WebPageProxy_DictationAlternatives`），则 helper 在第一条消息上被终止；3064 被判非法，则消息在 `ConnectionCocoa.mm:554-556` 处被丢弃、连接进入半开状态，helper 活着但收不到 UI 进程的任何指令，随后在页面超时或进程监视下被清理。两种情形的共同点是**这套组合无法工作**，差别只是终止发生得多快、由谁触发。第 6.2 节说明了本机按源码推得的是第一种。
+这条次要结论让答案对第 4 步的细节不敏感。第 4 步有两种可能：3076 在 16.1 是合法编号（`RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged`），则 helper 在第一条消息上被终止；3076 被判非法，则消息在 `ConnectionCocoa.mm:554-556` 处被丢弃、连接进入半开状态，helper 活着但收不到 UI 进程的任何指令，随后在页面超时或进程监视下被清理。两种情形的共同点是**这套组合无法工作**，差别只是终止发生得多快、由谁触发。第 6.2 节说明了本机按源码推得的是第一种。
 
-本文另有两处需要纠正的外部说法，见第 2 节与第 3 节末尾。
+本文另有一处需要纠正的外部说法，见第 2 节。
 
 ## 2. 需要纠正的一处背景
 
@@ -58,9 +87,11 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
         exitProcess(EXIT_FAILURE);
 ```
 
-同一个函数里的其他 delegate 调用（`getConnectionIdentifier`、`getClientIdentifier`、`getProcessIdentifier`、`getClientProcessName`）都以 `if (!...) exitProcess(EXIT_FAILURE);` 收尾，只有 `getClientSDKAlignedBehaviors` 这一条没有。16.1 UI 进程不发 `client-sdk-aligned-behaviors` 键时，18.3 helper 不会退出，`behaviors` 保持默认构造的全零位集继续启动，所有 SDK 对齐行为位都判定为不启用。
+同一个函数里的其他 delegate 调用（`getConnectionIdentifier`、`getClientIdentifier`、`getProcessIdentifier`、`getClientProcessName`）都以 `if (!...) exitProcess(EXIT_FAILURE);` 收尾，只有 `getClientSDKAlignedBehaviors` 这一条没有。所以这条路径的失效方式不是「返回 false 然后退出」，而是**断言中止**：键缺失或长度为 0 时函数返回 false、位集留零、helper 继续启动；键存在但长度不等于 12 时 `EPM18:93` 的 `RELEASE_ASSERT` 直接终止进程。
 
-真正会终止进程的是另一种情况：键存在但长度不符。`RELEASE_ASSERT` 在发布构建里也生效（`Source/WTF/wtf/Assertions.h:654-659`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`）。位集宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
+第二种才是实际部署时的路径。16.1 UI 进程**发送**这个键，长度为 8（`PL16:209`，见第 2 节与 `ios16-bootstrap-contract.md`），不等于 18.3 helper 期望的 12。所以 16.1 UI 配 18.3 helper 不是「位集留零、行为全不启用」，而是 helper 在 `XPCServiceInitializer` 内中止。
+
+上面这条路径的终止依据是 `RELEASE_ASSERT`，它在发布构建里也生效（18.3.1 的 `Source/WTF/wtf/Assertions.h:732`，`!ASSERT_ENABLED` 分支把 `RELEASE_ASSERT` 展开成 `CRASH_WITH_INFO`；同一 `#define` 在发货 16.1 上是 `:662`，在 `Safari-614.1.9` 上是 `:656`）。位集宽度由 `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133` 决定：
 
 ```cpp
 using SDKAlignedBehaviors = WTF::BitSet<static_cast<size_t>(SDKAlignedBehavior::NumberOfBehaviors), uint32_t>;
@@ -68,11 +99,13 @@ using SDKAlignedBehaviors = WTF::BitSet<static_cast<size_t>(SDKAlignedBehavior::
 
 同一 tag 的枚举有 94 个行为项，`BitSet<94, uint32_t>` 占 3 个 32 位字，`storageLengthInBytes()` 返回 12（`Source/WTF/wtf/BitSet.h:142`）。这个数字由编译进 helper 的枚举项数量决定，16.1 侧无法预知。
 
-这一节的意义是排除一种误判：XPC 启动阶段本身允许这组错配走到 CoreIPC，因此后面出现的进程消失不能用「引导字典不兼容」解释。
+这一节的意义是排除一种误判：XPC 启动阶段本身不是这组错配的终止点。16.1 UI 进程发送的 `client-sdk-aligned-behaviors` 是 8 字节，18.3 helper 断言 12 字节，所以这组错配在 `XPCServiceInitializer` 内就中止，比 CoreIPC 更早。第 6 节描述的 CoreIPC 终止是另一条不经过这个断言的路径。
 
 ## 3. 消息号是消息名字符串排序的连续序号
 
 `IPC::MessageName` 是构建期生成的枚举，生成器在两版都是 `Source/WebKit/Scripts/webkit/messages.py`。
+
+本节 16.1 一侧的 `messages.py` 行号取自 `Safari-614.1.9`（见文首说明）。发货 tag 的同一份文件行号不同，按符号查找更稳：`git grep -n 'def get_message_enumerators' <tag> -- Source/WebKit/Scripts/webkit/messages.py`。
 
 枚举顺序由 `get_message_enumerators()` 决定，16.1 `messages.py:89-100` 与 18.3 `:110-121` 逻辑相同：先按接收者分组，再按 `MessageEnumerator.sort_key` 排序，键依次是「是否同步 → receiver 排序权重 → 消息名字符串」。`sort_key` 的第三步是 `str(obj)`（16.1 `:84-86`，18.3 `:105-107`）。
 
@@ -87,21 +120,23 @@ using SDKAlignedBehaviors = WTF::BitSet<static_cast<size_t>(SDKAlignedBehavior::
 
 生成结果是两个文件。头文件 `MessageNames.h` 定义枚举本体，枚举顺序决定编号；源文件 `MessageNames.cpp` 实现 `receiverName()`、`description()`、`isValidMessageName()` 与同步属性表。
 
-- 16.1 的头文件里 `#if` 为 0 处，所以 3147 条消息、编号 0 到 3146 在任何编译配置下都不变。但它的 `MessageNames.cpp` 里有 711 处 `#if`，`isValidMessageName` 会按编译条件跳过部分条目（第 6.2 节讨论的 `USE(DICTATION_ALTERNATIVES)` 就是其中一处）。
-- 18.3 的头文件里有 703 处 `#if` 包裹的枚举项，所以连编号本身都随编译期的 feature flag 与平台宏浮动；`MessageNames.cpp` 里有 769 处。
+- 16.1 的头文件里 `#if` 为 0 处，所以 3185 条消息、编号 0 到 3184 在任何编译配置下都不变。但它的 `MessageNames.cpp` 里有 907 处 `#if`，`isValidMessageName` 会按编译条件跳过部分条目（`ENABLE(LEGACY_ENCRYPTED_MEDIA)`、`USE(DICTATION_ALTERNATIVES)` 都是其中一处；第 6.2 节用到的那条 `RemoteLegacyCDMProxy_SupportsMIMEType` 恰好不在任何 `#if` 里）。
+- 18.3 的头文件里有 703 处 `#if` 包裹的枚举项，所以连编号本身都随编译期的 feature flag 与平台宏浮动；`MessageNames.cpp` 里也是 703 处。
 
-本文的 18.3 编号按「全部条件项都计入」展开，是上界。这个方向对结论够用：18.3 的 `InitializeConnection` 要降到 2448，需要它前面有 617 条以上消息被编译掉，量级上不可能。
+本文的 18.3 编号按「全部条件项都计入」展开，是上界。这个方向对结论够用：18.3 的 `InitializeConnection` 要降到 2478，需要它前面有 598 条以上消息被编译掉，量级上不可能。
 
 ## 4. 两版消息号实测对照
 
-两版生成结果的消息总数与同步起点：
+两版生成结果的消息总数与同步起点。两列各自注明取自哪个 tag、哪个提交：
 
 | 版本 | 消息条数 | 编号范围 | 同步起点 |
 | --- | ---: | --- | --- |
-| 16.1 `Safari-614.1.9` | 3147 | 0–3146 | 2906，`GPUConnectionToWebProcess_EnsureAudioSession` |
-| 18.3 `releases/Apple/Safari-18.3.1-iOS-18.3.2` | 4058 | 0–4058（3810 被 `FirstSynchronous` 占位） | 3810，`FirstSynchronous`，3811 起为同步 |
+| 16.1 `releases/Apple/Safari-16.1-iOS-16.1`（`d81f16c5eee`，`614.2.9.0.10`） | 3185 | 0–3184 | 2946，`GPUConnectionToWebProcess_EnsureAudioSession` |
+| 18.3 `releases/Apple/Safari-18.3.1-iOS-18.3.2`（`1b670a0c038`，`620.2.4.10.8`） | 4086 | 0–4085 | 3838，`FirstSynchronous`（`GPUConnectionToWebProcess_EnsureAudioSession` 的别名），3839 起为同步 |
 
-16.1 的同步判定写在生成结果的 `messageIsSync()` 里，是一条阈值比较（`MessageNames16.h:3379-3382`）：
+作废的一行，留在这里只为说明它为什么不能用。本文早先写的是「16.1 `Safari-614.1.9` | 3147 | 0–3146 | 2906」。这三个数没有一个在两棵树上复现得出来：`Safari-614.1.9` 实际是 3140 条、0–3139、同步起点 2899，发货 16.1 是 3185 条、0–3184、2946。3147/2906 出自一份来路不明的 `MessageNames16.h`，它比 `Safari-614.1.9` 多 7 个消息名，见文首的说明。下表与全文的 16.1 一侧都已按发货 tag 重算，不再引用这份文件。
+
+16.1 的同步判定写在生成结果的 `messageIsSync()` 里，是一条阈值比较（发货 tag 的 `MessageNames.h:3410-3413`；614.1.9 的对应块在 `:3369-3372`）：
 
 ```cpp
 constexpr bool messageIsSync(MessageName name)
@@ -110,7 +145,7 @@ constexpr bool messageIsSync(MessageName name)
 }
 ```
 
-18.3 改成显式占位项（`MessageNames18.h:5761-5764`）：
+18.3 改成显式占位项（18.3 tag 生成件的 `MessageNames.h` `:5785-5788`）：
 
 ```cpp
 constexpr bool messageIsSync(MessageName name)
@@ -119,38 +154,32 @@ constexpr bool messageIsSync(MessageName name)
 }
 ```
 
-关键消息在两版的实际编号，以及同一编号在另一版被读成什么：
+关键消息在两版的实际编号，以及同一编号在另一版被读成什么。两列编号与两列「读成」都按各自 tag 的生成结果重算：16.1 取 `releases/Apple/Safari-16.1-iOS-16.1`，18.3 取 `releases/Apple/Safari-18.3.1-iOS-18.3.2`。
 
 | 消息 | 16.1 编号 | 18.3 编号 | 16.1 编号在 18.3 读成 | 18.3 编号在 16.1 读成 |
 | --- | ---: | ---: | --- | --- |
-| `IPC_InitializeConnection` | 2448 | 3064 | `WebPage_InsertTextAsync` | `WebPageProxy_DictationAlternatives` |
-| `SyncMessageReply` | 2452 | 3068 | `WebPage_IntelligenceTextAnimationsDidComplete` | `WebPageProxy_ExecuteUndoRedo` |
-| `Terminate` | 2453 | 无此消息 | `WebPage_KeyEvent` | — |
-| `WebProcess_InitializeWebProcess` | 2254 | 2830 | `WebPage_AddLayerForFindOverlay` | `WebPage_RequestMediaPlaybackStateReply` |
-| `WebProcess_CreateWebPage` | 2235 | 2809 | `WebPageProxy_WillPerformClientRedirectForFrame` | `WebPage_InteractionRegionsReply` |
-| `WebProcess_SetCacheModel` | 2282 | 2862 | `WebPage_ChangeFontAttributes` | `WebPaymentCoordinatorProxy_BeginApplePaySetupReply` |
-| `WebProcessProxy_DidDestroyFrame` | 2200 | 2774 | `WebProcessProxy_ShowInspectorIndication` | `WebPage_ExtendSelectionReply` |
-| `IPC_WrappedAsyncMessageForTesting` | 3146 | 4058 | `NetworkProcessProxy_DeleteWebsiteDataInWebProcessesForOriginReply` | 越界 |
+| `IPC_InitializeConnection` | 2478 | 3076 | `WebPage_MainFrameURLChangedInAnotherProcess` | `RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged` |
+| `SyncMessageReply` | 2482 | 3080 | `WebPage_ModelInlinePreviewDidLoad` | `RemoteRenderingBackend_GetFilteredImageForImageBuffer` |
+| `Terminate` | 2483 | 无此消息 | `WebPage_MouseEvent` | — |
+| `WebProcess_InitializeWebProcess` | 2275 | 2842 | `WebPage_ApplicationWillEnterForegroundForMedia` | `WebPage_GetWebArchiveOfFrameReply` |
+| `WebProcess_CreateWebPage` | 2255 | 2821 | `WebPageProxy_toggleSmartInsertDelete` | `WebPage_GetApplicationManifestReply` |
+| `WebProcess_SetCacheModel` | 2303 | 2874 | `WebPage_ClearServiceWorkerEntitlementOverride` | `WebPage_RunJavaScriptInFrameInScriptWorldReply` |
+| `WebProcessProxy_DidDestroyFrame` | 2220 | 2786 | `WebPageProxy_ShowValidationMessage` | `WebPageProxy_SpeechSynthesisResumeReply` |
+| `IPC_WrappedAsyncMessageForTesting` | 3184 | 4085 | `NetworkProcess_ClickBackgroundFetchReply` | 越界 |
 
-同号同名只有 11 条，全部落在编号 44 到 64 这段极小的前缀里：
+同号同名只有 5 条，全部落在枚举最前面的下标 0 到 4：
 
 ```
-44 DrawingArea_UpdateGeometry
-51 EventDispatcher_WheelEvent
-52 GPUConnectionToWebProcess_ClearNowPlayingInfo
-53 GPUConnectionToWebProcess_ConfigureLoggingChannel
-54 GPUConnectionToWebProcess_CreateAudioHardwareListener
-58 GPUConnectionToWebProcess_CreateRenderingBackend
-59 GPUConnectionToWebProcess_CreateVisibilityPropagationContextForPage
-60 GPUConnectionToWebProcess_CreateWCLayerTreeHost
-61 GPUConnectionToWebProcess_DestroyVisibilityPropagationContextForPage
-63 GPUConnectionToWebProcess_EnsureMediaSessionHelper
-64 GPUConnectionToWebProcess_ReleaseAudioHardwareListener
+0 AudioSessionRoutingArbitratorProxy_BeginRoutingArbitrationWithCategory
+1 AudioSessionRoutingArbitratorProxy_EndRoutingArbitration
+2 AuthenticationManager_CompleteAuthenticationChallenge
+3 AuxiliaryProcess_DidReceiveMemoryPressureEvent
+4 AuxiliaryProcess_MainThreadPing
 ```
 
-这 11 条里没有一条位于 UI 进程发往 WebContent 的初始化路径上。3147 条减掉这 11 条，**3136 条错配**。
+这 5 条里没有一条位于 UI 进程发往 WebContent 的初始化路径上。3185 条里只有 2911 条消息名两版都有，274 条只在 16.1 存在、1175 条只在 18.3 存在，所以 16.1 一侧有 **274 条编号对不在 18.3 的同名消息上**；其余同名的 2911 条里除 5 条同号外，全部错位。
 
-反向看，18.3 的 4058 条消息号里有 911 条大于 16.1 的 `Last`（3146）。这些编号在 16.1 侧会让 `Decoder` 的头部解析失败。
+反向看，18.3 的 4086 条消息号里有 901 条大于 16.1 的 `Last`（3184）。这些编号在 16.1 侧会让 `Decoder` 的头部解析失败。
 
 ## 5. `ReceiverName` 不在线格式里，`isValidMessage` 也不做白名单
 
@@ -206,7 +235,7 @@ inline bool HashMap<...>::isValidKey(const KeyType& key)
 
 键是 `std::pair`，`PairHashTraits::isDeletedValue` 只看 `.first`（`Source/WTF/wtf/HashTraits.h:314-327`），整数 traits 的删除值是 `-1`（同文件 `:56-60`），`emptyValue()` 是 `T()` 即 0（`:66`）。`std::pair<uint8_t, uint64_t>` 没有专门化，走 `DefaultHash<std::pair<T, U>> : PairHash<T, U>`（`Source/WTF/wtf/HashFunctions.h:270`），`safeToCompareToEmptyOrDeleted` 由两个整数哈希的 `true` 合取而来（`:169`、`:105`），所以实际比较走 `key == KeyTraits::emptyValue()` 那一支，空值是 `(0, 0)`。
 
-而 `ReceiverName` 从 1 开始编号，生成侧是 `enumerate(get_receiver_enumerators(receivers), 1)`（16.1 `Source/WebKit/Scripts/webkit/messages.py:1247`，18.3 `:1509`），`Invalid` 排在末尾（16.1 为 191，18.3 为 218，见 `MessageNames16.h:220-222`、`MessageNames18.h:249-251`）。最小的合法接收者是 1，永远不会是 0。
+而 `ReceiverName` 从 1 开始编号，生成侧是 `enumerate(get_receiver_enumerators(receivers), 1)`（16.1 `Source/WebKit/Scripts/webkit/messages.py:1247`，18.3 `:1509`），`Invalid` 排在末尾（发货 16.1 为 184，见其 `MessageNames.h:215`；`Safari-614.1.9` 为 188，见其 `MessageNames.h:219`；18.3 为 214，见其 `MessageNames.h:247`）。最小的合法接收者是 1，永远不会是 0。
 
 结论：**任何通过头部解码的消息，`isValidMessage` 都返回 true。** 这个函数在当前两版里不构成一条拒绝路径，它查的是「键是否落在哈希表的语义保留值上」，不是「接收者是否已登记」。判断「有没有人收这条消息」发生在下一步 `m_receiveQueues.get()`（16.1 `MessageReceiveQueueMap.cpp:52-65`，队列表为空时直接返回 `nullptr`），返回空时消息继续往下走，不会在此处被判非法。
 
@@ -249,11 +278,11 @@ inline bool HashMap<...>::isValidKey(const KeyType& key)
     processIncomingMessage(WTFMove(decoder));
 ```
 
-18.3 helper 侧发送时用的编号是它自己的 3064（18.3 `ConnectionCocoa.mm:189`）。16.1 的 `MessageName::InitializeConnection` 是 2448。`3064 == 2448` 不成立，整个分支连同 `m_isConnected = true`（`:593`）、`sendOutgoingMessages()`（`:596`）一起被跳过，消息落到 `processIncomingMessage`（`:601`）。
+18.3 helper 侧发送时用的编号是它自己的 3076（18.3 `ConnectionCocoa.mm:189`）。16.1 的 `MessageName::InitializeConnection` 是 2478。`3076 == 2478` 不成立，整个分支连同 `m_isConnected = true`（`:593`，发货 tag 为 `:619`）、`sendOutgoingMessages()`（`:596`，发货 tag 为 `:622`）一起被跳过，消息落到 `processIncomingMessage`（`:601`，发货 tag 为 `:627`）。
 
 `m_isConnected` 留在 `false` 的直接后果是 `canSendOutgoingMessages()` 恒为假（`Connection.cpp:941-944`），UI 进程此后每一条消息都只进入 `m_outgoingMessages` 队列，不出 mach 端口。`InitializeWebProcess` 走的是 `process.send(...)`（16.1 `Source/WebKit/UIProcess/WebProcessPool.cpp:907`），同样发不出去。
 
-### 6.2 编号 3064 在 16.1 是一条同步消息
+### 6.2 编号 3076 在 16.1 是一条同步消息
 
 16.1 的 `processIncomingMessage` 开头（`Connection.cpp:767-783`）：
 
@@ -276,11 +305,15 @@ void Connection::processIncomingMessage(std::unique_ptr<Decoder> message)
     }
 ```
 
-3064 既不是 16.1 的 `SyncMessageReply`（2452），也不是 `Terminate`（2453），`isValidMessage` 按第 5 节返回 true。
+3076 既不是 16.1 的 `SyncMessageReply`（2482），也不是 `Terminate`（2483），`isValidMessage` 按第 5 节返回 true。
 
-这里有一条容易被忽略的前提：16.1 的 `isValidEnum<IPC::MessageName>` 会调 `IPC::isValidMessageName` 逐条比对，而 `WebPageProxy_DictationAlternatives` 那一行被 `#if USE(DICTATION_ALTERNATIVES)` 包裹（本机生成的 `MessageNames.cpp` 里 `isValidMessageName` 的第 14896 至 14899 行）。若该宏在 iOS 上为 0，3064 会在头部解析阶段被拒，`Decoder::create` 返回 `nullptr`，`ConnectionCocoa.mm:554-556` 直接 `return`，消息丢弃、不终止进程——结论会退回到「静默不兼容」，而不是「第一条消息就终止」。
+这里有一条容易被忽略的前提：16.1 的 `isValidEnum<IPC::MessageName>` 会调 `IPC::isValidMessageName` 逐条比对，而每一条比对都可能被 `#if` 包裹。若 3076 对应的那条被包在一个在 iOS 上为 0 的宏里，3076 会在头部解析阶段被拒，`Decoder::create` 返回 `nullptr`，`ConnectionCocoa.mm:554-556` 直接 `return`，消息丢弃、不终止进程——结论会退回到「静默不兼容」，而不是「第一条消息就终止」。
 
-实际情况是该宏在 iOS 上为 1。`Source/WTF/wtf/PlatformUse.h:258-260`（16.1）与 `:241-243`（18.3）都是：
+按发货 tag 核对，3076 对应 `RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged`，它在生成结果的 `isValidMessageName` 里没有任何 `#if` 包裹（`MessageNames.cpp:17712`，函数体从 `:9818` 起；`:17711` 的 `#endif` 属于上一条 `RemoteMediaPlayerProxy_NativeImageForCurrentTime`），所以这一前提成立，不需要再判断哪个宏的取值。这条消息的接收者文件 `GPUProcess/media/RemoteMediaPlayerProxy.messages.in` 外层包在 `#if ENABLE(GPU_PROCESS) && ENABLE(VIDEO)`（该文件 `:24`），声明本身在 `:132`，其上最近的 `#endif` 在 `:131`；不过 16.1 的生成器不读 `.messages.in` 里的 `#if` 决定是否给枚举项加守卫，所以 `MessageNames.h` 与 `MessageNames.cpp` 里都是无条件条目（头文件枚举体 `#if` 计数为 0）。
+
+作为对照，本文早先引用的 `WebPageProxy_DictationAlternatives` 确实被 `#if USE(DICTATION_ALTERNATIVES)` 包裹（`MessageNames.cpp:17776-17779`），但它在发货 tag 上是 3104；那份 3147 条的错误生成结果把 7 个额外消息名插到了更前面，才让 3064 落到它头上。改用发货树的生成结果后，这层依赖消失；现在命中的 3076 同样不受条件包裹，见上一段。
+
+`Source/WTF/wtf/PlatformUse.h` 里 `USE_DICTATION_ALTERNATIVES` 的定义（16.1 `:258-260`，18.3 `:241-243`）与本文结论已无关，保留如下仅供追溯：
 
 ```cpp
 #if PLATFORM(COCOA)
@@ -288,9 +321,7 @@ void Connection::processIncomingMessage(std::unique_ptr<Decoder> message)
 #endif
 ```
 
-iOS 属于 `PLATFORM(COCOA)`，所以 3064 在 iOS 16.1 上是合法编号。但这一项成立的前提是设备上装的确实是 iOS 构建，而不是某个把 COCOA 相关宏关掉的非常规配置。
-
-随后 `m_receiveQueues.get()` 在 UI 进程的连接上返回空，`message->isSyncMessage()` 为真（3064 ≥ 2906），于是消息入队并在主线程进入 `dispatchMessage(std::unique_ptr<Decoder>)`（`Connection.cpp:1098`）。该函数按同步属性分流（`:1137-1140`）：
+随后 `m_receiveQueues.get()` 在 UI 进程的连接上返回空，`message->isSyncMessage()` 为真（3076 ≥ 2946），于是消息入队并在主线程进入 `dispatchMessage(std::unique_ptr<Decoder>)`（`Connection.cpp:1098`，发货 tag 为 `:1108`）。该函数按同步属性分流（`:1137-1140`，发货 tag 为 `:1147-1150`）：
 
 ```cpp
     if (message->isSyncMessage())
@@ -416,21 +447,21 @@ arm64 iOS 上 `size_t` 是 8 字节，`Vector` 的计数宽度两版相同。`Ha
 
 **8.3 枚举 coder 的合法性检查两版都只有上界（18.3）或上界加逐条比对（16.1）。** 16.1 `Source/WebKit/Platform/IPC/ArgumentCoder.h:117-135`，18.3 `Source/WTF/wtf/ArgumentCoder.h:73-91`，`decode` 都是先读底层整型再判 `WTF::isValidEnum<T>`。差异在被特化的那个函数：
 
-- 16.1 的 `EnumTraits<IPC::MessageName>::isValidEnum` 先比上界，再调 `IPC::isValidMessageName` 逐条比对（`MessageNames16.h:3389-3400`）。
-- 18.3 换成 `constexpr bool isValidEnum<IPC::MessageName, void>(...)`，只有一句上界比较（`MessageNames18.h:5770-5773`）。
+- 16.1 的 `EnumTraits<IPC::MessageName>::isValidEnum` 先比上界，再调 `IPC::isValidMessageName` 逐条比对（发货 tag 的 `MessageNames.h:3420-3428`；614.1.9 的对应块在 `:3379-3387`）。
+- 18.3 换成 `constexpr bool isValidEnum<IPC::MessageName, void>(...)`，只有一句上界比较（18.3 tag 生成件的 `MessageNames.h` `:5794-5797`）。
 
-这解释了两版对越界编号的反应不同：18.3 的 911 条越界消息到了 16.1 会在头部解析阶段失败（第 4 节），而 16.1 的消息到了 18.3 永远落在上界内，一定会被解析成实体消息（第 4 节的 3136 条错配）。
+这解释了两版对越界编号的反应不同：18.3 的 901 条越界消息到了 16.1 会在头部解析阶段失败（第 4 节），而 16.1 的消息到了 18.3 永远落在上界内，一定会被解析成实体消息（第 4 节的 274 条编号对不在同名消息上）。
 
 ## 9. 启动阶段：XPC 引导字典
 
-这一节在 CoreIPC 之前，结论是**启动阶段能成功**，因此不能用它解释进程消失。
+这一节在 CoreIPC 之前。结论是**启动阶段本身就已经终止**：宽度断言在 `XPCServiceInitializer` 内中止 helper，所以它比 CoreIPC 更早，不能用来说明 CoreIPC 之后的进程消失。
 
-16.1 `Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:218-243` 的 bootstrap 字典键：
+16.1 `Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:192-216` 的 bootstrap 字典键：
 
 ```
 message-name, server-port, client-identifier, client-bundle-identifier,
-client-sdk-version, process-identifier, ui-process-name, service-name,
-client-linked-on-or-after-override, extra-initialization-data
+client-sdk-aligned-behaviors, process-identifier, ui-process-name, service-name,
+extra-initialization-data
 ```
 
 18.3 同一文件 `:396-431`：
@@ -443,21 +474,21 @@ client-sdk-aligned-behaviors, extra-initialization-data
 
 差异：
 
-- 16.1 发 `client-sdk-version`（`:224`），18.3 不读这个键。
-- 18.3 发 `client-sdk-aligned-behaviors`（`:423-424`），16.1 不发。
-- 16.1 发 `client-linked-on-or-after-override`（`:235-236`），18.3 不发。
+- `client-sdk-version` 两版都不发也不读。它在 15.x 存在，从 16.0 起的每个 tag 都没有；16.1 与 18.3 都在这个键消失之后。
+- `client-sdk-aligned-behaviors` 两版都发：16.1 在 `PL16:209` 发 **8 字节**，18.3 在 `PL18:424` 发 **12 字节**。接收端都是同一个函数，且都做相等断言（`EPM16:91`、`EPM18:93`），所以两版之间互换 UI 进程与 helper 会在断言处中止。
+- `client-linked-on-or-after-override` 两版都不发也不读。同样是 15.x 的机制，16.0 起消失。
 - 18.3 多一个 `disable-logging`（`:413-416`），只在 Web 进程类型时发。
 - 18.3 多一个 `ContainerEnvironmentVariables` 子字典（`:373-382`，条件为 `#if PLATFORM(IOS_FAMILY)`），装 `HOME`、`CFFIXED_USER_HOME`、`TMPDIR`；16.1 没有这一项。
 - 两版都有的测试与调试键 `configure-jsc-for-testing`、`disable-jit`、`enable-shared-array-buffer`、`stdout`、`stderr` 属于开发构建分支，不参与这里的判定。
 - `server-port` 两版都有，它是 UI 进程的接收端口，也就是第 1 节里 helper 发消息的目标。
 
-按第 2 节，16.1 不发 `client-sdk-aligned-behaviors` 时 18.3 helper 不退出，位集留零，`AuxiliaryProcessCocoa.mm:104` 把这份零位集灌进去，后续所有 `linkedOnOrAfterSDKWithBehavior(...)` 判定返回 false。
+按第 2 节，16.1 发的 `client-sdk-aligned-behaviors` 是 **8 字节**，18.3 helper 的 `storageLengthInBytes()` 是 **12**，`EPM18:93` 的 `RELEASE_ASSERT` 在发布构建里也生效，helper 在 `XPCServiceInitializer` 内中止。也就是说这组错配在 XPC 阶段就终止了，不会走到 CoreIPC。
 
-启动握手两版一致：helper 收到 `message-name == "bootstrap"` 后回 `message-name == "process-finished-launching"`（16.1 `XPCServiceMain.mm:126-128`，18.3 `:214-216`），UI 侧断言这个回复（16.1 `ProcessLauncherCocoa.mm:315`，18.3 `:507`）。
+启动握手两版一致：helper 收到 `message-name == "bootstrap"` 后回 `message-name == "process-finished-launching"`（16.1 `XPCServiceMain.mm:122-124`，18.3 `:214-216`），UI 侧断言这个回复（16.1 `ProcessLauncherCocoa.mm:288`，18.3 `:507`）。两版都在回完这条消息之后才调用初始化函数（16.1 `XM16:134-138`，18.3 `XM18:226-236`），所以断言中止发生在回复入队之后，与回复的实际投递竞争。
 
-16.1 侧另有 `pre-bootstrap` 消息（`ProcessLauncherCocoa.mm:171-175`，只在 `shouldLeakBoost` 为真时发）。18.3 的 `XPCServiceMain.mm:150-241` 没有对应分支，该消息落到 `handleXPCEndpointMessage`，不影响启动成功与否，只影响 QoS boost。
+16.1 侧**在 iOS 上不发** `pre-bootstrap`：`shouldLeakBoost` 在 `PLATFORM(IOS_FAMILY)` 分支直接 `return false`（`PL16:82-86`），注释写明 RunningBoard 的进程断言已提供正确优先级。Mac 上才按 GPU/Network 进程类型返回 true。18.3 的 `XPCServiceMain.mm:150-241` 没有对应分支，即使收到也会落到 `handleXPCEndpointMessage`。
 
-所以 XPC 阶段把这组错配放行到了 CoreIPC，第 6 节的终止发生在它之后。
+所以 XPC 阶段并没有把这组错配放行：宽度断言在 `XPCServiceInitializer` 里就终止了 helper。第 6 节描述的 CoreIPC 终止发生在另一条路径上（该路径不经过这个断言），两者不能混为一谈。
 
 ## 10. 是否可能降级
 
@@ -476,16 +507,19 @@ client-sdk-aligned-behaviors, extra-initialization-data
 以下内容来自源码阅读与本地生成器执行，没有在设备上验证这组具体组合：
 
 - **设备未验证。** 「16.1 UI + 18.3 helper 时第一条消息触发终止」这条由第 6 节的源码路径推出，未在该组合下抓过日志。设备上已有的观察（18.x 三元组配 16.1 `.xpc` 壳时 spawn 数为 0、lookup 失败数千次）属于启动阶段更早的失败，与本文结论不冲突，但也没有印证它。验证方法见第 6.4 节的判据：查 helper 有没有自己的崩溃报告。
-- **18.3 编号按全部 `#if` 条件展开计算。** 生成器在解析阶段不展开宏，条件项被保留为 `#if` 包裹的行，本文按「条件都成立」计数，得到 3064。设备上的实际编号可能更低。这不改变结论方向：要降到 2448，需要有 617 条以上排在它前面的消息被编译掉。
+- **18.3 编号按全部 `#if` 条件展开计算。** 生成器在解析阶段不展开宏，条件项被保留为 `#if` 包裹的行，本文按「条件都成立」计数，得到 3076。设备上的实际编号可能更低。这不改变结论方向：要降到 2478，需要有 598 条以上排在它前面的消息被编译掉。
 - **`HashSet` 计数宽度差异（第 8.2 节）在 `WebProcessCreationParameters` 里的实际影响未逐字段核对。** 该结构体里 `HashSet` 类型字段在 iOS 分支上的出现位置，需要按 18.3 的 `#if PLATFORM(IOS_FAMILY)` 展开后再确认。这项在本文结论里不起作用，因为参数传递在消息层已经不可达。
-- **第 2 节关于 `RELEASE_ASSERT` 在发布构建生效的判断依据是 `Assertions.h:654-659` 的 `!ASSERT_ENABLED` 分支。** WebKit 发布构建是否定义 `ASSERT_ENABLED=0` 由构建配置决定，未在本仓库的构建参数里核对。
-- **第 6.2 节的终止结论依赖 `USE_DICTATION_ALTERNATIVES` 在设备上为 1。** 该宏由 `Source/WTF/wtf/PlatformUse.h` 的 `#if PLATFORM(COCOA)` 定义为 1，iOS 属于 COCOA，所以按源码应当在 iOS 上成立。未在设备上从二进制核对 16.1 `JavaScriptCore`/`WebKit` 里该宏的实际取值，也未核对 3064 这个编号在设备实际编译出的 16.1 `MessageNames.cpp` 里是否仍是 `WebPageProxy_DictationAlternatives`。若这一项不成立，结论退化为「消息在头部解析阶段被判非法、静默丢弃」，进程不会在第一条消息上被终止。
+- **第 2 节关于 `RELEASE_ASSERT` 在发布构建生效的判断依据是 `Assertions.h` 的 `!ASSERT_ENABLED` 分支。** 该 `#define RELEASE_ASSERT(assertion, ...)` 在 18.3.1 tag 上是 `:732`，在发货 16.1 tag 上是 `:662`（`Safari-614.1.9` 是 `:656`）；文中原先写的 `654-659` 两棵树都不指向它。WebKit 发布构建是否定义 `ASSERT_ENABLED=0` 由构建配置决定，未在本仓库的构建参数里核对。
+- **第 6.2 节的终止结论不再依赖 `USE(DICTATION_ALTERNATIVES)`。** 按发货 tag，3076 是 `RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged`，它在生成结果的 `isValidMessageName` 里无 `#if` 包裹（`MessageNames.cpp:17712`），所以不需要判断任何宏取值。未做的核对是：设备上实际编译出的 16.1 `MessageNames.cpp` 是否与 tag 生成的这一份逐条一致（设备侧只确认过 `WebKit` 二进制的符号，未反汇编该函数）。
 - **UI 进程侧是否注册了 `MessageReceiveQueue` 未逐一核对。** 第 6.2 节按「UI 进程的连接上队列表为空」推导；若某个 supplement 注册了 `WebPageProxy` 的队列（`WebProcessProxy.cpp:497` 附近有 `SecItemShimProxy` 之类的初始化），消息会先进队列再派发，`dispatchSyncMessage` 与后续 invalid 标志的设置顺序不变，结论不变。
-- **第 4 节表格的「18.3 编号在 16.1 读成」一列已全表填齐**（`InitializeConnection`、`SyncMessageReply`、`InitializeWebProcess`、`CreateWebPage`、`SetCacheModel`、`DidDestroyFrame`、`WrappedAsyncMessageForTesting`），全部取自本机生成的 `MessageNames16.h`，没有推算项。
+- **第 4 节表格的「18.3 编号在 16.1 读成」一列已全表填齐**（`InitializeConnection`、`SyncMessageReply`、`InitializeWebProcess`、`CreateWebPage`、`SetCacheModel`、`DidDestroyFrame`、`WrappedAsyncMessageForTesting`），全部取自本机按发货 16.1 tag 生成的 `MessageNames.h`，没有推算项。18.3 一列的编号与反向读数同样取自本机按 `releases/Apple/Safari-18.3.1-iOS-18.3.2` 生成的 `MessageNames.h`，同一份生成结果的 `MessageNames.cpp` 用来核对 `isValidMessageName` 的守卫情况。
+- **正文源码行号取自 `Safari-614.1.9`，不是发货 tag。** 101 处行号引用里 42 处两棵树同位置同内容，其余 59 处只在 614.1.9 上成立；关键几处已在正文并列给出发货 tag 的行号（`Connection.cpp` 的 `:779`/`:976`/`:1108`、`ConnectionCocoa.mm` 的 `:595`/`:619`/`:622`/`:627`）。其余未逐条重编。
 
 ## 12. 依据文件清单
 
-16.1（`Safari-614.1.9`）：
+本节的行号取自 `Safari-614.1.9` 快照（理由见文首「正文行号的归属要分开读」）。消息号与条目数按 `releases/Apple/Safari-16.1-iOS-16.1` 重算。
+
+`Safari-614.1.9`（`614.1.9.0.0`，2022-04-06，`694667f7d7c`；iOS 16.0 世代的早期快照，不是设备运行的 16.1）：
 
 - `Source/WebKit/Scripts/webkit/messages.py:84-100`、`:586-603`、`:1177`、`:1255-1259`
 - `Source/WebKit/Platform/IPC/Connection.cpp:767-783`、`:941-944`、`:967-980`、`:1098-1156`
@@ -505,7 +539,7 @@ client-sdk-aligned-behaviors, extra-initialization-data
 - `Source/WTF/wtf/PlatformUse.h:258-260`
 - `Source/WTF/wtf/HashMap.h:574-590`
 - `Source/WTF/wtf/HashTraits.h:56-67`、`:314-327`
-- `Source/WTF/wtf/Assertions.h:78-79`、`:422`、`:434`、`:654-659`
+- `Source/WTF/wtf/Assertions.h:78-79`、`:422`、`:434`、`:662`
 - `Source/WebKit/UIProcess/AuxiliaryProcessProxy.cpp:116-127`、`:255-266`、`:330-332`
 - `Source/WebKit/UIProcess/WebProcessProxy.cpp:860-890`、`:963-980`
 - `Source/WebKit/UIProcess/GPU/GPUProcessProxy.cpp:464-476`
@@ -538,7 +572,7 @@ client-sdk-aligned-behaviors, extra-initialization-data
 - `Source/WTF/wtf/ArgumentCoder.h:73-91`
 - `Source/WTF/wtf/PlatformUse.h:241-243`
 - `Source/WTF/wtf/HashMap.h:697-713`
-- `Source/WTF/wtf/Assertions.h:78-79`、`:422`、`:434`、`:654-659`
+- `Source/WTF/wtf/Assertions.h:78-79`、`:422`、`:434`、`:732`
 - `Source/WTF/wtf/BitSet.h:142`
 - `Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h:133`
 - `Source/WebKit/UIProcess/AuxiliaryProcessProxy.cpp:185-200`、`:329-352`
@@ -556,4 +590,4 @@ client-sdk-aligned-behaviors, extra-initialization-data
 - `Source/WebKit/WebProcess/WebProcess.cpp:973-1003`
 - `Source/WebKit/WebProcess/WebProcess.messages.in:24`
 
-本地生成结果（不在仓库内，可用第 3 节的方法复算）：16.1 消息 3147 条，编号 0–3146；18.3 消息 4058 条，编号 0–4058，其中 3810 被 `FirstSynchronous` 占位。
+本地生成结果（不在仓库内，可用文首的命令复算）：16.1（`releases/Apple/Safari-16.1-iOS-16.1`）消息 3185 条，编号 0–3184，同步起点 2946；18.3（`releases/Apple/Safari-18.3.1-iOS-18.3.2`）消息 4086 条，编号 0–4085，其中 3838 被 `FirstSynchronous` 占位（它是 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，3839 起为同步）。作为对照，`Safari-614.1.9` 是 3140 条、0–3139、同步起点 2899。本文早先版本写的 3147 条、0–3146、2906 不复现于任何一棵树，已作废。
