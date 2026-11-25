@@ -963,13 +963,17 @@ cdhash 按 CodeDirectory 自己的 `hashType` 算：`hashType` 为 2 时取 `SHA
 
 **先看磁盘这一层：它根本不是这次实验里的变量。** 实验用的那份 tar（`/var/mobile/Documents/bb/basebin-lh.tar`，`d5bd3ef3…`）里的 `basebin.tc` 是 `12bdb75e6962…`/640，与设备上 `/var/jb/basebin/basebin.tc` 逐字节相同，`version` 与 28 条记录也相同。也就是说不论装前装后，这个磁盘文件都是同一份内容，它没有随补丁一起变化，因此不可能是新旧两态之间的差异来源。2026-11-26 00:50Z 那次安装之后设备被重新越狱、`basebin` 整包回到出厂版本，本节读数是恢复之后在设备上重新取的。
 
-**而且磁盘上这 28 条并不是运行期生效的那张表。** 运行时内核查阅的缓存由 `jbctl trustcache info` 列出，它与磁盘文件的 `uuid` 与条数都不同：磁盘是 `a3e4647f…` / 28 条，运行期是 `A65DF2BA30F543B1B9A2FC3032D5ED8E` / 178 条。两张表不同，所以「某个 cdhash 在不在磁盘 `basebin.tc` 里」回答不了「运行期会不会被拦」。上面那张表的用处仅限于核对 tar 内容本身，不能延伸成运行期信任判定。
+**磁盘 uuid 与 `jbctl trustcache info` 的 uuid 不同，但这不是两张表。** 两个读数都能离线复核：磁盘 `basebin.tc` 的 uuid 是 `a3e4647f…`、28 条；`jbctl trustcache info` 列出的是 `A65DF2BA30F543B1B9A2FC3032D5ED8E`、178 条。它们不是同一层的两条并行清单，差别由 Dopamine 3.0.13 的三处代码决定。
 
-**运行期那份本轮无法复测，但上一轮的读数指向否定的答案。** `jbctl trustcache info` 需要 root，而本节所有读数都在 `mobile` 账户下取，该命令退出码 3、`ERROR: trustcache subcommand requires root.`。2026-11-26 的 M127 安装记录称运行期表有 178 条，其中**不含**原版 `launchdhook` 的两个 cdhash（`0e59e398…`、`a7438ed3…`），而原版二进制一直正常工作。那条读数只有一次，reviewer 当时也拿不到 root 无法复算，所以本轮不把它当作已验证的事实，只记为方向性证据。
+`BaseBin/libjailbreak/src/trustcache.h:11` 把 `BASEBIN_TRUSTCACHE_UUID` 定义成字面量 `{'B','A','S','E','B','I','N','\0',…}`；`trustcache.c:370-373` 的 `trustcache_file_upload_with_uuid` 用 `memcpy` 把这段 UUID 盖在文件自带的 uuid 上。所以上传之后链里那份的 uuid 是 `BASEBIN…` 而不是磁盘上的 `a3e4647f…`，后者不出现是上传的规定结果。
 
-**本节原先的结论「原版的两个也不在，所以 trust 状态无所谓」予以撤回。** 那句话是从一次错量的比对里得出来的，前提本身不成立。按正确量算，情况是：原版的每个切片都在磁盘 `basebin.tc` 里，补丁版两份都不在；而那个「在表里」的原版 `launchdhook` 与那个「不在表里」的补丁版 `systemhook` 都曾在这台设备上正常加载过。两个方向各自都有正常工作的例子，所以 trust 状态既不能说「重要」也不能说「无所谓」，只能说**它不是这次 panic 的可解释原因**。若上一段那条运行期读数成立，它进一步说明运行期这一层也不构成判据；若不成立，本节对这条轴线的结论不变。panic 的病因在这条轴线上**未知**。
+`trustcache.c:139-150` 的 `_is_jb_trustcache` 要求 `fileptr == tcKaddr + offsetof(jb_trustcache, file)`，即 `+0x48`；而 `trustcache.c:355` 的上传路径写的是 `tcKaddr + ksizeof(trustcache)`，iOS 16 上 `ksizeof` 取 `info.c:354-361` 设的 `0x28`。两者不等，所以 `jbctl trustcache info` 只列出 `JB_MAGIC` 池那 178 条，它不覆盖上传进去的那一段。
 
-要判定运行期这一层，需要一次以 root 读取 `jbctl trustcache info` 的测量并留存原始输出，本轮没有做。
+信任判定走的是另一条：`trustcache.c:449-460` 的 `is_cdhash_trustcached` 经 `_trustcache_list_enumerate`（`trustcache.c:50-60`，无过滤）到 `trustcache_contains_cdhash`。`basebin.tc` 的 28 条记录在这条无过滤链上，会被查到。所以上面那张表的命中与否就是判定用的读数，不是只能核对 tar 内容的旁证。
+
+`jbctl trustcache info` 本轮没有读（需 root，`mobile` 下退出码 3、`ERROR: trustcache subcommand requires root.`）。它对本节也没有判别力：那 178 条是 `JB_MAGIC` 池，结构上不会包含 `basebin.tc` 的任何条目，所以「其中没有某个 cdhash」是同义反复，不能当证据。上一轮曾把它当作「原版也在表外却工作正常」的方向性证据引用，那条用法取消。
+
+**本节原先的结论「原版的两个也不在，所以 trust 状态无所谓」予以撤回。** 那句话是从一次错量的比对里得出来的，前提本身不成立。按正确量算，情况是：原版的每个切片都在 `basebin.tc` 的 28 条里，补丁版两份都不在；而那个「在表里」的原版 `launchdhook` 与那个「不在表里」的补丁版 `systemhook` 都曾在这台设备上正常加载过。两个方向各自都有正常工作的例子，所以 trust 状态既不能说「重要」也不能说「无所谓」，只能说**它不是这次 panic 的可解释原因**。panic 的病因在这条轴线上**未知**。
 
 ### 十二·六 安装步骤（**未执行**）
 
