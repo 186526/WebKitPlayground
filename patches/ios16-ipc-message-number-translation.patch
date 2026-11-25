@@ -141,7 +141,7 @@ index f7cf0e0815633..47f779c4ced9c 100644
  
      if (message->messageName() == MessageName::SyncMessageReply) {
 diff --git a/Source/WebKit/Platform/IPC/Connection.h b/Source/WebKit/Platform/IPC/Connection.h
-index a8c07cbc1d621..06d86ba4ade6c 100644
+index a8c07cbc1d621..a719bc094e708 100644
 --- a/Source/WebKit/Platform/IPC/Connection.h
 +++ b/Source/WebKit/Platform/IPC/Connection.h
 @@ -452,6 +452,12 @@ public:
@@ -150,8 +150,8 @@ index a8c07cbc1d621..06d86ba4ade6c 100644
  
 +    // Set on the one connection that reaches a process running a different WebKit build: the
 +    // auxiliary process's connection to the UI process. No build this project produces calls it,
-+    // because the UI process and every helper are the same binary; AuxiliaryProcess::initialize
-+    // says why at the place the call used to be.
++    // because the UI process and every helper run this same code out of one framework;
++    // AuxiliaryProcess::initialize says why at the place the call used to be.
 +    void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }
 +
      uint64_t installIncomingSyncMessageCallback(WTF::Function<void()>&&);
@@ -7821,10 +7821,10 @@ index 5503dfc842d56..a3af9421b6d54 100644
      void reserve(size_t);
 diff --git a/Source/WebKit/Platform/IPC/MessageNumberTranslation.h b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
 new file mode 100644
-index 0000000000000..545e2c1fbb507
+index 0000000000000..5c167540845df
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,105 @@
 +/*
 + * Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 + *
@@ -7868,9 +7868,10 @@ index 0000000000000..545e2c1fbb507
 +// turn translation on: a Connection translates only when
 +// setShouldTranslateMessageNames(true) has been called on it, and the member it
 +// sets starts false. No build in this project calls that setter today, because
-+// the UI process and every auxiliary process are the same binary and assign the
-+// same number to the same message; AuxiliaryProcess::initialize records what
-+// happens if one is built the other way round.
++// the UI process and every auxiliary process run this same code out of this same
++// framework and so assign the same number to the same message;
++// AuxiliaryProcess::initialize records what happens if one is built the other
++// way round.
 +//
 +// The gate is the deployment target rather than a run-time question because the
 +// run-time question had no answer worth asking: peer identity used to be read
@@ -7970,10 +7971,10 @@ index 088ff202d0137..b287d15c4de7a 100644
      decoder->setImportanceAssertion(ImportanceAssertion { header });
  #endif
 diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp
-index 30487740bbe50..3f51a51fc81fa 100644
+index 30487740bbe50..ebf65fdbb37b3 100644
 --- a/Source/WebKit/Shared/AuxiliaryProcess.cpp
 +++ b/Source/WebKit/Shared/AuxiliaryProcess.cpp
-@@ -106,6 +106,24 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
+@@ -106,6 +106,27 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
      WebPageProxyIdentifier::enableGenerationProtection();
  
      m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
@@ -7982,9 +7983,10 @@ index 30487740bbe50..3f51a51fc81fa 100644
 +    // its member initialises with.
 +    //
 +    // The tables are still compiled in: IOS_16_MESSAGE_NUMBER_TRANSLATION keys on the deployment
-+    // target, which is 16.1. That macro describes how this binary was built, not what is on the
-+    // other end of the connection. Under this build's deployment those are the same binary, the UI
-+    // process and every helper included, so both sides number a message identically.
++    // target, which is 16.1. That macro describes how this framework was built, not what is on the
++    // other end of the connection. Under this build's deployment the UI process loads this same
++    // framework through the override, so both sides run this same enumeration and number a message
++    // identically.
 +    //
 +    // Turning it on would not be a no-op. The two enumerations share 2807 names, and 2802 of them
 +    // sit at a different position, so an incoming number is looked up as a different message. The
@@ -7993,8 +7995,10 @@ index 30487740bbe50..3f51a51fc81fa 100644
 +    // so the `messageName() == MessageName::InitializeConnection` test in ConnectionCocoa.mm stops
 +    // matching and the connection never establishes.
 +    //
-+    // A build genuinely paired with an older UI process is a different binary, and there this call
-+    // belongs: once, on the auxiliary process's connection to the UI process.
++    // This is also why the setter may not be turned on merely because the deployment target is 16.1:
++    // the target is a property of the build, while what decides whether two peers agree is which
++    // enumeration each of them runs. A build genuinely paired with an older UI process is a
++    // different case, and there the call belongs: once, on this connection.
      initializeConnection(m_connection.get());
      m_connection->open(*this);
  }

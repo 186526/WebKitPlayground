@@ -19,10 +19,10 @@ index 0c1c422..6699031 100644
  
      // We don't want XPC to be in charge of whether the process should be terminated or not,
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-index b8112f7..e6f2821 100644
+index b8112f7..9306d3b 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-@@ -90,10 +90,64 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
+@@ -90,10 +90,66 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
      auto behaviorData = xpc_dictionary_get_data(m_initializerMessage, "client-sdk-aligned-behaviors", &length);
      if (!length || !behaviorData)
          return false;
@@ -56,13 +56,15 @@ index b8112f7..e6f2821 100644
 +    // settle is direction: a narrower payload is older than this build, and a wider one is newer.
 +    //
 +    // It settles one more case, the one that matters under the deployment this build is for, where
-+    // the UI process and the helper are the same binary: a payload exactly as wide as this build's
-+    // own layout is this build's own layout, because ProcessLauncherCocoa.mm writes
-+    // sdkBehaviors.storage() with sdkBehaviors.storageLengthInBytes() out of that same BitSet
-+    // instantiation. Copying that one is correct, and is what upstream does. The price of keying on
-+    // width is that a 16.4, 17.0 or 18.0 through 18.2 peer, which also sends three words, is copied
-+    // under a layout it does not share; upstream takes that price too, and no build here is
-+    // deployed against such a peer.
++    // the UI process loads this very framework through the override rather than its own: the
++    // payload is exactly as wide as this build's own layout, and is this build's own layout, because
++    // ProcessLauncherCocoa.mm writes sdkBehaviors.storage() with sdkBehaviors.storageLengthInBytes()
++    // out of that same BitSet instantiation. Copying that one is correct, and is what upstream does.
++    // It is also the only case that keeps the two processes in agreement, since the UI process
++    // computes its set from its own main executable's SDK version and the helper would otherwise be
++    // left with every behaviour off. The price of keying on width is that a 16.4, 17.0 or 18.0
++    // through 18.2 peer, which also sends three words, is copied under a layout it does not share;
++    // upstream takes that price too, and no build here is deployed against such a peer.
 +    //
 +    // What this function guarantees for a payload of any other width is a defined bitmap, not a
 +    // translated one: the argument arrives zero-initialised, so leaving it alone applies the
