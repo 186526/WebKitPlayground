@@ -39,9 +39,17 @@
 #    names. "Not tested" must never be printed as "absent".
 #
 # Needs root for another user's process: run it under sudo -S -p "" on the
-# device. Exits 2 when any pid's environment could not be read, 1 when every
-# environment was read and no name dyld reads was present, 0 otherwise. The
-# distinction matters: "not tested" must never be reported as "absent".
+# device. Exit codes, which differ for a reason rather than as detail:
+#
+#   0  read, and a bare spelling dyld reads is present
+#   1  read, and no spelling of any of the four is present
+#   3  read, and only the __XPC_ prefixed spelling is present. dyld does not
+#      read that spelling, so this is not success; but it is not 1 either,
+#      because that shape is the untested case rather than a refutation
+#   2  the environment could not be read, so no conclusion is available
+#
+# "Not tested" must never be reported as "absent", and a spelling dyld cannot
+# read must never be reported as one it can.
 import ctypes
 import struct
 import sys
@@ -166,7 +174,21 @@ def describe(pid):
     return entries, None
 
 
+def carries_name_dyld_reads(counts):
+    """True only when a bare spelling is present.
+
+    Deliberately excludes PREFIXED_NAMES. dyld does not read
+    __XPC_DYLD_FRAMEWORK_PATH — it is a separate handoff mechanism — so a
+    process carrying only that spelling is in exactly the position the caller
+    needs to hear about, not the one it needs to pass. Counting all four here
+    would report success for the one shape whose effect is undetermined, and
+    that is the error this script exists to remove rather than to reproduce.
+    """
+    return any(counts[name] > 0 for name in BARE_NAMES)
+
+
 def report_pid(pid, check):
+    """Return "bare", "prefixed" or None (unreadable), in exit-code terms."""
     entries, error = describe(pid)
     print("pid %d" % pid)
     if error is not None:
@@ -187,7 +209,15 @@ def report_pid(pid, check):
             print("    %s" % entry)
         if not relevant:
             print("    (no entry begins with DYLD or __XPC)")
-    return sum(counts.values()) > 0
+    if carries_name_dyld_reads(counts):
+        return "bare"
+    if any(counts[name] > 0 for name in PREFIXED_NAMES):
+        # Carries a spelling, but not one dyld reads. Distinct from "none",
+        # because it is the shape whose effect is unverified, not a refutation.
+        print("  note: only the __XPC_ spelling is present; dyld does not read "
+              "it, and whether xpcproxy hands it over is unverified")
+        return "prefixed"
+    return "none"
 
 
 def main(argv):
@@ -212,7 +242,15 @@ def main(argv):
         # An unreadable environment is not a negative result. Say so with the
         # exit code, because that is what a script will branch on.
         return 2
-    return 0 if any(results) else 1
+    if any(result == "bare" for result in results):
+        return 0
+    if any(result == "prefixed" for result in results):
+        # Distinct from 1 on purpose. Exit 1 would say "this process carries no
+        # spelling, so env delivery was not the cause"; exit 3 says "it carries
+        # the one dyld cannot read, which is the untested case". Collapsing the
+        # two is how a gap becomes a negative result.
+        return 3
+    return 1
 
 
 if __name__ == "__main__":

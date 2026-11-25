@@ -13,8 +13,9 @@ Two defects are pinned, both of which produced wrong readings in this repo befor
 
 The parser is exercised directly, because the buffer shapes that produce these
 readings are hard to reproduce on a device on demand and trivial to write down.
-The script's Darwin-only path is not touched here; it refuses to run on the
-build host by design, which the last test pins.
+The exit-code mapping and the reporting text are exercised through main(), with
+the Darwin guard stubbed for the duration and the original restored after; the
+guard itself has its own test, which pins that it refuses on the build host.
 
 Usage: python3 scripts/test-inspect-process-env.py
 """
@@ -144,6 +145,60 @@ def main():
             failures.append("build host refusal")
     else:
         print("skip  Darwin guard (this host has sysctl, so it is the device)")
+
+    # The exit-code mapping is the contract a calling script branches on. A
+    # predicate counting all four spellings passes every parser test above while
+    # reporting success for a process carrying only the spelling dyld cannot
+    # read, so these cases go through main() and read the status it returns.
+    def run_main(read):
+        # main() prints the report; keep the test output readable.
+        import contextlib
+        import io
+        module.read_procargs = read
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            status = module.main(["inspect-process-env.py", "--check", "1234"])
+        return status, buffer.getvalue()
+
+    def quiet_exit_for(env):
+        return run_main(lambda pid: procargs(env=env))
+
+    # main() calls the Darwin guard before it reads anything, and this host is
+    # not the device, so the guard would exit before any of these cases ran.
+    # The guard has its own test above; here it is stubbed and restored.
+    real_require_darwin = module.require_darwin
+    module.require_darwin = lambda: None
+    try:
+        status, output = quiet_exit_for((b"DYLD_FRAMEWORK_PATH=/o",))
+        check("bare name present exits 0", status == 0, "exit %d" % status)
+
+        # The P1 case. A process carrying only the prefixed spelling carries
+        # nothing dyld reads, so this must not be 0.
+        status, output = quiet_exit_for((b"__XPC_DYLD_FRAMEWORK_PATH=/o",))
+        check("prefixed-only is not exit 0", status != 0, "exit %d" % status)
+        check("prefixed-only exits 3, distinct from 1", status == 3,
+              "exit %d" % status)
+        check("prefixed-only says the spelling is not dyld-readable",
+              "dyld does not read" in output, output.strip()[:80])
+
+        status, output = quiet_exit_for((b"PATH=/usr/bin",))
+        check("no spelling at all exits 1", status == 1, "exit %d" % status)
+
+        status, output = quiet_exit_for(
+            (b"__XPC_DYLD_FRAMEWORK_PATH=/o", b"DYLD_FRAMEWORK_PATH=/o"))
+        check("bare alongside prefixed exits 0", status == 0,
+              "exit %d" % status)
+
+        status, output = quiet_exit_for((b"__XPC_DYLD_LIBRARY_PATH=/o",))
+        check("prefixed-only library spelling also exits 3", status == 3,
+              "exit %d" % status)
+
+        status, _ = run_main(lambda pid: None)
+        check("unreadable environment exits 2", status == 2,
+              "exit %d" % status)
+    finally:
+        module.require_darwin = real_require_darwin
+        module.read_procargs = real_read
 
     print()
     if failures:

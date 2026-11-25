@@ -440,13 +440,13 @@ grep 'possible path(DYLD_FRAMEWORK/LIBRARY_PATH)' "$L" | grep -E 'WebKit\.framew
 grep 'found:' "$L" | grep -E 'WebKit\.framework/WebKit"|WebCore\.framework/WebCore"'
 ```
 
-**预期：** 两串候选**并存**，但两串的字符串形态不同——桩自己的 `LC_DYLD_ENVIRONMENT` 给出 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/Frameworks` 两个字面量目录（3.1 节）；basebin 的 `systemhook` 注入的纯名 `DYLD_FRAMEWORK_PATH` 给出**解析后的 preboot 绝对路径**，形如 `/private/preboot/<uuid>/.../procursus/Library/WebKitOverride`，**不是** `/var/jb` 字面量。`../../webkit-install-runbook.md:769-773` 记的 2026-11-24 05:58Z 实测输出就是这个形态，该段写明「前缀是 preboot 真实路径而不是 `/var/jb`，这是正常的」，因为 `systemhook` 交付的是解析后的绝对路径，没有保留 `/var/jb` 这层软链。`systemhook` 挂在 spawn 上，`/var/jb` 下被 shell 直接执行的二进制同样在钩子范围内，所以这一串出现是正常结果，不是异常。**判据是 `found:` 的落点，不是哪一串出现。**
+**预期：** 两串候选**并存**，但两串的字符串形态不同——桩自己的 `LC_DYLD_ENVIRONMENT` 给出 `/var/jb/Library/WebKitOverride` 与 `/var/jb/Library/Frameworks` 两个字面量目录（3.1 节）；basebin 的 `systemhook` 注入的纯名 `DYLD_FRAMEWORK_PATH` 给出**解析后的 preboot 绝对路径**，形如 `/private/preboot/<uuid>/.../procursus/Library/WebKitOverride`，**不是** `/var/jb` 字面量。`../../webkit-install-runbook.md` 判定 (d) 第一步 (d-1) 里「前缀是 preboot 真实路径而不是 `/var/jb`」那段记的 2026-11-24 05:58Z 实测输出就是这个形态，该段写明「前缀是 preboot 真实路径而不是 `/var/jb`，这是正常的」，因为 `systemhook` 交付的是解析后的绝对路径，没有保留 `/var/jb` 这层软链。`systemhook` 挂在 spawn 上，`/var/jb` 下被 shell 直接执行的二进制同样在钩子范围内，所以这一串出现是正常结果，不是异常。**判据是 `found:` 的落点，不是哪一串出现。**
 
 ```sh
 grep 'found:' "$L" | grep -E 'WebKit\.framework/WebKit"'
 ```
 
-`found:` 落在哪一串，那个目录就是这次直接运行实际采用的。**不成立时：** 若一条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 都没有，先确认 `DYLD_PRINT_SEARCHING` 是否被 dyld 的允许列表挡住（`DYLD_PRINT_SEARCHING=1 /var/jb/usr/bin/python3` 探 `NoSuchX` 是最小的对照，见 `../../webkit-install-runbook.md:757-773`），不要据此推断 helper 的行为。
+`found:` 落在哪一串，那个目录就是这次直接运行实际采用的。**不成立时：** 若一条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 都没有，先确认 `DYLD_PRINT_SEARCHING` 是否被 dyld 的允许列表挡住（`DYLD_PRINT_SEARCHING=1 /var/jb/usr/bin/python3` 探 `NoSuchX` 是最小的对照，见 `../../webkit-install-runbook.md` 判定 (d) 第一步 (d-1) 的 `NoSuchX` 对照），不要据此推断 helper 的行为。
 
 **3d-2. 谁优先：3d-1 的那次运行已经回答了一半，先读它，再决定要不要另做一次。** `systemhook` 会给直接执行的二进制注入纯名 `DYLD_FRAMEWORK_PATH`（`dopamine-basebin/0001-systemhook-set-search-paths.patch:43` 用 `envbuf_variable_matches` 判定「已存在」），所以 3d-1 的日志里本来就有两串候选：桩内嵌的那串，与注入的那串。**`found:` 落在哪一串，就是 dyld 在「内嵌」与「环境变量」之间的实际选择**，不需要再手工注入。
 
@@ -504,7 +504,7 @@ ps -Ao pid,comm | grep -E 'WebKit\.WebContent' | grep -v grep
 
 **3d-3 的读法限制要写明。** helper 自己的 stderr 落在系统日志里，而这台设备没有可用的 `log` 命令（`docs/device-install-plan.md:24`：`log` 没有可执行文件，`command -v log` 命中 zsh 内建），所以拿不到 launched helper 的候选行，只能拿加载结果。因此 3d-3 判「哪一种来源最终胜出」，判不了「哪一个中间候选被跳过」。要拿后一半，得改 basebin 把 `DYLD_PRINT_TO_FILE` 也设进 spawn 环境，那超出本文范围。
 
-**还要确认开关没被关掉。** `DisableJBFrameworkPath` 为真时四个变量都不设（`dopamine-basebin/0001-systemhook-set-search-paths.patch:106-116`）。设备上没有 `plutil`（`../../webkit-install-runbook.md:901`：`/var/jb/usr/bin/plutil` 与 `/usr/bin/plutil` 都不存在；`../../docs/device-install-plan.md:24` 记「`plutil` 无」），用 `python3` 的 `plistlib` 读：
+**还要确认开关没被关掉。** `DisableJBFrameworkPath` 为真时四个变量都不设（`dopamine-basebin/0001-systemhook-set-search-paths.patch:106-116`）。设备上没有 `plutil`（`../../webkit-install-runbook.md` 第六阶段的「关于运行期开关」一节：`/var/jb/usr/bin/plutil` 与 `/usr/bin/plutil` 都不存在；`../../docs/device-install-plan.md:24` 记「`plutil` 无」），用 `python3` 的 `plistlib` 读：
 
 ```sh
 python3 - <<'PY'
@@ -520,7 +520,7 @@ except Exception as exc:
 PY
 ```
 
-**预期：** 输出 `config.plist absent -> search paths enabled by default`。这是当前设备的状态：该文件不存在（`../../webkit-install-runbook.md:901`），开关取默认值即启用（同处原文：「在这个状态下开关处于默认值，即启用」）。**不成立时：** 若输出 `DisableJBFrameworkPath = True`，说明覆盖路径整层被关，先恢复再谈其余读数。
+**预期：** 输出 `config.plist absent -> search paths enabled by default`。这是当前设备的状态：该文件不存在（`../../webkit-install-runbook.md` 第六阶段的「关于运行期开关」一节），开关取默认值即启用（同处原文：「在这个状态下开关处于默认值，即启用」）。**不成立时：** 若输出 `DisableJBFrameworkPath = True`，说明覆盖路径整层被关，先恢复再谈其余读数。
 
 **若 3d-1 取不到候选行**（日志文件为空或没有 `possible path` 行），该缺口维持未测状态，不要用 `usedImages` 或 `vmSummary` 去替代这个判断。**本节三条全部待设备回网后执行。**
 
