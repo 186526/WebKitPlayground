@@ -251,6 +251,72 @@ GUARD_SHAPES = (
         "+    }\n"
         "+}\n",
     ),
+    (
+        "a call under a twice-negated member if passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + "+    if (!!m_shouldTranslateMessageNames) {\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+    ),
+    (
+        "a call under a parenthesised member if passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + "+    if ((m_shouldTranslateMessageNames)) {\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+    ),
+    (
+        "a call under a member if with two negated conjuncts passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + "+    if (m_shouldTranslateMessageNames && !m_a && !m_b) {\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+    ),
+    (
+        "a call under a member if with a conjunct the parser cannot read passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + "+    if (m_shouldTranslateMessageNames && someCall(x)) {\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+    ),
+    (
+        "a call under an alternation that still implies the member passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + "+    if ((m_shouldTranslateMessageNames || fallbackOn) && m_shouldTranslateMessageNames) {\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+    ),
+)
+
+# Round 8's P2-1: the guard was accepted whenever the condition mentioned the member, so a negated or
+# widened condition passed. Each entry below is a condition that can be true with the switch off, so
+# the translation would run exactly when it must not. Every one has to land on exit 1.
+GUARD_INVERSIONS = (
+    ("a call under a negated member if fails", "!m_shouldTranslateMessageNames"),
+    ("a call under a member if equal to false fails", "m_shouldTranslateMessageNames == false"),
+    ("a call under a member if not equal to true fails", "m_shouldTranslateMessageNames != true"),
+    ("a call under a negated this-> member if fails", "!this->m_shouldTranslateMessageNames"),
+    ("a call under a member if widened with or fails", "m_shouldTranslateMessageNames || fallbackOn"),
+    ("a call under a member if or its own negation fails",
+     "m_shouldTranslateMessageNames || !m_shouldTranslateMessageNames"),
+    ("a call under another object's member if fails", "connection->m_shouldTranslateMessageNames"),
+    # `!m && x` is the form that a misread truth table lets through: it runs the translation only
+    # when the switch is off, which is the exact inversion this check exists to refuse.
+    ("a call under a negated member if with a conjunct fails", "!m_shouldTranslateMessageNames && m_ready"),
+    # `&&` binds tighter than `||`, so this is `(m && x) || !m`, which is true with the switch off.
+    # A reader that collapses the `&&` to a single factor loses that.
+    ("a call under a conjunction or a negated member fails",
+     "m_shouldTranslateMessageNames && m_ready || !m_shouldTranslateMessageNames"),
 )
 
 # Round 7's P2-4: the setter's body was matched as one literal line, so a body written on its own lines
@@ -578,6 +644,19 @@ CASES += (
 
 for description, shape in GUARD_SHAPES:
     CASES += ((description, BASE + shape, 0, None),)
+
+for description, condition in GUARD_INVERSIONS:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void bad() {\n"
+        + "+    if (" + condition + ") {\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+        1,
+        "calls the translation outside the member's guard",
+    ),)
 
 
 def check_needles_are_unique_and_necessary() -> int:

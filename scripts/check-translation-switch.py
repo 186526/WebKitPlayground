@@ -45,11 +45,14 @@ What it refuses, and why each combination is a defect rather than a preference:
   - A translation call that does not sit under the member. The flag is a setter call and two reads;
     guarding only the call leaves the reads, and a read is the cheapest place to make translation
     unconditional. Every added statement that calls `translateOutgoingMessageName` or
-    `translateIncomingMessageName` must have `if (m_shouldTranslateMessageNames) {` open the block it
-    sits in. A bare `{` runs the block always, and `IOS_16_MESSAGE_NUMBER_TRANSLATION` is 1 in this
+    `translateIncomingMessageName` must sit under an `if` whose condition cannot hold while the switch
+    is off. A bare `{` runs the block always, and `IOS_16_MESSAGE_NUMBER_TRANSLATION` is 1 in this
     build because the deployment target is 16.1, so substituting the macro is the same as a bare brace
-    with a reassuring name. A caller added to a third file is checked too, because the rule is a
-    property of the call and not a list of the two files that first had one; only the two functions'
+    with a reassuring name. The condition is read by its boolean structure rather than searched for the
+    member's name, because `!m_shouldTranslateMessageNames`, `m_shouldTranslateMessageNames == false`
+    and `m_shouldTranslateMessageNames || fallback` all mention the member and all run the block
+    exactly when the switch is off. A caller added to a third file is checked too, because the rule is
+    a property of the call and not a list of the two files that first had one; only the two functions'
     own definitions and their header declarations are exempt, and that is decided by the file plus the
     declaration, so a new caller inside an exempt file still has to be guarded.
 
@@ -337,40 +340,182 @@ def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
     return blocks
 
 
-# The member as the guard can spell it. `this->m_shouldTranslateMessageNames` is the same member, so
-# the condition test matches it too; anything else in the parenthesis is allowed, so `m && !x` passes.
-MEMBER_REFERENCE = re.compile(r"(?:\bthis\s*->\s*)?\bm_shouldTranslateMessageNames\b")
+# The member as the condition can spell it. `this->m_shouldTranslateMessageNames` is the same member.
+MEMBER_NAME = "m_shouldTranslateMessageNames"
+# `this->` is the same object as the implicit one, so the prefix is dropped before the condition is
+# parsed. Any other object's member keeps its `->`, which makes the tokeniser fail and the condition
+# be refused, which is the safe answer for a read on some other connection.
+THIS_PREFIX = re.compile(r"\bthis\s*->\s*")
+IF_HEAD = re.compile(r"^if\b")
+
+# A guard is not "a condition that mentions the member": `!m`, `m == false`, `m != true` and
+# `m || fallback` all run the block exactly when the switch is off. The condition has to imply the
+# member, so it is parsed and evaluated with the member false, and accepted only when the result is
+# definitely false. The values are three-valued: `True`, `False`, and `UNKNOWN` for anything the
+# grammar does not cover, so an unhandled shape is a refused patch rather than an unchecked one.
+UNKNOWN = None
+CONDITION_TOKEN = re.compile(
+    r"\s*(?:(?P<operator>==|!=|&&|\|\||!|\(|\))|(?P<name>[A-Za-z_][A-Za-z_0-9]*))")
 
 
-def condition_asks_member(statement: str) -> bool:
-    """True for `if (m_shouldTranslateMessageNames) …` with any `{`-or-not tail and any extra conjuncts.
-
-    The condition is the part inside the parenthesis: it must mention the member, and the whole
-    statement must be an `if` rather than a loop or a bare block. `if (IOS_16_MESSAGE_NUMBER_TRANSLATION)`
-    does not mention the member and fails here; `if (m_shouldTranslateMessageNames && !m_inDispatch)`
-    does, and passes.
-    """
+def if_condition(statement: str) -> str | None:
+    """The text inside the parenthesis of an `if`, or None when the statement is not one."""
     stripped = statement.strip()
-    if not stripped.startswith("if"):
-        return False
+    if not IF_HEAD.match(stripped):
+        return None
     open_paren = stripped.find("(")
     if open_paren < 0:
-        return False
+        return None
     depth = 0
     for index in range(open_paren, len(stripped)):
-        character = stripped[index]
-        if character == "(":
+        if stripped[index] == "(":
             depth += 1
-        elif character == ")":
+        elif stripped[index] == ")":
             depth -= 1
             if depth == 0:
-                return bool(MEMBER_REFERENCE.search(stripped[open_paren:index + 1]))
+                return stripped[open_paren + 1:index]
+    return None
+
+
+def tokenise_condition(condition: str) -> list[str] | None:
+    """The condition as tokens, or None when a character is outside the grammar."""
+    tokens = []
+    position = 0
+    while position < len(condition):
+        if condition[position].isspace():
+            position += 1
+            continue
+        match = CONDITION_TOKEN.match(condition, position)
+        if not match:
+            return None
+        tokens.append(match.group("operator") or match.group("name"))
+        position = match.end()
+    return tokens
+
+
+def combine_not(value: bool | None) -> bool | None:
+    return UNKNOWN if value is UNKNOWN else not value
+
+
+def combine_binary(operator: str, left: bool | None, right: bool | None) -> bool | None:
+    """The three-valued truth table: a side that settles the answer does so even if the other is
+    unknown, which is what lets `m && anything` pass while `m || anything` does not."""
+    if operator == "&&":
+        if left is False or right is False:
+            return False
+        if left is True and right is True:
+            return True
+        return UNKNOWN
+    if operator == "||":
+        if left is True or right is True:
+            return True
+        if left is False and right is False:
+            return False
+        return UNKNOWN
+    if left is UNKNOWN or right is UNKNOWN:
+        return UNKNOWN
+    return (left == right) if operator == "==" else (left != right)
+
+
+def split_top_level(tokens: list[str], operator: str) -> list[list[str]]:
+    """Split the tokens at `operator` wherever it is not inside parentheses.
+
+    Splitting rather than parsing by position is what makes an unreadable conjunct tolerable: in
+    `m && someCall(x)` the second half cannot be evaluated, but the split still produces it as its own
+    factor, so the conjunction can be settled by the half that can.
+    """
+    parts: list[list[str]] = []
+    current: list[str] = []
+    depth = 0
+    for token in tokens:
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        if token == operator and depth == 0:
+            parts.append(current)
+            current = []
+            continue
+        current.append(token)
+    parts.append(current)
+    return parts
+
+
+def encloses_whole(tokens: list[str]) -> bool:
+    """True when the first `(` matches the last token, so the tokens are one parenthesised group."""
+    if len(tokens) < 2 or tokens[0] != "(" or tokens[-1] != ")":
+        return False
+    depth = 0
+    for index, token in enumerate(tokens):
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+            if depth == 0:
+                return index == len(tokens) - 1
     return False
 
 
+def evaluate_disjunction(tokens: list[str]) -> bool | None:
+    value = False
+    for part in split_top_level(tokens, "||"):
+        value = combine_binary("||", value, evaluate_conjunction(part))
+    return value
+
+
+def evaluate_conjunction(tokens: list[str]) -> bool | None:
+    value = True
+    for factor in split_top_level(tokens, "&&"):
+        value = combine_binary("&&", value, evaluate_factor(factor))
+    return value
+
+
+def evaluate_factor(tokens: list[str]) -> bool | None:
+    if not tokens:
+        return UNKNOWN
+    if tokens[0] == "!":
+        return combine_not(evaluate_factor(tokens[1:]))
+    if encloses_whole(tokens):
+        return evaluate_disjunction(tokens[1:-1])
+    for operator in ("==", "!="):
+        parts = split_top_level(tokens, operator)
+        if len(parts) == 2:
+            return combine_binary(operator, evaluate_factor(parts[0]), evaluate_factor(parts[1]))
+        if len(parts) > 2:
+            return UNKNOWN
+    # The whole evaluation is under the assumption that the switch is off, which is the state the
+    # member has by default and the state this check exists to keep it in.
+    if tokens == [MEMBER_NAME]:
+        return False
+    if tokens == ["true"]:
+        return True
+    if tokens == ["false"]:
+        return False
+    return UNKNOWN
+
+
+def condition_implies_member(statement: str) -> bool:
+    """True when the `if` condition cannot hold while the switch is off.
+
+    `if (m_shouldTranslateMessageNames)` passes, and so does `m && !m_inDispatchTesting`: a false
+    member settles a conjunction whatever else is in it, including a conjunct the parser cannot read.
+    `!m`, `m == false`, `m != true`, `!this->m` and `m || fallbackOn` are refused, because each can be
+    true with the member false, which runs the translation exactly when the switch is supposed to be
+    off. Anything outside the grammar — a comma operator, another object's member, a call where the
+    member's value is still needed — is unknown, and an unknown top-level result is refused.
+    """
+    condition = if_condition(statement)
+    if condition is None:
+        return False
+    tokens = tokenise_condition(THIS_PREFIX.sub("", condition))
+    if tokens is None:
+        return False
+    return evaluate_disjunction(tokens) is False
+
+
 def chain_has_guard(chain: list[str]) -> bool:
-    """True when any block in the chain is an `if` on the member."""
-    return any(condition_asks_member(block) for block in chain)
+    """True when any block in the chain is an `if` whose condition implies the member."""
+    return any(condition_implies_member(block) for block in chain)
 
 
 def chain_has_setter(chain: list[str]) -> bool:
@@ -409,7 +554,7 @@ def inline_guard_covers(statement: str, call_start: int) -> bool:
     `if (m_shouldTranslateMessageNames) { } call(x);`, where the block has already closed.
     """
     for offset, block in brace_opens(statement):
-        if offset >= call_start or not condition_asks_member(block):
+        if offset >= call_start or not condition_implies_member(block):
             continue
         depth = 0
         for character in statement[offset:call_start]:
@@ -463,7 +608,7 @@ def braceless_guard_before(statements: list[tuple[str, str]], index: int) -> boo
     previous_path, previous = statements[index - 1][0], statements[index - 1][1]
     if previous_path != statements[index][0]:
         return False
-    return not previous.rstrip().endswith("{") and condition_asks_member(previous)
+    return not previous.rstrip().endswith("{") and condition_implies_member(previous)
 
 
 def check_read_sites(patch: str) -> list[Violation]:
