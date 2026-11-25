@@ -51,7 +51,9 @@ cd WebKitPlayground
 DEVICE_SUDO_PASSWORD='...' scripts/probe-webkit-override-endpoints.sh
 ```
 
-可选参数：`--ssh-target <[user@]host>`（默认 `mobile@192.168.2.135`）、`--log-dir <dir>`（默认 `$TMPDIR` 下带时间戳的目录）、`--wait <秒>`（每次拉起后等多久，默认 5）。环境变量 `PROBE_SSH_TARGET`、`PROBE_LOG_DIR`、`PROBE_WAIT_SECONDS` 等价。
+可选参数：`--ssh-target <[user@]host>`（默认 `mobile@192.168.2.136`）、`--log-dir <dir>`（默认 `$TMPDIR` 下带时间戳的目录）、`--wait <秒>`（每次拉起后等多久，默认 5）。环境变量 `PROBE_SSH_TARGET`、`PROBE_LOG_DIR`、`PROBE_WAIT_SECONDS` 等价。
+
+**这一项与脚本当前行为不一致，以脚本为准。** 2026-11-26 00:53Z 复核时脚本 `:46` 的默认值仍是 `mobile@192.168.2.135`，而该地址现在报 `No route to host`；设备在 `192.168.2.136`（`uname -r` 返回 `22.1.0`）。换脚本属于 `scripts/**` 的范围，本文不动它，只在这里写明：在没有 `--ssh-target` 也没有 `PROBE_SSH_TARGET` 时，第一次 `ssh` 就会失败。
 
 退出码：`0` 读到 A 或 B，`4` UNKNOWN，`3` 图形域缺失（需重启），`2` 用法或环境错误。
 

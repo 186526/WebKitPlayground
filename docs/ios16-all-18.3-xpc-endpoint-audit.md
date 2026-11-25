@@ -197,11 +197,11 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 ## 附录 A：本文引用的实测读数
 
-塔在 `192.168.2.135` 上的只读读数（2026-11-25）：
+塔在 `192.168.2.135` 上的只读读数（2026-11-25；该地址此后失效，现报 `No route to host`，2026-11-26 00:53Z 复核时设备在 `192.168.2.136`）：
 
 - 覆盖目录不存在时 Safari 域（pid 69370）`services = {` 六条：`com.apple.accessibility.BrailleTranslation.BrailleTranslationService`、`com.apple.WebKit.WebContent`、`com.apple.MTLCompilerService`、`com.apple.WebKit.GPU`、`com.apple.WebKit.Networking`、`com.apple.WebKit.WebContent.CaptivePortal`。
 - `launchctl print pid/69370` 的 `environment` 段落含 `DYLD_LIBRARY_PATH => .../procursus/Library/WebKitOverride/usr/lib` 与 `DYLD_FRAMEWORK_PATH => .../procursus/Library/WebKitOverride`。
-- `/var/jb/basebin/gen/dyld` 974608 字节，`Nov 24 08:44`；用 python 读二进制计数 `_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` = 1、`...23isAlwaysOverridablePathEPKc` = 1、`dlopen_from` = 1、`__fcntl` = 1。设备上**没有 `strings`**，用 `strings | grep -c` 会得到假 0。
+- `/var/jb/basebin/gen/dyld` 974608 字节，`Nov 24 08:44`；用 python 读二进制计数 `_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` = 1、`...23isAlwaysOverridablePathEPKc` = 1、`dlopen_from` = 1、`__fcntl` = 1。设备上**没有 `strings`**，用 `strings | grep -c` 会得到假 0。**这一条是 11-24 那个时点的读数，不是现行值**：同一文件在 2026-11-26 01:07:50 CST 读到 974016 字节、`sha256 486620f0…`、判定 (b) `1 0 0 1`，`gen/` 下只有 `dyld` 与 `dyld.orig`（无 `dyld.old`），01:03 之后的读数见 `docs/ios16-whole-18.3-deployment-path.md` 附录 B 与 `docs/ios16-next-build-go-no-go.md` 的 5.1 节。两次用的是同一个数法，差别在文件，所以两份读数可以直接对照。
 - `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 50758784 字节，`Nov 24 18:06`，`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；五个 `.xpc` 的 `minos` 同为 `16.1.0`，各自二进制含 `DYLD_FRAMEWORK_PATH` 2 次、`/var/jb/Library/Frameworks` 1 次；系统桩这两个串均为 0。
 - `/var/jb/Library/WebKitOverride` 为 `ABSENT`。
 
