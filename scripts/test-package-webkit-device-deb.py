@@ -27,6 +27,11 @@ Each case writes a fixture product tree and runs the real script against it.  di
 stand-ins on Linux; dpkg-deb, zsh, file and python3 are the host's.  The cases that need a broken
 payload put a cp stand-in first on PATH, so the script itself stays free of test switches.
 
+The cases that end in `_lc_str`, `_rejected`, `_atomicity` and `_image` drive the Mach-O tool the
+script embeds directly, because the script deletes its work directory on exit and those cases need
+to see the tree the tool was handed.  They read the tool out of the script rather than keeping a
+copy, so they test the shipped code.
+
 Usage: python3 scripts/test-package-webkit-device-deb.py
 """
 from __future__ import annotations
@@ -86,23 +91,32 @@ def _pad(blob: bytes) -> bytes:
     return blob + b"\0" * (-len(blob) % 8)
 
 
-def _segment_command() -> bytes:
+def _segment_command(text_offset: int = TEXT_OFFSET) -> bytes:
     segname = b"__TEXT".ljust(16, b"\0")
     section = _pad(
         b"__text".ljust(16, b"\0") + segname
-        + struct.pack("<QQIIIIIIII", 0, 0x40, TEXT_OFFSET, 2, 0, 0, 0x80000400, 0, 0, 0)
+        + struct.pack("<QQIIIIIIII", 0, 0x40, text_offset, 2, 0, 0, 0x80000400, 0, 0, 0)
     )
     return struct.pack("<II", LC_SEGMENT_64, 72 + len(section)) + segname + struct.pack(
         "<QQQQiiII", 0, IMAGE_SIZE, 0, IMAGE_SIZE, 7, 5, 1, 0
     ) + section
 
 
-def _dylib_command(kind: int, name: str) -> bytes:
+def _dylib_command(kind: int, name: str, lc_str: int = 24) -> bytes:
+    """One dylib load command whose name sits at lc_str bytes into the command.
+
+    24 is the layout Xcode 14 emits, but it is a field, not a constant: the shipped
+    WebKit carries a 28 there for its CoreTelephony dependency, with four unused
+    bytes between the fixed part and the name.  A fixture set that only ever builds
+    24 cannot tell a reader that honours the field from a writer that does not.
+    """
     encoded = name.encode() + b"\0"
-    # cmdsize counts the padding, so it is computed after it.
-    size = -(-(24 + len(encoded)) // 8) * 8
-    body = struct.pack("<IIIIII", kind, size, 24, 0, 0x10000, 0x10000) + encoded
-    return body + b"\0" * (size - len(body))
+    # cmdsize counts everything through the terminator and then the padding.
+    size = -(-(lc_str + len(encoded)) // 8) * 8
+    body = struct.pack("<IIIIII", kind, 0, lc_str, 0, 0x10000, 0x10000)
+    body += b"\0" * (lc_str - 24) + encoded
+    body += b"\0" * (size - len(body))
+    return body[:4] + struct.pack("<I", size) + body[8:]
 
 
 def build_macho(
@@ -110,6 +124,8 @@ def build_macho(
     *,
     filetype: int = MH_DYLIB,
     signature: bool = False,
+    lc_str: int = 24,
+    header_pad: bool = True,
 ) -> bytes:
     """Write one thin arm64 Mach-O carrying the given dylib load commands.
 
@@ -117,17 +133,24 @@ def build_macho(
     reports "ERROR: Missing bin header libs" and exits 0 for an image with no dylib command at all,
     and a fixture the rewrite would never see in a real product must not be what the check is tested
     against.
+
+    lc_str is the offset each dylib command puts its name at.  header_pad=False starts __text
+    immediately after the load commands, which is the shape whose header pad cannot take another
+    LC_RPATH.
     """
-    commands = _segment_command()
     loaded = list(dependencies)
     if not loaded:
         loaded.append((LC_LOAD_DYLIB, LIBSYSTEM))
-    for kind, name in loaded:
-        commands += _dylib_command(kind, name)
+    commands = b"".join(_dylib_command(kind, name, lc_str) for kind, name in loaded)
     signature_offset = 0
     if signature:
         signature_offset = IMAGE_SIZE - 0x100
         commands += _pad(struct.pack("<IIII", LC_CODE_SIGNATURE, 16, signature_offset, 0x40))
+    leading = _segment_command()
+    text_offset = TEXT_OFFSET if header_pad else 32 + len(leading) + len(commands)
+    if text_offset + 0x100 > IMAGE_SIZE:
+        raise ValueError("the fixture's load commands leave no room for section data")
+    commands = _segment_command(text_offset) + commands
     header = struct.pack(
         "<IiiIIIII", MH_MAGIC_64, CPU_TYPE_ARM64, 0, filetype,
         1 + len(loaded) + (1 if signature else 0), len(commands), 0x00200085, 0,
@@ -243,6 +266,30 @@ def run_script(product: Path, output: Path, mode: str, bin_dir: Path,
 
 def unpack(deb: Path, destination: Path) -> None:
     subprocess.run(["dpkg-deb", "-x", str(deb), str(destination)], check=True)
+
+
+TOOL_HEREDOC = "MACHO_LOAD_PATHS_PYTHON"
+
+
+def extract_tool(destination: Path) -> Path:
+    """Write the Mach-O tool the script embeds, so a case can drive it directly.
+
+    The script writes it into its own mktemp work directory and deletes that on exit, so a case that
+    needs to see the payload tree it was given a partially-rewritten image of cannot go through the
+    script.  Reading the tool out of the script, rather than keeping a second copy, is what makes
+    these cases test the shipped code.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    opening = f"<<'{TOOL_HEREDOC}'\n"
+    start = text.index(opening) + len(opening)
+    end = text.index(f"\n{TOOL_HEREDOC}\n", start)
+    destination.write_text(text[start:end] + "\n", encoding="utf-8")
+    return destination
+
+
+def run_tool(tool: Path, mode: str, root: Path, prefix: str = "/var/jb") -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, str(tool), mode, str(root), prefix],
+                          capture_output=True, text=True)
 
 
 def is_macho(path: Path) -> bool:
@@ -565,6 +612,189 @@ def case_absent_overlay() -> None:
     print(f"PASS {label}")
 
 
+def write_destination_tree(root: Path, images: dict[str, bytes]) -> Path:
+    """Write the files an install-table row checks for, plus the given images, under root/var/jb.
+
+    Keys are payload-relative paths.  The three framework binaries exist so the rewrite's destination
+    check passes; they carry a single libSystem command and are never the image under test.
+    """
+    payload = root / "var" / "jb"
+    for relative in ("Library/Frameworks/WebKit.framework/WebKit",
+                     "Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+                     "Library/Frameworks/WebCore.framework/WebCore"):
+        write_macho(payload / relative)
+    for relative, data in images.items():
+        write_macho(payload / relative, data)
+    return payload
+
+
+def case_nonstandard_lc_str() -> None:
+    """A dylib command with lc_str=28 must be rewritten at 28, not at the usual 24.
+
+    24 is the layout Xcode 14 emits for these commands and the only one the fixtures used to build,
+    so a writer that hard-coded 24 passed everything while leaving lc_str=28 pointing at the tail of
+    the name it wrote.  The shipped WebKit carries such a command for CoreTelephony, so the shape is
+    reachable; here it names a framework the package ships, which is the reachable failure.
+    """
+    label = "a load command with lc_str=28 is rewritten at its own offset"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        image = "Library/Frameworks/WebKit.framework/WebKit"
+        write_destination_tree(root, {image: build_macho(((LC_LOAD_DYLIB, WEBKIT),), lc_str=28)})
+        before = (root / "var/jb" / image).read_bytes()
+
+        result = run_tool(tool, "rewrite", root)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        data = (root / "var/jb" / image).read_bytes()
+        count, size = struct.unpack_from("<II", data, 16)
+        cursor, rewritten = 32, []
+        for _ in range(count):
+            kind, command_size = struct.unpack_from("<II", data, cursor)
+            if kind in (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB):
+                rewritten.append((cursor, command_size,
+                                  struct.unpack_from("<I", data, cursor + 8)[0]))
+            cursor += command_size
+        if len(rewritten) != 1:
+            failures.append(f"{label}: expected one dylib command, found {len(rewritten)}")
+            return
+        offset, command_size, lc_str = rewritten[0]
+        if lc_str != 28:
+            failures.append(f"{label}: the rewrite changed lc_str from 28 to {lc_str}")
+            return
+        resolved = data[offset + lc_str:offset + command_size].split(b"\0", 1)[0]
+        if resolved != b"@rpath/WebKit.framework/WebKit":
+            failures.append(f"{label}: at lc_str=28 the command resolves {resolved!r}, not the "
+                            f"@rpath name; the writer used a fixed offset")
+            return
+        # Nothing before lc_str may move.  A name written at 24 lands four bytes early and ends up
+        # as the tail "th/WebKit.framework/WebKit" once the loader applies lc_str=28.
+        untouched = before[offset + 24:offset + lc_str]
+        if data[offset + 24:offset + lc_str] != untouched:
+            failures.append(f"{label}: the rewrite changed the bytes between the fixed part and "
+                            f"lc_str into {data[offset + 24:offset + lc_str]!r}")
+            return
+        if "no system load paths" not in run_tool(tool, "verify", root).stdout:
+            failures.append(f"{label}: verify rejected an image that should be clean")
+            return
+    print(f"PASS {label}")
+
+
+def case_corrupted_name_is_rejected() -> None:
+    """verify must reject a load command whose name resolves to the tail of a name.
+
+    This is the check whose absence let the fixed-offset write ship silently: a name like
+    "th/WebKit.framework/WebKit" starts with neither a forbidden prefix nor "@rpath/", so the
+    prefix test, the dependency list and the resolution loop all passed it.
+    """
+    label = "verify rejects a load command whose name resolves to a path tail"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        image = "Library/Frameworks/WebKit.framework/WebKit"
+        write_destination_tree(root, {image: build_macho(((LC_LOAD_DYLIB, WEBKIT),), lc_str=28)})
+        path = root / "var/jb" / image
+        # Write the @rpath name at 24 and leave lc_str at 28: exactly what a fixed-offset writer
+        # produced, byte for byte, without relying on the writer still being broken.
+        data = bytearray(path.read_bytes())
+        count = struct.unpack_from("<I", data, 16)[0]
+        cursor = 32
+        for _ in range(count):
+            kind, command_size = struct.unpack_from("<II", data, cursor)
+            if kind == LC_LOAD_DYLIB:
+                lc_str = struct.unpack_from("<I", data, cursor + 8)[0]
+                encoded = b"@rpath/WebKit.framework/WebKit\0"
+                data[cursor + 24:cursor + command_size] = encoded + b"\0" * (command_size - 24 - len(encoded))
+                struct.pack_into("<I", data, cursor + 8, lc_str)
+            cursor += command_size
+        path.write_bytes(bytes(data))
+
+        result = run_tool(tool, "verify", root)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: verify passed a corrupted load command\n{combined}")
+            return
+        if "neither an absolute path nor @-prefixed" not in combined:
+            failures.append(f"{label}: the failure does not name the corrupted command\n{combined}")
+            return
+    print(f"PASS {label}")
+
+
+def case_header_pad_atomicity() -> None:
+    """A payload rejected for header-pad exhaustion must be left byte-identical.
+
+    adattributiond has room for the two LC_RPATH entries and sorts before webpushd, whose __text
+    starts immediately after its load commands.  Before the capacity check moved into the planning
+    phase, the first image was written and then the second failed the run, leaving a half-rewritten
+    tree behind a non-zero exit.
+    """
+    label = "a payload whose header pad is too small is left untouched"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        roomy = "Library/Frameworks/adattributiond"
+        tight = "Library/Frameworks/webpushd"
+        write_destination_tree(root, {
+            roomy: build_macho(((LC_LOAD_DYLIB, WEBKIT),), filetype=MH_EXECUTE),
+            tight: build_macho(((LC_LOAD_DYLIB, WEBKIT),), filetype=MH_EXECUTE, header_pad=False),
+        })
+        before = {relative: (root / "var/jb" / relative).read_bytes() for relative in (roomy, tight)}
+
+        result = run_tool(tool, "rewrite", root)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0, the exhausted header pad should have failed\n{combined}")
+            return
+        if "no room for" not in combined:
+            failures.append(f"{label}: the failure is not the header-pad one\n{combined}")
+            return
+        after = {relative: (root / "var/jb" / relative).read_bytes() for relative in (roomy, tight)}
+        for relative in (roomy, tight):
+            if before[relative] != after[relative]:
+                failures.append(f"{label}: {relative} was modified even though the run failed")
+                return
+    print(f"PASS {label}")
+
+
+def case_truncated_image() -> None:
+    """A Mach-O whose command area runs past the end of the file must fail with a payload error.
+
+    The shape matters.  A file whose command list happens to end before the truncation point still
+    parses, and the old tool reported the size mismatch cleanly.  The defect appears when the
+    command walk itself reaches the end of the buffer: struct.unpack_from then raises struct.error,
+    which main() never caught, so the packager printed a traceback instead of a payload error.
+    """
+    label = "a truncated Mach-O fails with a payload error, not a traceback"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        image = "Library/Frameworks/WebKit.framework/WebKit"
+        write_destination_tree(root, {})
+        whole = bytearray(build_macho(((LC_LOAD_DYLIB, WEBKIT),)))
+        # Fill the command area with 8-byte commands and claim far more of them than the truncated
+        # file holds, so the parse walks off the end of the buffer.
+        for offset in range(32, 1000, 8):
+            struct.pack_into("<II", whole, offset, LC_CODE_SIGNATURE, 8)
+        struct.pack_into("<II", whole, 16, 1000, 0x2000)
+        (root / "var/jb" / image).write_bytes(bytes(whole[:1000]))
+
+        result = run_tool(tool, "rewrite", root)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0, a truncated image should fail\n{combined}")
+            return
+        if "Traceback" in combined:
+            failures.append(f"{label}: the failure is an uncaught traceback\n{combined}")
+            return
+        if "is truncated" not in combined:
+            failures.append(f"{label}: the failure is not the truncation error\n{combined}")
+            return
+    print(f"PASS {label}")
+
+
 def main() -> int:
     missing = [tool for tool in ("zsh", "dpkg-deb", "file") if shutil.which(tool) is None]
     if missing:
@@ -596,6 +826,10 @@ exec {CP} "$@"''',
     case_no_system_dependencies()
     case_unparseable_image()
     case_missing_table_destination()
+    case_nonstandard_lc_str()
+    case_corrupted_name_is_rejected()
+    case_header_pad_atomicity()
+    case_truncated_image()
 
     if failures:
         print(f"\n{len(failures)} failure(s):", file=sys.stderr)

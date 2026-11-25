@@ -407,11 +407,14 @@ done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type f -name '*.dylib' -
 # every Mach-O in this payload, and because the XPC services need their
 # entitlements on the new seal.
 #
-# llvm-install-name-tool is not used: on the shipped WebKit.framework/WebKit
-# it fails with "unsupported load command (cmd=0x1e)" because these images
-# carry LC_LAZY_LOAD_DYLIB, and it has no way to skip a command it does not
-# know.  The rewrite is a small Mach-O reader below instead, which needs no
-# tool beyond the python3 this script already requires.
+# llvm-install-name-tool is not used: it rejects every image in this payload
+# with "unsupported load command", and it has no way to leave a command it does
+# not know alone.  Measured on the shipped payload, the rejected command is
+# 0x1e (LC_SEGMENT_SPLIT_INFO) in WebKit.framework/WebKit and 0x27
+# (LC_DYLD_ENVIRONMENT) in the XPC helpers.  LC_LAZY_LOAD_DYLIB is 0x20 and
+# appears zero times in this payload, so it is not what stops that tool.  The
+# rewrite is a small Mach-O reader below instead, which needs no tool beyond the
+# python3 this script already requires.
 log_step "Rewriting framework load paths to @rpath..."
 
 MACHO_LOAD_PATHS_TOOL="${WORK_DIR}/macho-load-paths.py"
@@ -432,9 +435,11 @@ Modes:
 <root> is an unpacked package tree, <prefix> the install prefix it targets:
 "/var/jb" for rootless, "" for rootful and roothide.
 
-An image this program cannot parse, a system path with no row in the install
-table, and a row whose destination is missing from the payload all exit
-non-zero.  Skipping an image is never a success.
+An image this program cannot parse, a truncated image, a system path with no row
+in the install table, a row whose destination is missing from the payload, and
+an image whose header pad cannot take the LC_RPATH entries all exit non-zero.
+Skipping an image is never a success.  Every check runs before the first write,
+so a rejected payload is left byte-identical.
 """
 
 import os
@@ -462,8 +467,15 @@ DYLIB_COMMAND_KINDS = (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_
 
 # Where each command kind keeps its string offset, and the smallest offset the
 # string can have.  LC_RPATH's fixed part is 12 bytes, a dylib command's is 24.
+# These are floors for validation only; the actual offset is always read from
+# the command's own lc_str field.
 NAME_OFFSETS = {LC_RPATH: 12, LC_LOAD_DYLIB: 24, LC_LOAD_WEAK_DYLIB: 24,
                 LC_REEXPORT_DYLIB: 24, LC_LAZY_LOAD_DYLIB: 24}
+
+# Every install name a linked image can carry.  The check in verify_image uses
+# it as a format test, not a whitelist: a name outside these forms is the tail
+# of a name that a wrong-offset write left behind.
+INSTALL_NAME_PREFIXES = ("/", "@rpath/", "@executable_path/", "@loader_path/")
 
 FORBIDDEN_PREFIXES = (
     "/System/Library/Frameworks/WebKit.framework/",
@@ -544,6 +556,9 @@ class Image:
             raise PayloadError("%s is not a 64-bit little-endian Mach-O (magic 0x%08x)" % (path, magic))
         self.command_count = struct.unpack_from("<I", self.data, 16)[0]
         self.command_bytes = struct.unpack_from("<I", self.data, 20)[0]
+        if len(self.data) < HEADER_SIZE_64 + self.command_bytes:
+            raise PayloadError("%s is truncated: sizeofcmds says %d command bytes but the file holds %d"
+                               % (path, self.command_bytes, len(self.data) - HEADER_SIZE_64))
         self.commands = self._parse_commands()
 
     def _parse_commands(self):
@@ -601,14 +616,30 @@ class Image:
             values.append(self._c_string(command.offset + offset, command.offset + command.size))
         return values
 
+    def name_slot(self, command):
+        """The byte range a dylib command's name occupies, read from its own field.
+
+        Both the reader and the writer use this: `lc_str` is a field, not a
+        constant.  The shipped WebKit carries one 28-byte LC_LOAD_DYLIB beside
+        its 24-byte ones, so a writer that assumed 24 would move the name and
+        leave the field pointing at the tail of it.
+        """
+        start = command.offset + self._string_offset(command)
+        return start, command.offset + command.size
+
     def replace_name(self, command, name):
         encoded = name.encode("utf-8")
-        start = command.offset + NAME_OFFSETS[command.kind]
-        end = command.offset + command.size
+        start, end = self.name_slot(command)
         if len(encoded) >= end - start:
             raise PayloadError("%s: %r does not fit in the %d-byte slot that named a longer path"
                                % (self.path, name, end - start))
         self.data[start:end] = encoded + b"\0" * (end - start - len(encoded))
+        # Read the name back the way the loader will, so a write at the wrong
+        # offset fails here rather than shipping an image whose load command
+        # names a file that does not exist.
+        if self._c_string(start, end) != name:
+            raise PayloadError("%s: wrote %r at %d but the command now resolves %r"
+                               % (self.path, name, start, self._c_string(start, end)))
 
     def _header_pad_end(self):
         # The gap between the end of the load commands and the first byte of
@@ -635,20 +666,32 @@ class Image:
         blob = struct.pack("<III", LC_RPATH, size, NAME_OFFSETS[LC_RPATH]) + encoded
         return blob + b"\0" * (size - len(blob))
 
-    def add_rpath(self, value):
-        if value in self.rpaths():
-            return False
-        blob = self.rpath_blob(value)
+    def missing_rpath_blobs(self, values):
+        """The LC_RPATH blobs this image still needs, in the order they are appended."""
+        present = self.rpaths()
+        return [self.rpath_blob(value) for value in values if value not in present]
+
+    def check_rpath_capacity(self, blobs):
+        # Checked while planning, before any image is written, so a payload whose
+        # header pad is too small leaves every image untouched.
+        if not blobs:
+            return
         start = HEADER_SIZE_64 + self.command_bytes
         end = self._header_pad_end()
-        if start + len(blob) > end:
-            raise PayloadError("%s: no room for LC_RPATH %s; it needs %d bytes before the first section at %d"
-                               % (self.path, value, len(blob), end))
-        self.data[start:start + len(blob)] = blob
-        self.command_count += 1
-        self.command_bytes += len(blob)
-        struct.pack_into("<II", self.data, 16, self.command_count, self.command_bytes)
-        return True
+        needed = sum(len(blob) for blob in blobs)
+        if start + needed > end:
+            raise PayloadError("%s: no room for %d LC_RPATH byte(s) at %d; the first section starts at %d"
+                               % (self.path, needed, start, end))
+
+    def append_rpaths(self, blobs):
+        start = HEADER_SIZE_64 + self.command_bytes
+        for blob in blobs:
+            self.data[start:start + len(blob)] = blob
+            start += len(blob)
+            self.command_count += 1
+            self.command_bytes += len(blob)
+        if blobs:
+            struct.pack_into("<II", self.data, 16, self.command_count, self.command_bytes)
 
     def save(self):
         mode = os.stat(self.path).st_mode
@@ -684,8 +727,9 @@ def install_mapping(system_path):
 
 
 def rewrite(root, prefix):
-    # Every image is parsed and every destination is resolved before the first
-    # byte is written, so a payload this program rejects stays untouched.
+    # Planning parses every image, resolves every destination, and checks the
+    # header pad of every image that needs new LC_RPATH bytes, before the first
+    # write.  A payload this program rejects therefore stays byte-identical.
     plan = []
     for path in payload_images(root):
         image = Image(path)
@@ -700,16 +744,17 @@ def rewrite(root, prefix):
                                    % (path, name, destination))
             replacements.append((command, rpath_name))
         if replacements:
-            plan.append((path, image, replacements))
+            blobs = image.missing_rpath_blobs([prefix + "/" + directory for directory in RPATH_DIRECTORIES])
+            image.check_rpath_capacity(blobs)
+            plan.append((path, image, replacements, blobs))
     if not plan:
         raise PayloadError("no Mach-O under %s names a system framework path; the install table matched nothing"
                            % root)
     total = 0
-    for path, image, replacements in plan:
+    for path, image, replacements, blobs in plan:
         for command, rpath_name in replacements:
             image.replace_name(command, rpath_name)
-        for directory in RPATH_DIRECTORIES:
-            image.add_rpath(prefix + "/" + directory)
+        image.append_rpaths(blobs)
         image.save()
         total += len(replacements)
         print("  %s: rewrote %d load command(s)" % (os.path.relpath(path, root), len(replacements)))
@@ -719,9 +764,19 @@ def rewrite(root, prefix):
 def verify_image(image, root, relative, prefix):
     problems = []
     entries = image.install_name_commands()
-    for _, name in entries:
+    for command, name in entries:
         if name.startswith(FORBIDDEN_PREFIXES):
             problems.append("%s still names the system path %s" % (relative, name))
+            continue
+        # An install name is an absolute path or an @-prefixed one.  Anything
+        # else is the tail of a name some step overwrote from the wrong offset
+        # (writing "@rpath/..." at 24 into a command whose lc_str is 28 yields
+        # "th/WebKit.framework/WebKit"), and the prefix and resolution checks
+        # below would all wave it through.
+        if not name.startswith(INSTALL_NAME_PREFIXES):
+            problems.append("%s: load command 0x%08x at %d resolves a name that is neither an "
+                            "absolute path nor @-prefixed: %r"
+                            % (relative, command.kind, command.offset, name))
     dependencies = [name for _, name in entries if name.startswith("@rpath/")]
     reexports = {name for command, name in entries if command.kind == LC_REEXPORT_DYLIB}
     if not dependencies:
