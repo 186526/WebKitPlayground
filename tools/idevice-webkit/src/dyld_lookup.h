@@ -18,11 +18,11 @@ void *library_load(const char *path);
    The mode is a parameter rather than a constant because the two callers need
    different ones and the difference is the point. The framework load that reads
    a version wants RTLD_LAZY on its own and no effect on the process's symbol
-   scopes. The seven-image chain needs RTLD_NOW|RTLD_GLOBAL: NOW so a missing
+   scopes. The seven-image chain asks for RTLD_NOW|RTLD_GLOBAL: NOW so a missing
    symbol fails the load that is being attempted instead of faulting at the first
-   call through it, GLOBAL so the image's exports are visible to the loads that
-   follow. Passing the mode in keeps that decision in the one file that explains
-   why it is what it is, instead of in the loader helper. */
+   call through it, GLOBAL so an image's exports also sit in the global scope for
+   a lookup that falls back to it. Passing the mode in keeps that decision in the
+   one file that explains why it is what it is, instead of in the loader helper. */
 
 void *library_load_with_mode(const char *path, i32 mode);
 

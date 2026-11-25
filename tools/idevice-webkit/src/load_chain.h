@@ -50,30 +50,47 @@
 
 #define load_chain_count 7
 
-/* RTLD_GLOBAL, and why it is not optional.
+/* The load mode, and what each half of it rests on.
 
    Darwin's values: RTLD_LAZY 1, RTLD_NOW 2, RTLD_GLOBAL 8. The tweak used
-   RTLD_LAZY alone, which is the 0x0001 in the recorded error.
+   RTLD_LAZY alone, which is the 0x0001 in the recorded error. That reading says
+   the old call passed neither flag; it does not say which of the two its failure
+   needed, because the failure it recorded was a dependency bound to the 16.1
+   copy rather than a symbol looked up at run time.
 
    RTLD_NOW makes a missing symbol fail the dlopen that is being attempted,
    instead of faulting at the first call through it. That turns an unreported
-   crash into a step index and a symbol name in the report.
+   crash into a step index and a symbol name in the report, which is why every
+   step asks for it.
 
-   RTLD_GLOBAL puts the image's exports in the global scope, where a later load
-   resolves against them. Without it each image is a separate island and a
-   sibling's lookup does not see it. This is the flag whose absence the device
-   telemetry records, and it is what makes the 18.3 JavaScriptCore's exports
-   reachable by the 18.3 WebCore and WebKit that follow it.
+   RTLD_GLOBAL puts the image's exports in the global scope, where a lookup that
+   falls back to that scope resolves against them; without it the exports are
+   reachable only through a handle to the image. Nothing in the chain needs that
+   for the order to work: each of the seven names its siblings by absolute /var/jb
+   path, and dyld opens the path rather than searching a scope. GLOBAL is kept as
+   the wider of two placements — a late lookup through the global table is then
+   answered by the 18.3 export instead of missing — and no run has shown it to
+   hurt. It is not a measured requirement.
 
-   The concrete case is WebCore's two weak dependencies. WebCore carries
-   LC_LOAD_WEAK_DYLIB on libwebrtc and on libANGLE-shared, so it loads without
-   either of them and its references to their symbols are left unresolved. Those
-   two are loaded before WebCore for exactly this reason, and they have to be
-   GLOBAL rather than merely resident: a symbol reached through a weak import is
-   resolved against the global scope, so a libwebrtc loaded LOCAL leaves WebCore
-   binding the system copy or binding nothing. The measured order in
-   build-state.md 第八轮 is what took the duplicate count from 31 to 0, and the
-   global scope is what lets that order mean anything. */
+   WHY THE ORDER IS WHAT IT IS. WebCore carries LC_LOAD_WEAK_DYLIB on three of
+   the seven: libwebrtc, libANGLE-shared and WebGPU. Those three are read out of
+   the payload's own WebCore by parsing its load commands; the other nine weak
+   commands in that image name system libraries (BrowserEngineCore, libxslt.1,
+   libAccessibility, six libswift*). A weak dependency does not stop the load.
+   Its target is whichever file the string names: with the payload's original
+   /System strings, a WebCore loaded before the two dylibs bound the resident
+   16.1 copies and the later /var/jb dlopen mapped a second copy, which is the
+   duplicate count the reorder removed. In the rewritten tree the three strings
+   are /var/jb/.../WebKit18, so the /System string WebCore used to name is gone
+   and no weak import of the three can reach a 16.1 image.
+
+   WHAT IS MEASURED AND WHAT IS NOT. The order is measured: build-state.md 第八轮
+   took the duplicate count from 31 to 0 at 7/7 with this sequence, and recorded
+   WebCore failing on a StringImpl symbol under another one. The flag is not
+   measured. The probe that produced those counts calls
+   `dlopen(kImages[i], RTLD_NOW)` — docs/ios16-dyld-identity-and-load-conditions.md
+   8.1 — with no RTLD_GLOBAL anywhere, so the count fell with every image in its
+   own scope, and no device run compares the two modes. */
 
 #define load_mode_now 2
 #define load_mode_global 8

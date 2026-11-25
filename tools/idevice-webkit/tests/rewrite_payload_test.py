@@ -6,10 +6,11 @@
 # The payload is synthetic for the same reason tests/signature_test.py builds its
 # dylib: the real one is a 50 MB install from a package, and a test that needed
 # it could not run on a fresh checkout. The synthetic images carry the same
-# fifteen load commands the seven real ones do where it matters — an
+# load commands the seven real ones do where it matters — an
 # LC_ID_DYLIB claiming the system identity, an LC_LOAD_DYLIB on the system
-# JavaScriptCore, a dependency on a real system framework that must be left
-# alone, and an LC_CODE_SIGNATURE past the load commands.
+# JavaScriptCore, WebCore's three LC_LOAD_WEAK_DYLIB commands on the other six,
+# a dependency on a real system framework that must be left alone, and an
+# LC_CODE_SIGNATURE past the load commands.
 #
 # What is checked, and the failure each one would cause on the device:
 #
@@ -51,6 +52,7 @@ LOAD_CHAIN = os.path.join(HERE, "..", "src", "load_chain.c")
 
 LC_LOAD_DYLIB = 0x0C
 LC_ID_DYLIB = 0x0D
+LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_CODE_SIGNATURE = 0x1D
 MH_MAGIC_64 = 0xFEEDFACF
 MH_DYLIB = 6
@@ -80,6 +82,19 @@ IMAGES = (
 
 JAVASCRIPTCORE_SYSTEM = "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"
 FOUNDATION_SYSTEM = "/System/Library/Frameworks/Foundation.framework/Foundation"
+
+# WebCore's three LC_LOAD_WEAK_DYLIB commands that name one of the seven. The
+# real image carries exactly these three as weak (besides nine on system
+# libraries), and the count matters to the load order: the two dylibs are loaded
+# before WebCore, WebGPU after it, and all three strings have to end up under
+# /var/jb or the weak import binds the resident 16.1 copy. The synthetic payload
+# carries them so a rewrite that dropped one, or that rewrote it to a path
+# outside the destination root, fails here instead of on the device.
+WEAK_DEPENDENCIES = (
+    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib",
+    "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU",
+    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib",
+)
 
 # Wide enough for every replacement the rewrite writes, and the same for all
 # seven so a failure is about the name rather than about a slot chosen to fit.
@@ -150,7 +165,7 @@ def build_signature(code, code_limit, hash_types=(1, 2), page=0x1000, flags=0):
     return struct.pack(">III", 0xFADE0CC0, index_size + len(bodies), count) + entries + bodies
 
 
-def build_image(path, identity, dependencies, slot=SLOT, sign=True):
+def build_image(path, identity, dependencies, slot=SLOT, sign=True, weak_dependencies=()):
     """A thin Mach-O whose signature covers every byte before its own offset.
 
     The CodeDirectory lands at a fixed offset in all seven images, and the test's
@@ -161,6 +176,8 @@ def build_image(path, identity, dependencies, slot=SLOT, sign=True):
     commands = [name_command(LC_ID_DYLIB, identity, slot)]
     for dependency in dependencies:
         commands.append(name_command(LC_LOAD_DYLIB, dependency, slot))
+    for dependency in weak_dependencies:
+        commands.append(name_command(LC_LOAD_WEAK_DYLIB, dependency, slot))
     if sign:
         head = b"".join(commands) + signature_command(0, 0)
         header = struct.pack("<IiIIIIII", MH_MAGIC_64, 0x0100000C, 0x0, MH_DYLIB,
@@ -192,11 +209,13 @@ def build_image(path, identity, dependencies, slot=SLOT, sign=True):
 
 
 def build_payload(root, slot=SLOT):
-    for _, directory, leaf, identity in IMAGES:
+    for name, directory, leaf, identity in IMAGES:
         dependencies = [FOUNDATION_SYSTEM]
         if identity != JAVASCRIPTCORE_SYSTEM:
             dependencies.append(JAVASCRIPTCORE_SYSTEM)
-        build_image(os.path.join(root, directory, leaf), identity, dependencies, slot)
+        weak = WEAK_DEPENDENCIES if name == "WebCore" else ()
+        build_image(os.path.join(root, directory, leaf), identity, dependencies, slot,
+                    weak_dependencies=weak)
 
 
 def read(path):
@@ -263,7 +282,7 @@ def main():
         check("plan exits 0 on a payload that fits", result.returncode == 0, result.stderr)
         check("plan writes nothing", not os.path.exists(staging))
         check("plan counts the rewrites and the preserved /System references apart",
-              "Planned 13 rewrite(s)" in result.stdout
+              "Planned 16 rewrite(s)" in result.stdout
               and "7 /System reference(s) left byte for byte alone" in result.stdout,
               result.stdout)
 
@@ -272,14 +291,15 @@ def main():
         check("write leaves the source payload byte for byte as it was",
               before == {path: digest(path) for path in walk(payload)})
 
-        # Thirteen edges in this synthetic tree: seven identities and six
+        # Sixteen edges in this synthetic tree: seven identities, six
         # dependencies on the system JavaScriptCore — every image except
-        # JavaScriptCore itself. The one dependency on a real system framework
-        # each image carries is what the preserved count above stands for.
+        # JavaScriptCore itself — and WebCore's three LC_LOAD_WEAK_DYLIB commands.
+        # The one dependency on a real system framework each image carries is what
+        # the preserved count above stands for.
         plans = module.plan_payload(payload)
         total = sum(len(rewrites) for _, _, _, _, _, rewrites in plans)
         check("every planned rewrite is an identity or a dependency on the seven",
-              total == 13, str(total))
+              total == 16, str(total))
 
         problems, signed, identity_kept = module.verify(staging)
         check("verify finds no problem in the written tree", not problems, repr(problems))
@@ -324,6 +344,28 @@ def main():
             identity = identity_of(read(os.path.join(staging, device_path.lstrip("/"))))
             check("%s: calls itself the path it occupies" % name,
                   identity == device_path, repr(identity))
+
+        # WebCore's weak set is what the load order in src/load_chain.c exists to
+        # satisfy, so it is read back rather than assumed: the three weak commands
+        # that name one of the seven have to come out naming /var/jb, and none may
+        # still name /System. A rewrite that skipped one of them leaves the weak
+        # import binding the resident 16.1 copy, which is the failure the order and
+        # the rewrite are both there to prevent.
+        web_core = read(os.path.join(staging, module.DESTINATION_ROOT.lstrip("/"),
+                                     "WebCore.framework", "WebCore"))
+        weak_after = weak_dependencies_of(web_core)
+        check("WebCore keeps exactly three weak dependencies on the seven",
+              len(weak_after) == len(WEAK_DEPENDENCIES), repr(weak_after))
+        check("every one of WebCore's three weak dependencies names /var/jb",
+              all(path.startswith(module.DESTINATION_ROOT) for path in weak_after),
+              repr(weak_after))
+        check("none of WebCore's weak dependencies still names /System",
+              not any(path.startswith("/System") for path in weak_after),
+              repr(weak_after))
+        check("the weak set survived the rewrite unchanged in membership",
+              sorted(weak_after) == sorted(module.SYSTEM_TO_DESTINATION[name]
+                                           for name in WEAK_DEPENDENCIES),
+              repr(sorted(weak_after)))
 
         # The capacity guard, exercised in process because the seven real
         # replacements are all strictly shorter than the names they replace: no
@@ -371,8 +413,8 @@ def main():
         result = run("write", payload, probe, "--deps-only")
         check("--deps-only exits 0", result.returncode == 0, result.stderr)
         problems, _, identity_kept = module.verify(probe, rewrite_identity=False)
-        check("--deps-only rewrites the six dependencies and no identity",
-              count_rewrites(probe, module) == 6, str(count_rewrites(probe, module)))
+        check("--deps-only rewrites the nine dependencies and no identity",
+              count_rewrites(probe, module) == 9, str(count_rewrites(probe, module)))
         check("--deps-only is reported as keeping all seven system identities",
               len(identity_kept) == 7, repr(identity_kept))
         check("--deps-only raises no problem of its own", not problems, repr(problems))
@@ -439,6 +481,27 @@ def source_directory(name):
     raise KeyError(name)
 
 
+def weak_dependencies_of(data):
+    """The LC_LOAD_WEAK_DYLIB names in a written image, in command order.
+
+    Read from the bytes rather than from the plan, because the plan says what was
+    intended and this says what dyld will see. The page hashes change under the
+    rewrite and nothing else, so a name read here is the name that was written.
+    """
+    names = []
+    offset = MACH_HEADER_SIZE_64
+    count, _ = struct.unpack_from("<II", data, 16)
+    for _ in range(count):
+        command, size = struct.unpack_from("<II", data, offset)
+        if command == LC_LOAD_WEAK_DYLIB:
+            name_offset, = struct.unpack_from("<I", data, offset + 8)
+            start = offset + name_offset
+            end = data.index(b"\0", start)
+            names.append(data[start:end].decode())
+        offset += size
+    return names
+
+
 def identity_of(data):
     offset = MACH_HEADER_SIZE_64
     count, _ = struct.unpack_from("<II", data, 16)
@@ -463,8 +526,11 @@ def all_all_zero_after_name(data, rewrites):
 
 
 def count_rewrites(root, module):
-    """How many load commands in a written tree still name a system path they
-    should not, inverted: how many of the nine no longer do."""
+    """How many load commands in a written tree now name a /var/jb path that the
+    source named a system path for. Counts every command kind the rewrite targets,
+    LC_LOAD_WEAK_DYLIB included: WebCore's three weak commands are edges like the
+    strong ones, and leaving them out would let a tree that still binds the 16.1
+    dylibs pass."""
     rewritten = 0
     for _, directory, destination_directory, leaf in module.IMAGES:
         device_path = module.DESTINATION_ROOT + "/" + destination_directory + "/" + leaf
@@ -473,7 +539,7 @@ def count_rewrites(root, module):
         count, _ = struct.unpack_from("<II", data, 16)
         for _ in range(count):
             command, size = struct.unpack_from("<II", data, offset)
-            if command in (LC_LOAD_DYLIB, LC_ID_DYLIB):
+            if command in (LC_LOAD_DYLIB, LC_ID_DYLIB, LC_LOAD_WEAK_DYLIB):
                 name_offset, = struct.unpack_from("<I", data, offset + 8)
                 start = offset + name_offset
                 end = data.index(b"\0", start)

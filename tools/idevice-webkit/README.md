@@ -34,12 +34,33 @@ __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...`. JavaScriptCore is first
 because it exports the WTF symbols the rest bind, and WebKit is last because it
 reexports WebKitLegacy and loads JavaScriptCore.
 
+WebCore is why the two dylibs sit where they do. Its load commands carry
+`LC_LOAD_WEAK_DYLIB` on three of the seven — `libwebrtc`, `libANGLE-shared` and
+`WebGPU`. The other nine weak commands in that image name system libraries
+(`BrowserEngineCore`, `libxslt.1`, `libAccessibility` and six `libswift*`), so the
+three are the whole of the set this chain relates to. A weak import does not block
+the load. In the payload as shipped the three strings are
+`/System` paths, so a WebCore loaded first bound the resident 16.1 copies and the
+later `/var/jb` load mapped a second copy: that is the 31. In the rewritten tree
+all three strings are `/var/jb/.../WebKit18`, so the System string is gone and
+this import cannot name the system image at all — which is why the rewrite, not
+the ordering alone, is what makes the weak set safe. The ordering is what removes
+the duplicate under the payload's original strings, and `build-state.md` 第八轮
+measured exactly that.
+
 `RTLD_NOW` turns a missing symbol into a failed step instead of a fault at first
-call. `RTLD_GLOBAL` is the flag whose absence the device recorded as `0x0001`:
-without it each image is a separate scope, and WebCore's `LC_LOAD_WEAK_DYLIB`
-bindings to `libwebrtc`, `libANGLE-shared` and `WebGPU` resolve against the
-global scope, so those two must be GLOBAL for the measured order to mean
-anything.
+call, and every step asks for it.
+
+About `RTLD_GLOBAL`: the order measurement above is not evidence for it. The
+probe that produced those counts calls `dlopen(kImages[i], RTLD_NOW)` — see
+`docs/ios16-dyld-identity-and-load-conditions.md` 8.1 — with no `RTLD_GLOBAL`, so
+the 31 → 0 reading was taken with every image in its own scope, and no device run
+has compared the two modes. The flag is kept because it is the permissive
+placement: it cannot hide a sibling behind a private scope, and this dylib's own
+class and function lookups go through the global table
+(`symbol_find_global`). Whatever `RTLD_GLOBAL` is worth is unmeasured, and the
+chain's own edges do not need it: each of the seven names its siblings by
+absolute `/var/jb` path.
 
 The paths name `/var/jb/Library/WebKit18`, which `rewrite-payload.py` produces and
 repairs the signature of. Without that rewrite the seven keep their system install
