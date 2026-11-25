@@ -320,7 +320,7 @@ already: SYSTEM
 Symbol not found: __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyENSt3__14spanIKDsLm18446744073709551615EEE
 ```
 
-（`WebCore`、`WebKitLegacy`、`WebGPU`、`WebKit` 四个都因这条符号失败，`JavaScriptCore` 与两条 dylib 之外的顺序无法补救。）
+（`WebCore`、`WebKitLegacy`、`WebGPU`、`WebKit` 四个都因这条符号失败，调整 `JavaScriptCore` 与两条 dylib 以外的顺序无法补救。）
 
 三行读数说明：
 
