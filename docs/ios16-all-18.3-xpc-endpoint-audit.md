@@ -151,6 +151,8 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 覆盖了第 3、4、5、6 行。**未覆盖**第 2 行（那是另一个补丁的事）、第 8 行（`.xpc` 的加载命令）、第 9、10 行。
 
+`patches/ios16-ipc-message-number-translation.patch` 的 `XPCServiceEntryPoint.mm` hunk 已从 `getClientBundleIdentifier` 之后移到文件末尾，表头为 `@@ -235,4 +236,26 @@`（`XPCServiceExit` 之后、`} // namespace WebKit` 之前），上表那一行 `@@ -84,12 +85,137 @@` 保持原值，两处插入区间因此不再重叠。
+
 ### `patches/ios18-public-sdk-xpc-main.patch`（87 行，4 个 hunk）
 
 | hunk 位置 | 内容 | 对应上表 |
