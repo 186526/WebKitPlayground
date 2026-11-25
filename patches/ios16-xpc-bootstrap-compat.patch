@@ -19,157 +19,79 @@ index 0c1c422..6699031 100644
  
      // We don't want XPC to be in charge of whether the process should be terminated or not,
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-index b8112f7..4152e2b 100644
+index b8112f7..9306d3b 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-@@ -34,6 +34,7 @@
- #import <wtf/WTFProcess.h>
- #import <wtf/cocoa/Entitlements.h>
- #import <wtf/spi/darwin/SandboxSPI.h>
-+#import <wtf/spi/darwin/dyldSPI.h>
- #import <wtf/text/StringToIntegerConversion.h>
- 
- namespace WebKit {
-@@ -84,12 +85,137 @@ bool XPCServiceInitializerDelegate::getClientBundleIdentifier(String& clientBund
-     return !clientBundleIdentifier.isEmpty();
- }
- 
-+// The version each behavior was introduced in, mirroring the linkedBefore calls in
-+// WTF::computeSDKAlignedBehaviors (Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.cpp). A
-+// client linked before the version does not get the behavior.
-+static void setSDKAlignedBehaviorsFromClientSDKVersion(uint32_t clientSDKVersion, SDKAlignedBehaviors& behaviors)
-+{
-+    struct SDKVersionBehaviorPair {
-+        uint32_t sdkVersion;
-+        SDKAlignedBehavior behavior;
-+    };
-+
-+    static const SDKVersionBehaviorPair behaviorsIntroducedInVersion[] = {
-+        { DYLD_IOS_VERSION_9_0, SDKAlignedBehavior::PictureInPictureMediaPlayback },
-+        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::MediaTypesRequiringUserActionForPlayback },
-+        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::RequiresUserGestureToLoadVideo },
-+        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::LinkPreviewEnabledByDefault },
-+        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::ConvertsInvalidURLsToBlank },
-+        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::NoTheSecretSocietyHiddenMysteryWindowOpenQuirk },
-+        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::UnprefixedPlaysInlineAttribute },
-+        { DYLD_IOS_VERSION_10_0, SDKAlignedBehavior::SupportsInitConstructors },
-+        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::ExceptionsForDuplicateCompletionHandlerCalls },
-+        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::ExpiredOnlyReloadBehavior },
-+        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::DropToNavigateDisallowedByDefault },
-+        { DYLD_IOS_VERSION_11_0, SDKAlignedBehavior::WebIconDatabaseWarning },
-+        { DYLD_IOS_VERSION_11_3, SDKAlignedBehavior::DisallowsSettingAnyXHRHeaderFromFileURLs },
-+        { DYLD_IOS_VERSION_11_3, SDKAlignedBehavior::DefaultsToPassiveTouchListenersOnDocument },
-+        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::ScrollViewContentInsetsAreNotObscuringInsets },
-+        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::UIScrollViewDoesNotApplyKeyboardInsetsUnconditionally },
-+        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::MainThreadReleaseAssertionInWebPageProxy },
-+        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::NoMoviStarPlusCORSPreflightQuirk },
-+        { DYLD_IOS_VERSION_12_0, SDKAlignedBehavior::TimerThreadSafetyChecks },
-+        { DYLD_IOS_VERSION_12_2, SDKAlignedBehavior::LazyGestureRecognizerInstallation },
-+        { DYLD_IOS_VERSION_12_2, SDKAlignedBehavior::ProcessSwapOnCrossSiteNavigation },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::NoUnconditionalUniversalSandboxExtension },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::SnapshotAfterScreenUpdates },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::SupportsDeviceOrientationAndMotionPermissionAPI },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::DecidesPolicyBeforeLoadingQuickLookPreview },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::ExceptionsForRelatedWebViewsUsingDifferentDataStores },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::ModernCompabilityModeByDefault },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::HasUIContextMenuInteraction },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::WKContentViewDoesNotOverrideKeyCommands },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::SupportsOverflowHiddenOnMainFrame },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::NoIMDbCSSOMViewScrollingQuirk },
-+        { DYLD_IOS_VERSION_13_0, SDKAlignedBehavior::DownloadDelegatesCalledOnTheMainThread },
-+        { DYLD_IOS_VERSION_13_2, SDKAlignedBehavior::SiteSpecificQuirksAreEnabledByDefault },
-+        { DYLD_IOS_VERSION_13_4, SDKAlignedBehavior::RestrictsBaseURLSchemes },
-+        { DYLD_IOS_VERSION_13_4, SDKAlignedBehavior::SendsNativeMouseEvents },
-+        { DYLD_IOS_VERSION_13_4, SDKAlignedBehavior::MinimizesLanguages },
-+        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::SessionCleanupByDefault },
-+        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::InitializeWebKit2MainThreadAssertion },
-+        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::WKWebsiteDataStoreInitReturningNil },
-+        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::WebSQLDisabledByDefaultInLegacyWebKit },
-+        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::NoLaBanquePostaleQuirks },
-+        { DYLD_IOS_VERSION_14_0, SDKAlignedBehavior::NoPokerBrosBuiltInTagQuirk },
-+        { DYLD_IOS_VERSION_14_2, SDKAlignedBehavior::SupportsiOSAppsOnMacOS },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::DataURLFragmentRemoval },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::HTMLDocumentSupportedPropertyNames },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::ObservesClassProperty },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::NoWeChatScrollingQuirk },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::SharedNetworkProcess },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::BlanksViewOnJSPrompt },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::NoClientCertificateLookup },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::DefaultsToPassiveWheelListenersOnDocument },
-+        { DYLD_IOS_VERSION_14_5, SDKAlignedBehavior::AllowsWheelEventGesturesToBecomeNonBlocking },
-+        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::NullOriginForNonSpecialSchemedURLs },
-+        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::DOMWindowReuseRestriction },
-+        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::NoExpandoIndexedPropertiesOnWindow },
-+        { DYLD_IOS_VERSION_15_0, SDKAlignedBehavior::DoesNotDrainTheMicrotaskQueueWhenCallingObjC },
-+        { DYLD_IOS_VERSION_15_4, SDKAlignedBehavior::AuthorizationHeaderOnSameOriginRedirects },
-+        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::NoTypedArrayAPIQuirk },
-+        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::ForbidsDotPrefixedFonts },
-+        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::ContextMenuTriggersLinkActivationNavigationType },
-+        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::DoesNotParseStringEndingWithFullStopAsFloatingPointNumber },
-+        { DYLD_IOS_VERSION_16_0, SDKAlignedBehavior::UIBackForwardSkipsHistoryItemsWithoutUserGesture },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::NoShowModalDialog },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::DoesNotAddIntrinsicMarginsToFormControls },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::ProgrammaticFocusDuringUserScriptShowsInputViews },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::DefaultsToExcludingBackgroundsWhenPrinting },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::InspectableDefaultsToDisabled },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::PushStateFilePathRestriction },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::NoUNIQLOLazyIframeLoadingQuirk },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::UsesGameControllerPhysicalInputProfile },
-+        { DYLD_IOS_VERSION_16_4, SDKAlignedBehavior::ScreenOrientationAPIEnabled },
-+        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::FullySuspendsBackgroundContent },
-+        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::RunningBoardThrottling },
-+        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::PopoverAttributeEnabled },
-+        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::LiveRangeSelectionEnabledForAllApps },
-+        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::DoesNotOverrideUAFromNSUserDefault },
-+        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::EvaluateJavaScriptWithoutTransientActivation },
-+        { DYLD_IOS_VERSION_17_0, SDKAlignedBehavior::ResettingTransitionCancelsRunningTransitionQuirk },
-+        { DYLD_IOS_VERSION_17_2, SDKAlignedBehavior::OnlyLoadWellKnownAboutURLs },
-+        { DYLD_IOS_VERSION_17_2, SDKAlignedBehavior::ThrowIfCanDeclareGlobalFunctionFails },
-+        { DYLD_IOS_VERSION_17_4, SDKAlignedBehavior::AsyncFragmentNavigationPolicyDecision },
-+        { DYLD_IOS_VERSION_17_4, SDKAlignedBehavior::DoNotLoadStyleSheetIfHTTPStatusIsNotOK },
-+        { DYLD_IOS_VERSION_17_4, SDKAlignedBehavior::ScrollViewSubclassImplementsAddGestureRecognizer },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::FullySuspendsBackgroundContentImmediately },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::NoGetElementsByNameQuirk },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::ApplicationStateTrackerDoesNotObserveWindow },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::ThrowOnKVCInstanceVariableAccess },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BlockOptionallyBlockableMixedContent },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::LaxCookieSameSiteAttribute },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::UseCFNetworkNetworkLoader },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BrowsingContextControllerSPIAccessRemoved },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BlocksConnectionsToAddressWithOnlyZeros },
-+        { DYLD_IOS_VERSION_18_0, SDKAlignedBehavior::BlockCrossOriginRedirectDownloads },
-+    };
-+
-+    behaviors.setAll();
-+    for (auto& pair : behaviorsIntroducedInVersion) {
-+        if (clientSDKVersion < pair.sdkVersion)
-+            behaviors.clear(static_cast<size_t>(pair.behavior));
-+    }
-+}
-+
- bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehaviors& behaviors)
- {
-     size_t length = 0;
+@@ -90,10 +90,66 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
      auto behaviorData = xpc_dictionary_get_data(m_initializerMessage, "client-sdk-aligned-behaviors", &length);
--    if (!length || !behaviorData)
--        return false;
-+    if (!length || !behaviorData) {
-+        // A UI process older than 18.x sends the version it was linked against as a decimal string
-+        // instead of the behavior bit set. Rebuild the set from that version, so a helper launched
-+        // by such a UI process does not start with every behavior disabled. The caller ignores the
-+        // return value, so the behaviors have to be filled in here.
-+        auto clientSDKVersionString = xpc_dictionary_get_string(m_initializerMessage, "client-sdk-version");
-+        if (!clientSDKVersionString)
-+            return false;
-+        auto clientSDKVersion = parseInteger<uint32_t>(StringView::fromLatin1(clientSDKVersionString));
-+        if (!clientSDKVersion)
-+            return false;
-+        setSDKAlignedBehaviorsFromClientSDKVersion(*clientSDKVersion, behaviors);
+     if (!length || !behaviorData)
+         return false;
+-    RELEASE_ASSERT(length == behaviors.storageLengthInBytes());
+-    memcpy(behaviors.storage(), behaviorData, length);
+ 
+-    return true;
++    // SDKAlignedBehaviors is a bit set indexed by SDKAlignedBehavior, and that enumeration gained,
++    // lost and reordered members between releases, so a shared width does not by itself mean a
++    // shared layout: three words is 16.4 as well as 18.0 through 18.3, and those two generations
++    // hold the same enumerator at 3 of 73 and 53 of 93 positions respectively.
++    //
++    // The counts below are the VALUE of SDKAlignedBehavior::NumberOfBehaviors, which is the
++    // template argument SDKAlignedBehaviors is declared with, and therefore the number of real
++    // behaviours. It is one less than the number of enumerator lines in the header, because the
++    // trailing NumberOfBehaviors sentinel is itself an enumerator line but not a behaviour;
++    // counting lines instead of the value makes 16.2 and 16.3 look like three words when they are
++    // two. Measured by compiling each release's own enum and this tree's word formula:
++    //
++    //   18.3.1 (this build)  94 behaviors, 12 bytes
++    //   18.0                 93 behaviors, 12 bytes, same index at 53 of 93 positions, and it both
++    //                        adds NoSearchInputIncrementalAttributeAndSearchEvent off the tail and
++    //                        lacks two names this build has
++    //   17.0                 79 behaviors, 12 bytes, same index at 3 of 79
++    //   16.4                 73 behaviors, 12 bytes, same index at 3 of 73
++    //   16.2 / 16.3          64 behaviors,  8 bytes, same index at 3 of 64
++    //   16.0 / 16.1          63 behaviors,  8 bytes, same index at 3 of 63
++    //
++    // The width only separates 16.0 through 16.3, which are two words, from 16.4 onwards, which
++    // are three. Inside the three-word group it cannot tell 16.4 from this build. What it does
++    // settle is direction: a narrower payload is older than this build, and a wider one is newer.
++    //
++    // It settles one more case, the one that matters under the deployment this build is for, where
++    // the UI process loads this very framework through the override rather than its own: the
++    // payload is exactly as wide as this build's own layout, and is this build's own layout, because
++    // ProcessLauncherCocoa.mm writes sdkBehaviors.storage() with sdkBehaviors.storageLengthInBytes()
++    // out of that same BitSet instantiation. Copying that one is correct, and is what upstream does.
++    // It is also the only case that keeps the two processes in agreement, since the UI process
++    // computes its set from its own main executable's SDK version and the helper would otherwise be
++    // left with every behaviour off. The price of keying on width is that a 16.4, 17.0 or 18.0
++    // through 18.2 peer, which also sends three words, is copied under a layout it does not share;
++    // upstream takes that price too, and no build here is deployed against such a peer.
++    //
++    // What this function guarantees for a payload of any other width is a defined bitmap, not a
++    // translated one: the argument arrives zero-initialised, so leaving it alone applies the
++    // default-off set that WTF::computeSDKAlignedBehaviors produces for a client linked before
++    // every behavior.
++    //
++    // There is deliberately no fallback on the "client-sdk-version" bootstrap key either. WebKit
++    // for iOS 16.0 stopped writing and reading it, so no 16.x peer has ever sent it to this helper.
++    const size_t ownLength = behaviors.storageLengthInBytes();
++
++    if (length == ownLength) {
++        memcpy(behaviors.storage(), behaviorData, length);
 +        return true;
 +    }
-     RELEASE_ASSERT(length == behaviors.storageLengthInBytes());
-     memcpy(behaviors.storage(), behaviorData, length);
++
++    if (length < ownLength)
++        RELEASE_LOG_ERROR(IPC, "UI process sent a %zu-byte SDK aligned behavior bitmap, narrower than this build's %zu-byte layout, so it comes from an older generation; every SDK aligned behavior stays at its default", length, ownLength);
++    else
++        RELEASE_LOG_ERROR(IPC, "UI process sent a %zu-byte SDK aligned behavior bitmap, wider than this build's %zu bytes, so it comes from a newer generation; every SDK aligned behavior stays at its default", length, ownLength);
++
++    // Reported false for a peer whose payload was rejected, so a caller can tell it from one whose
++    // payload was applied. The caller ignores the value, as it always has, and a true return does
++    // not by itself mean anything was copied.
++    return length < ownLength;
+ }
  
+ bool XPCServiceInitializerDelegate::getProcessIdentifier(WebCore::ProcessIdentifier& identifier)
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 index 9c1adcf..018fed1 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
