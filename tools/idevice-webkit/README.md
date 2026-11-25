@@ -9,6 +9,35 @@ Two device measurements, both taken on iPad14,4 / iPadOS 16.1, decide what this
 directory does. They are written here because they are not inferable from the
 sources.
 
+## The seven 18.3 images load as a chain, not as one dlopen
+
+The tweak used to `dlopen` WebKit alone. The device answered:
+
+```
+dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001):
+  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+  Referenced from: <787DFAB1-...> .../WebKit.framework/WebKit
+  Expected in:     <D309AA36-...> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+```
+
+The entry image was 18.3; the dependency it bound was 16.1. `src/load_chain.c`
+loads all seven in the measured order (JavaScriptCore first, WebKit last), each
+by explicit `/var/jb` path with `RTLD_NOW|RTLD_GLOBAL`, and stops at the first
+failure so the report names the step rather than the last image that happened to
+be tried. `RTLD_NOW` turns a missing symbol into a failed step instead of a fault
+at first call; `RTLD_GLOBAL` puts each image's exports where the next load
+resolves against them.
+
+The paths name `/var/jb/Library/WebKit18`, which `rewrite-payload.py` produces and
+repairs the signature of. Without that rewrite the seven keep their system install
+names and bind the resident 16.1 siblings. See `docs/rewrite-payload.md`.
+
+The report states two readings separately, because they are different questions:
+the seven UUIDs are what the chain loaded, and the three system UUIDs are what the
+application's own `/System/.../WebKit` request had already resolved. Equal sets
+mean the substitution happened; disjoint sets mean the payload works and the
+browser is still on 16.1. Do not read "seven loaded" as "the browser runs 18.3".
+
 ## The filter's lists sit in the top-level Filter dictionary
 
 `WebSafeWebKitFilter.plist` has one top-level key, `Filter`, and `Classes` and

@@ -28,6 +28,10 @@ void *library_load(const char *path) {
   return dlopen(path, load_lazy);
 }
 
+void *library_load_with_mode(const char *path, i32 mode) {
+  return dlopen(path, mode);
+}
+
 void *symbol_find(void *library, const char *name) {
   return library == no_library ? NULL : dlsym(library, name);
 }
