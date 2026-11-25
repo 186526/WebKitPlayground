@@ -501,7 +501,7 @@ client-sdk-aligned-behaviors, extra-initialization-data
 1. **版本协商字段**：`Encoder::encodeHeader()` 只写 flags、messageName、destinationID（16.1 `Encoder.cpp:159-164`，18.3 `:162-167`），没有版本字段。`InitializeConnection` 的消息体只有 mach 端口（16.1 `ConnectionCocoa.mm:217-223`，18.3 `:181-192`）。不存在协商点。
 2. **消息号映射**：`MessageName` 是编译期枚举，分发靠 `Messages::X::Y::name()` 常量比对（16.1 `messages.py:586-603`，18.3 `:673-698`），没有运行时查表或别名。
 3. **参数向后兼容读取**：`Decoder::decode<T>()` 失败时置 invalid 并返回 `nullopt`（16.1 `Decoder.h:120-135`），没有「跳过未知字段」的能力；生成式 serialization 也不支持带默认值的可选字段跳过。
-4. **未识别消息的容错**：生成器在 `didReceiveMessage` 末尾写的是 `ASSERT_NOT_REACHED_WITH_MESSAGE`（16.1 `messages.py:1177`，18.3 `:1432`）。该宏展开成 `ASSERT_WITH_MESSAGE`，两个宏各自在 `!ASSERT_ENABLED` 下都退化为空语句：`ASSERT_NOT_REACHED_WITH_MESSAGE` 在 `Source/WTF/wtf/Assertions.h` 里 16.1 是 `:440`、18.3.1 是 `:498`；它展开到的 `ASSERT_WITH_MESSAGE` 的 `((void)0)` 分支在 16.1 是 `:428`、18.3.1 是 `:485`。发布构建里未识别消息确实不触发断言，但这是「丢弃」，不是「兼容」。
+4. **未识别消息的容错**：生成器在 `didReceiveMessage` 末尾写的是 `ASSERT_NOT_REACHED_WITH_MESSAGE`（`Safari-614.1.9` 的 `messages.py:1177`，发货 16.1 为 `:1176`；18.3 `:1432`）。该宏展开成 `ASSERT_WITH_MESSAGE`，两个宏各自在 `!ASSERT_ENABLED` 下都退化为空语句：`ASSERT_NOT_REACHED_WITH_MESSAGE` 在 `Source/WTF/wtf/Assertions.h` 里 16.1 是 `:440`、18.3.1 是 `:498`；它展开到的 `ASSERT_WITH_MESSAGE` 的 `((void)0)` 分支在 16.1 是 `:428`、18.3.1 是 `:485`。发布构建里未识别消息确实不触发断言，但这是「丢弃」，不是「兼容」。
 5. **进程级容错**：`WebProcessProxy::didReceiveInvalidMessage` 的选择是 `terminate()`，没有重试、没有降级到旧协议的分支（`WebProcessProxy.cpp:963-978`）。
 
 结论：没有降级路径。而且这次连「丢弃后继续跑」都不成立——第 6 节的终止发生在第一条消息上。
