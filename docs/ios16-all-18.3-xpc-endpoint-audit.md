@@ -77,13 +77,18 @@ M47 的直接证据：Music.app（pid 42029）加载自己 app 包内的 `MusicA
 
 ```sh
 APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
-launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
 ```
 
 先在覆盖目录不存在时取一次基线（塔今天读到六条，见附录 A），再装覆盖目录取一次。
 
-- **(A) 覆盖目录建立后仍为六条或四条** —— launchd 会现扫索引外的 `XPCServices`。全 18.3 的启动链在路上，剩下的是 helper 与 UI 之间的协议与 ABI 问题。
-- **(B) 覆盖目录建立后缩到两条以内（只剩 `BrailleTranslation` 与 `MTLCompilerService`）** —— launchd 只认索引内路径。
+**判据是四个基础服务名各自在不在，不是某个固定条数。** 段里每个活着的页面各注册一条带 UUID 后缀的实例条目，所以按行 `grep -cE` 的读数随页面数漂移：2026-11-25 20:41 CST 在 Chrome pid 626 上同一段按行得 9（其中 5 条带 UUID），去重后的基础名是 4 个。附录 A 的「六条」与 `build-state.md` 的「8」都是采样值，不是常量，不能当对照基线。
+
+- **(A) 覆盖目录建立后四个基础名仍在** —— launchd 会现扫索引外的 `XPCServices`。全 18.3 的启动链在路上，剩下的是 helper 与 UI 之间的协议与 ABI 问题。
+- **(B) 覆盖目录建立后缩到两个以内（只剩 `BrailleTranslation` 与 `MTLCompilerService` 一类）** —— launchd 只认索引内路径。
 
 **读这个数字之前必须先排除 dyld 中止。** 因为 (B) 的读数有两种完全不同的成因，不排除 dyld 就无法归因：
 
@@ -200,8 +205,9 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 塔在 `192.168.2.135` 上的只读读数（2026-11-25；该地址此后失效，现报 `No route to host`，2026-11-26 00:53Z 复核时设备在 `192.168.2.136`）：
 
 - 覆盖目录不存在时 Safari 域（pid 69370）`services = {` 六条：`com.apple.accessibility.BrailleTranslation.BrailleTranslationService`、`com.apple.WebKit.WebContent`、`com.apple.MTLCompilerService`、`com.apple.WebKit.GPU`、`com.apple.WebKit.Networking`、`com.apple.WebKit.WebContent.CaptivePortal`。
+- **2026-11-25 20:41 CST 复核，同一口径在 Chrome pid 626 上：`services = {` 段 14 行、去重后基础名 12 个，其中 WebKit 名下 4 个（`WebContent`、`GPU`、`Networking`、`WebContent.CaptivePortal`）。按行 `grep -cE` 得 9，其中 5 条是带 UUID 后缀的页面实例。上面那条「六条」与 `build-state.md` 的「8」都是采样值，不是常量；判据用去重后的基础名。**
 - `launchctl print pid/69370` 的 `environment` 段落含 `DYLD_LIBRARY_PATH => .../procursus/Library/WebKitOverride/usr/lib` 与 `DYLD_FRAMEWORK_PATH => .../procursus/Library/WebKitOverride`。
-- `/var/jb/basebin/gen/dyld` 974608 字节，`Nov 24 08:44`；用 python 读二进制计数 `_MACHOMERGER_HOOK__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc` = 1、`...23isAlwaysOverridablePathEPKc` = 1、`dlopen_from` = 1、`__fcntl` = 1。设备上**没有 `strings`**，用 `strings | grep -c` 会得到假 0。**这一条是 11-24 那个时点的读数，不是现行值**：同一文件在 2026-11-26 01:07:50 CST 读到 974016 字节、`sha256 486620f0…`、判定 (b) `1 0 0 1`，`gen/` 下只有 `dyld` 与 `dyld.orig`（无 `dyld.old`），01:03 之后的读数见 `docs/ios16-whole-18.3-deployment-path.md` 附录 B 与 `docs/ios16-next-build-go-no-go.md` 的 5.1 节。两次用的是同一个数法，差别在文件，所以两份读数可以直接对照。
+- `/var/jb/basebin/gen/dyld` **974016** 字节、`sha256 486620f0c5ce26e602f0155412375d9c9d564f10b014fee2c369cd58e55751ba`、`Nov 25 10:37`。判据是 runbook 第五阶段判定 (b)：先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 取出全部合并后符号，再按 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 四个名字过滤，读数依次写成四列。设备上这份文件读 **`1 0 0 1`**，即 `dlopen_from` 与 `__fcntl` 两个原生 hook 在场、两个覆盖用的 hook 不在，所以 basebin 层当前**未**部署；补齐后是 `1 1 1 1`。**不要改用裸子串计数**：裸串 `isOverridablePath` 在 `gen/dyld` 里本来就出现 1 次，来自 dyld 自己的导出符号 `__ZNK5dyld413ProcessConfig9DyldCache17isOverridablePathEPKc`；`MACHOMERGER` 出现 38 次，全部来自原生两个 hook 的符号、trampoline 与 orig，这两个数在任何一份 dyld 上都不为零，区分不了装没装。设备上**没有 `strings`**，用 `strings | grep -c` 会得到假 0。**这两个字节数在 `../../webkit-install-runbook.md:113-114` 的表里含义相反，读任何一处之前先对一遍**：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」，`974608` =「已合入两个新 hook」。本附录早先记的那一版是 974608 字节、`Nov 24 08:44`，那是 11-24 那个时点的读数，不是现行值；那一版已不在设备上，`dyld.old` 也不在了。同一天的读数与判据见 `docs/ios16-whole-18.3-deployment-path.md` 附录 B 的 B.1。
 - `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 50758784 字节，`Nov 24 18:06`，`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；五个 `.xpc` 的 `minos` 同为 `16.1.0`，各自二进制含 `DYLD_FRAMEWORK_PATH` 2 次、`/var/jb/Library/Frameworks` 1 次；系统桩这两个串均为 0。
 - `/var/jb/Library/WebKitOverride` 为 `ABSENT`。
 

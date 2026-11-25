@@ -62,7 +62,7 @@ xpc_connection_set_bootstrap(m_xpcConnection.get(), initializationMessage.get())
 
 `_CFBundleSetupXPCBootstrap` 在 CoreFoundation 的私有头里有声明（`apple-oss-distributions/CF`, `CFBundlePriv.h:259-260`，`CF_AVAILABLE(10_10, 8_0)`），但 CF 开源树只有 CFLite，**实现不在其中**（`grep -c XPCBootstrap CFBundle.c` = 0）。所以「bootstrap 字典里到底带了哪些 framework 路径」无源码可查。
 
-这一点很重要：launchd 若要从「该 pid 域加载了什么」推算候选集，最直接的通道就是这份握手时提交的 bootstrap 字典。另一条可能的通道是 launchd 在 `dlopen` 时收到 dyld 的通知（dyld 有 `dlopen_from` 一类的回调点，Dopamine 的 dyld 补丁就挂在它上面，`docs/ios16-all-18.3-xpc-endpoint-audit.md:204` 记录过在设备二进制里数到 `dlopen_from` 命中 1 次），所以「launchd 完全不知道进程 dlopen 了什么」这个说法不能成立。两条通道的区别在于时机：bootstrap 字典只在启动时提交一次，dyld 通知则随每次 `dlopen` 发生。
+这一点很重要：launchd 若要从「该 pid 域加载了什么」推算候选集，最直接的通道就是这份握手时提交的 bootstrap 字典。另一条可能的通道是 launchd 在 `dlopen` 时收到 dyld 的通知（dyld 有 `dlopen_from` 一类的回调点，Dopamine 的 dyld 补丁就挂在它上面，`docs/ios16-all-18.3-xpc-endpoint-audit.md:210` 记录过设备 `gen/dyld` 的判定 (b) 里 `dlopen_from` 计数为 1），所以「launchd 完全不知道进程 dlopen 了什么」这个说法不能成立。两条通道的区别在于时机：bootstrap 字典只在启动时提交一次，dyld 通知则随每次 `dlopen` 发生。
 
 现有读数无法区分这两条通道，但它们对本文结论的影响相同：**两个通道都只在「有镜像被加载」时才带回 framework 路径**。空目录与只含 `Info.plist` 的目录不产生新镜像，两条通道都不触发，于是仍是系统那份 `WebKit` 的条目。
 
@@ -436,7 +436,7 @@ launchd_flat_mach_namespace = false;
 
 真正支撑这一步的是两条设备读数：
 
-- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:202`），Chrome 基线 8 条（`build-state.md:502`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
+- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:207`），Chrome 基线 8 条（`build-state.md:502`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
 - 四个 WebKit 服务名在 `system`/`user/501`/`gui/501` 三域都查不到（`build-state.md:408`）。
 
 这两条只说明「`print pid/N` 看到的那个集合很小」，不能单独证明「这个集合来自 XPC 域」，也不能排除「来自某个很小的非 XPC 域」。9.9 第 1 条是能把它定案的读数。
@@ -536,7 +536,7 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
 **两种口径下结论相同，但论证要分清是哪一条：**
 
 - **本仓库树**：四处调用都被 `#if PLATFORM(MAC)` 排除在 iOS 编译之外（文件本身是否参与 iOS 构建是另一回事），其中只有 `DaemonUtilities.mm:40` 带 `XPC_CONNECTION_MACH_SERVICE_LISTENER`（即「登记成服务等连接」），其调用者 `WebPushDaemonMain.mm:179` 与 `PCMDaemonEntryPoint.mm:147` 也都在守卫内。
-- **上游**：这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。其中 `DaemonUtilities.mm:39` 服务于 webpushd（`ENABLE_WEB_PUSH_NOTIFICATIONS` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:243-245` 对 `PLATFORM(IOS)` 默认 1），`RemoteInspectorCocoa.mm:332` 属于 JavaScriptCore 的 `RemoteInspector`，连的是 webinspectord relay（`ENABLE_REMOTE_INSPECTOR` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:765-767` 默认 1，文件在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30` 收录）。这两个都不是 WebKit 的 WebContent/Networking/GPU helper；另两个 `DaemonConnectionCocoa.mm:67` 与 `WebPushToolConnection.mm:80` 是客户端侧，flag 为 `0`（`docs/ios16-all-18.3-xpc-endpoint-audit.md:107`）。
+- **上游**：这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。其中 `DaemonUtilities.mm:39` 服务于 webpushd（`ENABLE_WEB_PUSH_NOTIFICATIONS` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:243-245` 对 `PLATFORM(IOS)` 默认 1），`RemoteInspectorCocoa.mm:332` 属于 JavaScriptCore 的 `RemoteInspector`，连的是 webinspectord relay（`ENABLE_REMOTE_INSPECTOR` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:765-767` 默认 1，文件在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30` 收录）。这两个都不是 WebKit 的 WebContent/Networking/GPU helper；另两个 `DaemonConnectionCocoa.mm:67` 与 `WebPushToolConnection.mm:80` 是客户端侧，flag 为 `0`（`docs/ios16-all-18.3-xpc-endpoint-audit.md:112`）。
 
 **所以「WebKit helper 不走 Mach 服务名」这个结论在两种口径下都成立**，只是它不能靠「iOS 上一行都不编译」这个断言来支撑——上游这四个调用点都没有平台守卫。支撑它的是：四处调用没有一处出现在 WebKit helper 的入口路径上（`XPCServiceMain.mm` 走的是本仓库树里那段 `xpc_main` 等价物或上游的 `xpc_main`，两者都只等 launchd 递 peer）。
 
@@ -667,16 +667,44 @@ if (!strcmp(key, "LaunchDaemons")) {                                     // :38
 
 ### 9.9 设备读数清单：一次定案本节结论
 
-**设备离线，以下五条全部未执行。** 工具限 `ps`/`launchctl`/`lldb`/`killall`/`uiopen`/`ls`/`grep`/`wc`/`tail`/`sed`/`awk`。所有项先过前置检查（`build-state.md:937-941`）：`launchctl print gui/501` 必须非空且退出 0，否则先重启，读数作废。
+**这五条里有四条至今未执行；第 1 条的判据命令本身是错的，已在本节修正并实测。** 工具限 `ps`/`launchctl`/`lldb`/`killall`/`uiopen`/`ls`/`grep`/`wc`/`tail`/`sed`/`awk`。
+
+前置检查原先写成「`launchctl print gui/501` 必须非空且退出 0，否则先重启」。这条判据在 iOS 16.1 加 Dopamine 的设备上恒不成立，且设备健康时也不成立：2026-11-25 20:41 CST 实测，开机 10 小时、Safari pid 622 与 Chrome pid 626 均为开机时启动、23 个 WebKit helper 在跑的设备上，`launchctl print gui/501` 返回 `exit=125`、0 行输出、stderr 也为空，加 `sudo` 与不加 `sudo` 同样是 `exit=125`、0 行（五种写法全部如此：`sudo -S -p ""`、`printf` 喂密码、`sudo -i`、root `bash -c`、`sudo -n`）。同一时刻 `launchctl print system` 的域列表只有 `user/501`（第 300 行），没有 `gui/501`；`launchctl print user/501` 返回 `exit=0`、2135 行、`active count = 573`，其中 `com.apple.SpringBoard` pid 345 与 `com.apple.backboardd` pid 380 都在。iOS 的图形会话落在 `user/501`，`gui/501` 本来就不存在。
+
+旧判据的出处是 `build-state.md` 的〈七、`gui/501` 图形域丢失：现象、已试手段、结论〉一节，那节的结论句「需要一次正常重启，`gui/501` 才会重建」与紧随其后的前置检查段，就是「`gui/501` 必须非空」这条的原文。该节的结论只适用于它记录的那次事故（2026-11-25 02:05 前后应用全部起不来），同一文件〈第十轮〉第一节已用健康设备的读数把它降为事故专用。
+
+所以前置检查改成读图形会话本身：
+
+```sh
+launchctl print user/501/com.apple.SpringBoard | grep -m1 'state = '
+```
+
+判据是 `state = running`。实测该命令返回 `exit=0`，`state = running`，`active count = 39`。job 缺失（`exit=113`）、job 存在但未运行（`state = not running`）、`user/501` 域缺失，三种形态各自给出不同的退出码与 state，都能与「设备正常」区分。`launchctl print gui/501` 仍照记，但只作为诊断读数，不再作为前置条件。
 
 **第 1 条：确认 app 的域是私有域**（直接判据，至今未取过）
 
+原判据命令是 `grep -c ' => '`，这条在该设备上恒为 0：`launchctl print` 的 `services = {` 段是制表符分隔的三列（优先级、`-`、服务名），没有 ` => `。实测 pid 626 该段 14 行、`grep -c ' => '` 得 0，`grep -c "	com\.apple\."` 得 12。改成按服务名计数，并且只数基础名，不数带 UUID 的实例条目：
+
 ```sh
 APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
-launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -c ' => '
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
+  | grep -oE 'com\.apple\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u | wc -l
 ```
 
-预期：服务名条数是个位数（基线 8）。若达到数百条，说明该 pid 的视图来自 `root_jobmgr`，9.1 的结论要重写。
+实测 `launchctl print pid/345` 该段去重后 12 个基础名，其中 WebKit 四个都在。SpringBoard 的域名下挂着十来个别的服务（`MTLCompilerService`、`SiriTTSService.TrialProxy`、`siri.embeddedspeech` 等），所以「个位数」这个预期是错的；有意义的判据是这个数与 `root_jobmgr` 的量级差开，以及 WebKit 那四个在不在：
+
+```sh
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' \
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
+```
+
+预期：恰好这四个名字。若该段达到数百条，说明该 pid 的视图来自 `root_jobmgr`，9.1 的结论要重写。
+
+**为什么不能沿用「基线 8」这个数。** 旧的判据是 `grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'`，它数的是**行**，而 launchd 给每个活着的页面各注册一条带 UUID 后缀的实例条目。pid 626 实测：该正则有 9 行命中，其中 5 行带 UUID；去重后的基础名是 4 个（`WebContent`、`GPU`、`Networking`、`WebContent.CaptivePortal`）。另一个时刻同一台设备的 `WebContent` 实例数是 3，所以行数读数随页面数在 4 到 9 以上浮动。`build-state.md` 的「无覆盖目录时该值是 8」是某一次的采样值，不是常量，不能当作「端点全失 = 0」的对照基线。判据应改为四个基础服务名各自在不在，见 `docs/ios16-override-endpoint-probe.md` 第二节与 `docs/ios16-branch-a-deployment-path.md` 第 1.1 节。
 
 **第 2 条（决定项）：确认别的域的 `MachServices` 名不进入 app 视图。** 这一条没有覆盖目录也能做，是本节唯一能直接判定「名字落进 app 可见的域」这件事的读数，也是 9.1 那个前提的判据。`$APP` 取第 1 条的结果。
 

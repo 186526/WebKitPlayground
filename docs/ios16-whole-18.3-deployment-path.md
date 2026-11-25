@@ -177,7 +177,7 @@ M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 
 
 **只有第 3 种情形成立时，端点读数才对「launchd 解不解析」有含义。** 判第 3 种之前，先要排除第 1 种：这正是 `lldb image list` 与 `environment` 段落这两条读数的用处。本文 2.4 节原先只列了两种，漏掉的第 1 种恰是今天唯一成立的。
 
-**另外一句要撤回，并且已经改掉。** 本节与第 0 步此前把「`gui/501` 为空」当作「任何应用都无法启动」，据此说新读数取不到。同日设备健康运行时 `launchctl print gui/501` 也是空输出、`exit=125`，图形会话落在 `user/501`（`launchctl print user/501` 含 `SpringBoard` 与 `backboardd`，Safari 与 Chrome 都在运行，23 个 helper）。**所以「`gui/501` 为空」是这个系统的常态，不是故障。** 第 0 步已改成「`launchctl print user/501` 含 `SpringBoard`」加「有应用进程活着」两条判据，本节也已在上面补上第 1 种情形。读数见附录 B 的 B.5。
+**另外一句要撤回，并且已经改掉。** 本节与第 0 步此前把「`gui/501` 为空」当作「任何应用都无法启动」，据此说新读数取不到。同日设备健康运行时 `launchctl print gui/501` 也是空输出、`exit=125`，图形会话落在 `user/501`（`launchctl print user/501` 含 `SpringBoard` 与 `backboardd`，Safari 与 Chrome 都在运行，23 个 helper）。**所以「`gui/501` 为空」是这个系统的常态，不是故障。** 第 0 步已改成以 `launchctl print user/501` 里的 `SpringBoard` job 为门，本节也已在上面补上第 1 种情形。读数见附录 B 的 B.5。
 
 ---
 
@@ -242,11 +242,14 @@ M63 的审计对此的表述要照抄：第四轮修正表里每一次「放进 
 **这一步的判据在 2026-11-25 改掉了，原因写在下面。** 原先的写法是「`gui/501` 为 0 行则图形域丢失、任何应用都无法启动」，据此把这一步当整节的门。实测那个前提不成立：设备健康运行时 `launchctl print gui/501` 也是空输出、`exit=125`，而 Safari pid 622、Chrome pid 626、23 个 WebKit helper 全都在跑，且都是开机后启动的。`launchctl print system` 的域列表里只有 `user/501`，`launchctl print user/501` 含 `SpringBoard` 与 `backboardd`。**iOS 16.1 这台设备的图形会话落在 `user/501`，`gui/501` 为空是常态而不是故障。**
 
 ```sh
-launchctl print user/501 2>/dev/null | grep -cE 'com\.apple\.springboard|SpringBoard'
+launchctl print user/501 | grep -cE 'com\.apple\.SpringBoard'
 ps -Ao comm | grep -cE '^/Applications/(MobileSafari|Chrome)'
 ```
 
-**通过判据：** 第一条大于 0（`user/501` 里有 `SpringBoard`），第二条大于 0（有应用进程活着）。两条任一为 0 时，再去看 `launchctl print gui/501` 与 M65 的手段记录。
+**通过判据：** 只有第一条是门，大于 0 即通过（`user/501` 里有 `SpringBoard` 的 job）。第二条大于 0 说明此刻有应用进程活着，是单向佐证，为 0 不作反向判据；两条的含义为何不对称见下一段。**第一条为 0 时，再去看 `launchctl print gui/501` 与 M65 的手段记录。**
+
+**为什么第二条不能单独当门，以及它为什么仍然要写在这里。** `ps` 里没有应用不等于设备坏了：刚开机、还没打开过任何应用的健康设备同样读到 0，所以它只能当「有读数就说明肯定能拉起」的单向证据，不能当反向判据。反过来，SpringBoard 这个进程活着也不等于应用拉得起来：`build-state.md` 的〈七、`gui/501` 图形域丢失〉一节的表里，`sbreload` 那一行记着 SpringBoard 确实重启成了 pid `70572`，而同一事故里 Safari、备忘录、计算器三个应用**全部无法启动**。所以真正的判据是「真的拉起一个应用看能不能起来」，那一步在本节第 3 步：脚本用 `uiopen --path /Applications/MobileSafari.app` 拉起 Safari，拿不到 pid 就以 `safari_not_running` 记 UNKNOWN，而不是把环境的 0 当成 launchd 的答案。脚本第 1 步的中止条件只取 SpringBoard 的 `state`，与这里第一条一致。
+
 **不要再用「`gui/501` 是否非空」当门。** 那条门在这台设备上恒不过，照它执行会让第四节的所有读数都取不到，而设备实际上是健康的。本轮已经开始执行第四节式的测量并成功取到读数（附录 B 的 B.4、B.6、B.7），可作为这条门被撤掉的依据。
 
 ### 第 1 步：清掉残留 helper，确认真实基线
@@ -571,17 +574,21 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p'
 
 ```sh
 launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
-  | grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'
+  | grep -oE 'com\.apple\.WebKit\.[A-Za-z0-9._-]+' \
+  | sed -E 's/\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$//' \
+  | sort -u
 ```
 
 **两种情形：**
 
-- **(A) 覆盖目录建立后仍为四条以上**，说明 launchd 会现扫索引外的 `XPCServices`，启动链在路上；
-- **(B) 缩到两条以内（只剩 `BrailleTranslation` 与 `MTLCompilerService`）**，说明 launchd 只认索引内路径。
+- **(A) 覆盖目录建立后四个基础名仍在**，说明 launchd 会现扫索引外的 `XPCServices`，启动链在路上；
+- **(B) 缩到两个以内（只剩 `BrailleTranslation` 与 `MTLCompilerService` 一类）**，说明 launchd 只认索引内路径。
+
+**不要用按行 `grep -cE` 比较这两个读数。** 段里每个活着的页面各注册一条带 UUID 后缀的实例条目，行数随页面数漂移。2026-11-25 20:41 CST 实测 Chrome pid 626：按行得 9（其中 5 条带 UUID），去重后基础名 4 个。下面那句「无覆盖目录 8 条」是某一次的采样值，不是常量，不能当对照基线；判据是四个基础名各自在不在。
 
 **读这个数字之前必须先排除第 2 步的两类崩溃。** 只有「进程确实活着（`ps ax | grep Chrome` 有宿主进程）且新增报告里没有 `DYLD` 或 `PAC_EXCEPTION`」时，端点归零才是 (B) 的证据。
 
-参照读数（外层仓库 `build-state.md` 的「端点数目表（目标应用 Chrome，每次 `killall` 后重新 `uiopen <url>`）」一节，该表首行是「| 覆盖目录内容 | 端点 | spawn | lookup 失败 |」，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数）：无覆盖目录 8 条；加自建 `WebCore` + `JavaScriptCore` 5 条；再加只含 `WebKit` 二进制的 `WebKit.framework` 为 **0** 条。
+参照读数（外层仓库 `build-state.md` 的「端点数目表（目标应用 Chrome，每次 `killall` 后重新 `uiopen <url>`）」一节，该表首行是「| 覆盖目录内容 | 端点 | spawn | lookup 失败 |」，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数）：无覆盖目录 8 条；加自建 `WebCore` + `JavaScriptCore` 5 条；再加只含 `WebKit` 二进制的 `WebKit.framework` 为 **0** 条。这三个数都是按行计的采样值，各自的页面数不同，只能当量级参照，不能当固定基线。
 
 **必须在测试台之外确认的三件事**（都是踩过的坑，缺一条就得到假数据）：
 
@@ -663,10 +670,10 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 
 ## 附录 A：本文引用的实测读数（2026-11-25，192.168.2.135，只读）
 
-- `launchctl print gui/501` 为 0 行；`launchctl print user/501` 为 2056 行。**这一条不能用来判断设备是否健康**：同日另一轮实测（附录 B 的 B.5）在设备正常运行时（Safari pid 622、Chrome pid 626、23 个 WebKit helper）也读到 `gui/501` 为 0 行、`launchctl print system` 的域列表里只有 `user/501`。图形会话落在这台设备的 `user/501` 域。**本文第 0 步与 2.4 节里「`gui/501` 为空则任何应用都无法启动」这句因此不成立**；那两处已在本文改写（第 0 步改成两条可成立的判据，2.4 节加了三种情形的次序，见 B.5），`docs/ios16-launchd-xpc-resolution-gap.md` 的同一处更正属另一组改动。
+- `launchctl print gui/501` 为 0 行、`exit=125`（加 `sudo` 一样）；`launchctl print user/501` 为 2135 行、`active count = 573`；`launchctl print user/501/com.apple.SpringBoard` 为 `state = running`。2026-11-25 20:41 CST 复核。**这一条不能用来判断设备是否健康**：同日另一轮实测（附录 B 的 B.5）在设备正常运行时（Safari pid 622、Chrome pid 626、23 个 WebKit helper）也读到 `gui/501` 为 0 行、`launchctl print system` 的域列表里只有 `user/501`。图形会话落在这台设备的 `user/501` 域。**本文第 0 步与 2.4 节里「`gui/501` 为空则任何应用都无法启动」这句因此不成立**；那两处已在本文改写（第 0 步改成以 `user/501` 的 SpringBoard job 为门，2.4 节加了三种情形的次序，见 B.5），`docs/ios16-launchd-xpc-resolution-gap.md` 的同一处更正属另一组改动。
 - `/var/jb/Library/WebKitOverride` 不存在。
 - `/var/jb` 是 `/private/preboot/1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB/dopamine-ML13U0/procursus` 的符号链接。
-- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`，**本条读数已过期**：当时读的是 974608 字节、`Nov 24 08:44`，同日另一轮（附录 B 的 B.1）读到 974016 字节。**现行状态取附录 B。** 两个值在 `../../webkit-install-runbook.md:113-114` 的表里含义相反：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」，`974608` =「已合入两个新 hook」。附录 A 这一条当初的旁证（两个 hook 计数为 `1`）与今天用的是同一个数法，差别在文件，见 B.1 末段。
+- `/usr/lib/dyld` 指向同一 preboot 目录下的 `basebin/gen/dyld`。2026-11-25 20:41 CST 复核为 **974016 字节**、`sha256 486620f0c5ce26e602f0155412375d9c9d564f10b014fee2c369cd58e55751ba`、`Nov 25 10:37`。basebin 层的判据是 runbook 第五阶段判定 (b)：先按 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 取出全部合并后符号，再按 `dlopen_from`、`isOverridablePath`、`isAlwaysOverridablePath`、`__fcntl` 四个名字过滤，读数依次写成四列。`gen/dyld` 与设备上的 `dyldhook_merge.arm64e.iOS16-17.dylib`（74352 字节）都是 `1 0 0 1`，两个覆盖用的 hook 不在；`basebin.tar` 里那份补丁版 hook dylib（75952 字节）是 `1 1 1 1`。所以 basebin 层当前**未**部署。第 2、3 位才是可区分处：裸串 `isOverridablePath` 在 `gen/dyld` 里本来就出现 1 次，来自 dyld 自己的导出符号；`MACHOMERGER` 出现 38 次，全部来自原生两个 hook 的符号、trampoline 与 orig；数这两个量恒得 1 与 38，与补丁无关。另外 `isAlwaysOverridablePath` 的前缀是 `_ZN5` 不是 `_ZNK5`，直接拿带 `_ZNK5` 的完整串匹配会把补丁版也数成 0。早先记的 974608 字节那一版已不在设备上，`dyld.old` 也不在了。**这两个字节数在 `../../webkit-install-runbook.md:113-114` 的表里含义相反，读任何一处之前先对一遍**：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」，`974608` =「已合入两个新 hook」。附录 A 原先那条 974608 记录的旁证（两个 hook 计数为 `1`）与今天用的是同一个数法，差别在文件，见 B.1 末段。
 - `/var/jb/Library/Frameworks` 含 `AltList.framework`、`CydiaSubstrate.framework`、`JavaScriptCore.framework`、`WebCore.framework`、`WebGPU.framework`、`WebKit.framework`、`WebKitLegacy.framework`、`adattributiond`、`webpushd`。
 - `ps -Ao comm` 里有 3 个 WebKit helper（70750、70751、70753），`ppid` 全为 1，全部来自 `/System/Library/Frameworks/WebKit.framework/XPCServices/...`，没有宿主进程。
 - 对 70753 跑 `lldb image list -o -f`：`[86] /System/Library/Frameworks/WebKit.framework/WebKit`、`[113] /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore`、`[115] /System/Library/PrivateFrameworks/WebCore.framework/WebCore`。
@@ -682,9 +689,9 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 
 ## 附录 B：2026-11-25 本轮读数（`192.168.2.136`，只读）
 
-这一轮的读数改写了附录 A 里两条，并把第 0 步与 2.4 节的两个前提改成可成立的形式。附录 B 记录的观测步骤全部只读；设备上另有一次写操作，即跑 `sh /var/mobile/install-webkit-override.sh` 建了一个覆盖目录（退出码 0，见 B.6），该目录在收尾时已删除，设备恢复为 Safari 进程加 22 个 helper。本轮没有重装 basebin。
+这一轮的读数补全了附录 A 里 `gen/dyld` 那一条（附录 A 现记 974016，与 B.1 一致），并把第 0 步与 2.4 节的两个前提改成可成立的形式。附录 B 记录的观测步骤全部只读；设备上另有一次写操作，即跑 `sh /var/mobile/install-webkit-override.sh` 建了一个覆盖目录（退出码 0，见 B.6），该目录在收尾时已删除，设备恢复为 Safari 进程加 22 个 helper。本轮没有重装 basebin。
 
-### B.1 basebin 层今天没有生效（改写附录 A 的 `gen/dyld` 一条）
+### B.1 basebin 层今天没有生效（附录 A 的 `gen/dyld` 一条按本轮读数写定）
 
 | 读数 | 值 | 出处与判据 |
 | --- | --- | --- |
@@ -701,7 +708,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 3. **不要用 `MACHOMERGER` 的出现次数当判据。** `gen/dyld` 里它出现 **38** 次，全部是原带的 `dlopen_from` 与 `__fcntl` 两组 hook 及其 trampoline/orig 符号。
 4. **也不要用 mtime 推断「刚装过所以补丁在」。** 今天 `gen/` 与 `gen/dyld` 的 mtime 都是当天的 10:37（`Nov 3 01:04` 是原生安装时间），而内容仍是原版。
 
-**这条与附录 A 的 974608 冲突，但两份读数用的是同一个数法，差别在文件。** 附录 A 那份记录了两个 hook 计数为 `1`，按当时的状态那是成立的；今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。**真正能区分的是 hook dylib 的 74352 对 75952，以及判定 (b) 第 2、3 位的 `0 0` 对 `1 1`。** 今天这两项都指向原版。重装 basebin 之后的正确复现读数是 hook dylib 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608。
+**这份 974016 的读数取代了本文早先引的 974608，原因是文件变了，不是读法变了。** 早先那份记录在两个 hook 上数得 `1`，按当时的状态那是成立的；今天同一文件是 974016、判定 (b) 是 `1 0 0 1`，两次用的是同一个数法，可以直接对照。**能区分的是 hook dylib 的 74352 对 75952，以及判定 (b) 第 2、3 位的 `0 0` 对 `1 1`。** 今天这两项都指向原版。重装 basebin 之后的正确复现读数是 hook dylib 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608。附录 A 的 `gen/dyld` 条目与本节的读数一致，都是 974016。
 
 **这条对本文的影响是全篇性的。** 第 2.3、3.1、3.2 节与第四节全部步骤的隐含前提是「dyld 愿意用磁盘副本」，而那个前提来自装了新 hook 的配置。**今天不在那个配置下。** 所以本文第四节的步骤在重装 basebin 之后才能给出可归因的读数；在那之前，任何 `image list` 出现 `/System` 的读数都只能说明 dyld 层没生效，不能说明路径对齐失败。
 
@@ -754,7 +761,7 @@ com.apple.WebKit.WebContent.CaptivePortal    0
 - `launchctl print system` 的域列表里只有 `user/501`，没有 `gui/501`；
 - `launchctl print user/501` 有 573 个 active 条目，含 `SpringBoard` 与 `backboardd`。
 
-也就是说 iOS 16.1 的图形会话落在这台设备的 `user/501` 域，`gui/501` 本来就恒为 0 行。**所以第 0 步把「`gui/501` 非空」当前置检查，在这台设备上永不过；2.4 节「任何应用都无法启动」这句与实测不符。** 第 0 步已改成两条可成立的判据（`launchctl print user/501` 含 `SpringBoard`；有应用进程活着），2.4 节已补上「dyld 层没生效」这第 1 种情形并把本条撤回。
+也就是说 iOS 16.1 的图形会话落在这台设备的 `user/501` 域，`gui/501` 本来就恒为 0 行。**所以第 0 步把「`gui/501` 非空」当前置检查，在这台设备上永不过；2.4 节「任何应用都无法启动」这句与实测不符。** 第 0 步已改成以 `launchctl print user/501` 里的 `SpringBoard` job 为门，并保留一条 `ps` 的应用进程计数作单向佐证（有读数就说明能拉起，为 0 不作反向判据），2.4 节已补上「dyld 层没生效」这第 1 种情形并把本条撤回。
 
 ### B.6 装上覆盖目录后的读数（本轮）
 
@@ -801,8 +808,8 @@ lldb -b -o "process attach --pid 2628" -o "image list -o -f" -o detach -o quit 2
 | 2.4 节「端点归零只有两种成因」 | 还有第 1 种：dyld 层没生效 | 已在 2.4 节补上三种情形的顺序 |
 | 必要条件表第三条「basebin 四个变量都设了」 | 设备上是 233520 原版 | 已改为「**不成立**（2026-11-25 实测）」 |
 | 第四节第 5 步「这是第二条必要条件的判定」 | 前置的 dyld 层不成立 | 见 B.9，第 5 步的读数要在 B.1 通过后才可归因 |
-| 第 0 步「`gui/501` 为 0 则任何应用都无法启动」 | 设备健康时 `gui/501` 也是 0 | 已改成两条可成立的判据（B.5） |
-| 附录 A「`gen/dyld` 974608」 | 974016 | 已标注过期并指向 B.1 |
+| 第 0 步「`gui/501` 为 0 则任何应用都无法启动」 | 设备健康时 `gui/501` 也是 0 | 已改成以 `user/501` 的 SpringBoard job 为门，并保留 `ps` 的应用进程计数作单向佐证（B.5） |
+| 附录 A「`gen/dyld` 974608」 | 974016 | 已改为本轮读数（974016、`sha256 486620f0…`、判定 (b) `1 0 0 1`），并按 B.1 标出两个字节数在 runbook 里的相反含义。附录 A 现在记的就是现行值，不再是「已过期、指向 B.1」 |
 | 阅读顺序前提（本文第 11 行）「basebin 已设变量」 | 同上，未设 | 已在该处加入「本节之前还有一项」的段落 |
 | 第四节引言「本节全部步骤待设备回网后执行……没有任何一条是按本节命令新取的读数」 | 第 2 步与第 4 步本轮已按本节命令逐字执行 | 已改成「写作时的状态」，并写明这两个读数说明 dyld 层没生效、不是路径对齐的判据（B.7 末段） |
 | 第 4 步末「这一步同样待设备回网后执行」 | 本节两条命令已对 pid 2628 执行 | 已改为记录本轮读数：三份 framework 全在 `/System`，「两份 `WebKit` 并存」今天没有发生 |
