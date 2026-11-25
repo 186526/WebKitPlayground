@@ -14,7 +14,7 @@
 
 ## 一、271 次 failed lookup 与端点数 0 是两个不同方向的失败
 
-`build-state.md` 把这两件事写在同一段（第 583-585 行），但它们的发起方向相反，判据也不同。
+`build-state.md` 把这两件事写在同一段（第 574-585 行），但它们的发起方向相反，判据也不同。
 
 **failed lookup 是 UI 进程向 launchd 要不到东西。** 发起方是 UI 进程。`ProcessLauncherCocoa.mm:307-308` 调 `xpc_connection_create(name, nullptr)`，`name` 来自同文件 `:199-215` 的 `serviceName()`，对 Network 返回字面量 `"com.apple.WebKit.Networking"`（`:205`）。libxpc 拿这个名字去 launchd 查，查不到就记一条 `failed lookup`。这条路径上 UI 进程是**客户端**。
 
@@ -173,7 +173,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 **路径不一致（已修，设备未验证）。** `ios18-public-sdk-xpc-main.patch` 原先第 12 行给每个 `.xpc` 链接期写死 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`，而 `install-webkit-override.sh` 把 framework 复制到 `/var/jb/Library/WebKitOverride`。M69 之后补丁写成两处搜索列表都以覆盖目录开头：`:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride`，`:22` 的 `DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib`；`install-webkit-override.sh:66` 与 `check-webkit-override.sh:27` 各写一次同一字面量，所以三处的目录名可以 `grep` 比对。覆盖目录存在时 helper 与 UI 都首先解析到它，`/var/jb/Library/Frameworks` 只作后备。**剩下的是设备侧验证，不是源码缺口**：补丁改后必须重建并重新打包才会进 `.xpc` 的 `LC_DYLD_ENVIRONMENT`，而这一步还没做；`iOS` 上没有版本检查（`WebKitBundleVersion` 的比对在 `XPCServiceMain.mm:107-123` 的 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 内，iOS 编译掉），所以两侧字节是否同代只能靠 `shasum` 与 `image list` 直接比，不能靠版本号推断。
 
-**`build-state.md` 内部有一处未处理的冲突。** 第二轮记录覆盖目录带 `XPCServices` 时 GPU 有过三次 `Successfully spawned` 且有崩溃报告 `procPath` 指向覆盖目录（第 336 行）；第三轮的 A/B 表（第 377-383 行）却记录同一配置 spawn 为 0；第四轮判定第三轮的错因是设备没有 `pkill`、测的都是旧进程（第 442-461 行）。一个没重启的旧进程不会产生新的 `.ips`，所以第二轮那次崩溃不可能由这个错因造成，两份记录不能同时成立。这直接影响第四节 (A)/(B) 的判定，已作为 finding 提交。
+**`build-state.md` 内部有一处未处理的冲突。** 第二轮记录覆盖目录带 `XPCServices` 时 GPU 有过三次 `Successfully spawned` 且有崩溃报告 `procPath` 指向覆盖目录（第 336 行）；第三轮的 A/B 表（第 377-384 行）却记录同一配置 spawn 为 0；第四轮判定第三轮的错因是设备没有 `pkill`、测的都是旧进程（第 442-461 行）。一个没重启的旧进程不会产生新的 `.ips`，所以第二轮那次崩溃不可能由这个错因造成，两份记录不能同时成立。这直接影响第四节 (A)/(B) 的判定，已作为 finding 提交。
 
 ---
 
