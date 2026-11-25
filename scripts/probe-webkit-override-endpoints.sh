@@ -38,8 +38,10 @@
 # header line followed by a JSON body, and AGENTS.md's device tool list has no
 # plist reader to split them.
 #
-# Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when launchctl print
-# gui/501 is empty, 2 for a usage or setup error.
+# Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when SpringBoard's job
+# under user/501 is missing or not running, 2 for a usage or setup error.
+# gui/501 is read as a diagnostic and does not affect the exit status: on
+# iOS 16.1 under Dopamine it is empty with exit 125 on a healthy device.
 #
 set -u
 
@@ -91,6 +93,12 @@ GUI_RC=0
 GUI_OUTPUT=''
 OVERRIDE_PRESENT_BEFORE=unknown
 INSTALL_RC=not-run
+# Whether the installed override carries WebKit.framework/XPCServices. This is
+# read from the device after the install rather than assumed from the install
+# script's name: two copies of that script exist and they disagree, the device's
+# /var/mobile one copies the tree whole while the repo's scripts/ one prunes it.
+# The verdict narrative below depends on which one this run used.
+OVERRIDE_XPC_SERVICES=unknown
 OVERRIDE_PRESENT_AFTER=unknown
 UNINSTALL_RC=not-run
 SAFARI_PID=''
@@ -124,11 +132,13 @@ BASELINE_HELPERS_RECORDED=0
 # different fact from "a report could not be read".
 BASELINE_MISSING_STEPS=''
 BASELINE_MISSING_SEPARATOR=''
-# The override prunes WebKit.framework/XPCServices (install-webkit-override.sh
-# :235-251), so every helper's executable lives under the system .xpc bundle and
-# comm alone can never say which WebKit framework it loaded. The framework path
-# comes from lldb's image list, one attach per new helper, because that is the
-# only reader the device has.
+# comm names each helper's executable, but a helper can run from the override
+# .xpc bundle (when the override carries WebKit.framework/XPCServices) or from
+# the system .xpc bundle (when it does not), so comm alone cannot say which
+# WebKit framework it loaded. Which shape this run installed is measured in
+# step 2 and recorded in OVERRIDE_XPC_SERVICES. The framework path comes from
+# lldb's image list, one attach per new helper, because that is the only reader
+# the device has.
 HELPER_FRAMEWORK_PATHS_RECORDED=0
 HELPER_FRAMEWORK_OVERRIDE=0
 HELPER_FRAMEWORK_JB=0
@@ -139,8 +149,8 @@ HELPER_FRAMEWORK_UNKNOWN=0
 # indexed. If the helper's own executable (comm) is under the override tree,
 # launchd started the override's .xpc; if it is the system stub, launchd started
 # the indexed stub and the dyld environment handed the override framework over.
-# The install script prunes XPCServices, so in this configuration the first
-# mechanism cannot occur and A can only mean the second.
+# Both are reachable whenever the override carries XPCServices, so the counters
+# are read from the comm paths rather than assumed from the install script.
 HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC=0
 HELPER_JB_FRAMEWORK_THROUGH_STUB=0
 VERDICT=UNKNOWN
@@ -169,8 +179,10 @@ Environment:
   PROBE_WAIT_SECONDS    same as --wait
   PROBE_LOG_DIR         same as --log-dir
 
-Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when launchctl print gui/501
-is empty, 2 for a usage or setup error.
+Exit status: 0 for verdict A or B, 4 for UNKNOWN, 3 when SpringBoard's job under
+user/501 is missing or not running, 2 for a usage or setup error. gui/501 is
+read as a diagnostic only: on iOS 16.1 under Dopamine it is empty with exit 125
+on a healthy device.
 USAGE
 }
 
@@ -508,14 +520,36 @@ skip_step() {
 # Step 1: preconditions
 # ---------------------------------------------------------------------------
 
-# Counted on the host rather than with the device's wc, so the reading is the
-# line count of what launchctl actually printed and no further device program is
-# needed. The exit status matters as much as the count: when the domain is gone,
-# launchctl prints `Could not find domain for gui/501` to stderr and exits
-# nonzero, and `remote` merges stderr into the output, so a count taken alone
-# would read that one-line refusal as a healthy domain. Both facts are therefore
-# written to GUI_RC and GUI_LINES directly: a caller that captured the count
-# through `$(...)` would get the count in a subshell and lose the status.
+# The health gate is SpringBoard's own job, not the gui/501 domain.
+#
+# On iOS 16.1 under Dopamine there is no gui/501 domain at all, and there is
+# nothing wrong with the device when that is so: the graphics session lives in
+# user/501. Measured 2026-11-25 20:41 CST on the healthy device (uptime 10 h,
+# Safari 622 and Chrome 626 both started at boot, 23 WebKit helpers):
+#
+#   launchctl print gui/501                  -> rc=125, 0 lines, stderr empty
+#   launchctl print gui/501  (under sudo)    -> rc=125, 0 lines, stderr empty
+#   launchctl print system  | grep '^\s*\(gui\|user\)/'
+#                                            -> user/501 only, no gui/501
+#   launchctl print user/501                 -> rc=0, 2135 lines, active 573
+#   launchctl print user/501 | grep -c 'com\.apple\.SpringBoard'
+#                                            -> 1 (pid 345)
+#   launchctl print user/501/com.apple.SpringBoard
+#                                            -> rc=0, state = running
+#
+# Both readings of gui/501 are the same observation and neither means the device
+# is broken: exit 125 with empty output. An earlier revision of this script
+# aborted on exactly that, so it could never run on this device at all. The
+# domain name is still read, because a log that omits it would leave a reader
+# unable to tell this configuration from one where the domain does exist, but
+# the reading is now a diagnostic and never a gate.
+#
+# The gate that does mean something is SpringBoard's job under user/501. It is
+# the process that owns the graphics session, and reading its `state = running`
+# is what separates a working device from a degraded one. A device whose
+# SpringBoard job is missing or not running cannot start an application, so no
+# per-pid domain would carry the endpoints and every reading after this point
+# would be the environment's zero rather than launchd's answer.
 read_gui_domain_facts() {
     remote 'launchctl print gui/501'
     GUI_RC=${REMOTE_RC}
@@ -532,28 +566,50 @@ read_gui_domain_facts() {
     esac
 }
 
-gui_domain_usable() {
-    [ "${GUI_RC}" -eq 0 ] && [ "${GUI_LINES}" -gt 0 ]
+# One reading, three facts: whether launchctl would describe the system domain at
+# all, whether that domain lists user/501, and whether SpringBoard's job under it
+# is running. `launchctl print user/501/com.apple.SpringBoard` is asked directly
+# and its `state = running` is the gate, so a missing user domain, a missing job
+# and a stopped job are three distinct reasons in the log rather than one.
+SPRINGBOARD_STATE=''
+SPRINGBOARD_RC=0
+
+read_springboard_facts() {
+    remote 'launchctl print user/501/com.apple.SpringBoard'
+    SPRINGBOARD_RC=${REMOTE_RC}
+    if [ "${REMOTE_RC}" -eq 255 ]; then
+        die "ssh to ${SSH_TARGET} failed (exit 255): ${REMOTE_OUTPUT}"
+    fi
+    SPRINGBOARD_STATE=$(printf '%s\n' "${REMOTE_OUTPUT}" \
+        | grep -E '^[[:space:]]+state = ' | head -n 1 \
+        | sed -E 's/^[[:space:]]*state = //; s/[[:space:]]+$//')
+    SPRINGBOARD_STATE=${SPRINGBOARD_STATE:-unknown}
 }
 
-abort_gui_domain_missing() {
+graphics_session_healthy() {
+    [ "${SPRINGBOARD_RC}" -eq 0 ] && [ "${SPRINGBOARD_STATE}" = running ]
+}
+
+abort_graphics_session_missing() {
     emit ""
-    emit '需要先重启设备，图形域缺失'
-    emit "launchctl print gui/501 exited ${GUI_RC} and printed ${GUI_LINES} line(s), so the graphics domain is not there and no GUI process can start. Every endpoint reading after this point would be meaningless. Reboot the device, then run this script again. sbreload and launchctl kickstart system/com.apple.runningboardd were both observed failing to restore the domain, so a reboot is the only known fix."
-    if [ "${GUI_RC}" -ne 0 ]; then
-        emit "  the command's output, which is where launchd explains the refusal: ${GUI_OUTPUT}"
+    emit '需要先重启设备，图形会话缺失'
+    emit "SpringBoard's job under user/501 is not running: launchctl exited ${SPRINGBOARD_RC} and reported state=${SPRINGBOARD_STATE}. SpringBoard owns the graphics session, so no application can start and every endpoint reading after this point would be the environment's zero rather than launchd's answer. Reboot the device, then run this script again. sbreload and launchctl kickstart system/com.apple.runningboardd were both observed failing to restore a lost graphics session, so a reboot is the only known fix."
+    emit "  launchctl print gui/501, recorded as a diagnostic and not a gate: exit=${GUI_RC}, ${GUI_LINES} line(s). On iOS 16.1 under Dopamine this is empty with exit 125 on a healthy device, because the graphics session lives in user/501 and there is no gui/501 domain."
+    if [ "${SPRINGBOARD_RC}" -ne 0 ]; then
+        emit "  the SpringBoard command's output, which is where launchd explains the refusal: ${REMOTE_OUTPUT}"
     fi
     emit 'PROBE_VERDICT=ABORTED'
-    emit 'PROBE_REASON=gui_domain_missing_reboot_required'
+    emit 'PROBE_REASON=graphics_session_missing_reboot_required'
     exit 3
 }
 
 step_preconditions() {
     step_begin 1 'record the preconditions'
     # The gate already ran in main, before any device write; this only reports the
-    # same reading, so the log keeps the fact without asking launchd twice.
-    emit "  launchctl print gui/501: exit=${GUI_RC}, ${GUI_LINES} line(s)"
-    gui_domain_usable || abort_gui_domain_missing
+    # same reading, so the log keeps the fact without asking launchd again.
+    emit "  launchctl print gui/501: exit=${GUI_RC}, ${GUI_LINES} line(s) (diagnostic, not a gate)"
+    emit "  launchctl print user/501/com.apple.SpringBoard: exit=${SPRINGBOARD_RC}, state=${SPRINGBOARD_STATE} (this is the gate)"
+    graphics_session_healthy || abort_graphics_session_missing
 
     run 'override directory before' "[ -d ${OVERRIDE_ROOT} ] && echo present || echo absent"
     OVERRIDE_PRESENT_BEFORE=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^(present|absent)$' | tail -n 1)
@@ -659,9 +715,72 @@ step_install() {
         OVERRIDE_INSTALLED=1
         run 'override directory after install' "[ -d ${OVERRIDE_ROOT} ] && echo present || echo absent"
         emit "  ${OVERRIDE_ROOT}: $(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^(present|absent)$' | tail -n 1)"
+        read_override_xpc_services
     fi
     step_end
     [ "${INSTALL_RC}" -eq 0 ]
+}
+
+# The install script's name does not say whether the result carries XPCServices:
+# the device's /var/mobile copy copies each framework tree whole, while the repo's
+# scripts/install-webkit-override.sh calls prune_xpc_services. Read it instead of
+# assuming it, because the verdict narrative is different for the two shapes.
+#
+# Existence and count are two calls on purpose. A single
+# `ls -1 dir 2>/dev/null | wc -l` prints a number for every input: the pipeline's
+# status is wc's, which is always 0, and a denied or racing directory becomes 0.
+# Zero is the positive claim "the install pruned XPCServices", so that form turns
+# a failed read into an assertion. Here a failed existence check or a failed
+# listing leaves the shape unknown instead.
+#
+# The existence check is three-way for the same reason. `[ -d path ]` is false
+# both for a missing path and for one whose parent cannot be traversed, so a
+# two-way check still reports a permission refusal as `absent`. `-x` on the
+# containing directories is what separates the two, and a directory it cannot
+# vouch for reports unreadable.
+read_override_xpc_services() {
+    OVERRIDE_XPC_SERVICES=unknown
+    local presence listing
+    run 'is WebKit.framework/XPCServices present in the installed override' \
+        "p=${OVERRIDE_ROOT}/WebKit.framework/XPCServices
+framework=${OVERRIDE_ROOT}/WebKit.framework
+if [ -d \"\$p\" ]; then echo present
+elif [ ! -e ${OVERRIDE_ROOT} ]; then echo unreadable
+elif [ -x \"\$framework\" ]; then echo absent
+elif [ -e \"\$framework\" ]; then echo unreadable
+elif [ -x ${OVERRIDE_ROOT} ]; then echo absent
+else echo unreadable; fi"
+    presence=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^(present|absent|unreadable)$' | tail -n 1)
+    case ${presence:-none} in
+        absent)
+            OVERRIDE_XPC_SERVICES=absent
+            ;;
+        present)
+            # Counted on this host from the listing itself, so REMOTE_RC is ls's
+            # own status rather than wc's. A listing that failed reports nothing
+            # and the shape stays unknown.
+            run 'list the XPC bundles in the installed override' \
+                "ls -1 ${OVERRIDE_ROOT}/WebKit.framework/XPCServices"
+            if [ "${REMOTE_RC}" -eq 0 ]; then
+                listing=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -cE '[^[:space:]]' || true)
+                case ${listing} in
+                    ''|*[!0-9]*) OVERRIDE_XPC_SERVICES=unknown ;;
+                    # An existing but empty XPCServices directory gives launchd no
+                    # bundle to resolve, which is the pruned configuration's shape
+                    # in every respect the verdict turns on.
+                    0) OVERRIDE_XPC_SERVICES=absent ;;
+                    *) OVERRIDE_XPC_SERVICES="present (${listing} bundles)" ;;
+                esac
+            fi
+            ;;
+        *)
+            # Either the framework directory exists but the check could not look
+            # inside it, or the check itself did not answer. Neither presence nor
+            # absence is known, so the shape is not claimed.
+            OVERRIDE_XPC_SERVICES=unknown
+            ;;
+    esac
+    emit "  WebKit.framework/XPCServices in the override: ${OVERRIDE_XPC_SERVICES}"
 }
 
 # ---------------------------------------------------------------------------
@@ -851,6 +970,26 @@ report_service() {
     fi
 }
 
+# The line count the older documents published as "8", and the reason it is not a
+# constant. launchctl lists one line per registered instance, and WebContent and
+# Networking also register a UUID-suffixed entry per live page, so a naive
+# `grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)'` over the section
+# grows and shrinks with the page count. Measured 2026-11-25 20:41 CST on Chrome
+# pid 626: 9 lines, of which 5 carried a UUID suffix; the bounded count of the
+# same section was 4 (one per base name) and the harness documents still said 8.
+#
+# The script's own count_service is already bounded and never used the line
+# count, so the two can disagree by any number of instances. Both are printed so
+# a new log can be compared with an old reading: the bounded count is the
+# criterion, the line count is what the old documents called the baseline.
+count_webkit_lines() {
+    grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)' "$1" || true
+}
+
+count_webkit_instances() {
+    grep -cE 'com\.apple\.WebKit\.(Networking|WebContent|GPU)\.[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' "$1" || true
+}
+
 step_read_endpoints() {
     step_begin 4 'read the Safari per-pid services section'
     if [ -z "${SAFARI_PID}" ]; then
@@ -888,6 +1027,8 @@ step_read_endpoints() {
     report_service com.apple.accessibility.BrailleTranslation.BrailleTranslationService "${SVC_BRAILLE}"
     report_service com.apple.MTLCompilerService "${SVC_MTL}"
     emit "  distinct dotted names in the section: ${SVC_DISTINCT} (M63 appendix A read six with no override directory)"
+    emit "  naive line count, the reading older documents called the baseline: $(count_webkit_lines "${block}"); of those, UUID-instance lines: $(count_webkit_instances "${block}")"
+    emit "  the criterion is the four bounded counts above, not this line count: it grows with the number of live pages, so it is not a constant and the old baseline of 8 was one sample of it"
     step_end
     return 0
 }
@@ -914,11 +1055,13 @@ classify_helper_path() {
     esac
 }
 
-# comm names each helper's executable, which is always under the system .xpc
-# because the override prunes XPCServices. Which WebKit framework that helper
-# actually loaded is a separate fact and only lldb's image list reports it. The
-# attach needs root, and the ObjC expression parser on this device cannot install
-# its checkers, so `image list -o -f` is the whole vocabulary used here.
+# comm names each helper's executable, which lands under the system .xpc bundle
+# when the override carries no XPCServices and under the override .xpc bundle
+# when it does; OVERRIDE_XPC_SERVICES records which shape this run installed.
+# Which WebKit framework that helper actually loaded is a separate fact and only
+# lldb's image list reports it. The attach needs root, and the ObjC expression
+# parser on this device cannot install its checkers, so `image list -o -f` is the
+# whole vocabulary used here.
 #
 # Two same-named WebKit images in one process is normal here (outer AGENTS.md,
 # 设备 section): the system copy and the override copy both stay loaded. So every
@@ -1067,10 +1210,10 @@ step_tally_helpers() {
     emit "    total: ${HELPER_STALE_TOTAL}"
     emit "    signalled with kill -9 in step 3: ${HELPER_KILLED}"
 
-    # The comm classification cannot answer the question the verdict asks,
-    # because the override prunes XPCServices: every helper's executable lives
-    # in the system bundle whatever framework it loads. So each new helper is
-    # attached once and its WebKit framework path is read from lldb.
+    # The comm classification alone cannot answer the question the verdict asks:
+    # comm gives the executable path, not the framework the process loaded. So
+    # each new helper is attached once and its WebKit framework path is read
+    # from lldb.
     emit ""
     emit '  WebKit framework each new helper loaded (lldb image list):'
     if [ "${HELPER_NEW_TOTAL}" -eq 0 ]; then
@@ -1164,8 +1307,7 @@ baseline_missing_in_reading_window() {
 }
 
 # Which /var/jb framework the new helpers loaded. The executable path cannot
-# answer this (the override prunes XPCServices, so every helper runs from the
-# system .xpc), so this counts the lldb framework paths only.
+# answer this on its own, so this counts the lldb framework paths only.
 new_helper_framework_jb_count() {
     printf '%s' $((HELPER_FRAMEWORK_OVERRIDE + HELPER_FRAMEWORK_JB))
 }
@@ -1290,8 +1432,9 @@ step_summary() {
 
     emit ""
     emit 'Facts:'
-    emit "  gui/501 at step 1: exit=${GUI_RC}, ${GUI_LINES} line(s)"
-    emit "  override directory before: ${OVERRIDE_PRESENT_BEFORE}; install exit: ${INSTALL_RC}"
+    emit "  gui/501 at step 1: exit=${GUI_RC}, ${GUI_LINES} line(s) (diagnostic, not a gate)"
+    emit "  SpringBoard under user/501 at step 1: exit=${SPRINGBOARD_RC}, state=${SPRINGBOARD_STATE} (this is the gate)"
+    emit "  override directory before: ${OVERRIDE_PRESENT_BEFORE}; install exit: ${INSTALL_RC}; XPCServices in the override: ${OVERRIDE_XPC_SERVICES}"
     emit "  Safari pid: ${SAFARI_PID:-none}; launch: ${SAFARI_LAUNCH_MODE}"
     emit "  WebKit services present: ${webkit_count} of 4 (WebContent=${SVC_WEBCONTENT}, GPU=${SVC_GPU}, Networking=${SVC_NETWORKING}, CaptivePortal=${SVC_CAPTIVEPORTAL})"
     emit "  BrailleTranslation=${SVC_BRAILLE}, MTLCompilerService=${SVC_MTL}, distinct dotted names=${SVC_DISTINCT}"
@@ -1304,43 +1447,100 @@ step_summary() {
     emit "  steps that could not rule out a crash (a DYLD or PAC_EXCEPTION report appeared, or the exclusion could not be established): ${invalid}"
 
     emit ""
-    emit 'Comparison. build-state.md:402 is this configuration: "再加只含 WebKit 二进制的'
-    emit 'WebKit.framework", endpoints 0, spawn 0, lookup failures 265. install-webkit-override.sh'
-    emit 'prunes XPCServices, so the override it installs carries the Info.plist and the binary'
-    emit 'and nothing else. A reading of 0 endpoints here is therefore a reproduction of a known'
-    emit 'result, and only a divergence from that row is new information.'
-    emit ''
-    emit 'What A can and cannot mean here. With XPCServices pruned, launchd has no override'
-    emit '.xpc bundle to resolve, so A cannot come from launchd scanning the override tree.'
-    emit 'The only route left is the system stub plus the dyld framework handover: launchd'
-    emit 'starts the indexed /System stub, and the dyld environment the UI process carries'
-    emit 'loads the override WebKit into it. PROBE_REASON names which of the two happened for'
-    emit 'this run, and the two counters above say how many helpers each. Separating them'
-    emit 'definitively needs an unpruned run, i.e. an override that still carries'
-    emit 'XPCServices; docs/ios16-branch-a-deployment-path.md section 第 2 步 describes it.'
-    emit 'Existing partial (A) evidence for the unpruned configuration is at'
-    emit 'build-state.md:264-278, where launchd launched GPU from the override .xpc.'
+    case ${OVERRIDE_XPC_SERVICES} in
+        absent)
+            emit 'Comparison. build-state.md:506 is this configuration: "再加只含 WebKit 二进制的'
+            emit 'WebKit.framework", endpoints 0, spawn 0, lookup failures 265. This run measured no'
+            emit 'WebKit.framework/XPCServices in the override, so it installs the Info.plist and the'
+            emit 'binary and nothing else. A reading of 0 endpoints here is therefore a reproduction of'
+            emit 'a known result, and only a divergence from that row is new information.'
+            emit ''
+            emit 'What A can and cannot mean here. With XPCServices absent from the override, launchd'
+            emit 'has no override .xpc bundle to resolve, so A cannot come from launchd scanning the override tree.'
+            emit 'The only route left is the system stub plus the dyld framework handover: launchd'
+            emit 'starts the indexed /System stub, and the dyld environment the UI process carries'
+            emit 'loads the override WebKit into it. PROBE_REASON names which of the two happened for'
+            emit 'this run, and the two counters above say how many helpers each.'
+            emit 'Separating them definitively needs an unpruned run; docs/ios16-branch-a-deployment-path.md'
+            emit 'section 第 2 步 describes one. Existing partial (A) evidence for that configuration'
+            emit 'is at build-state.md:333-347, where launchd launched GPU from the override .xpc.'
+            ;;
+        present*)
+            emit 'Comparison. This run is NOT the build-state.md:506 configuration. That row is the'
+            emit 'pruned shape (Info.plist plus the WebKit binary, no XPCServices), while this run'
+            emit 'measured WebKit.framework/XPCServices inside the override. A 0-endpoint reading here'
+            emit 'is a new observation about the unpruned shape rather than a reproduction, and it is'
+            emit 'directly comparable with build-state.md:333-347 instead.'
+            emit ''
+            emit 'What A can mean here. With XPCServices present in the override, both routes are live'
+            emit 'and the two counters above separate them: a helper whose own executable (comm) is'
+            emit 'under the override tree was started by launchd from the override .xpc, which is (A)'
+            emit 'directly; a helper that is the /System stub but loaded the override framework came'
+            emit 'through the dyld handover, which does not answer whether launchd scans paths it has'
+            emit 'not indexed. PROBE_REASON names which one this run actually saw.'
+            ;;
+        *)
+            emit 'Comparison withheld: the run could not establish whether the installed override'
+            emit 'carries WebKit.framework/XPCServices, so it cannot say which configuration'
+            emit 'build-state.md:506 corresponds to. Read the step 2 lines above: either the existence'
+            emit 'check did not answer with present or absent, or the listing of the directory failed.'
+            emit 'Re-run before citing this log as a reproduction of that row.'
+            ;;
+    esac
 
     emit ""
     emit 'Verdict. M63 docs/ios16-all-18.3-xpc-endpoint-audit.md section 4 (情形的判据) and section 8 item 1:'
     case ${VERDICT} in
         A)
             emit '  A: all four WebKit services are in the Safari section and a new helper loaded a'
-            emit '  /var/jb WebKit framework. That contradicts build-state.md:402 (same configuration,'
-            emit '  endpoints 0), so that reading was affected by a variable it did not record and has'
-            emit '  to be redone. It does not by itself show that launchd resolved an unindexed path:'
-            emit '  see the paragraph above. The whole-18.3 route stays open; what remains is the'
-            emit '  helper-to-UI protocol and ABI work.'
+            emit '  /var/jb WebKit framework.'
+            case ${OVERRIDE_XPC_SERVICES} in
+                absent)
+                    emit '  That contradicts build-state.md:506 (same pruned configuration, endpoints 0),'
+                    emit '  so that reading was affected by a variable it did not record and has to be'
+                    emit '  redone. It does not by itself show that launchd resolved an unindexed path:'
+                    emit '  see the paragraph above.'
+                    ;;
+                present*)
+                    emit '  This run installed XPCServices inside the override, so it is not the'
+                    emit '  build-state.md:506 configuration and does not contradict that row. Read the'
+                    emit '  reason line to see whether launchd started the override .xpc itself or the'
+                    emit '  /System stub handed the framework over.'
+                    ;;
+                *)
+                    emit '  The installed override shape could not be established, so whether this'
+                    emit '  contradicts build-state.md:506 is not decided here.'
+                    ;;
+            esac
+            emit '  The whole-18.3 route stays open; what remains is the helper-to-UI protocol and'
+            emit '  ABI work.'
             ;;
         B)
             emit '  B: every new helper whose framework was read loaded the system copy, and at most'
-            emit '  two of the four services remain. This agrees with build-state.md:402 (endpoints 0,'
-            emit '  spawn 0, 265 lookup failures): under this configuration the endpoints going to zero'
-            emit '  is a known result, and this run is a reproduction that adds a CrashReporter diff'
-            emit '  and the helper framework paths rather than a new attribution. Replacing the UI'
-            emit '  process on 16.1 cannot work, because the UI process has no code to register those'
-            emit '  names itself (section 4, 若 (B) 成立); work moves to the 16.1 UI plus 18.3 helper'
-            emit '  translation route.'
+            emit '  two of the four services remain.'
+            case ${OVERRIDE_XPC_SERVICES} in
+                absent)
+                    emit '  This agrees with build-state.md:506 (endpoints 0, spawn 0, 265 lookup'
+                    emit '  failures): under this configuration the endpoints going to zero is a known'
+                    emit '  result, and this run is a reproduction that adds a CrashReporter diff and the'
+                    emit '  helper framework paths rather than a new attribution.'
+                    ;;
+                present*)
+                    emit '  This is NOT the build-state.md:506 configuration: that row is the pruned'
+                    emit '  shape, and this run measured XPCServices inside the override. Endpoints going'
+                    emit '  to zero here is a new reading about the unpruned shape rather than a'
+                    emit '  reproduction of that row; it is comparable with build-state.md:333-347, where'
+                    emit '  the unpruned override did get GPU started from its own .xpc before that'
+                    emit '  process died in xpc_dictionary_apply.'
+                    ;;
+                *)
+                    emit '  The installed override shape could not be established, so whether this'
+                    emit '  reproduces build-state.md:506 is withheld. Read the step 2 lines above.'
+                    ;;
+            esac
+            emit '  Replacing the UI process on 16.1 cannot work, because the UI process has no code'
+            emit '  to register those names itself (section 4, 若 (B) 成立); work moves to the 16.1 UI'
+            emit '  plus 18.3 helper translation route.'
             ;;
         *)
             emit '  UNKNOWN: this run does not answer (A) or (B). The PROBE_REASON line names the condition that blocked it.'
@@ -1471,14 +1671,18 @@ main() {
     prepare_log
     trap cleanup EXIT INT TERM
 
-    # The graphics-domain check is the first device action, before anything is
-    # written anywhere. An empty gui/501, or one launchctl refuses to describe,
-    # means no app can start, so every reading would be meaningless; the only
-    # known fix is a reboot.
+    # Graphics-session check, the first device action and before anything is
+    # written anywhere. The gate is SpringBoard's job under user/501; gui/501 is
+    # read too, because a log that omits it could not be told apart from a run on
+    # a configuration that does have that domain, but it never gates.
+
     read_gui_domain_facts
-    printf 'Precondition: launchctl print gui/501 exited %s and printed %s line(s).\n' \
+    printf 'Precondition: launchctl print gui/501 exited %s and printed %s line(s) (diagnostic).\n' \
         "${GUI_RC}" "${GUI_LINES}" >>"${LOG_FILE}"
-    gui_domain_usable || abort_gui_domain_missing
+    read_springboard_facts
+    printf 'Precondition: launchctl print user/501/com.apple.SpringBoard exited %s, state=%s (gate).\n' \
+        "${SPRINGBOARD_RC}" "${SPRINGBOARD_STATE}" >>"${LOG_FILE}"
+    graphics_session_healthy || abort_graphics_session_missing
 
     probe_sudo
     remote "test -f ${INSTALL_SCRIPT} && test -f ${UNINSTALL_SCRIPT} && echo scripts-present"
