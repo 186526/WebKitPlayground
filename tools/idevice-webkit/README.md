@@ -38,8 +38,9 @@ case: it loaded 7/7 and only raised duplicate-class warnings (doc 2.3), which th
 5.2 table shows as the same 7/7 with a count of 31 instead of 0. So the constraint
 these readings establish is that `WebCore` cannot precede `JavaScriptCore`; the
 reorder against the two dylibs is what the count measures, and the one such
-sequence that was run loaded all seven. JavaScriptCore is first because it exports
-the WTF symbols the rest bind, and WebKit is last because it reexports WebKitLegacy
+sequence that was run loaded all seven. JavaScriptCore is first because the four
+framework images bind WTF symbols to it and nothing else in the chain exports them;
+the two dylibs bind none at all. And WebKit is last because it reexports WebKitLegacy
 and loads JavaScriptCore.
 
 Doc 6.3 answers a different question. There the chain ran in this same order with
@@ -47,8 +48,10 @@ Doc 6.3 answers a different question. There the chain ran in this same order wit
 loaded; the four remaining steps then failed, on three distinct `WTF` symbols: `WebCore` and
 `WebKit` both on `_WTFSignpostIndirectLoggingEnabled`, `WebKitLegacy` on
 `WTF::Thread::s_key`, and `WebGPU` on the `StringImpl` symbol quoted above. All three
-are exported by the self-built `JavaScriptCore` alone (`llvm-nm -gU` finds them as
-`S`/`D`/`T` definitions there and in none of the other four images), and each of the
+are exported by the self-built `JavaScriptCore` alone (`llvm-nm -gU` counts all seven
+images in the chain and finds them as `S`/`D`/`T` definitions there and in none of the
+other six — the four framework images export 14138, 525, 236 and 2178 symbols, and
+`libwebrtc` and `libANGLE-shared` export 409 and 955), and each of the
 four failing images refers to its own one as an undefined import. The cause is
 the identity rule in doc 4.3: a host that links `WebKit` already has the system copy
 resident, and it keeps the identity, so the `dlopen` of the self-built
