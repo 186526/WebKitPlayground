@@ -14,15 +14,15 @@
 
 ## 一、271 次 failed lookup 与端点数 0 是两个不同方向的失败
 
-`build-state.md` 把这两件事写在同一段（第 479-481 行），但它们的发起方向相反，判据也不同。
+`build-state.md` 把这两件事写在同一段（第 583-585 行），但它们的发起方向相反，判据也不同。
 
 **failed lookup 是 UI 进程向 launchd 要不到东西。** 发起方是 UI 进程。`ProcessLauncherCocoa.mm:307-308` 调 `xpc_connection_create(name, nullptr)`，`name` 来自同文件 `:199-215` 的 `serviceName()`，对 Network 返回字面量 `"com.apple.WebKit.Networking"`（`:205`）。libxpc 拿这个名字去 launchd 查，查不到就记一条 `failed lookup`。这条路径上 UI 进程是**客户端**。
 
 **端点数是 launchd 替 UI 进程算出来的服务集合大小。** 判据是 `launchctl print pid/<PID>` 里 `services = {` 段落中包含几个 `com.apple.WebKit.*` 条目。这个数字反映 launchd 认为「这个 pid 域可以使用哪些服务」，不是 UI 进程主动注册的结果——UI 进程没有注册的代码，见开头第一段。
 
-两者可以在不同时间点各自成立：UI 进程已经发出请求（lookup 在涨），而 launchd 找不到候选（返回错误）。`build-state.md` 第 481 行记录的「累计 271 次」是在进程中已经存在两份 18.3 镜像的情况下测的，那时 `_WTFSignpostIndirectLoggingEnabled` 已经由自建 `JavaScriptCore` 补上，所以进程活着，能发出请求。
+两者可以在不同时间点各自成立：UI 进程已经发出请求（lookup 在涨），而 launchd 找不到候选（返回错误）。`build-state.md` 第 585 行记录的「累计 271 次」是在进程中已经存在两份 18.3 镜像的情况下测的，那时 `_WTFSignpostIndirectLoggingEnabled` 已经由自建 `JavaScriptCore` 补上，所以进程活着，能发出请求。
 
-**读数的可信度要打折。** `build-state.md` 自己说明（第 383 行）`failed lookup` 的计数取决于应用转圈多久，不能单独用作判据；第四轮因此改用端点计数。本文同样以端点计数为主判据，lookup 计数只用作方向指示。
+**读数的可信度要打折。** `build-state.md` 自己说明（第 454 行）`failed lookup` 的计数取决于应用转圈多久，不能单独用作判据；第四轮因此改用端点计数。本文同样以端点计数为主判据，lookup 计数只用作方向指示。
 
 ---
 
@@ -34,9 +34,9 @@
 
 **端点集合由 launchd 在另一个时刻决定。** 端点出现在 `launchctl print pid/<PID>` 里，取决于 launchd 如何为这个 pid 域计算服务候选集，与 dyld 是否成功启动进程无关——严格说，launchd 的面板可以在进程运行、尚未请求任何服务时就已经有内容（塔今天在不加覆盖目录的对照组里读到六条，见附录 A）。
 
-所以「补上 JSC 后进程活、端点仍 0」不构成「两个故障是同一个」的证据，反而正好说明它们是两个独立的层次：符号解析层（dyld）与服务解析层（launchd）。`build-state.md` 第四轮的修正表（第 396-404 行）里，`WebKit` 二进制一进场端点就归零，而 `_WTFSignpostIndirectLoggingEnabled` 缺失只在五个 framework 不齐时触发（第 321-327 行），两个变量在这张表里各自独立变化，也支持这个划分。
+所以「补上 JSC 后进程活、端点仍 0」不构成「两个故障是同一个」的证据，反而正好说明它们是两个独立的层次：符号解析层（dyld）与服务解析层（launchd）。`build-state.md` 第四轮的修正表（第 500-509 行）里，`WebKit` 二进制一进场端点就归零，而 `_WTFSignpostIndirectLoggingEnabled` 缺失只在五个 framework 不齐时触发（第 390-396 行），两个变量在这张表里各自独立变化，也支持这个划分。
 
-**一处必须在硬件上确认的空白。** 第四轮修正表每次都用「自建 `WebCore` + `JavaScriptCore`」作固定基数（第 394 行明写「去掉 `JavaScriptCore` 不是有效用例」），所以那张表里「放进 `WebKit` 二进制端点归零」的每一次读数，都是在 JSC 已补上的前提下取得的。这意味着归零**不能**用 dyld 中止解释——那时进程不崩了。这一条是本文最重要的未决点，判定方法与预期结果见第四节。
+**一处必须在硬件上确认的空白。** 第四轮修正表每次都用「自建 `WebCore` + `JavaScriptCore`」作固定基数（第 498 行明写「去掉 `JavaScriptCore` 不是有效用例」），所以那张表里「放进 `WebKit` 二进制端点归零」的每一次读数，都是在 JSC 已补上的前提下取得的。这意味着归零**不能**用 dyld 中止解释——那时进程不崩了。这一条是本文最重要的未决点，判定方法与预期结果见第四节。
 
 ---
 
@@ -173,7 +173,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 **路径不一致（已修，设备未验证）。** `ios18-public-sdk-xpc-main.patch` 原先第 12 行给每个 `.xpc` 链接期写死 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks`，而 `install-webkit-override.sh` 把 framework 复制到 `/var/jb/Library/WebKitOverride`。M69 之后补丁写成两处搜索列表都以覆盖目录开头：`:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride`，`:22` 的 `DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks` 与 `DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib`；`install-webkit-override.sh:66` 与 `check-webkit-override.sh:27` 各写一次同一字面量，所以三处的目录名可以 `grep` 比对。覆盖目录存在时 helper 与 UI 都首先解析到它，`/var/jb/Library/Frameworks` 只作后备。**剩下的是设备侧验证，不是源码缺口**：补丁改后必须重建并重新打包才会进 `.xpc` 的 `LC_DYLD_ENVIRONMENT`，而这一步还没做；`iOS` 上没有版本检查（`WebKitBundleVersion` 的比对在 `XPCServiceMain.mm:107-123` 的 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 内，iOS 编译掉），所以两侧字节是否同代只能靠 `shasum` 与 `image list` 直接比，不能靠版本号推断。
 
-**`build-state.md` 内部有一处未处理的冲突。** 第二轮记录覆盖目录带 `XPCServices` 时 GPU 有过三次 `Successfully spawned` 且有崩溃报告 `procPath` 指向覆盖目录（第 267 行）；第三轮的 A/B 表（第 309-315 行）却记录同一配置 spawn 为 0；第四轮判定第三轮的错因是设备没有 `pkill`、测的都是旧进程（第 371-390 行）。一个没重启的旧进程不会产生新的 `.ips`，所以第二轮那次崩溃不可能由这个错因造成，两份记录不能同时成立。这直接影响第四节 (A)/(B) 的判定，已作为 finding 提交。
+**`build-state.md` 内部有一处未处理的冲突。** 第二轮记录覆盖目录带 `XPCServices` 时 GPU 有过三次 `Successfully spawned` 且有崩溃报告 `procPath` 指向覆盖目录（第 336 行）；第三轮的 A/B 表（第 377-383 行）却记录同一配置 spawn 为 0；第四轮判定第三轮的错因是设备没有 `pkill`、测的都是旧进程（第 442-461 行）。一个没重启的旧进程不会产生新的 `.ips`，所以第二轮那次崩溃不可能由这个错因造成，两份记录不能同时成立。这直接影响第四节 (A)/(B) 的判定，已作为 finding 提交。
 
 ---
 
@@ -205,7 +205,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 - `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 50758784 字节，`Nov 24 18:06`，`LC_BUILD_VERSION` 为 `platform=2 minos=16.1.0 sdk=18.5.0`；五个 `.xpc` 的 `minos` 同为 `16.1.0`，各自二进制含 `DYLD_FRAMEWORK_PATH` 2 次、`/var/jb/Library/Frameworks` 1 次；系统桩这两个串均为 0。
 - `/var/jb/Library/WebKitOverride` 为 `ABSENT`。
 
-`build-state.md` 的第四轮修正表（第 396-404 行，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数。这一节第 371-390 行先撤回了第三轮的旧 A/B 表，理由是设备没有 `pkill`、每次测的都是未重启的旧进程；本文只引用撤回后的表）：
+`build-state.md` 的第四轮修正表（第 500-509 行，Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` 与 `JavaScriptCore` 作固定基数。这一节第 442-461 行先撤回了第三轮的旧 A/B 表，理由是设备没有 `pkill`、每次测的都是未重启的旧进程；本文只引用撤回后的表）：
 
 | 覆盖目录内容 | 端点 | spawn | lookup 失败 |
 | --- | --- | --- | --- |
