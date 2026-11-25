@@ -143,7 +143,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | --- | --- | --- |
 | `XPCServiceEntryPoint.h @@ -93,8 +93,14` | 入口签名加默认第三参数 | 第 5 行 |
 | `XPCServiceEntryPoint.mm @@ -34,6 +34,7` | 头文件引用 | 支撑第 6 行 |
-| `XPCServiceEntryPoint.mm @@ -84,12 +85,137` | `getClientSDKAlignedBehaviors` 改写后的函数体（M85 落地前是按键缺失回退到 `client-sdk-version`，对 16.1 是死代码；M85 落地后该回退删除，改为按数据块长度清零走默认或拒绝） | 第 6 行 |
+| `XPCServiceEntryPoint.mm @@ -84,12 +85,137` | `getClientSDKAlignedBehaviors` 改写后的函数体（`main` 上是按键缺失回退到 `client-sdk-version`，对 16.1 是死代码；M85 分支删掉该回退，改为按数据块长度清零走默认或拒绝） | 第 6 行 |
 | `XPCServiceMain.mm @@ -124,6 +124,8` | `InitializerFunction` 改三参数 | 第 5 行 |
 | `XPCServiceMain.mm @@ -152,18 +154,49` | `ContainerEnvironmentVariables` 双来源、`OverrideLanguages` 双来源、`pre-bootstrap` 分支 | 第 3、4 行 |
 | `XPCServiceMain.mm @@ -174,11 +207,21` | `ContainerEnvironmentVariables` 取到才 `apply` | 第 3 行 |
