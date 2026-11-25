@@ -195,6 +195,130 @@ GUARD_CLOSED_INLINE_CALL = (
     "+void bad() { if (m_shouldTranslateMessageNames) { } translateOutgoingMessageName(x); }\n"
 )
 
+CALL_IN_THIRD_FILE = (
+    "diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp\n"
+)
+
+# Round 7's P2-1: the guard was recognised only as the innermost block compared to one literal line, so
+# correct code failed whenever anything sat between the guard and the call, or whenever the guard was
+# spelled differently. Each entry here is correct and must exit 0.
+GUARD_SHAPES = (
+    (
+        "a translation call inside a for loop under the guard passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok(unsigned count) {\n"
+        "+    if (m_shouldTranslateMessageNames) {\n"
+        "+        for (unsigned index = 0; index < count; ++index) {\n"
+        "+            translateOutgoingMessageName(x);\n"
+        "+        }\n"
+        "+    }\n"
+        "+}\n",
+    ),
+    (
+        "a translation call inside a nested if under the guard passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        "+    if (m_shouldTranslateMessageNames) {\n"
+        "+        if (someCondition) {\n"
+        "+            translateOutgoingMessageName(x);\n"
+        "+        }\n"
+        "+    }\n"
+        "+}\n",
+    ),
+    (
+        "a call under a braceless member if passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        "+    if (m_shouldTranslateMessageNames)\n"
+        "+        translateOutgoingMessageName(x);\n"
+        "+}\n",
+    ),
+    (
+        "a call under a member if with another conjunct passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        "+    if (m_shouldTranslateMessageNames && !m_inDispatchTesting) {\n"
+        "+        translateOutgoingMessageName(x);\n"
+        "+    }\n"
+        "+}\n",
+    ),
+    (
+        "a call under a member if spelled this-> passes",
+        CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        "+    if (this->m_shouldTranslateMessageNames) {\n"
+        "+        translateOutgoingMessageName(x);\n"
+        "+    }\n"
+        "+}\n",
+    ),
+)
+
+# Round 7's P2-4: the setter's body was matched as one literal line, so a body written on its own lines
+# was read as an assignment outside the setter. The definition line and its `{` are on separate lines.
+MULTILINE_SETTER = (
+    "+void setShouldTranslateMessageNames(bool shouldTranslate)\n"
+    "+{\n"
+    "+    m_shouldTranslateMessageNames = shouldTranslate;\n"
+    "+}\n"
+)
+INLINE_SETTER = (
+    "+void setShouldTranslateMessageNames(bool shouldTranslate) "
+    "{ m_shouldTranslateMessageNames = shouldTranslate; }\n"
+)
+
+# Round 7's P2-2: one statement can hold two calls, and checking only the first let the unguarded one
+# through. The second call sits after the guard's block has closed.
+DOUBLE_CALL_ONE_LINE = (
+    CALL_IN_THIRD_FILE
+    + "+void bad() { if (m_shouldTranslateMessageNames) { translateOutgoingMessageName(x); } "
+    "translateOutgoingMessageName(y); }\n"
+)
+
+# Round 7's P2-3: two more spellings of the same assignment that compile and used to pass.
+PARENTHESISED_ASSIGNMENT = "+    ((m_shouldTranslateMessageNames)) = true;\n"
+WRAPPED_ASSIGNMENT = "+    m_shouldTranslateMessageNames\n+        = true;\n"
+
+# The parameter name alone used to exempt an assignment, so any function taking `bool shouldTranslate`
+# could turn the flag on. The value is the setter's, but the body is not.
+SETTER_PARAMETER_ELSEWHERE = (
+    CALL_IN_THIRD_FILE
+    + "+void steer(bool shouldTranslate) {\n"
+    "+    m_shouldTranslateMessageNames = shouldTranslate;\n"
+    "+}\n"
+)
+# The other half of the same rule: inside the setter's body, the value still has to be the parameter.
+# `= true` there turns the flag on for every connection the setter is called on, which is the state the
+# whole patch exists to keep reachable only through a call this check can see.
+SETTER_BODY_IGNORES_PARAMETER = (
+    "+void setShouldTranslateMessageNames(bool shouldTranslate)\n"
+    "+{\n"
+    "+    (void)shouldTranslate;\n"
+    "+    m_shouldTranslateMessageNames = true;\n"
+    "+}\n"
+)
+# The same body shape, correct this time: a first line that begins with `(` must not swallow the `{`
+# above it. If it did, the whole body would read as one statement and the legitimate assignment would
+# be reported as sitting outside the setter.
+MULTILINE_SETTER_WITH_CAST = (
+    "+void setShouldTranslateMessageNames(bool shouldTranslate)\n"
+    "+{\n"
+    "+    (void)shouldTranslate;\n"
+    "+    m_shouldTranslateMessageNames = shouldTranslate;\n"
+    "+}\n"
+)
+# And on the read side: a guarded block whose first line begins with `(`. The setter case above is the
+# one that fails if the `{` is joined to the next line; this one pins the read-side verdict, where the
+# one-line guard path still recognises the guard.
+GUARD_WITH_CAST_FIRST_LINE = (
+    CALL_IN_THIRD_FILE
+    + "+void ok(bool inDispatch) {\n"
+    "+    if (m_shouldTranslateMessageNames) {\n"
+    "+        (void)inDispatch;\n"
+    "+        translateOutgoingMessageName(x);\n"
+    "+    }\n"
+    "+}\n"
+)
+
 # Appended rather than substituted: the committed patch carries no setter call, so there is nothing to
 # replace. This is the wrap the line-at-a-time check used to miss.
 FOLDED_CALL = "+    m_connection->setShouldTranslateMessageNames\n+        (true);\n"
@@ -380,7 +504,80 @@ CASES += (
         1,
         "calls the translation outside the member's guard",
     ),
+    (
+        "a setter written across four lines passes",
+        BASE.replace(
+            "+void setShouldTranslateMessageNames(bool shouldTranslate) { "
+            "m_shouldTranslateMessageNames = shouldTranslate; }\n",
+            MULTILINE_SETTER,
+        ),
+        0,
+        None,
+    ),
+    (
+        "a setter written on one line passes",
+        BASE.replace(
+            "+void setShouldTranslateMessageNames(bool shouldTranslate) { "
+            "m_shouldTranslateMessageNames = shouldTranslate; }\n",
+            INLINE_SETTER,
+        ),
+        0,
+        None,
+    ),
+    (
+        "two translation calls on one line, the second unguarded, fails",
+        BASE + DOUBLE_CALL_ONE_LINE,
+        1,
+        "calls the translation outside the member's guard",
+    ),
+    (
+        "a patch that assigns the member through two pairs of parentheses fails",
+        BASE.replace(SEND_GUARD, PARENTHESISED_ASSIGNMENT + SEND_GUARD, 1),
+        1,
+        "assigns m_shouldTranslateMessageNames outside the setter",
+    ),
+    (
+        "a patch that wraps the assignment onto the next line fails",
+        BASE.replace(SEND_GUARD, WRAPPED_ASSIGNMENT + SEND_GUARD, 1),
+        1,
+        "assigns m_shouldTranslateMessageNames outside the setter",
+    ),
+    (
+        "the setter's parameter assigned from another function fails",
+        BASE + SETTER_PARAMETER_ELSEWHERE,
+        1,
+        "assigns m_shouldTranslateMessageNames outside the setter",
+    ),
+    (
+        "a setter body that assigns true instead of its parameter fails",
+        BASE.replace(
+            "+void setShouldTranslateMessageNames(bool shouldTranslate) { "
+            "m_shouldTranslateMessageNames = shouldTranslate; }\n",
+            SETTER_BODY_IGNORES_PARAMETER,
+        ),
+        1,
+        "assigns m_shouldTranslateMessageNames outside the setter",
+    ),
+    (
+        "a setter whose body begins with a cast passes",
+        BASE.replace(
+            "+void setShouldTranslateMessageNames(bool shouldTranslate) { "
+            "m_shouldTranslateMessageNames = shouldTranslate; }\n",
+            MULTILINE_SETTER_WITH_CAST,
+        ),
+        0,
+        None,
+    ),
+    (
+        "a guarded block whose first line begins with a cast passes",
+        BASE + GUARD_WITH_CAST_FIRST_LINE,
+        0,
+        None,
+    ),
 )
+
+for description, shape in GUARD_SHAPES:
+    CASES += ((description, BASE + shape, 0, None),)
 
 
 def check_needles_are_unique_and_necessary() -> int:

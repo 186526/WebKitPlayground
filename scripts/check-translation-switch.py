@@ -171,7 +171,9 @@ def added_code_lines(patch: str) -> list[str]:
 # 5953 `case` statements is joined into its neighbour, which is what keeps a correct patch from being
 # read as a violation.
 CONTINUES_AFTER = (",", "\\", "&&", "||", "->", ".", "=")
-CONTINUES_BEFORE = ("(", ".", "->", ",")
+# `=` is in this set too: `m_shouldTranslateMessageNames\n    = true;` puts the operator at the head of
+# the second line, and splitting there leaves a statement with no member in it to check.
+CONTINUES_BEFORE = ("(", ".", "->", ",", "=")
 FILE_HEADER = re.compile(r"^diff --git a/(\S+) b/")
 
 
@@ -213,6 +215,14 @@ def added_code_statements(patch: str) -> list[tuple[str, str]]:
         current = code if not current else current + " " + code
         depth = max(0, depth + code.count("(") - code.count(")"))
         following = per_file[index + 1][1] if index + 1 < len(per_file) and per_file[index + 1][0] == line_path else ""
+        # A line that opens or closes a block ends the statement there. Without this a body written as
+        # `{` on its own line is joined to the first line of that body whenever the body starts with a
+        # `(` — the argument of a `(void)param;` or a `(Type)value` cast — and the `{` then never opens
+        # the block, so everything inside it is read as unguarded and unsettered.
+        if current.endswith("{"):
+            statements.append((current_path, current))
+            current, depth = "", 0
+            continue
         if depth > 0 or current.endswith(CONTINUES_AFTER) or (following and following.startswith(CONTINUES_BEFORE)):
             continue
         statements.append((current_path, current))
@@ -254,16 +264,23 @@ READ_SITES = (
 # The member may be written from one place only: the setter's own body, from its parameter. Any other
 # assignment reaches the same state without a call, which is the path check_no_setter_call cannot see.
 #
-# The left side is optional parentheses around the member, and the operator is a plain or compound
-# assignment. Both exist because the shapes compile and turn the flag on just as surely as `= true`
-# does: `(m_shouldTranslateMessageNames) = true` and `m_shouldTranslateMessageNames |= true` both
-# compile under g++ -std=c++17 and leave the flag set. `(?<![=!<>+\-*/%&|^])` keeps `==` a comparison
-# and refuses to read `<=`/`>=`/`!=` as an assignment to a member named on the right of them.
+# The left side allows any number of parentheses: `((m_shouldTranslateMessageNames)) = true` compiles
+# and turns the flag on exactly as the single-parenthesis form does. The operator is a plain or
+# compound assignment; `(?<![=!<>+\-*/%&|^])` keeps `==` a comparison and refuses to read `<=`/`>=`/
+# `!=` as an assignment to a member named on the right of them. `\s*` spans a newline, so an operator
+# on the next line is still the same assignment once the statements are joined.
 ASSIGNMENT = re.compile(
-    r"\(?\s*\bm_shouldTranslateMessageNames\s*\)?\s*"
+    r"\(*\s*\bm_shouldTranslateMessageNames\s*\)*\s*"
     r"(?<![=!<>+\-*/%&|^])(?:[|&^+\-*/%]|<<|>>)?=(?!=)\s*([^=;]+);"
 )
-SETTER_BODY = "void setShouldTranslateMessageNames(bool shouldTranslate)"
+# The setter's definition is matched by shape, not by one literal line: written across three lines it
+# still opens a block, and the assignment inside it is legitimate. The `{` is optional because the
+# statement may be the declaration line with the body beginning on the next one.
+SETTER_DEFINITION = re.compile(
+    r"^void\s+setShouldTranslateMessageNames\s*\([^)]*\)\s*[;{]?$")
+# The one-line form keeps the definition and the assignment in a single statement, so no block chain
+# holds the definition. The head is what identifies it, and the body has to follow it.
+SETTER_HEADER = re.compile(r"^void\s+setShouldTranslateMessageNames\s*\(")
 
 # The two functions are declared in MessageNumberTranslation.h and defined in Encoder.cpp. Inside
 # them the call is the translation rather than a use of it, and the header's two lines declare them,
@@ -282,57 +299,171 @@ DEFINITION_FILES = (
 TRANSLATE_CALL = re.compile(r"\btranslate(?:Outgoing|Incoming)MessageName\s*\(")
 
 
-def enclosing_blocks(statements: list[tuple[str, str]]) -> list[str | None]:
-    """For each statement, the statement that directly opened the block it sits in, or None.
+def enclosing_blocks(statements: list[tuple[str, str]]) -> list[list[str]]:
+    """For each statement, the chain of blocks around it, innermost first.
+
+    A chain rather than the innermost block alone: a call wrapped in a `for` inside the guard is still
+    guarded, and comparing only the innermost block reported `for (...)` and failed correct code. The
+    guard is satisfied when the chain contains it at any depth.
 
     A statement opens a block when it *ends* with `{`, and closes one when it starts with `}`. That
     matters: `Locker locker { reportedUnmappedNamesLock };` and `bool m_x { false };` carry braces but
     end with `;`, so a naive brace count would treat the braced initialiser as a block and report the
-    wrong guard. The nesting is tracked so the answer is the innermost block, not the outermost: the
-    translation call in the send path sits inside a second `if` that closes above it.
+    wrong guard.
+
+    A body opened on its own line is recorded as its definition, not as the bare `{`: the setter may
+    be written as three lines, and the chain would otherwise hold a `{` that says nothing about what
+    opens it.
     """
-    blocks: list[str | None] = []
+    blocks: list[list[str]] = []
     stack: list[str] = []
     current_path = None
-    for path, statement in statements:
+    for index, (path, statement) in enumerate(statements):
         if path != current_path:
             stack = []
             current_path = path
-        blocks.append(stack[-1] if stack else None)
+        blocks.append(list(reversed(stack)))
         if statement.startswith("}"):
             if stack:
                 stack.pop()
             continue
         if statement.endswith("{"):
-            stack.append(statement)
+            opener = statement
+            if statement == "{" and index > 0 and statements[index - 1][0] == path:
+                previous = statements[index - 1][1]
+                if SETTER_DEFINITION.match(previous):
+                    opener = previous
+            stack.append(opener)
     return blocks
 
 
+# The member as the guard can spell it. `this->m_shouldTranslateMessageNames` is the same member, so
+# the condition test matches it too; anything else in the parenthesis is allowed, so `m && !x` passes.
+MEMBER_REFERENCE = re.compile(r"(?:\bthis\s*->\s*)?\bm_shouldTranslateMessageNames\b")
+
+
+def condition_asks_member(statement: str) -> bool:
+    """True for `if (m_shouldTranslateMessageNames) …` with any `{`-or-not tail and any extra conjuncts.
+
+    The condition is the part inside the parenthesis: it must mention the member, and the whole
+    statement must be an `if` rather than a loop or a bare block. `if (IOS_16_MESSAGE_NUMBER_TRANSLATION)`
+    does not mention the member and fails here; `if (m_shouldTranslateMessageNames && !m_inDispatch)`
+    does, and passes.
+    """
+    stripped = statement.strip()
+    if not stripped.startswith("if"):
+        return False
+    open_paren = stripped.find("(")
+    if open_paren < 0:
+        return False
+    depth = 0
+    for index in range(open_paren, len(stripped)):
+        character = stripped[index]
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return bool(MEMBER_REFERENCE.search(stripped[open_paren:index + 1]))
+    return False
+
+
+def chain_has_guard(chain: list[str]) -> bool:
+    """True when any block in the chain is an `if` on the member."""
+    return any(condition_asks_member(block) for block in chain)
+
+
+def chain_has_setter(chain: list[str]) -> bool:
+    """True when the statement sits inside the setter's body, judged by the block chain.
+
+    The definition line may be written on one line or split across three, so it is matched by shape
+    (`SETTER_DEFINITION`) rather than compared to one literal statement. `enclosing_blocks` attributes a
+    body opened on its own line to the definition above it, so both spellings arrive here as the same
+    chain element.
+    """
+    return any(SETTER_DEFINITION.match(block) for block in chain)
+
+
+def assignment_in_setter(chain: list[str], statement: str, value: str) -> bool:
+    """True when this assignment is the setter doing its job.
+
+    Two facts have to hold together: the statement is inside the setter's body (from the chain), and the
+    value assigned is the setter's own parameter. The parameter alone is not enough — any function that
+    happens to take a `bool shouldTranslate` could assign the member and turn the flag on from a place
+    this check cannot see through. The one-line spelling keeps the definition and the assignment in one
+    statement, so there the chain is empty and the statement's own head is what says which body it is.
+    """
+    if value != "shouldTranslate":
+        return False
+    if chain_has_setter(chain):
+        return True
+    return bool(SETTER_HEADER.match(statement))
+
+
 def inline_guard_covers(statement: str, call_start: int) -> bool:
-    """True when `if (m_shouldTranslateMessageNames) {` opens a block still open at `call_start`.
+    """True when a member `if` opens a block that is still open at `call_start`.
 
     A one-line form such as `void f() { if (m_shouldTranslateMessageNames) { call(x); } }` is a
     correctly guarded call, but it is a single statement, so the brace stack has no enclosing block to
     report. Counting depth from the guard's `{` to the call keeps that case passing without accepting
     `if (m_shouldTranslateMessageNames) { } call(x);`, where the block has already closed.
     """
-    guard = "if (m_shouldTranslateMessageNames) {"
-    offset = statement.find(guard)
-    while offset >= 0:
-        brace = offset + len(guard) - 1
-        if brace < call_start:
-            depth = 0
-            for character in statement[brace:call_start]:
-                if character == "{":
-                    depth += 1
-                elif character == "}":
-                    depth -= 1
-                    if depth == 0:
-                        break
-            if depth > 0:
-                return True
-        offset = statement.find(guard, offset + 1)
+    for offset, block in brace_opens(statement):
+        if offset >= call_start or not condition_asks_member(block):
+            continue
+        depth = 0
+        for character in statement[offset:call_start]:
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        if depth > 0:
+            return True
     return False
+
+
+def brace_opens(statement: str) -> list[tuple[int, str]]:
+    """Every `{` in the statement, paired with the clause that opens it.
+
+    Nested braces are included: a function written on one line still has its guard's `{` inside the
+    function's `{`, and the inner one is the brace that decides whether the call is guarded. The clause
+    is the text since the previous `;` or `}` at the same nesting, so a guard that follows another
+    statement is read as the `if` rather than as everything before it.
+    """
+    opens = []
+    clause_starts = [0]
+    paren_depth = 0
+    for index, character in enumerate(statement):
+        if character == "(":
+            paren_depth += 1
+        elif character == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif character == "{":
+            opens.append((index, statement[clause_starts[-1]:index].strip()))
+            clause_starts.append(index + 1)
+        elif character == "}":
+            if len(clause_starts) > 1:
+                clause_starts.pop()
+            clause_starts[-1] = index + 1
+        elif character == ";" and paren_depth == 0:
+            clause_starts[-1] = index + 1
+    return opens
+
+
+def braceless_guard_before(statements: list[tuple[str, str]], index: int) -> bool:
+    """True when the statement just before `index` is a member `if` with no brace.
+
+    `if (m_shouldTranslateMessageNames)` on its own line guards the next statement, and that guard is
+    not part of any block the chain can see.
+    """
+    if index == 0:
+        return False
+    previous_path, previous = statements[index - 1][0], statements[index - 1][1]
+    if previous_path != statements[index][0]:
+        return False
+    return not previous.rstrip().endswith("{") and condition_asks_member(previous)
 
 
 def check_read_sites(patch: str) -> list[Violation]:
@@ -349,42 +480,38 @@ def check_read_sites(patch: str) -> list[Violation]:
         """
         return path in DEFINITION_FILES and bool(TRANSLATION_DEFINITION.match(statement))
 
+    def guarded(index: int, call_start: int) -> bool:
+        if chain_has_guard(blocks[index]):
+            return True
+        if braceless_guard_before(statements, index):
+            return True
+        return inline_guard_covers(statements[index][1], call_start)
+
     # Every added statement that calls the translation has to sit under the member, not just the two
-    # files that were the read sites when this check was written. The per-file assertion below keeps
-    # those two from moving or disappearing; this loop keeps a third caller from being invisible.
+    # files that were the read sites when this check was written. Every call in a statement is checked,
+    # not only the first: two calls on one line would otherwise pass on the strength of one guard.
     for index, (path, statement) in enumerate(statements):
-        call = TRANSLATE_CALL.search(statement)
-        if not call:
-            continue
         if is_exempt(path, statement):
             continue
-        guard = blocks[index]
-        if guard == "if (m_shouldTranslateMessageNames) {":
-            continue
-        if inline_guard_covers(statement, call.start()):
-            continue
-        found = "no enclosing block" if guard is None else "`%s`" % guard
-        violations.append(
-            Violation(
-                "the patch calls the translation outside the member's guard",
-                "expected `if (m_shouldTranslateMessageNames) {` to open the block holding `%s` in %s, "
-                "found %s; a translation call anywhere else runs on every message, which is the switch "
-                "turned on without anyone flipping it" % (statement.strip(), path, found),
+        for call in TRANSLATE_CALL.finditer(statement):
+            if guarded(index, call.start()):
+                continue
+            chain = blocks[index]
+            found = "no enclosing block" if not chain else "the blocks `%s`" % "` < `".join(chain)
+            violations.append(
+                Violation(
+                    "the patch calls the translation outside the member's guard",
+                    "expected an `if` on `m_shouldTranslateMessageNames` around `%s` in %s, found %s; "
+                    "a translation call anywhere else runs on every message, which is the switch "
+                    "turned on without anyone flipping it" % (statement.strip(), path, found),
+                )
             )
-        )
-
-    def guards_for(path: str, call: str) -> list[str | None]:
-        """The enclosing block of every statement in `path` that calls `call`.
-
-        Every occurrence is returned, not just the first: a second, unguarded call site added next to
-        the guarded one would otherwise pass on the strength of the guarded one.
-        """
-        return [blocks[index] for index, (line_path, statement) in enumerate(statements)
-                if line_path == path and call in statement]
 
     for path, call, description in READ_SITES:
-        guards = guards_for(path, call)
-        if not guards:
+        matches = [(index, found.start(), statement)
+                   for index, (line_path, statement) in enumerate(statements)
+                   if line_path == path for found in [TRANSLATE_CALL.search(statement)] if found]
+        if not matches:
             violations.append(
                 Violation(
                     "%s no longer calls %s" % (description, call),
@@ -393,23 +520,24 @@ def check_read_sites(patch: str) -> list[Violation]:
                 )
             )
             continue
-        for guard in guards:
-            if guard == "if (m_shouldTranslateMessageNames) {":
+        for index, call_start, statement in matches:
+            if guarded(index, call_start):
                 continue
-            found = "no enclosing block" if guard is None else "`%s`" % guard
+            chain = blocks[index]
+            found = "no enclosing block" if not chain else "the blocks `%s`" % "` < `".join(chain)
             violations.append(
                 Violation(
                     "%s is guarded by something other than the member" % description,
-                    "expected `if (m_shouldTranslateMessageNames) {` to open the block holding %s in "
-                    "%s, found %s; IOS_16_MESSAGE_NUMBER_TRANSLATION is 1 in this build because the "
-                    "deployment target is 16.1, so a macro condition here is a bare brace with a "
-                    "reassuring name" % (call, path, found),
+                    "expected an `if` on `m_shouldTranslateMessageNames` around %s in %s, found %s; "
+                    "IOS_16_MESSAGE_NUMBER_TRANSLATION is 1 in this build because the deployment "
+                    "target is 16.1, so a macro condition here is a bare brace with a reassuring name"
+                    % (call, path, found),
                 )
             )
 
-    for path, statement in statements:
+    for index, (path, statement) in enumerate(statements):
         for found in ASSIGNMENT.finditer(statement):
-            if SETTER_BODY in statement and found.group(1).strip() == "shouldTranslate":
+            if assignment_in_setter(blocks[index], statement, found.group(1).strip()):
                 continue
             violations.append(
                 Violation(
