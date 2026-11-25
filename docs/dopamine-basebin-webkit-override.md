@@ -955,15 +955,15 @@ cdhash 按 CodeDirectory 自己的 `hashType` 算：`hashType` 为 2 时取 `SHA
 
 同一套取法作用在设备上另外两个 basebin 文件上，`libjailbreak.dylib` 与 `jbctl` 的各两个切片也都命中 `basebin.tc`，所以这套取法本身是对的，不是只会读到「不在」。
 
-**但补丁版不在表里的这一差别，也不能用来解释 panic。** 有一条独立的实测反例：`systemhook.dylib` 的 234336 字节版本（`d7045cd4…`）同样不在 `basebin.tc` 里，而它在 2026-11-24 已经以那份字节在这台设备上被加载并生效过。`webkit-install-runbook.md` 记录 2026-11-24 05:58Z 设备上是 234336 字节，05:59Z 第六阶段六项读数通过；同一天的 (d-1) 判定输出里，一个由 `python3` 拉起的探针进程拿到了 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): ".../procursus/Library/WebKitOverride/NoSuchX.framework/NoSuchX"` 这一行，而这行只可能由已注入该进程的 `systemhook` 产生——它正是那个「不在表里」的二进制。
+**补丁版不在表里这一差别，不足以单独解释 panic。** 有一条独立的实测反例：`systemhook.dylib` 的 234336 字节版本（`d7045cd4…`）同样不在 `basebin.tc` 里，而它在 2026-11-24 已经以那份字节在这台设备上被加载并生效过。`webkit-install-runbook.md` 记录 2026-11-24 05:58Z 设备上是 234336 字节，05:59Z 第六阶段六项读数通过；同一天的 (d-1) 判定输出里，一个由 `python3` 拉起的探针进程拿到了 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): ".../procursus/Library/WebKitOverride/NoSuchX.framework/NoSuchX"` 这一行，而这行只可能由已注入该进程的 `systemhook` 产生——它正是那个「不在表里」的二进制。
 
 2026-11-25T17:2xZ 查设备上现存的内核 panic 报告，只有八份：`Retired/` 下三份 `2026-11-25-1018…`、`1019…`、`1020…`，当前目录五份 `2026-11-26-0051…` 到 `0100…`；2026-11-24 一份都没有。（旧报告的保留期不由本文控制，11-24 缺少记录不等于绝对没发生过；这里只能说现存记录不支持「它 panicked」。）
 
-所以「补丁版 `systemhook` 不在 `basebin.tc` 里」这一状态在 2026-11-24 已经以「被加载、生效、无 panic 记录」的形式存在过，它不是这次安装专有的异常，构不成 panic 的解释。补丁版 `launchdhook` 与它同为 `hashType` 1、同样不在表里，但前者是否也因为「不在表里」而被拦，这个反例并不回答；它只排除「不在表里」这一条作为充分原因。
+所以「补丁版 `systemhook` 不在 `basebin.tc` 里」这一状态在 2026-11-24 已经以「被加载、生效、无 panic 记录」的形式存在过，它不是这次安装专有的异常。补丁版 `launchdhook` 与它同为 `hashType` 1、同样不在表里，但前者是否也因为「不在表里」而被拦，这个反例并不回答。它证到的是：「不在表里」这一条不是**充分**原因——有的二进制不在表里却照常工作。它没有证明「不在表里」与 panic 无关，因为「工作正常」本身也可能是另一条准入路径放行的结果（见本节末 M133 的读数）。
 
 **先看磁盘这一层：它根本不是这次实验里的变量。** 实验用的那份 tar（`/var/mobile/Documents/bb/basebin-lh.tar`，`d5bd3ef3…`）里的 `basebin.tc` 是 `12bdb75e6962…`/640，与设备上 `/var/jb/basebin/basebin.tc` 逐字节相同，`version` 与 28 条记录也相同。也就是说不论装前装后，这个磁盘文件都是同一份内容，它没有随补丁一起变化，因此不可能是新旧两态之间的差异来源。2026-11-26 00:50Z 那次安装之后设备被重新越狱、`basebin` 整包回到出厂版本，本节读数是恢复之后在设备上重新取的。
 
-**磁盘 uuid 与 `jbctl trustcache info` 的 uuid 不同，但这不是两张表。** 两个读数都能离线复核：磁盘 `basebin.tc` 的 uuid 是 `a3e4647f…`、28 条；`jbctl trustcache info` 列出的是 `A65DF2BA30F543B1B9A2FC3032D5ED8E`、178 条。它们不是同一层的两条并行清单，差别由 Dopamine 3.0.13 的三处代码决定。
+**磁盘 uuid 与 `jbctl trustcache info` 的 uuid 不同，但这不是两张表。** 两个读数的来源不同，先分清：磁盘 `/var/jb/basebin/basebin.tc` 的 uuid `a3e4647f…` 与 28 条是本节在设备上直接读到的；`jbctl trustcache info` 报的 `A65DF2BA30F543B1B9A2FC3032D5ED8E` 与 178 条**不是本节取的**——该命令需 root，`mobile` 下退出码 3，本轮没有读到，这里按 M127 的设备记录引用，那个数也无法独立复算。下面的机制解释只依赖 Dopamine 3.0.13 的源码，不依赖 178 这个值。
 
 `BaseBin/libjailbreak/src/trustcache.h:11` 把 `BASEBIN_TRUSTCACHE_UUID` 定义成字面量 `{'B','A','S','E','B','I','N','\0',…}`；`trustcache.c:370-373` 的 `trustcache_file_upload_with_uuid` 用 `memcpy` 把这段 UUID 盖在文件自带的 uuid 上。所以上传之后链里那份的 uuid 是 `BASEBIN…` 而不是磁盘上的 `a3e4647f…`，后者不出现是上传的规定结果。
 
@@ -973,7 +973,14 @@ cdhash 按 CodeDirectory 自己的 `hashType` 算：`hashType` 为 2 时取 `SHA
 
 `jbctl trustcache info` 本轮没有读（需 root，`mobile` 下退出码 3、`ERROR: trustcache subcommand requires root.`）。它对本节也没有判别力：那 178 条是 `JB_MAGIC` 池，结构上不会包含 `basebin.tc` 的任何条目，所以「其中没有某个 cdhash」是同义反复，不能当证据。上一轮曾把它当作「原版也在表外却工作正常」的方向性证据引用，那条用法取消。
 
-**本节原先的结论「原版的两个也不在，所以 trust 状态无所谓」予以撤回。** 那句话是从一次错量的比对里得出来的，前提本身不成立。按正确量算，情况是：原版的每个切片都在 `basebin.tc` 的 28 条里，补丁版两份都不在；而那个「在表里」的原版 `launchdhook` 与那个「不在表里」的补丁版 `systemhook` 都曾在这台设备上正常加载过。两个方向各自都有正常工作的例子，所以 trust 状态既不能说「重要」也不能说「无所谓」，只能说**它不是这次 panic 的可解释原因**。panic 的病因在这条轴线上**未知**。
+**「一直加载正常」不能当作「通过了信任判定」的证据。** 上面那个 `systemhook` 反例的力度取决于一个没被验证的前提：这台设备的准入来自信任缓存。M133 的设备实测（转引，非本节测量）说的正相反：在一个 `CS_DEBUGGED=False` 的进程里不做任何授权，按依赖顺序 `dlopen` 七个 `/var/jb` 镜像，`7/7` 全部加载成功；Dopamine 3.0.13 的准入走 `pmap_cs_allow_invalid`（`BaseBin/libjailbreak/src/kernel.c:339`，对 arm64e 无条件执行），`proc_set_debugged` 不是开关。所以「加载成功」说明不了该 cdhash 通过了 `is_cdhash_trustcached`。
+
+**本节原先的结论「原版的两个也不在，所以 trust 状态无所谓」予以撤回。** 那句话是从一次错量的比对里得出来的，前提本身不成立。按正确量算，情况是：原版的每个切片都在 `basebin.tc` 的 28 条里，补丁版两份都不在。但这组命中关系与 panic 的关系**没有被判定**：
+
+- 「补丁版不在表里所以出事」不成立——缺席没有被证明会导致加载失败，那次判定本身没有被做过。
+- 「在不在表里与 panic 无关」同样不成立——补丁版确实不在那 28 条里，而这条链确实参与信任判定，两边不能互推。
+
+两个方向都缺少同一样东西：一次在 panic 之前读到的 `is_cdhash_trustcached` 对补丁版那个 cdhash 的返回值。本轮没有这个读数。所以本节只能说 `systemhook` 那条已经证到的一步——「不在 `basebin.tc` 里」不是**加载失败**的充分原因，因为确实有不在表里的二进制照常工作；至于这是不是通过信任缓存放行的，M133 的读数说明未必。再往前一步，说它是不是这次 panic 的可解释原因，两边都没有依据。**panic 的病因在这条轴线上未知。**
 
 ### 十二·六 安装步骤（**未执行**）
 
