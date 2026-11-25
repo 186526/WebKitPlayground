@@ -31,16 +31,27 @@ JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy �
 WebKit the duplicate-image count fell from 31 to 0 and all seven loaded. What the
 readings do and do not support matters here. `WebCore` ahead of `JavaScriptCore`
 fails with `Symbol not found:
-__ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...` — recorded when `WebCore`
-is loaded alone (doc 2.2) and when a host that links `WebKit` runs the chain (doc
-6.3) — because that symbol comes from `JavaScriptCore`. `WebCore` ahead of the two
-dylibs but still after `JavaScriptCore` is a different case: it loaded 7/7 and only
-raised duplicate-class warnings (doc 2.3), which the 5.2 table shows as the same
-7/7 with a count of 31 instead of 0. So the constraint these readings establish is
-that `WebCore` cannot precede `JavaScriptCore`; the reorder against the two dylibs
-is what the count measures, and the one such sequence that was run loaded all
-seven. JavaScriptCore is first because it exports the WTF symbols the rest bind,
-and WebKit is last because it reexports WebKitLegacy and loads JavaScriptCore.
+__ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...`, recorded when `WebCore`
+is loaded alone (doc 2.2), because that symbol comes from `JavaScriptCore`.
+`WebCore` ahead of the two dylibs but still after `JavaScriptCore` is a different
+case: it loaded 7/7 and only raised duplicate-class warnings (doc 2.3), which the
+5.2 table shows as the same 7/7 with a count of 31 instead of 0. So the constraint
+these readings establish is that `WebCore` cannot precede `JavaScriptCore`; the
+reorder against the two dylibs is what the count measures, and the one such
+sequence that was run loaded all seven. JavaScriptCore is first because it exports
+the WTF symbols the rest bind, and WebKit is last because it reexports WebKitLegacy
+and loads JavaScriptCore.
+
+Doc 6.3 answers a different question. There the chain ran in this same order with
+`JavaScriptCore` first, and `JavaScriptCore`, `libwebrtc` and `libANGLE-shared` all
+loaded; the four remaining steps then failed, each on its own `WTF` symbol —
+`WebCore` and `WebKit` on `_WTFSignpostIndirectLoggingEnabled`, `WebKitLegacy` on
+`WTF::Thread::s_key`, `WebGPU` on the `StringImpl` symbol quoted above. The cause is
+the identity rule in doc 4.3: a host that links `WebKit` already has the system copy
+resident, and it keeps the identity, so the `dlopen` of the self-built
+`JavaScriptCore` returned the resident handle instead of replacing it. That is a
+statement about which copy owns the identity, not about where `WebCore` sits in the
+chain.
 
 WebCore is why the two dylibs sit where they do. Its load commands carry
 `LC_LOAD_WEAK_DYLIB` on three of the seven — `libwebrtc`, `libANGLE-shared` and

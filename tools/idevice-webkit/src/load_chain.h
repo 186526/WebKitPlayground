@@ -92,12 +92,15 @@
    took the duplicate count from 31 to 0 at 7/7 with this sequence. What that
    measurement covers is narrow, and the constraint it establishes is one edge, not
    the whole permutation. WebCore ahead of JavaScriptCore fails on a StringImpl
-   symbol — recorded for WebCore loaded alone (doc 2.2) and for a host that links
-   WebKit (doc 6.3) — because JavaScriptCore provides that symbol. WebCore ahead of
-   the two dylibs but still after JavaScriptCore is not a failure: doc 2.3 and the
-   5.2 table both give 7/7 for it, differing only in the duplicate count (31 against
-   0). So JavaScriptCore must come before WebCore, and the reorder against the two
-   dylibs is what removes the duplicates.
+   symbol, recorded for WebCore loaded alone (doc 2.2), because JavaScriptCore
+   provides that symbol. WebCore ahead of the two dylibs but still after
+   JavaScriptCore is not a failure: doc 2.3 and the 5.2 table both give 7/7 for it,
+   differing only in the duplicate count (31 against 0). So JavaScriptCore must come
+   before WebCore, and the reorder against the two dylibs is what removes the
+   duplicates. Doc 6.3 answers a different question: there JavaScriptCore loaded
+   first and the four later steps still failed on WTF symbols, because in a host
+   that links WebKit the resident system copy keeps the identity and the self-built
+   JavaScriptCore was never put in its place (doc 4.3).
 
    The flag is not measured: the probe that produced those counts calls
    `dlopen(kImages[i], RTLD_NOW)` — docs/ios16-dyld-identity-and-load-conditions.md
