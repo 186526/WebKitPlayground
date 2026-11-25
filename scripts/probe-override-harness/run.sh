@@ -181,24 +181,49 @@ expect_status 'b-with-evidence exit' "${CASE_STATUS}" 0
 expect_contains 'b-with-evidence verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
 expect_contains 'b-with-evidence reason' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=services_gone_or_at_most_two_and_no_new_helper_loaded_a_var_jb_framework'
 
-# --- P1-4: the gui/501 gate ------------------------------------------------
+# --- P1-4: the graphics-session gate ---------------------------------------
 
-printf '\n== P1-4 launchd refuses gui/501 on stderr, nothing is written\n'
-new_case gui-error "{\"mode\": \"gui_error\"}"
-run_probe
-expect_status 'gui-error exit' "${CASE_STATUS}" 3
-expect_contains 'gui-error Chinese message' "${CASE_DIR}/stdout.txt" '需要先重启设备，图形域缺失'
-expect_contains 'gui-error aborted verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
-expect_not_contains 'gui-error never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
-expect_contains 'gui-error only one device command' "${CASE_DIR}/state/calls.log" 'launchctl print gui/501'
-expect_count 'gui-error single call' "${CASE_DIR}/state/calls.log" '' 1
+# The gate used to be "gui/501 is non-empty", which is false on iOS 16.1 under
+# Dopamine: there is no gui/501 domain and a healthy device answers it with exit
+# 125 and no output. The gate is now SpringBoard's job under user/501. These two
+# cases pin both halves of that contract: it can still abort, and an empty
+# gui/501 no longer aborts.
 
-printf '\n== gui/501 empty still aborts before any write\n'
-new_case gui-empty "{\"gui_empty\": true}"
+printf '\n== P1-4 user/501 has no running SpringBoard, nothing is written\n'
+new_case sb-missing '{"springboard_absent": true}'
 run_probe
-expect_status 'gui-empty exit' "${CASE_STATUS}" 3
-expect_contains 'gui-empty Chinese message' "${CASE_DIR}/stdout.txt" '需要先重启设备，图形域缺失'
-expect_not_contains 'gui-empty never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
+expect_status 'sb-missing exit' "${CASE_STATUS}" 3
+expect_contains 'sb-missing Chinese message' "${CASE_DIR}/stdout.txt" '需要先重启设备，图形会话缺失'
+expect_contains 'sb-missing aborted verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
+expect_contains 'sb-missing reason names the graphics session' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=graphics_session_missing_reboot_required'
+expect_not_contains 'sb-missing never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
+expect_contains 'sb-missing asks SpringBoard' "${CASE_DIR}/state/calls.log" 'launchctl print user/501/com.apple.SpringBoard'
+
+printf '\n== P1-4b SpringBoard job present but not running still aborts\n'
+new_case sb-stopped '{"springboard_state": "not running"}'
+run_probe
+expect_status 'sb-stopped exit' "${CASE_STATUS}" 3
+expect_contains 'sb-stopped reason' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=graphics_session_missing_reboot_required'
+expect_not_contains 'sb-stopped never installs' "${CASE_DIR}/log/probe.log" 'install-webkit-override.sh'
+
+# The contract change itself. Before this mission an empty gui/501 aborted with
+# exit 3; it no longer does, because on this platform that reading is what a
+# healthy device returns. The assertion is inverted on purpose, not relaxed: the
+# run must now get past the gate and record gui/501 as a diagnostic.
+printf '\n== empty gui/501 does NOT abort (it is the healthy shape on iOS 16.1)\n'
+new_case gui-empty '{}'
+run_probe
+expect_status 'gui-empty no longer aborts' "${CASE_STATUS}" 4
+expect_not_contains 'gui-empty does not claim a missing graphics session' "${CASE_DIR}/stdout.txt" '图形会话缺失'
+expect_contains 'gui-empty records gui/501 as a diagnostic' "${CASE_DIR}/log/probe.log" '(diagnostic, not a gate)'
+expect_contains 'gui-empty records the gate reading' "${CASE_DIR}/log/probe.log" 'state=running (this is the gate)'
+expect_not_contains 'gui-empty is not an abort' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
+
+printf '\n== a configuration that does have gui/501 also passes the gate\n'
+new_case gui-present '{"gui_domain_present": true}'
+run_probe
+expect_status 'gui-present exit' "${CASE_STATUS}" 4
+expect_not_contains 'gui-present is not an abort' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=ABORTED'
 
 # --- p2: A must say which mechanism ----------------------------------------
 
@@ -213,11 +238,93 @@ expect_contains 'a-stub says A cannot settle the question here' "${CASE_DIR}/log
 expect_contains 'a-stub points at the unpruned run' "${CASE_DIR}/log/probe.log" 'docs/ios16-branch-a-deployment-path.md'
 
 printf '\n== A from an override .xpc is named as its own mechanism\n'
-new_case a-override-xpc "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8302, \"path\": \"${OVR_XPC}\", \"frameworks\": [\"${OVR_FW}\"]}]}"
+new_case a-override-xpc "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8302, \"path\": \"${OVR_XPC}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_prunes_xpc_services\": false, \"override_xpc_bundles\": 5}"
 run_probe
 expect_status 'a-override-xpc exit' "${CASE_STATUS}" 0
 expect_contains 'a-override-xpc reason names the resolved bundle' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=all_four_services_present_and_a_helper_started_from_the_override_xpc_loaded_a_var_jb_framework'
 expect_contains 'a-override-xpc counter' "${CASE_DIR}/log/probe.log" 'PROBE_JB_FRAMEWORK_FROM_OVERRIDE_XPC=1'
+expect_contains 'a-override-xpc reads the installed shape' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: present (5 bundles)'
+expect_contains 'a-override-xpc is not called a reproduction' "${CASE_DIR}/log/probe.log" 'This run is NOT the build-state.md:506 configuration'
+expect_not_contains 'a-override-xpc never retracts A' "${CASE_DIR}/log/probe.log" 'A cannot come from launchd scanning the override tree'
+expect_contains 'a-override-xpc says A is direct evidence' "${CASE_DIR}/log/probe.log" 'which is (A)'
+
+printf '\n== an override whose XPCServices cannot be read withholds the comparison\n'
+# The install script's name cannot settle which of the two on-device shapes was
+# produced, so a run that cannot read the directory must not claim to reproduce
+# build-state.md:506 either way. The stub fails the existence check itself, with
+# the error on stderr, which is what the real `[ -d ... ]` does when the read is
+# refused: no present/absent word comes back.
+new_case xpc-unreadable "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8304, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_xpc_services_unreadable\": true}"
+run_probe
+expect_contains 'xpc-unreadable records unknown' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: unknown'
+expect_contains 'xpc-unreadable withholds the comparison' "${CASE_DIR}/log/probe.log" 'Comparison withheld'
+expect_not_contains 'xpc-unreadable never claims a reproduction' "${CASE_DIR}/log/probe.log" 'is therefore a reproduction of'
+
+printf '\n== a listing that fails after the directory was found present is unknown, not absent\n'
+# The directory exists, so the shape is not the pruned one; but its listing failed,
+# so the bundle count is unknown. The old `ls ... 2>/dev/null | wc -l` form turned
+# exactly this state into 0, which reads as "pruned", a positive claim from a failed
+# read.
+new_case xpc-listing-fails "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8306, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_prunes_xpc_services\": false, \"override_xpc_bundles\": 5, \"override_xpc_listing_fails\": true}"
+run_probe
+expect_contains 'xpc-listing-fails records unknown' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: unknown'
+expect_not_contains 'xpc-listing-fails never claims absent' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: absent'
+expect_contains 'xpc-listing-fails withholds the comparison' "${CASE_DIR}/log/probe.log" 'Comparison withheld'
+
+printf '\n== the pruned shape still reproduces build-state.md:506 and still retracts A\n'
+# build-state.md:506 is the pruned shape, so this is the one run where a zero
+# endpoint reading is a reproduction and where A does contradict that row.
+new_case xpc-pruned "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8305, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_prunes_xpc_services\": true, \"override_xpc_bundles\": 0}"
+run_probe
+expect_contains 'xpc-pruned records absent' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: absent'
+expect_contains 'xpc-pruned reproduces the known row' "${CASE_DIR}/log/probe.log" 'is therefore a reproduction of'
+expect_contains 'xpc-pruned retracts A' "${CASE_DIR}/log/probe.log" 'A cannot come from launchd scanning the override tree'
+
+# --- p1 round 2: B must say which shape it measured, exactly as A does -------
+#
+# The Comparison paragraph above the verdict already branches on the shape. When
+# B was left flat, one log said "This run is NOT the build-state.md:506
+# configuration" and then, eleven lines later, "this run is a reproduction" of
+# it. B is the likelier verdict on this device (basebin is undeployed, so helpers
+# load the system copy), so the shape-blind text covered the common case. Each
+# case below pins one of the three shapes, and two of them assert on the verdict
+# arm's own wording rather than the comparison paragraph's.
+
+printf '\n== B with the pruned override reproduces the known row\n'
+new_case b-pruned "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8700), \"override_prunes_xpc_services\": true, \"override_xpc_bundles\": 0}"
+run_probe
+expect_status 'b-pruned exit' "${CASE_STATUS}" 0
+expect_contains 'b-pruned verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
+expect_contains 'b-pruned records absent' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: absent'
+expect_contains 'b-pruned calls itself a reproduction' "${CASE_DIR}/log/probe.log" 'is a reproduction that adds a CrashReporter diff'
+expect_contains 'b-pruned names the row it agrees with' "${CASE_DIR}/log/probe.log" 'This agrees with build-state.md:506'
+
+printf '\n== B with an unpruned override is a new reading, not a reproduction\n'
+# The shape the device's own install script produces. The log must not claim both
+# "not this configuration" and "a reproduction of it"; the verdict arm has to say
+# the second thing the first one implies.
+new_case b-unpruned "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8700), \"override_prunes_xpc_services\": false, \"override_xpc_bundles\": 5}"
+run_probe
+expect_status 'b-unpruned exit' "${CASE_STATUS}" 0
+expect_contains 'b-unpruned verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
+expect_contains 'b-unpruned comparison says it is not that row' "${CASE_DIR}/log/probe.log" 'This run is NOT the build-state.md:506 configuration'
+expect_contains 'b-unpruned verdict says it is not that row too' "${CASE_DIR}/log/probe.log" 'This is NOT the build-state.md:506 configuration: that row is the pruned'
+expect_contains 'b-unpruned calls itself a new reading' "${CASE_DIR}/log/probe.log" 'a new reading about the unpruned shape'
+expect_contains 'b-unpruned points at the unpruned comparison' "${CASE_DIR}/log/probe.log" 'comparable with build-state.md:333-347'
+# The contradiction the reviewer reproduced, asserted absent by wording: no arm
+# may call an unpruned run a reproduction of the pruned row.
+expect_not_contains 'b-unpruned never claims a reproduction' "${CASE_DIR}/log/probe.log" 'is a reproduction that adds a CrashReporter diff'
+expect_not_contains 'b-unpruned never agrees with the pruned row' "${CASE_DIR}/log/probe.log" 'This agrees with build-state.md:506'
+
+printf '\n== B whose override shape could not be read withholds the comparison\n'
+new_case b-unreadable "{\"services\": ${TWO}, \"helpers\": $(make_helpers 2 "${SYS_FW}" 8700), \"override_xpc_services_unreadable\": true}"
+run_probe
+expect_status 'b-unreadable exit' "${CASE_STATUS}" 0
+expect_contains 'b-unreadable verdict' "${CASE_DIR}/log/probe.log" 'PROBE_VERDICT=B'
+expect_contains 'b-unreadable records unknown' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: unknown'
+expect_contains 'b-unreadable withholds the verdict comparison' "${CASE_DIR}/log/probe.log" 'is withheld. Read the step 2 lines above.'
+expect_not_contains 'b-unreadable never claims a reproduction' "${CASE_DIR}/log/probe.log" 'is a reproduction that adds a CrashReporter diff'
+expect_not_contains 'b-unreadable never agrees with the pruned row' "${CASE_DIR}/log/probe.log" 'This agrees with build-state.md:506'
 
 printf '\n== A from the /var/jb Frameworks copy is named separately again\n'
 new_case a-jb-copy "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8303, \"path\": \"${SYS_XPC}\", \"frameworks\": [\"${JB_FW}\"]}]}"
