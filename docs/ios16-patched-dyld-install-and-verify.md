@@ -2,12 +2,13 @@
 
 本文回答四个问题：`gen/dyld` 怎么产生、在启动哪一步被读、替换它要重启什么；把它换成带 `isOverridablePath` / `isAlwaysOverridablePath` 两个 hook 的版本需要哪几步、每步怎么回退；装上之后用什么命令判定「链接期硬依赖系统 WebKit 的宿主加载了 18.3」；这条路走不通时否证它是哪一条读数。
 
-结论先写四条：
+结论先写五条：
 
 1. **`gen/dyld` 是合成产物，不是装进去的文件。** 它每次由 `gen/dyld.orig` 复制一份、打 `getAMFI` 与 `LC_UUID` 补丁、用 `MachOMerger` 合并 `basebin/dyldhook_merge.<arch>.iOS<ver>.dylib`、再重签名得到。所以「装 hook」等于「换掉那个 `dyldhook_merge` 输入」，不是换 `gen/dyld`。
-2. **这条路在离线证据上成立，但还缺一次重启后的行为读数。** 本次取到的三段读数把「缺什么」钉住了：覆盖目录里放一份 18.3 `WebKit`、`DYLD_FRAMEWORK_PATH` 指向它，未打 hook 时 dyld 连候选行都不打印（对照 `/var/jb/usr/lib/libiosexec.1.dylib` 会打印）；四个 hook 计数在设备上是 `1 0 0 1`、`basebin.tar` 里那份是 `1 1 1 1`；硬链接宿主的开局形态被判据复现（一份 `WebKit`、uuid `743EAFB4…`、来自 `/System`）。缺的是装上之后同一个宿主的 uuid 变成 `787DFAB1…`。
-3. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（设备 `1 0 0 1`）；`systemhook` 是原版、不写那四个搜索路径变量（设备那份 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次，`basebin.tar` 里那份 234336 出现 2 次）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`）。三处都要补，任缺一处都拿不到 18.3 那份 `WebKit`；并且三者的依赖是有序的——hook 是前提，变量是通道，链接是让通道末端有文件（4.4 节）。
-4. **安装需要 root，并且要一次用户空间重启。** 本次没有执行任何需要 root 的写操作，也没有重启。命令整理成清单交回，见第六节。
+2. **dyld 这一层已在本机装好并验证通过，但它只让 helper 换到 18.3，没让 app 的 UI 进程换。** 2026-11-25 23:51–23:53 设备装上了两份补丁（`dyldhook_merge` 75952 / 四计数 `1 1 1 1`，`systemhook` 234336 含四个变量），`gen/dyld` 由 974016 变成 974608；`dyld.orig` 未被重写。装上后 4.2 节出现 `found: dylib-from-disk-to-override-cache`（8 次命中），4.3 节直接跑 18.3 的 `WebContent` 得到五个镜像全部来自 `/var/jb`；`uiopen` 真实拉起 Safari 时，launchd 起的 `WebContent`/`Networking` 同样加载 `/var/jb`。装 hook 之前的同一组测试全部是 `found: dylib-from-cache` 或没有候选行，两侧都留了读数。
+3. **同一时刻 `MobileSafari`、`Chrome`、`SpringBoard` 三个 UI 进程仍加载 `/System` 的 16.1。** 它们的 envp 里只有 `__XPC_DYLD_FRAMEWORK_PATH`/`__XPC_DYLD_LIBRARY_PATH`，没有裸名那两个，dyld 不读前者。于是设备处于跨代形态：UI 是 16.1、helper 是 18.3。这与 `docs/ios16-whole-18.3-deployment-path.md:47` 的硬约束一致——那一节要求 UI 与每个 helper 同代，`:80` 写明不同代的后果是「渲染循环卡死而非进程死亡」。本次没有取得「页面是否真的渲染」的读数（设备上没有截图工具，也没有用户的界面观察），所以只能记到「进程结构与那条失败形态一致」为止。
+4. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（装之前设备 `1 0 0 1`）；`systemhook` 是原版、不写那四个搜索路径变量（原版 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次，`basebin.tar` 里那份 234336 出现 2 次）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`）。三处补上之后 4.2 与 4.3 两层对 helper 都通过。三者的依赖是有序的——hook 是前提，变量是通道，链接是让通道末端有文件（4.4 节）。
+5. **安装需要 root，并且要一次用户空间重启。** 本次没有执行任何需要 root 的写操作；设备上的那次安装发生在 23:51–23:53，不是本次执行的。命令整理成清单，见第六节。
 
 本文的结论分三档标注，与 `docs/ios16-launchd-xpc-resolution-gap.md` 的约定一致：**已确证**（附设备读数原文）、**有源码支撑**（能指出代码位置，但没有设备行为读数）、**假设**（无直接读数）。一条论断的强度取它最弱的一环。
 
@@ -218,45 +219,77 @@ dyldhook_merge.arm64e.iOS16-17.dylib   75952  <tar 里那份的 sha>  [1, 1, 1, 
 
 ### 4.2 第二层：运行期，dyld 愿不愿意用磁盘副本
 
-一条命令，不需要 root，不需要改任何文件。命令里的目录要和第五节的布局一致：按第 2 步建了链接集合，用 `/var/jb/Library/WebKitOverride`；没建，就直接用 18.3 实际所在的 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`。
+一条命令，不需要 root，不需要改任何文件。
+
+**`systemhook` 装上之后，这条命令里的路径变量由它决定，不由命令行决定。** 打了补丁的 `systemhook` 在每次 `spawn` 时把四个变量写进子进程的 `envp`，已有同名变量且取值不同就覆盖（`0001-systemhook-set-search-paths.patch` 的 `envbuf_variable_matches` 只在取值相同时跳过，否则走 `envbuf_setenv`）。所以在装了 `systemhook` 的设备上，命令行前置 `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks` 不起作用，实际生效的永远是 `/var/jb/Library/WebKitOverride`。本次实测：前置两条路径 `DYLD_FRAMEWORK_PATH=/var/jb/tmp/aaa:/var/jb/tmp/bbb`，子进程里只读到一条，值是 `.../Library/WebKitOverride`。
 
 ```sh
-DIR=/var/jb/Library/Frameworks          # 或 /var/jb/Library/WebKitOverride
-LIBDIR=/var/jb/usr/lib                  # 或 $DIR/usr/lib（链接集合里这一跳同样成立）
-DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=$DIR DYLD_LIBRARY_PATH=$LIBDIR \
+DYLD_PRINT_SEARCHING=1 \
   /var/jb/usr/bin/python3 -c 'import ctypes; ctypes.CDLL("/System/Library/Frameworks/WebKit.framework/WebKit")' 2>&1 \
   | grep -A6 'find path "/System/Library/Frameworks/WebKit.framework/WebKit"'
 ```
 
-**hook 生效时的预期输出**（关键是第 3 行出现、`found:` 不再是 `dylib-from-cache`）：
+判据看的是候选行落在哪个目录，而不是命令里写了什么：候选行必须是 `<JB>/Library/WebKitOverride/WebKit.framework/WebKit`。如果那条链接集合没建（第五节第 2 步未执行），候选行仍然指向 `WebKitOverride` 而目录不存在，读数落到下面的第二种情形——这正是「变量对了、目录缺文件」的样子，不要误判成 hook 没生效。
+
+**hook 生效时的实际输出**（2026-11-25 23:5x 在设备上取到，装的是打过补丁的 `gen/dyld`，`<uuid>` 为 `1365146172213F87EA86B1C2E2A9BD3EAD711C77755E01EE22DEC1CDCC29B90C60C18A22DDD057613BBD33717E603CEB`）：
 
 ```
-dyld[N]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
-dyld[N]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "<DIR>/WebKit.framework/WebKit"
-dyld[N]:   found: dylib-from-disk-to-override-cache: "<DIR>/WebKit.framework/WebKit"
+dyld[36753]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
+dyld[36753]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride/WebKit.framework/WebKit"
+dyld[36753]:   found: dylib-from-disk-to-override-cache: "/private/preboot/<uuid>/dopamine-ML13U0/procursus/Library/WebKitOverride/WebKit.framework/WebKit"
 ```
 
-**本机当前（未打 hook）的实际输出**，即失败基线。本次用真实的 18.3 目录重取了一遍，形状与之前用 `/tmp` 对照目录取的一致：
+同一轮里 `dylib-from-disk-to-override-cache` 共 8 次，命中的八个目标是：
 
 ```
-$ DIR=/var/jb/Library/Frameworks DYLD_PRINT_SEARCHING=1 DYLD_FRAMEWORK_PATH=$DIR ...
+JavaScriptCore.framework/JavaScriptCore   WebCore.framework/WebCore
+WebKit.framework/WebKit                   WebGPU.framework/WebGPU
+WebKitLegacy.framework/WebKitLegacy       usr/lib/libwebrtc.dylib
+usr/lib/libANGLE-shared.dylib             usr/lib/liblzma.5.dylib
+```
+
+五个 framework 与两个弱链接库全部顶替成功。`liblzma.5.dylib` 也在列，这是 `usr` 链接把整个 `/var/jb/usr/lib` 都变成搜索路径的副作用：那一目录里有 137 个 `.dylib`，其中与共享缓存重名的文件同样会被顶替。同一轮一共 443 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，`liblzma.5.dylib` 是唯一一个非 WebKit 的命中。这不是 WebKit 需要的，属于这条方案的附带影响。
+
+**附带影响的范围到这里为止，不要把它当风险放大。** 候选行只对本次真正要加载的叶子名产生，所以覆盖面取决于进程加载了什么，而不是 `/var/jb/usr/lib` 里有什么。`libmrc.dylib` 这类重名文件在 WebKit 的依赖图里不出现，就不会产生候选行。要判断某个具体文件有没有被顶替，用同一条命令换叶子名实测，不要从目录内容推断。
+
+**装 hook 之前的失败基线**（同一天早些时候，同一台设备）：
+
+```
 dyld[33724]: find path "/System/Library/Frameworks/WebKit.framework/WebKit"
 dyld[33724]:   possible path(original path on disk): "/System/Library/Frameworks/WebKit.framework/WebKit"
 dyld[33724]:   possible path(original path): "/System/Library/Frameworks/WebKit.framework/WebKit"
 dyld[33724]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/WebKit.framework/WebKit"
 ```
 
-判据写成三行，每条对应一种失败：
+判据写成三行。前两行有本机实测，第三行只有源码与旧读数支撑：
 
-| 判据 | 读数 | 归因 |
-| --- | --- | --- |
-| 出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 且 `found: dylib-from-disk-to-override-cache` | 通过 | hook 生效、目录命中、磁盘副本顶替成功 |
-| 有 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)`，但 `found: dylib-from-cache` | **hook 生效但没取代** | 目录里没有这个文件，或 inode 与缓存项相同；查 `ls -l <DIR>/WebKit.framework/WebKit` |
-| 完全没有 `DYLD_FRAMEWORK/LIBRARY_PATH` 候选行 | **hook 没生效** | 回到 4.1 看四个计数 |
+| 判据 | 读数 | 归因 | 本次实测 |
+| --- | --- | --- | --- |
+| 出现 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 且 `found: dylib-from-disk-to-override-cache` | 通过 | hook 生效、目录命中、磁盘副本顶替成功 | 已取得（上），同一轮 8 次命中 |
+| 有 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)`，但 `found: dylib-from-cache` | **hook 生效但没取代** | 目录里没有这个叶子名；源码允许的另一种情形是磁盘副本与缓存项 inode 相同 | 已取得，用 `UIKit` 与 `CoreFoundation` 做了负对照（下） |
+| 完全没有 `DYLD_FRAMEWORK/LIBRARY_PATH` 候选行 | **hook 没生效** | 回到 4.1 看四个计数 | 装 hook 之前的全部测试；装好之后无法再复现（hook 已在 `gen/dyld` 里，去掉只能回退 `gen/dyld`） |
 
-这三种判据里，只有第三种有本机实测（3.1 节那三段：候选行根本不出现）。前两种的读数形状来自源码与 dyld 里的字符串，本次**没有**在装上 hook 的机器上取到，复跑时请按实际输出记录，不要照抄上表。
+**第二种情形的负对照。** 覆盖目录里只有五个 WebKit 相关的 framework，`UIKit` 与 `CoreFoundation` 都不在其中。对这两个发起加载，候选行照样出现，`found` 落回 `/System` 的缓存项：
 
-第二种之所以能单独分辨，是因为同一台设备上出现过「候选行出现、但命中的不是覆盖目录」的现成例子，读数是 `/var/jb/usr/lib/libiosexec.1.dylib` 那条：候选行 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): ".../libiosexec.1.dylib"` 存在，`found:` 落在 `dylib-from-disk` 而不是覆盖目录。它证明「候选行出现」与「命中覆盖目录」是两件可分的事。
+```
+$ DYLD_PRINT_SEARCHING=1 /var/jb/usr/bin/python3 -c 'import ctypes; ctypes.CDLL("/System/Library/Frameworks/UIKit.framework/UIKit")'
+dyld[37278]: find path "/System/Library/Frameworks/UIKit.framework/UIKit"
+dyld[37278]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "<JB>/Library/WebKitOverride/UIKit.framework/UIKit"
+dyld[37278]:   possible path(original path on disk): "/System/Library/Frameworks/UIKit.framework/UIKit"
+dyld[37278]:   possible path(cryptex prefix): "/private/preboot/Cryptexes/OS/System/Library/Frameworks/UIKit.framework/UIKit"
+dyld[37278]:   possible path(original path): "/System/Library/Frameworks/UIKit.framework/UIKit"
+dyld[37278]:   found: dylib-from-cache: (0x06DD) "/System/Library/Frameworks/UIKit.framework/UIKit"
+```
+
+`CoreFoundation` 同一形状。这组对照把归因固定在「目录里没有这个叶子名」这一条上：hook 已经生效（候选行出现就是它生效的表现），目录也在（`WebKit.framework` 那几个同轮命中过），区别只是这个文件不在。
+
+另一种情形「磁盘副本与缓存项 inode 相同」本次没有构造：要让 `stat()` 出来的 inode 与共享缓存里那个条目一致，需要把文件硬链进缓存，设备上做不到可控复现。它是 `Loader.cpp` 的判定分支，属于**源码支撑**，不是实测。
+
+第三种之所以难再取得，是因为装好之后 `gen/dyld` 里已经有那两个 hook，唯一回到该形状的办法是第五节第 5 步的回退。本次没有为了取这条读数而回退。
+
+**装 hook 前的第三种形状有直接读数。** 3.1 节那三段全部是「候选行根本不出现」，当时 `gen/dyld` 判据是 `1 0 0 1`，与本节第一行互为对照：同一台设备、同一条命令，`gen/dyld` 换掉前后分别落在第三与第一种形状，所以两者确实由两个 override hook 决定，不是由命令写法或目录内容决定。
+
+**旧记录里一个当时被误算的形状，要更正。** 本节早前版本说装 hook 前有 36 条候选行、其中 18 条落在 `/var/jb` 下，并把这归为「第二种判据的形状」。那个归因不对：那 18 条命中的是 `systemhook.dylib`、`TweakLoader.dylib` 这类**不在共享缓存里**的文件，它们走 `found: dylib-from-disk` 是「本来就不在缓存」的正常结果，与 override hook 无关。第二种形状的判据必须同时满足「叶子名在共享缓存里」与「候选行指向覆盖目录」这两条，`libiosexec.1.dylib` 那条也不满足前者。判据按第三种记，装 hook 前针对 `WebKit.framework/WebKit` 的候选行确实是 0 条。
 
 **这条命令为什么能代表硬链接宿主。** 3.2 节那个硬链接宿主的判定与它同源：宿主开局是 `WEBKIT_IMAGES=1`、uuid `743EAFB4…`、全部来自 `/System`。hook 生效之后，同一个宿主的期望读数是 `WEBKIT_IMAGES=1`、uuid `787DFAB1…`、`path=<DIR>/WebKit.framework/WebKit`，并且 `anchor bound to: NOT the 16.1 system WebKit`。三行都要对上才算通过；只对上 uuid 不行，因为 uuid 相同不代表路径是覆盖目录那份（`/var/jb` 是符号链接，同一个文件有两条字符串形态）。
 
@@ -322,7 +355,55 @@ dyld[33746]:   possible path(original path): "/System/Library/Frameworks/WebKit.
 dyld[33746]:   found: dylib-from-cache: (0x0068) "/System/Library/Frameworks/WebKit.framework/WebKit"
 ```
 
-这一轮共打印 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，其中 18 条落在 `/var/jb` 下（`systemhook.dylib`、`TweakLoader.dylib`、`libroot.dylib` 等），**但针对 `WebKit.framework/WebKit` 的候选行是 0 条**。这正好是 4.2 节第二种判据的形状：候选行机制本身是通的（非缓存路径上出现了），缺的是缓存项允许被磁盘副本顶替的那两个 hook。所以 18.3 的 `.xpc` 即使自己声明了 `/var/jb/Library/Frameworks`，现在也拿不到那份。
+这一轮共打印 36 条 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH)` 候选行，其中 18 条落在 `/var/jb` 下（`systemhook.dylib`、`TweakLoader.dylib`、`libroot.dylib` 等），**但针对 `WebKit.framework/WebKit` 的候选行是 0 条**。那 18 条命中的文件本来就不在共享缓存里，走 `found: dylib-from-disk` 是正常结果，不能拿来当「候选行机制通了」的证据；判断标准是共享缓存里的那个叶子名有没有候选行。`WebKit.framework/WebKit` 在共享缓存里，它的候选行是 0 条，所以这一轮落在 4.2 节第三种形状：变量在 envp 里，但 dyld 不为缓存项拼候选行，缺的是那两个 override hook。18.3 的 `.xpc` 即使自己声明了 `/var/jb/Library/Frameworks`，装 hook 之前也拿不到那份。
+
+**装上 hook 之后，同一个二进制换成了 18.3 那一套。** 直接跑同一个 `WebContent` 并打印它实际映射的镜像：
+
+```
+$ DYLD_PRINT_LIBRARIES=1 /var/jb/Library/Frameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent
+dyld[35673]: <787DFAB1-4DE3-3568-9923-C9409791B728> .../procursus/Library/Frameworks/WebKit.framework/WebKit
+dyld[35673]: <06CB6C38-5FA3-3847-909C-7857DABDF5DA> .../procursus/Library/Frameworks/WebCore.framework/WebCore
+dyld[35673]: <39762ECD-9C3A-33CD-971F-62C61DFEBDD7> .../procursus/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+dyld[35673]: <B22027E7-83B0-395C-9CDC-2FD3059FAB14> .../procursus/usr/lib/libwebrtc.dylib
+dyld[35673]: <277DB473-669B-3F0D-857A-DF23FEFA73D3> .../procursus/usr/lib/libANGLE-shared.dylib
+```
+
+五个镜像全部来自 `/private/preboot/<uuid>/dopamine-ML13U0/procursus`，没有一个是 `/System`。`WebKit` 的 uuid 是 18.3 的 `787DFAB1…`，不是 16.1 的 `743EAFB4…`；`WebCore`、`JavaScriptCore`、`libwebrtc`、`libANGLE-shared` 的 uuid 也与各自的 18.3 文件一致（本书 4.4 节表里给了文件名与尺寸）。
+
+**这一条是本 mission 要回答的那个问题的答案：装了 hook 之后，链接期硬依赖系统 WebKit 的宿主能加载 `/var/jb` 的 18.3。** 三个条件缺一不可，本次依次验证过：hook 进 `gen/dyld`（4.1）、覆盖目录有 18.3 且被搜索到（4.2）、`systemhook` 把变量交给进程（4.3）。
+
+**launchd 真实拉起的 helper 也是 18.3，不是只有手工执行的那份。** 上一条是直接执行二进制，可能被质疑「不算真实宿主」。本次另外取了一组：`uiopen "https://example.com"` 让系统按正常路径拉起 Safari，然后对 launchd 起的 helper 跑 `lldb image list`：
+
+```
+37805 (WebContent) -> <JB>/Library/Frameworks/WebKit.framework/WebKit
+37806 (Networking) -> <JB>/Library/Frameworks/WebKit.framework/WebKit
+```
+
+进程路径本身是系统的 `.../WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/...`，加载的 `WebKit` 却是 `/var/jb` 那份，说明覆盖对真实启动路径同样生效。helper 的 envp 里两个裸名变量都在，值是 `WebKitOverride`：
+
+```
+$ ps -E -p 37805 | tr ' ' '\n' | grep -E '^(DYLD_FRAMEWORK_PATH|DYLD_LIBRARY_PATH)='
+DYLD_FRAMEWORK_PATH=<JB>/Library/WebKitOverride
+DYLD_LIBRARY_PATH=<JB>/Library/WebKitOverride/usr/lib
+```
+
+**但 app 的 UI 进程仍是 16.1，两侧不同代。** 同一时刻 `MobileSafari`、`Chrome`、`SpringBoard` 三个 UI 进程的 `image list` 全都是 `/System/Library/Frameworks/WebKit.framework/WebKit`，且它们的 envp 里**没有裸名**那两个变量，只有 `__XPC_` 前缀的两个：
+
+| 进程 | `DYLD_FRAMEWORK_PATH` | `__XPC_DYLD_FRAMEWORK_PATH` | 加载的 `WebKit` |
+| --- | --- | --- | --- |
+| `MobileSafari` 36826 | 0 条 | 1 条 | `/System`（16.1） |
+| `SpringBoard` 36405 | 0 条 | 1 条 | 未测 |
+| `Chrome` 37171 | 0 条 | 1 条 | `/System`（16.1） |
+| `WebContent` 36828 | 1 条 `WebKitOverride` | 1 条 | `/var/jb`（18.3） |
+| `Networking` 37174 | 1 条 `WebKitOverride` | 1 条 | `/var/jb`（18.3） |
+
+两者差的正是 dyld 认的那两个名字。`__XPC_DYLD_FRAMEWORK_PATH` 只在 XPC helper 一侧被转成真正的搜索路径，app 进程里它只是躺着的环境变量，dyld 不读。所以「装了 hook」并不等于「app 自己也换了引擎」：`systemhook` 写入的四个变量里，对 UI 进程有效的那个（裸名）在它自己的 `spawn` 链上没有落地。
+
+**这与仓库既有的硬约束一致，不是新发现的缺陷。** `docs/ios16-whole-18.3-deployment-path.md:47` 写「UI 进程与每一个 helper 必须同代且同时换到新一代——任何一端落后，都会在 `initializeWebProcess` 处按上面的方式崩」；同文件 `:80` 给出另一种后果：「渲染循环卡死而非进程死亡」，进程存活、没有崩溃报告，页面停在首帧或全白。本次设备正落在后者这一侧的形状里：Safari 与 Chrome 都能起来、helper 稳定存活 30 秒以上、`%cpu` 全程 0.0、页面加载后 72 行 `launchd.log` 增量里 `failed lookup` 与 `WebKit` spawn 都是 0。
+
+**渲染是否真的停住，本次没有判定。** 判断需要看屏幕，而设备上没有截图工具（`snaputil` 只做 APFS 快照），本轮也没有取得用户的界面观察。所以能写下的只有：进程结构与文档描述的那条失败形态一致，`%cpu` 为 0.0 与「不再产生新的 layer tree」相容，但「页面是白屏还是正常」这一点未验证。这一条是本次最重要的未验证项，见第八节。
+
+**`launchd.log` 里的 `sent an invalid request` 与上述判据无关，但确实在发生。** 23:53 之后对每个进程（`ps`、`ls`、`cat`、`env`、`clang`、`xpcproxy` 等，不只是 WebKit 相关）都会打印 `<Notice>: <名字> sent an invalid request`；一次 33 秒的窗口里 77 条，其中 `xpcproxy` 占比最高。`installd` 等仍能正常 spawn，SpringBoard 活着，`user/501` 域有 SpringBoard。这是 launchd 域层面的现象，与装 hook 同一分钟开始，原因未定，已单独报出。
 
 ### 4.4 要先把三处路径对齐
 
@@ -348,7 +429,7 @@ dyld[33774]:   possible path(DYLD_FRAMEWORK/LIBRARY_PATH): "/tmp/m121-symtest/li
 dyld[33774]:   found: dylib-from-disk: "/tmp/m121-symtest/linkedlib/libiosexec.1.dylib"
 ```
 
-**对齐的形状是「真目录 + 六条链接」，不是整目录一条链接。** `systemhook` 给的 framework 路径是 `/var/jb/Library/WebKitOverride` 本身，library 路径是 `/var/jb/Library/WebKitOverride/usr/lib`，所以 `WebKitOverride` 下面既要直接有 `WebKit.framework`，又要有 `usr`。整目录链接只能满足前者（`WebKitOverride/usr` 就成了 `Frameworks/usr`，不存在）。第五节第 2 步按这个形状给出六条 `ln -s`，回退是一条 `rm -rf`，18.3 本身不动。代价是 `install-webkit-override.sh` 之后不能直接再跑：它会往 `WebKitOverride` 里写自己的那份，与这套链接冲突。两条路只能选一条。
+**对齐的形状是「真目录 + 六条链接」，不是整目录一条链接。** `systemhook` 给的 framework 路径是 `/var/jb/Library/WebKitOverride` 本身，library 路径是 `/var/jb/Library/WebKitOverride/usr/lib`，所以 `WebKitOverride` 下面既要直接有 `WebKit.framework`，又要有 `usr`。整目录链接只能满足前者（`WebKitOverride/usr` 就成了 `Frameworks/usr`，不存在）。第五节第 2 步按这个形状给出六条 `ln -s`，回退是一条 `rm -rf`，18.3 本身不动。设备上现在是这个形态，`install-webkit-override.sh` 那条路未被采用（第五节第 2 步末尾）。
 
 **`libwebrtc.dylib` 与 `libANGLE-shared.dylib` 是弱链接，不在普通依赖列表里。** 18.3 的 `WebKit` 与 `WebCore` 对它们用的是 `LC_LOAD_WEAK_DYLIB`，命令字是 **`0x80000018`**（低位 `0x18`，带 `LC_REQ_DYLD` 位）。这一点容易读错：`rabin2 -l` 只按名字列出、不区分类型，会让人以为它们是强依赖；而按 `0xc` 去匹配 `LC_LOAD_DYLIB` 的解析器会把它们整个漏掉，本次两种错法都出现过一次。判据要用下面这段，它按 `cmd & 0x7fffffff` 归并：
 
@@ -492,7 +573,9 @@ dyld[34204]:   found: dylib-from-cache: (0x03C3) "/System/Library/PrivateFramewo
 
 这一步不修改任何现有文件，只新增一个目录与六条链接。回退是 `rm -rf /var/jb/Library/WebKitOverride` 一条命令，18.3 本身不受影响。
 
-**如果用户更愿意按 `install-webkit-override.sh` 的布局把 18.3 真复制进一个新目录，那就跳过这一步、改跑那个脚本；不要两件事都做。**
+**设备上现在采用的就是这一步的链接方案，`install-webkit-override.sh` 那条没有被采用。** 2026-11-25 23:54 建成的 `/var/jb/Library/WebKitOverride` 是 root:wheel 的真目录，里面五条 `*.framework` 符号链接加一个 `usr` 符号链接，指向 `/var/jb/Library/WebKitOverride/usr` 的那条同样存在；没有一份 18.3 被复制。这个形态与本节给出的 `ln -s` 六条一致。
+
+`install-webkit-override.sh` 那条路仍然成立，但它与本方案互斥：脚本会往 `WebKitOverride` 里写自己的副本，与符号链接同名冲突。已经按本节建过链接的设备上不要再跑它；要改用脚本，先 `rm -rf /var/jb/Library/WebKitOverride` 再跑。两者选哪一条不影响 4.2 与 4.3 的判据，因为两条路都让 `WebKitOverride/WebKit.framework/WebKit` 可达。
 
 ### 第 3 步：装上两份库并重建 `gen/dyld`（需要 root，触发用户空间重启）
 
@@ -612,11 +695,14 @@ cp -p /var/mobile/Documents/m121-backup/systemhook.dylib.orig /var/jb/basebin/sy
 
 | 未做项 | 为什么 | 补它的最小动作 |
 | --- | --- | --- |
-| 装上 hook 后的 4.2 节读数 | 需要 root 写 `/var/jb/basebin`，加一次用户空间重启 | 第五节全流程，约 5 分钟，重启一次 |
-| 4.3 节第 ④ 条的环境读数 | 依赖上一条 | 上一条通过后取一个 `WebContent` 的 pid，跑 4.3 节 ①② |
-| `libwebrtc`/`libANGLE` 在进程里命中哪一份 | 依赖上一条 | 第一层通过后，在 `WebContent` 的 `image list` 里核这两个的 `LC_UUID` 是否为 `b22027e7…`/`277db473…` |
+| ~~装上 hook 后的 4.2 节读数~~ | **已取得**（2026-11-25 23:5x）：`found: dylib-from-disk-to-override-cache` 8 次，五个 framework 与两个弱链接库全部顶替 | 无需补 |
+| ~~4.3 节的环境读数~~ | **已取得**：helper 的 envp 里有裸名两个变量、全部指向 `WebKitOverride`；`lldb image list` 显示 helper 加载 `/var/jb` | 无需补 |
+| **app 的 UI 进程仍是 16.1** | 本次新取得：`MobileSafari`/`Chrome`/`SpringBoard` 的 envp 只有 `__XPC_DYLD_*`，没有裸名，dyld 不认，于是留在共享缓存那份。与 helper 的 18.3 构成跨代 | 让 UI 进程也拿到裸名变量。`systemhook` 已写四个变量，`__XPC_` 那两个对 app 无效；可行方向是给 UI 进程的 `spawn` 路径单独补裸名，或让 `libxpc` 侧把 `__XPC_` 转成裸名。两者都要改 basebin，超出本文 |
+| **页面是否真的渲染出来** | 判断需要看屏幕；设备上没有截图工具（`snaputil` 只做 APFS 快照），本轮也没有用户的界面观察。`%cpu` 全程 0.0 与「渲染循环卡死」相容，但相容不等于成立 | 请用户在 Safari/Chrome 里打开一个页面并报告是否出内容；或在设备上装一个能截屏的包 |
+| `libwebrtc`/`libANGLE` 在 helper 进程里的 `LC_UUID` | 4.2 的搜索日志已给出它们从 `WebKitOverride/usr/lib` 顶替，但没有对存活 helper 做逐镜像 uuid 核对 | `lldb` 挂上 helper，`image list -o -f` 后对这两个取 `LC_UUID`，期望 `b22027e7…`/`277db473…` |
+| `launchd` 对每个进程打印 `sent an invalid request` | 23:53 起发生，与装 hook 同一分钟；33 秒窗口 77 条，`xpcproxy` 占多数。`installd` 仍能 spawn、SpringBoard 活着，所以不是全面故障 | 需要单独排查：比对装 hook 前后 `launchd.log` 的归一化增量，确认是 `systemhook` 的 `spawn` 钩子改了请求，还是 basebin 安装本身。跨出本文范围，已单独报出 |
 | 补丁跨重新越狱的存活 | 需要改写 `Dopamine.app/basebin.tar`（归 `_installd`，要 root） | 换它的对应成员，或接受每次重新越狱后重做第五节 |
-| `xpcproxy` 是否转发 `__XPC_` 前缀 | 设备上 `/usr/libexec/xpcproxy` 无该字符串，`libxpc` 源码不公开 | 与本文无关；4.3 节的通过条件是镜像路径，不依赖前缀转发 |
+| `xpcproxy` 是否转发 `__XPC_` 前缀 | 本次取得了结论：helper 一侧确实拿到了裸名变量，所以转交在 helper 上成立；app 进程一侧不成立（见上） | 剩余问题变成「为什么 app 进程不成立」，那是上一行的内容 |
 
 **`launchctl print` 的 `environment` 段不能当 envp 用。** 本次在同一个 pid（33349）上对照过两种读法，`launchctl print` 只显示四项，而 `ps -E` 与 `sysctl KERN_PROCARGS2` 都显示 21 项、其中含 `DYLD_INSERT_LIBRARIES`，`lldb image list` 也确认 `systemhook.dylib` 已映射进该进程。这条修正影响三份文档的读法：本文 4.3 节已改；`docs/ios16-whole-18.3-deployment-path.md:150/:178/:179` 与 `docs/ios16-all-18.3-xpc-endpoint-audit.md:203` 里「`environment` 段落含 `DYLD_FRAMEWORK_PATH`」这类记载不是否认能成立的证据，因为反向（段落为空）不代表进程里没有。它们要重取一次 `ps -E` 才能定案。
 
