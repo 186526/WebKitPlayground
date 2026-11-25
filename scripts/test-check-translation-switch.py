@@ -51,9 +51,9 @@ BASE = """\
 +// 16.1 enumeration it would name
 +// MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged.
 +// decoder->messageName() == MessageName::InitializeConnection
-+// Of the 4088 numbers, 5 land on a message with the same name, 3180 land on a different
-+// message, and 903 fall off the end of an enumeration of 3185; against 614.1.9 the same
-+// reading gives 3135 and 948.
++// Of the 4086 numbers, 5 land on a message with the same name, 3180 land on a different
++// message, and 901 fall off the end of an enumeration of 3185; against 614.1.9 the same
++// reading gives 3135 and 946.
 +// Safari-614.1.9 is a 16.0-generation snapshot, not the tag the device runs.
 +// The device runs releases/Apple/Safari-16.1-iOS-16.1 with 2946, 2478 and 3184,
 +// 45 at Last away from 3139.

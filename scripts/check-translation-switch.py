@@ -12,13 +12,15 @@ What it refuses, and why each combination is a defect rather than a preference:
     deployment loads our own WebKit.framework through scripts/install-webkit-override.sh, so both
     sides of the connection are this build and already number messages identically. Switching
     translation on renumbers messages that were correct. `InitializeConnection` is number 3076 in
-    this tree and 2478 in the shipped 16.1 enumeration, and the incoming table is a switch over 16.1
-    numbers, so case 3076 answers
-    MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged - a real message with no
-    relation to the handshake. 3076 is not in isKnownUnmappedIncomingNumber, so the miss path that
-    would flag the message is not taken and the rename is silent. ConnectionCocoa.mm's
-    `decoder->messageName() == MessageName::InitializeConnection` then never fires, m_isConnected
-    stays false, and the page renders blank instead of reporting anything.
+    this tree, and the incoming table switches over the older numbering the tables were generated
+    from, so case 3076 answers MessageName::WebPageProxy_RootViewToAccessibilityScreen - the message
+    that occupies 3076 in the Safari-614.1.9 snapshot, and a real message with no relation to the
+    handshake. Against the shipped 16.1 enumeration the same number instead names
+    MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged, which is what a peer
+    running that build would be misread as. Either way 3076 is not in isKnownUnmappedIncomingNumber,
+    so the miss path that would flag the message is not taken and the rename is silent.
+    ConnectionCocoa.mm's `decoder->messageName() == MessageName::InitializeConnection` then never
+    fires, m_isConnected stays false, and the page renders blank instead of reporting anything.
 
   - A member initialiser other than `{ false }` in Connection.h. IPC::Connection::Connection does
     not include MessageNumberTranslation.h, so an initialiser written as a macro name would be an
@@ -77,10 +79,10 @@ REQUIRED_RATIONALE = (
      "decoder->messageName() == MessageName::InitializeConnection"),
     ("the same-name count of the index comparison", "5 land on a message"),
     ("the different-message count against shipped 16.1", "3180"),
-    ("the beyond-range count against shipped 16.1", "903"),
+    ("the beyond-range count against shipped 16.1", "901"),
     ("the different-message count against the 614.1.9 basis", "3135"),
-    ("the beyond-range count against the 614.1.9 basis", "948"),
-    ("the tree's own size", "4088"),
+    ("the beyond-range count against the 614.1.9 basis", "946"),
+    ("the tree's own size", "4086"),
     ("the shipped 16.1 enumeration's size", "3185"),
     ("the tag the tables were generated from", "Safari-614.1.9"),
     ("the statement that the tables are a 16.0-generation snapshot", "16.0-generation snapshot"),
