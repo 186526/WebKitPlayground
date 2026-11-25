@@ -89,9 +89,17 @@
    image.
 
    WHAT IS MEASURED AND WHAT IS NOT. The order is measured: build-state.md 第八轮
-   took the duplicate count from 31 to 0 at 7/7 with this sequence, and recorded
-   WebCore failing on a StringImpl symbol under another one. The flag is not
-   measured. The probe that produced those counts calls
+   took the duplicate count from 31 to 0 at 7/7 with this sequence. What that
+   measurement covers is narrow, and the constraint it establishes is one edge, not
+   the whole permutation. WebCore ahead of JavaScriptCore fails on a StringImpl
+   symbol — recorded for WebCore loaded alone (doc 2.2) and for a host that links
+   WebKit (doc 6.3) — because JavaScriptCore provides that symbol. WebCore ahead of
+   the two dylibs but still after JavaScriptCore is not a failure: doc 2.3 and the
+   5.2 table both give 7/7 for it, differing only in the duplicate count (31 against
+   0). So JavaScriptCore must come before WebCore, and the reorder against the two
+   dylibs is what removes the duplicates.
+
+   The flag is not measured: the probe that produced those counts calls
    `dlopen(kImages[i], RTLD_NOW)` — docs/ios16-dyld-identity-and-load-conditions.md
    8.1 — with no RTLD_GLOBAL anywhere, so the count fell with every image in its
    own scope, and no device run compares the two modes. */

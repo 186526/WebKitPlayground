@@ -28,11 +28,19 @@ be tried.
 
 The order is `build-state.md` 第八轮's measurement: with
 JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy → WebGPU →
-WebKit the duplicate-image count fell from 31 to 0 and all seven loaded; any
-other order made WebCore fail with `Symbol not found:
-__ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...`. JavaScriptCore is first
-because it exports the WTF symbols the rest bind, and WebKit is last because it
-reexports WebKitLegacy and loads JavaScriptCore.
+WebKit the duplicate-image count fell from 31 to 0 and all seven loaded. What the
+readings do and do not support matters here. `WebCore` ahead of `JavaScriptCore`
+fails with `Symbol not found:
+__ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...` — recorded when `WebCore`
+is loaded alone (doc 2.2) and when a host that links `WebKit` runs the chain (doc
+6.3) — because that symbol comes from `JavaScriptCore`. `WebCore` ahead of the two
+dylibs but still after `JavaScriptCore` is a different case: it loaded 7/7 and only
+raised duplicate-class warnings (doc 2.3), which the 5.2 table shows as the same
+7/7 with a count of 31 instead of 0. So the constraint these readings establish is
+that `WebCore` cannot precede `JavaScriptCore`; the reorder against the two dylibs
+is what the count measures, and the one such sequence that was run loaded all
+seven. JavaScriptCore is first because it exports the WTF symbols the rest bind,
+and WebKit is last because it reexports WebKitLegacy and loads JavaScriptCore.
 
 WebCore is why the two dylibs sit where they do. Its load commands carry
 `LC_LOAD_WEAK_DYLIB` on three of the seven — `libwebrtc`, `libANGLE-shared` and
@@ -40,22 +48,27 @@ WebCore is why the two dylibs sit where they do. Its load commands carry
 (`BrowserEngineCore`, `libxslt.1`, `libAccessibility` and six `libswift*`), so the
 three are the whole of the set this chain relates to. A weak import does not block
 the load. In the payload as shipped the three strings are `/System` paths, so a
-WebCore loaded first bound the resident 16.1 copies and the later `/var/jb` load
+WebCore loaded first bound the resident 16.1 copies rather than the `/var/jb`
+ones, and the later `/var/jb` load of a dylib that had already been bound this way
 mapped a second copy. Two of the three were then reordered and the third was not:
 `libwebrtc` and `libANGLE-shared` are steps 2 and 3 against WebCore's step 4, and
 moving them ahead is what took the duplicate count to 0, while `WebGPU` is step 6,
 after WebCore, so no run has varied it. Both of the reordered two belong in the
 experiment because both are weak imports WebCore would otherwise bind to the
 system copies; the count is what only one of them can report. The 31 belongs to
-`libwebrtc` alone — it is `Class WK_RTC... is implemented in both` warnings,
-`libwebrtc` carries 466 `WK_RTC` strings, `WebGPU` carries none, and
-`libANGLE-shared` defines no classes at all (it has `__objc_classname` and
-`__objc_classrefs` but no `__objc_classlist`), so a second copy of it raises no
-`Class ... is implemented in both` warning and cannot appear in this count even
-though the second mapping is real. In the rewritten tree all three strings are
-`/var/jb/.../WebKit18`, so the System string is gone and no weak import of the
-three can name the system image — which is why the rewrite, not the ordering
-alone, is what makes the weak set safe.
+`libwebrtc` alone — it is `Class WK_RTC... is implemented in both` warnings, and
+`libwebrtc` carries 466 `WK_RTC` strings, so two copies of it in one process must
+produce them. `WebGPU` carries no `WK_RTC` name, so it cannot contribute to that
+count. `libANGLE-shared` defines no classes at all (it has `__objc_classname` and
+`__objc_classrefs` but no `__objc_classlist`), so two copies of it would raise no
+warning and this count cannot decide whether it ever had a second one. Doc 4.3's
+rule bears on that question — identity is decided by install name and the resident
+copy wins, and the `/var/jb` copy shares its install name with the shared-cache
+one — but its row for that case is marked not directly measured. So the 31 proves
+a second copy for `libwebrtc`, and for neither of the other two either way. In the
+rewritten tree all three strings are `/var/jb/.../WebKit18`, so the System string
+is gone and no weak import of the three can name the system image — which is why
+the rewrite, not the ordering alone, is what makes the weak set safe.
 
 `RTLD_NOW` turns a missing symbol into a failed step instead of a fault at first
 call, and every step asks for it.
