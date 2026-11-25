@@ -23,20 +23,28 @@ Fixtures are real thin arm64 Mach-O images: a header, one LC_SEGMENT_64 carrying
 dylib load commands the case needs.  A 32-byte header with ncmds=0 is not a legal image and would
 give the rewrite a payload no linker can produce, so the fixtures do not use one.
 
-Each case writes a fixture product tree and runs the real script against it.  ditto and ldid are
-stand-ins on Linux; dpkg-deb, zsh, file and python3 are the host's.  The cases that need a broken
-payload put a cp stand-in first on PATH, so the script itself stays free of test switches.
+Each case writes a fixture product tree and runs the real script against it.  ditto and the signer
+are stand-ins on Linux; dpkg-deb, zsh, file and python3 are the host's.  The cases that need a
+broken payload put a cp stand-in first on PATH, so the script itself stays free of test switches.
 
-The cases that end in `_lc_str`, `_rejected`, `_atomicity` and `_image` drive the Mach-O tool the
-script embeds directly, because the script deletes its work directory on exit and those cases need
-to see the tree the tool was handed.  They read the tool out of the script rather than keeping a
-copy, so they test the shipped code.
+The signer stand-ins write a real CodeDirectory over the bytes they are handed, through this
+module's own `--sign` entry point, because STEP 6 refuses to ship an image whose seal does not
+cover it.  The ldid stand-in also records each image it was given, so a case can prove the rewrite
+ran before the signing pass; `write_rcodesign` swaps it for the branch a Linux host takes.
+
+The cases that drive the embedded Mach-O tool directly (`_lc_str`, `_rejected`, `_atomicity`,
+`_image`) and the ones that drive `macho-code-signature.py` directly (`_note`, `_rejected`) see the
+tree the tool was handed, which a full run cannot: the script deletes its work directory on exit.
+They read the tool out of the script, or use the script's own checker, rather than keeping a copy,
+so they test the shipped code.
 
 Usage: python3 scripts/test-package-webkit-device-deb.py
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -166,6 +174,78 @@ def write_macho(path: Path, data: bytes | None = None, payload: bytes = b"") -> 
     path.write_bytes(data if data is not None else build_macho() + payload)
 
 
+def sign_fixture(path: Path) -> None:
+    """Sign one fixture image the way `ldid -S` does, so the check has something real to read.
+
+    The packaging script's post-condition rejects an image that ships unsigned, so a stand-in that
+    only logs like the old one would make every full-script case fail.  This writes a CodeDirectory
+    that covers the image, which is what the check verifies.
+
+    The signature has to start exactly where the covered range ends and reach the end of the file,
+    so the covered length and the signature size are solved together: a longer signature shortens
+    the covered range, which can change the page count, which changes the signature size.  Two
+    passes settle it for images this size.
+    """
+    data = bytearray(path.read_bytes())
+    count, _size = struct.unpack_from("<II", data, 16)
+    existing = None
+    cursor = 32
+    for index in range(count):
+        kind, command_size = struct.unpack_from("<II", data, cursor)
+        if kind == LC_CODE_SIGNATURE:
+            existing = cursor
+            break
+        cursor += command_size
+
+    identifier = path.name.encode() + b"\0"
+    page = 4096
+    code_limit = len(data)
+    if existing is None:
+        # Appending a command grows the header, so the covered range starts after it and the
+        # command is rewritten once the final size is known.
+        count += 1
+    for _ in range(4):
+        pages = (code_limit + page - 1) // page
+        directory_length = 44 + pages * 20 + len(identifier)
+        signature_size = 12 + 8 + directory_length
+        candidate = len(data) - signature_size
+        if candidate == code_limit:
+            break
+        code_limit = candidate
+    pages = (code_limit + page - 1) // page
+    directory_length = 44 + pages * 20 + len(identifier)
+    signature_size = 12 + 8 + directory_length
+    code_limit = len(data) - signature_size
+
+    command = struct.pack("<IIII", LC_CODE_SIGNATURE, 16, code_limit, signature_size)
+    if existing is None:
+        insert_at = 32 + struct.unpack_from("<I", data, 20)[0]
+        data[insert_at:insert_at] = command
+        struct.pack_into("<I", data, 16, count)
+        struct.pack_into("<I", data, 20, struct.unpack_from("<I", data, 20)[0] + 16)
+    else:
+        data[existing:existing + 16] = command
+
+    body = bytes(data[:code_limit])
+    digests = b"".join(
+        hashlib.sha1(body[slot * page:min((slot + 1) * page, code_limit)]).digest()
+        for slot in range(pages)
+    )
+    header_size = 44
+    ident_offset = header_size + len(digests)
+    directory = struct.pack(
+        ">IIIIIIIIIBBBBBBBB",
+        0xFADE0C02, directory_length, 0x20400, 0x2, header_size, ident_offset, 0,
+        pages, code_limit, 20, 1, 0, 12, 0, 0, 0, 0,
+    )
+    code_directory = directory + digests + identifier
+    superblob = struct.pack(">III", 0xFADE0CC0, 12 + 8 + directory_length, 1)
+    superblob += struct.pack(">II", 0, 12 + 8) + code_directory
+    if len(superblob) != signature_size:
+        raise AssertionError(f"fixture signature is {len(superblob)}, planned {signature_size}")
+    path.write_bytes(body + superblob)
+
+
 def build_product(root: Path, with_top_level_overlay: bool = True, with_dependencies: bool = True) -> Path:
     """Write the product tree the packaging script reads.
 
@@ -233,11 +313,12 @@ def write_shims(bin_dir: Path, cp_body: str | None = None) -> None:
     """Write ditto and ldid stand-ins.
 
     ditto copies recursively without following symlinks, which is how the real one behaves and why
-    the framework's relative link survives into the payload.  ldid ad-hoc signs each Mach-O; the
-    stand-in records, per image, whether the file it was handed carries an @rpath load command, in
-    $LDID_LOG when that is set.  A case can then prove the signing pass ran on the rewritten bytes,
-    and the file itself is left alone so the layout cases still compare real content.  The optional
-    cp body replaces the overlay copy, which is how the negative cases reintroduce a broken payload.
+    the framework's relative link survives into the payload.  ldid ad-hoc signs each Mach-O through
+    this module's own signer, so the packaging script's post-condition reads a seal that covers the
+    bytes rather than the `exit 0` that used to stand in for one.  Before signing it records, per
+    image, whether the file it was handed carries an @rpath load command, in $LDID_LOG when that is
+    set, which is how a case proves the rewrite ran before the signing pass.  The optional cp body
+    replaces the overlay copy, which is how the negative cases reintroduce a broken payload.
     """
     write_stand_in(bin_dir, "ditto", f'exec {CP} -R "$@"')
     write_stand_in(
@@ -245,9 +326,31 @@ def write_shims(bin_dir: Path, cp_body: str | None = None) -> None:
         'for last; do :; done; '
         'if [ -n "${LDID_LOG:-}" ]; then '
         'printf "%s %s\\n" "$(grep -a -c "@rpath/" "$last" || true)" "$last" >> "$LDID_LOG"; '
-        'fi',
+        'fi; '
+        f'exec {sys.executable} {Path(__file__).resolve()} --sign "$@"',
     )
     write_stand_in(bin_dir, "cp", cp_body or f'exec {CP} "$@"')
+
+
+def write_rcodesign(bin_dir: Path) -> None:
+    """Swap the ldid stand-in for an rcodesign one.
+
+    The script prefers ldid and only looks for rcodesign when no ldid is on PATH, so the fallback
+    is unreachable while the ldid stand-in exists.  rcodesign takes an output path instead of
+    editing in place, and it is the signer a Linux host uses, which is the branch whose
+    "reported success but wrote no output" guard would otherwise never run.
+    """
+    (bin_dir / "ldid").unlink()
+    write_stand_in(bin_dir, "rcodesign", f'''input=""
+output=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    sign) shift;;
+    --entitlements-xml-file) shift 2;;
+    *) input="$output"; output="$1"; shift;;
+  esac
+done
+{CP} "$input" "$output" && exec {sys.executable} {Path(__file__).resolve()} --sign "$output"''')
 
 
 def run_script(product: Path, output: Path, mode: str, bin_dir: Path,
@@ -296,6 +399,22 @@ def is_macho(path: Path) -> bool:
     with open(path, "rb") as handle:
         head = handle.read(4)
     return head in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe")
+
+
+def signature_state(path: Path) -> str:
+    """Ask the packaging script's own checker what seal one image ships."""
+    checker = Path(__file__).resolve().parent / "macho-code-signature.py"
+    with tempfile.TemporaryDirectory() as work:
+        target = Path(work) / path.name
+        shutil.copyfile(path, target)
+        result = subprocess.run(
+            [sys.executable, str(checker), "survey", work], capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 4:
+                return parts[3]
+    return "absent"
 
 
 def load_commands(path: Path) -> tuple[list[int], list[str]]:
@@ -795,7 +914,297 @@ def case_truncated_image() -> None:
     print(f"PASS {label}")
 
 
+def case_signer_that_does_nothing() -> None:
+    """A signer that reports success without signing must fail the run, not ship.
+
+    This is the defect the check exists for: `ldid -S` with no post-condition made a signing pass
+    that did nothing indistinguishable from one that worked.  The fixture product ships unsigned
+    images, so a signer that leaves them alone has to stop the run.
+    """
+    label = "a signer that leaves images unsigned fails the run"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        # The old `exit 0` stand-in, which is the shape of the real defect.
+        write_stand_in(bin_dir, "ldid", "exit 0")
+        product = build_product(root)
+        deb = root / "webkit.deb"
+        result = run_script(product, deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0, an unsigned payload was shipped\n{combined}")
+            return
+        if "no code signature" not in combined:
+            failures.append(f"{label}: the check did not name the unsigned images\n{combined}")
+            return
+        if deb.exists():
+            failures.append(f"{label}: a package was written despite the failed check")
+            return
+    print(f"PASS {label}")
+
+
+def case_resign_is_recorded() -> None:
+    """The run must list the cdhashes it changed, because the device admits by cdhash."""
+    label = "a re-signing pass lists the cdhashes it changed"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        product = build_product(root)
+        deb = root / "webkit.deb"
+        result = run_script(product, deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        if "carry a new signature after STEP 5's rewrite" not in combined:
+            failures.append(f"{label}: the run did not report the new signatures\n{combined}")
+            return
+        if "->" not in combined:
+            failures.append(f"{label}: the run did not list any cdhash\n{combined}")
+            return
+    print(f"PASS {label}")
+
+
+def case_rcodesign_path() -> None:
+    """The rcodesign dispatch has to sign, and its output has to reach the payload.
+
+    ldid is preferred and rcodesign is only consulted when no ldid is on PATH, so without a case
+    that removes the ldid stand-in the branch a Linux host takes never runs.  rcodesign also writes
+    an output path rather than editing in place, which is the file the script moves back.
+    """
+    label = "a package signed through rcodesign passes the seal check"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        write_rcodesign(bin_dir)
+        product = build_product(root)
+        deb = root / "webkit.deb"
+        result = run_script(product, deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        if "Signing Mach-O binaries with rcodesign" not in combined:
+            failures.append(f"{label}: the rcodesign branch did not run\n{combined}")
+            return
+        if "carry a new signature after STEP 5's rewrite" not in combined:
+            failures.append(f"{label}: the rcodesign pass did not re-sign the payload\n{combined}")
+            return
+        unpacked = root / "unpacked"
+        unpack(deb, unpacked)
+        for path in unpacked.rglob("*"):
+            if path.is_file() and is_macho(path) and signature_state(path) != "valid":
+                failures.append(f"{label}: {path.relative_to(unpacked)} ships no valid seal")
+                return
+    print(f"PASS {label}")
+
+
+def case_rcodesign_writes_no_output() -> None:
+    """An rcodesign that exits 0 without writing its file must fail, not pass a stale image.
+
+    Without the guard the script moves nothing, the image keeps its pre-rewrite seal, and the
+    comparison reads bytes that were never re-signed.
+    """
+    label = "an rcodesign that writes no output fails the run"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        write_rcodesign(bin_dir)
+        write_stand_in(bin_dir, "rcodesign", "exit 0")
+        product = build_product(root)
+        deb = root / "webkit.deb"
+        result = run_script(product, deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0, the run passed without signing\n{combined}")
+            return
+        if "wrote no output" not in combined:
+            failures.append(f"{label}: the failure is not the missing-output one\n{combined}")
+            return
+        if deb.exists():
+            failures.append(f"{label}: a package was written despite the failed signing pass")
+            return
+    print(f"PASS {label}")
+
+
+def case_byte_identical_note() -> None:
+    """A signer that leaves every image unchanged has to say so out loud.
+
+    This is the other half of the silent-pass diagnosis: a pass that changed nothing is not an
+    error, because a payload can already be correctly sealed, but the operator has to be told the
+    run cannot distinguish that from a signer that did nothing at all.
+
+    Driven against `macho-code-signature.py compare` directly.  A full-script run cannot produce
+    this shape: STEP 5's rewrite edits the command area of every image it touches, so the signing
+    pass always changes those cdhashes, and the case would be asserting a state the pipeline never
+    reaches.
+    """
+    label = "a run that changes no cdhash says it cannot tell a signer ran"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        payload = root / "payload"
+        image = payload / "Image.dylib"
+        write_macho(image, payload=b"code")
+        sign_fixture(image)
+        checker = Path(__file__).resolve().parent / "macho-code-signature.py"
+        survey = subprocess.run(
+            [sys.executable, str(checker), "survey", str(payload)],
+            capture_output=True, text=True,
+        )
+        before = root / "before.txt"
+        before.write_text(survey.stdout, encoding="utf-8")
+        if "\tvalid\t" not in survey.stdout:
+            failures.append(f"{label}: the signed fixture did not survey as valid\n{survey.stdout}")
+            return
+        compare = subprocess.run(
+            [sys.executable, str(checker), "compare", "--before", str(before), str(payload)],
+            capture_output=True, text=True,
+        )
+        combined = compare.stdout + compare.stderr
+        if compare.returncode != 0:
+            failures.append(f"{label}: exit {compare.returncode} on an unchanged payload\n{combined}")
+            return
+        if "byte-identical to the pre-signing survey" not in combined:
+            failures.append(f"{label}: the note did not name the byte-identical state\n{combined}")
+            return
+        if "cannot tell that a signer ran" not in combined:
+            failures.append(f"{label}: the note did not say what it cannot tell\n{combined}")
+            return
+    print(f"PASS {label}")
+
+
+def case_stale_seal_is_rejected() -> None:
+    """The checker itself must reject a seal that no longer covers the file.
+
+    Driven directly against `macho-code-signature.py compare`, so the rule is pinned without
+    depending on which signer the host has.
+    """
+    label = "a stale seal is reported as a violation"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        image = root / "payload" / "Image.dylib"
+        write_macho(image, payload=b"code")
+        sign_fixture(image)
+        checker = Path(__file__).resolve().parent / "macho-code-signature.py"
+        survey = subprocess.run(
+            [sys.executable, str(checker), "survey", str(root / "payload")],
+            capture_output=True, text=True,
+        )
+        if survey.returncode != 0:
+            failures.append(f"{label}: survey failed\n{survey.stderr}")
+            return
+        before = root / "before.txt"
+        before.write_text(survey.stdout, encoding="utf-8")
+        if "\tvalid\t" not in survey.stdout:
+            failures.append(f"{label}: the signed fixture did not survey as valid\n{survey.stdout}")
+            return
+        # Change a byte the seal covers.
+        data = bytearray(image.read_bytes())
+        data[40] ^= 0xFF
+        image.write_bytes(bytes(data))
+        compare = subprocess.run(
+            [sys.executable, str(checker), "compare", "--before", str(before), str(root / "payload")],
+            capture_output=True, text=True,
+        )
+        if compare.returncode == 0:
+            failures.append(f"{label}: a stale seal was accepted\n{compare.stdout}{compare.stderr}")
+            return
+        if "does not cover" not in compare.stderr:
+            failures.append(f"{label}: the violation did not explain the seal\n{compare.stderr}")
+            return
+    print(f"PASS {label}")
+
+
+def case_survey_follows_the_rewrite() -> None:
+    """The seal survey has to bracket the signing pass, which means it runs after the rewrite.
+
+    This is the merged order, and the reason it is asserted rather than assumed: the rewrite edits
+    the command area, which sits inside the pages a seal hashes, so a survey taken before it
+    reports a seal that is valid at the time and broken once the rewrite lands.  A check in that
+    order goes green while the shipped image is broken.  The script's own output names the step it
+    credits for the rewrite, so a comment that drifts back to the wrong step fails here too.
+    """
+    label = "the seal survey runs after STEP 5's rewrite"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        product = build_product(root)
+        deb = root / "webkit.deb"
+        result = run_script(product, deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        # Every image the rewrite touched has to be re-signed, and the run says so.  If the survey
+        # had run before the rewrite this count would be zero and the seals would be stale.
+        if "carry a new signature after STEP 5's rewrite" not in combined:
+            failures.append(f"{label}: no image carries a signature from after the rewrite\n{combined}")
+            return
+        unpacked = root / "unpacked"
+        unpack(deb, unpacked)
+        # The shipped bytes are what the seal has to cover: survey them again and require valid.
+        checker = Path(__file__).resolve().parent / "macho-code-signature.py"
+        shipped = subprocess.run(
+            [sys.executable, str(checker), "survey", str(unpacked)],
+            capture_output=True, text=True,
+        )
+        if shipped.returncode != 0:
+            failures.append(f"{label}: surveying the shipped package failed\n{shipped.stderr}")
+            return
+        rows = [line.split("\t") for line in shipped.stdout.splitlines() if "\t" in line]
+        broken = [row[0] for row in rows if len(row) >= 4 and row[3] != "valid"]
+        if broken:
+            failures.append(f"{label}: the shipped package carries seal(s) that do not cover it: "
+                            f"{broken}")
+            return
+    print(f"PASS {label}")
+
+
+def case_step_banners_are_ordered() -> None:
+    """The script's step banners have to be numbered without gaps or reuse.
+
+    The merged script is the one the pipeline runs.  A banner that numbers a step differently from
+    the step that performs it is what makes a comment credit the wrong step: the rewrite is STEP 5,
+    so a duplicated number anywhere leaves two steps claiming one ordinal.
+    """
+    label = "the step banners are numbered once each, in order"
+    text = SCRIPT.read_text(encoding="utf-8")
+    numbers = [int(match) for match in re.findall(r"^# STEP (\d+) —", text, re.MULTILINE)]
+    if numbers != list(range(1, len(numbers) + 1)):
+        failures.append(f"{label}: the banners are {numbers}")
+        return
+    # TOTAL_STEPS is declared as 0 next to STEP_INDEX and assigned its real value after the
+    # argument parsing, so the effective number is the last assignment in the file.
+    assignments = [int(value) for value in re.findall(r"^TOTAL_STEPS=(\d+)$", text, re.MULTILINE)]
+    if not assignments or assignments[-1] != len(numbers):
+        failures.append(f"{label}: TOTAL_STEPS assignments are {assignments} but there are "
+                        f"{len(numbers)} banner(s)")
+        return
+    print(f"PASS {label}")
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--sign":
+        # The signer stand-ins call back into this module so the fixtures carry seals the packaging
+        # script's post-condition can actually read.  ldid's shape is `ldid -S[-e entitlements]
+        # file`; rcodesign's is `rcodesign sign [--entitlements-xml-file e] in out`, so the last
+        # argument that is not a flag is the file to sign in both.
+        arguments = [argument for argument in sys.argv[2:] if not argument.startswith("-")]
+        if not arguments:
+            return 2
+        sign_fixture(Path(arguments[-1]))
+        return 0
+
     missing = [tool for tool in ("zsh", "dpkg-deb", "file") if shutil.which(tool) is None]
     if missing:
         print(f"missing required tool(s): {', '.join(missing)}", file=sys.stderr)
@@ -830,6 +1239,14 @@ exec {CP} "$@"''',
     case_corrupted_name_is_rejected()
     case_header_pad_atomicity()
     case_truncated_image()
+    case_signer_that_does_nothing()
+    case_resign_is_recorded()
+    case_rcodesign_path()
+    case_rcodesign_writes_no_output()
+    case_byte_identical_note()
+    case_stale_seal_is_rejected()
+    case_survey_follows_the_rewrite()
+    case_step_banners_are_ordered()
 
     if failures:
         print(f"\n{len(failures)} failure(s):", file=sys.stderr)
