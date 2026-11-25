@@ -19,10 +19,10 @@ index 0c1c422..6699031 100644
  
      // We don't want XPC to be in charge of whether the process should be terminated or not,
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-index b8112f7..d1c8d49 100644
+index b8112f7..e6f2821 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-@@ -90,10 +90,66 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
+@@ -90,10 +90,64 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
      auto behaviorData = xpc_dictionary_get_data(m_initializerMessage, "client-sdk-aligned-behaviors", &length);
      if (!length || !behaviorData)
          return false;
@@ -30,11 +30,10 @@ index b8112f7..d1c8d49 100644
 -    memcpy(behaviors.storage(), behaviorData, length);
  
 -    return true;
-+    // No bitmap from another generation is copied, at any width, because none of them can be read
-+    // correctly. SDKAlignedBehaviors is a bit set indexed by SDKAlignedBehavior, and that
-+    // enumeration gained, lost and reordered members between releases, so a shared width does not
-+    // mean a shared layout: three words is 16.4 as well as 18.0 through 18.3, and those two
-+    // generations hold the same enumerator at 3 of 73 and 53 of 93 positions respectively.
++    // SDKAlignedBehaviors is a bit set indexed by SDKAlignedBehavior, and that enumeration gained,
++    // lost and reordered members between releases, so a shared width does not by itself mean a
++    // shared layout: three words is 16.4 as well as 18.0 through 18.3, and those two generations
++    // hold the same enumerator at 3 of 73 and 53 of 93 positions respectively.
 +    //
 +    // The counts below are the VALUE of SDKAlignedBehavior::NumberOfBehaviors, which is the
 +    // template argument SDKAlignedBehaviors is declared with, and therefore the number of real
@@ -53,18 +52,17 @@ index b8112f7..d1c8d49 100644
 +    //   16.0 / 16.1          63 behaviors,  8 bytes, same index at 3 of 63
 +    //
 +    // The width only separates 16.0 through 16.3, which are two words, from 16.4 onwards, which
-+    // are three. It cannot tell 16.4 from this build inside the three-word group. It can tell that
-+    // a narrower payload is older, and that a wider one is newer, than this build.
++    // are three. Inside the three-word group it cannot tell 16.4 from this build. What it does
++    // settle is direction: a narrower payload is older than this build, and a wider one is newer.
 +    //
-+    // So the width decides a third thing as well, and that is the one that matters under the
-+    // deployment this build is for, where the UI process and the helper are the same binary: a
-+    // payload exactly as wide as this build's own layout is this build's own layout, because
-+    // ProcessLauncherCocoa.mm writes sdkBehaviors.storage() with sdkBehaviors.storageLengthInBytes()
-+    // out of that same BitSet instantiation. Copying that one is correct and is what upstream does.
-+    //
-+    // The residual cost of keeping upstream's rule is that a 16.4, 17.0 or 18.0 through 18.2 peer,
-+    // which also sends three words, still gets copied bit for bit under a layout it does not share.
-+    // Upstream accepts that case too, and no build here is deployed against such a peer.
++    // It settles one more case, the one that matters under the deployment this build is for, where
++    // the UI process and the helper are the same binary: a payload exactly as wide as this build's
++    // own layout is this build's own layout, because ProcessLauncherCocoa.mm writes
++    // sdkBehaviors.storage() with sdkBehaviors.storageLengthInBytes() out of that same BitSet
++    // instantiation. Copying that one is correct, and is what upstream does. The price of keying on
++    // width is that a 16.4, 17.0 or 18.0 through 18.2 peer, which also sends three words, is copied
++    // under a layout it does not share; upstream takes that price too, and no build here is
++    // deployed against such a peer.
 +    //
 +    // What this function guarantees for a payload of any other width is a defined bitmap, not a
 +    // translated one: the argument arrives zero-initialised, so leaving it alone applies the
