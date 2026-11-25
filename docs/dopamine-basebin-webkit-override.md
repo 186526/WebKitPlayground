@@ -880,6 +880,8 @@ XPC 服务进程相反：它们拿到裸名，加载 `/var/jb` 下的 18.3（UUI
 
 回归用例两个方向都固定了：原版 `launchdhook`（312848 字节，`sha256 449a9606…`，四个名字出现 0 次）必须让脚本退出 1；打过补丁的（330144 字节，`sha256 150270a5…`）必须退出 0。缺成员、`arm64` 侧回退、`/Library/Frameworks` 混入也都各有用例。
 
+同一轮里补上的第二个洞是信任缓存。脚本原先只断言 `basebin.tc` 存在，一个换过成员却留着原版 `basebin.tc` 的 tar 照样打印 `Result: PASS`。现在它调 `verify-basebin-trustcache.py`，逐成员逐切片比对，缺一条就打印该切片 cdhash 并退出 1。回归用例两条：`basebin.tc` 覆盖交付成员的 tar 必须通过；`basebin.tc` 为空、成员是补丁版的 tar 必须失败并点名 `launchdhook.dylib slice cdhash … is not in basebin.tc`。为什么这个不匹配必须修而不是解释成无害，见十二·八。
+
 ### 十二·七 交付物：basebin tar、安装与回滚
 
 tar 以设备自带的 `Dopamine.app/basebin.tar` 为底，只替换需要换的成员，条目数保持 31：
@@ -887,27 +889,55 @@ tar 以设备自带的 `Dopamine.app/basebin.tar` 为底，只替换需要换的
 | 字段 | 值 |
 | --- | --- |
 | 交付 tar | `/tmp/m125/basebin-m125-full.tar` |
-| 交付 tar sha256 | `23c8a9506e030e5d221514a9e5c92359b8d1a6da7147802820d3ece130ceebc4` |
+| 交付 tar sha256 | `db01a9aa2662bf116d3a30620aefac73458c30ce206ec935e1c9ad007a7019c7` |
 | 交付 tar 大小 | 6113280 字节 |
 | 回滚 tar | 设备自带 `Dopamine.app/basebin.tar` 的原样拷贝 `/tmp/m125/rollback-device-basebin.tar` |
 | 回滚 tar sha256 | `52607d787d01efa34a28815cd522b20b05e7e3d648fe94432171abcac3c9e828` |
 | 回滚 tar 大小 | 6082560 字节 |
 | 设备来源 | `/var/containers/Bundle/Application/5A377821-2DBD-46F2-92E7-34D59B163B84/Dopamine.app/basebin.tar` |
 
+重建方法（两次运行、以及在一个空目录里从头重跑，都得到同一 sha256）：
+
+```sh
+cd /tmp/m125
+rm -rf stage && mkdir stage && tar -xf rollback-device-basebin.tar -C stage
+for f in launchdhook.dylib systemhook.dylib dyldhook_merge.arm64e.iOS16-17.dylib \
+         dyldhook_merge.arm64.iOS15.dylib dyldhook_merge.arm64.iOS16-17.dylib \
+         dyldhook_merge.arm64.iOS18+.dylib dyldhook_merge.arm64e.iOS15.dylib \
+         dyldhook_merge.arm64e.iOS18+.dylib; do
+  cp -p "cix/basebin/$f" "stage/basebin/$f"; chmod 755 "stage/basebin/$f"
+done
+# regenerate the trustcache from the members just written (十二·八)
+python3 WebKitPlayground/dopamine-basebin/make-basebin-trustcache.py stage
+# pin the tc timestamp to the stock one, so the tar is byte-reproducible
+python3 - <<'PY'
+import os, tarfile
+stock = tarfile.open('rollback-device-basebin.tar').getmember('basebin/basebin.tc')
+os.chmod('stage/basebin/basebin.tc', 0o644)
+os.utime('stage/basebin/basebin.tc', (stock.mtime, stock.mtime))
+PY
+cd stage && tar --sort=name --owner=0 --group=0 --numeric-owner -cf ../basebin-m125-full.tar basebin
+```
+
 替换后的成员与三份读数（设备自带 tar、本 tar、设备当前实际文件）：
 
 | 成员 | 设备自带 tar | 本 tar | 设备当前 |
 | --- | --- | --- | --- |
 | `launchdhook.dylib` | `449a96068dbc` | `150270a5f2e6` | `449a96068dbc` |
-| `systemhook.dylib` | `6f16c545abda` | `d7045cd4850e` | `d7045cd4850e` |
-| `dyldhook_merge.arm64e.iOS16-17.dylib` | `1e90c5a38405` | `9fb3b9c0e2ae` | `9fb3b9c0e2ae` |
-| 其余四个 `dyldhook_merge` 成员 | 原版 | CI 构建 | 原版 |
+| `systemhook.dylib` | `6f16c545abda` | `d7045cd4850e` | `6f16c545abda` |
+| `dyldhook_merge.arm64e.iOS16-17.dylib` | `1e90c5a38405` | `9fb3b9c0e2ae` | `1e90c5a38405` |
+| `dyldhook_merge.arm64e.iOS15.dylib` | 原版 | CI 构建 | 原版 |
+| `dyldhook_merge.arm64.iOS15.dylib` | 原版 | CI 构建 | 原版 |
+| `dyldhook_merge.arm64.iOS16-17.dylib` | 原版 | CI 构建 | 原版 |
+| `dyldhook_merge.arm64e.iOS18+.dylib` | 原版 | CI 构建 | 原版 |
+| `dyldhook_merge.arm64.iOS18+.dylib` | 原版 | CI 构建 | 原版 |
+| `basebin.tc` | `12bdb75e6962` | 重建，见十二·八 | `12bdb75e6962` |
 
-后三行是把设备当前的补丁状态固化进 tar：设备上 `systemhook.dylib` 与 `dyldhook_merge.arm64e.iOS16-17.dylib` 已经是打过补丁的版本，而设备自带的 tar 里是原版。以自带 tar 为底就会把它们换回原版，所以这两份取设备当前的字节。
+`systemhook.dylib` 与 `dyldhook_merge.arm64e.iOS16-17.dylib` 取 CI 构建里的补丁版，因为设备当前是出厂字节：`/var/jb/basebin` 下 22 个文件与 `Dopamine.app/basebin.tar` 逐位相同，`systemhook.dylib` 是 233520 字节的 `6f16c545`，`dyldhook_merge.arm64e.iOS16-17.dylib` 是 74352 字节的 `1e90c5a3`。以自带 tar 为底会把这三处都留在原版。
 
-五个非 arm64e 或 iOS 18 的 `dyldhook_merge` 成员取 CI 构建（`/tmp/m125/cix/basebin`）：`verify-dyldhook-merge.sh` 要求每个切片都带两个 override hook，设备上这五个是原版，不带。这台设备只用 `arm64e.iOS16-17`，其余五个不会被加载，替换它们只影响校验结果，不影响运行。
+其余**五个** `dyldhook_merge` 成员取 CI 构建：`arm64e.iOS15`、`arm64.iOS15`、`arm64.iOS16-17`、`arm64e.iOS18+`、`arm64.iOS18+`。`verify-dyldhook-merge.sh` 要求每个切片都带两个 override hook，设备自带 tar 里这五个是原版、不带。这台设备只用 `arm64e.iOS16-17`，其余五个不会被加载，替换它们只影响校验结果，不影响运行。
 
-`basebin.tc` 未改动：它的 28 条 cdhash 只约束 `MachOMerger`、`dopamine`、`forkfix.dylib`、`idownloadd`，这四个成员都保持原样，所以替换 `launchdhook.dylib` 不触动信任缓存。
+**安装前的前置条件是覆盖目录存在且内容是 18.3。** `docs/ios16-override-path-alignment.md:127` 记录：app 进程除 basebin 给的目录外没有别的 `/var/jb` 候选；`build-state.md:232` 记录覆盖目录不存在时 dyld 打印的 `found:` 是 `dylib-from-cache`，即回落到共享缓存里的 16.1。所以只装这个 tar 而不建覆盖目录，app 只会拿到一个不存在的搜索目录并回落到 16.1，这一改动不产生任何可见变化。覆盖目录里 `WebKit.framework/WebKit` 必须是 18.3 那份（UUID `787DFAB1`），`install-webkit-override.sh` 的 `preflight_sources` 在缺任何一个 framework 时直接退出。
 
 安装命令（**尚未执行**，`jbctl update basebin` 会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出）：
 
@@ -923,10 +953,111 @@ scp /tmp/m125/rollback-device-basebin.tar mobile@192.168.2.136:/var/mobile/Docum
 ssh -t mobile@192.168.2.136 'echo "<password>" | sudo -S -p "" /var/jb/basebin/jbctl update basebin /var/mobile/Documents/basebin.tar'
 ```
 
-安装后确认三件事：`ps -E` 读新起的 app 的 `DYLD_FRAMEWORK_PATH` 是否出现；`lldb -b -o "process attach --pid <pid>" -o "image list"` 里 `WebKit.framework/WebKit` 的路径是否变成 `/var/jb` 下、UUID 是否从 `743EAFB4` 变成 `787DFAB1`；helper 的 `WebContent` 是否仍为 `787DFAB1`（不能回退）。
+安装后确认三件事，前两件用两个读数互验：
 
-### 十二·八 这一节没有做的事
+**不要用 `uiopen` 启动 `MobileSafari` 来验收。** 塔台 2026-11-26 02:27–02:34 CST 实测：`uiopen` 启动 `MobileSafari` 一律失败（进程不出现、无崩溃日志），把过滤器四个 plist 全部改名禁用后仍失败，把 deb 回滚到 `620.2.4-20261120204509` 后仍失败。这是 SpringBoard 侧状态，与 WebKit 无关。也不要拿 `ps -E` 当主读数：它读的是初始栈 `envp`，对 root 拥有的 pid 一律打印 0 条变量，曾经的「`runningboardd` 零 DYLD 变量」就是这条权限假象。
 
-- 没有安装，也没有再对设备发命令。tar 只在本机生成与校验。
+1. **覆盖目录与内容先查。** `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit` 必须存在且 UUID 为 `787DFAB1`。这一条排在最前，因为覆盖目录不在时后面两条必然失败，原因与本次改动无关。
+2. **app 进程里 WebKit 的实际来源。** 两个读数互验：一个用带 `DYLD_PRINT_LIBRARIES=1` 的直接 exec 看 dyld 打印的解析路径，一个用 `lldb -p <pid> -o "image list"` 看活进程的镜像表。只取前者会得到假阳性：塔台实测打印里出现了 `/var/jb` 那份 `WebKit`（UUID `7E97B496-DB02-3E46-9799-C4BDEC869E8E`），而同一进程的 `image list` 里查该 UUID 命中 0 次。判据是活进程镜像表里 `WebKit.framework/WebKit` 的路径在 `/var/jb` 下、UUID 为 `787DFAB1`；打印里多出一份不算数。
+3. **helper 不回退。** `WebContent`、`Networking` 的 `image list` 里 `WebKit.framework/WebKit` 仍是 `787DFAB1`。
+
+验收用的命令：
+
+```sh
+# 1. 覆盖目录内容
+ssh mobile@192.168.2.136 'ls -l /var/jb/Library/WebKitOverride/WebKit.framework/WebKit'
+
+# 2. 直接 exec，不带 uiopen；先记 dyld 打印，再对同一进程读镜像表
+ssh mobile@192.168.2.136 'cd /Applications/MobileSafari.app && DYLD_PRINT_LIBRARIES=1 ./MobileSafari 2>&1 | grep -i "webkit.framework/WebKit" | head'
+ssh mobile@192.168.2.136 'lldb -b -o "process attach --pid $(ps ax | grep -F MobileSafari.app/MobileSafari | grep -v grep | awk "{print \$1}" | head -1)" -o "image list -o -f" -o detach -o quit 2>/dev/null | grep "WebKit.framework/WebKit$"'
+```
+
+第三条同样对 `com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent` 的 pid 跑一遍 `image list`。
+
+### 十二·八 信任缓存：为什么必须按交付的成员重新生成 `basebin.tc`
+
+`basebin.tc` 不是描述性文件，它是内核信任缓存的输入。`update.m:32-39` 在替换成员**之前**把它上传为 `BASEBIN_TRUSTCACHE_UUID`；`DOJailbreaker.m:348` 每次越狱也上传同一份。之后没有任何一步会按 `/var/jb/basebin` 里的实际文件重算它（`jb_trustcache_add_directory` 在 `BaseBin/` 与 `Application/` 里没有任何调用点）。所以 tar 里的 `basebin.tc` 与实际成员不一致时，内核信任的是另一批二进制。
+
+stock `basebin.tc` 的覆盖范围是实测出来的，不是从注释读来的。解析它的 28 条 entry，按 ChOma 的 `csd_code_directory_calculate_hash` 同一算法（CodeDirectory blob 的 sha256）在每个成员上算 cdhash，逐条对应：
+
+| 项 | 读数 |
+| --- | --- |
+| entry 数 | 28 |
+| 覆盖的成员数 | 16 |
+| 覆盖的成员 | `MachOMerger`、`boomerang`、`dopamine`、`fallback/CydiaSubstrate.framework/CydiaSubstrate`、`forkfix.dylib`、`hookd`、`idownloadd`、`jbctl`、`launchdhook.dylib`、`libchoma.dylib`、`libjailbreak.dylib`、`libxpf.dylib`、`opainject`、`rootlesshooks.dylib`、`systemhook.dylib`、`watchdoghook.dylib` |
+| 不在其中的成员 | 六个 `dyldhook_merge.*.dylib`，与 `BaseBin/Makefile:100` 的注释一致（「dyldhook dylibs do not need to be added」） |
+
+stock `launchdhook.dylib` 的两个切片 cdhash 是 `0e59e39881d8ed7152b5102c87fe3fd2d660818b` 与 `a7438ed3dc79bcda49ec9434b901bf5a73fbaab9`，都在 28 条里。替换后的 `launchdhook.dylib`（`150270a5…`）四个切片 cdhash 是 `8629ee98…`、`f68f9da3…`、`b0d2a727…`、`6f362b32…`，都不在。`systemhook.dylib` 同样：stock 的 `dd3f99c4…`、`d3c4e949…` 在，替换后的 `737d2356…`、`14d05a3f…`、`20dcc827…`、`d468b1fb…` 不在。
+
+保留 stock `basebin.tc` 的后果是 `jbctl update basebin` 上传一个描述 8 个已不在 tar 里的切片的信任缓存，而被替换的 8 个切片一个都没被覆盖。所以本 tar 的 `basebin.tc` 按交付目录重新生成，规则与 `BaseBin/Makefile:96-98` 的 `trustcache create .build/basebin.tc .build` 相同：遍历成员，取每个切片的 CodeDirectory sha256 前 20 字节，`hash_type` 写 2（sha256），按 cdhash 升序排列。
+
+| 项 | stock | 本 tar |
+| --- | --- | --- |
+| entry 数 | 28 | 32 |
+| 移除的 entry | — | 4 条（stock `launchdhook` 2 + stock `systemhook` 2） |
+| 新增的 entry | — | 8 条（补丁版 `launchdhook` 4 + 补丁版 `systemhook` 4） |
+| UUID | `a3e4647f…` | `3dde63f83db4895ea698c03ac74d11d7` |
+| 文件 sha256 | `12bdb75e696230aa…` | `6787037ed378b5b6…` |
+| 生成命令 | 上游 `trustcache create`（不在仓库内） | `dopamine-basebin/make-basebin-trustcache.py` |
+
+UUID 由 cdhash 集合的 sha256 前 16 字节派生，不是随机值，目的是让两次构建得到同一份文件。上游每次建都随机（`_trustcache_file_init` 调 `uuid_generate`），内核只把它当标识，不参与查找。
+
+这条规则可复核。生成器是 `dopamine-basebin/make-basebin-trustcache.py`，校验器是 `dopamine-basebin/verify-basebin-trustcache.py`，两者共用同一份 cdhash 计算：生成器加载校验器的 `member_cdhashes`。把设备自带 tar 展开后跑一次生成器，与自带文件逐条比对：
+
+```sh
+tar -xf rollback-device-basebin.tar -C cmpa
+python3 dopamine-basebin/make-basebin-trustcache.py cmpa /tmp/tc_check.bin
+python3 -c "
+import struct
+stock = open('cmpa/basebin/basebin.tc','rb').read()
+regen = open('/tmp/tc_check.bin','rb').read()
+n = struct.unpack_from('<I', stock, 20)[0]
+m = struct.unpack_from('<I', regen, 20)[0]
+print(n, m, [stock[24+i*22:24+i*22+20] for i in range(n)]
+          == [regen[24+i*22:24+i*22+20] for i in range(m)])
+"
+```
+
+实测输出 `28 28 True`：条数、顺序、每个 cdhash 都相同，只有 UUID 不同。这既确认生成器与上游 `trustcache create` 同规则，也说明本 tar 的 `basebin.tc` 不是手写的。
+
+`verify-basebin-tar.sh` 原先只断言 `basebin.tc` 存在，不断言它覆盖 tar 里的成员，所以一个「换了成员、留着 stock tc」的 tar 会打印 `Result: PASS`。这是这次复审发现的漏洞。现在脚本调 `verify-basebin-trustcache.py`，对每个需要信任缓存的成员逐切片查表，缺一条就打印该切片 cdhash 并退出 1。
+
+### 十二·九 为什么改写必须在 dyld 路径解析阶段从进程内部发生
+
+一句话判据：**平台签名进程对 `DYLD_FRAMEWORK_PATH` 不生效，构造函数里的 `dlopen` 只会映射出第二份，两者都不能把 app 的 `WebKit` 换成 18.3。** 能让 app 换库的只有一条路：在 dyld 完成路径解析之前，由 `posix_spawn` 那一刻交给子进程的 `envp` 把搜索目录送进去。这就是本分支改 `launchdhook` 而不是改过滤器的原因。
+
+第一条实测：直接 exec，环境变量给到 `/var/jb/Library/Frameworks`。
+
+| 读数 | 结果 |
+| --- | --- |
+| 启动方式 | `DYLD_FRAMEWORK_PATH=/var/jb/Library/Frameworks DYLD_PRINT_LIBRARIES=1 /Applications/MobileSafari.app/MobileSafari` |
+| `WebKit.framework/WebKit` 解析位置 | `/System/Library/Frameworks/WebKit.framework/WebKit`，镜像 **#51**，UUID `743EAFB4-D052-3C44-9307-9246B559B7C0` |
+| `WebCore` 解析位置 | `/System/Library/Frameworks/WebCore.framework/WebCore`，镜像 **#416** |
+| `/var/jb` 那份 `WebKit` 的 UUID | `7E97B496-DB02-3E46-9799-C4BDEC869E8E`，出现在 `DYLD_PRINT_LIBRARIES` 打印里 |
+| 对活进程 `lldb -p <pid> -o "image list"` 查 `7E97B496` | 命中 **0 次** |
+
+打印里有、活进程镜像表里没有，这一对读数说明打印不能单独作为判据。同一时刻活进程的 `WebKit.framework/WebKit` 只有 #51 那份 16.1。
+
+第二条实测：过滤器 dlopen 路线。
+
+| 读数 | 结果 |
+| --- | --- |
+| 装 m136 deb 后启动 `MobileSafari` 的 stderr | 614 行 |
+| 重复类警告 | **613** 条 |
+| 按族计数 | `WebKit` 267、`WebKitLegacy` 216、`WebCore` 120、`JavaScriptCore` 10 |
+| `WebSafeWebKitFilter.dylib` 大小 | 135552 字节 |
+| 它的导入符号 | 只有 `dlopen` 与 `dlsym` |
+| 它内部的路径 | 只有 `/var/jb/Library/Frameworks/WebKit.framework/WebKit`（出现 2 次），`WebKit18` 出现 0 次 |
+
+过滤器按设计意图执行了，结果是两份 `WebKit` 同时在进程里，613 条重复类警告。
+
+这两条合起来给出机制：dyld 在映射镜像时按 `LC_LOAD_DYLIB` 的 install name 完成绑定，这一步发生在任何构造函数运行之前。构造函数里的 `dlopen("/var/jb/...")` 请求的路径不等于已加载镜像的 install name，于是 dyld 把它当成另一个库再映射一份；此前已绑定的引用仍指向 `/System` 那份。这就是「两份共存、类重复、旧引用不动」。同一台设备上 `worker-w1` 的另一组读数从反方向印证了这一点：宿主用 `/System` 路径 `dlopen` 时 dyld 返回已映射的 `/var/jb` 那份（镜像索引 266，`VARJB`），说明判重看的是 install name 而不是调用方写的路径。环境变量那条同理不成立：平台签名进程的 dyld 不读它，所以解析阶段根本没有 `/var/jb` 候选。
+
+因此判据落在 `posix_spawn` 的 `envp`：`launchdhook` 在 launchd 里拦住这次 exec，把四个变量写进子进程的 `envp`，dyld 在子进程里做的第一次解析就能看到 `/var/jb/Library/WebKitOverride`，不需要任何运行期替换。
+
+### 十二·十 这一节没有做的事
+
+- 没有安装，也没有对设备发命令改动任何文件。tar、`basebin.tc` 与所有校验都在本机完成；设备侧只有只读的 `scp` 取回自带 tar 与三个成员用于比对。
 - 没有构建 `launchdhook.dylib`：交付的二进制取自 CI 构建产物 `basebin-tar`（artifact 14849117614，run 45237030318），本机没有 macOS 与 iPhoneOS SDK，无法重建。
 - 没有验证「装完之后 app 真的从 `/var/jb` 取 WebKit」。这需要一次用户空间重启，属于用户确认的动作。
+- 没有验证新 `basebin.tc` 在设备上被内核接受。本机无法上传信任缓存，也无法运行需要内核调用的路径。

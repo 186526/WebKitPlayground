@@ -79,9 +79,24 @@ do
 done
 
 # basebin.tc is what makes the dylibs loadable on the device; jbctl refuses a
-# tar without it.
+# tar without it.  Shipping the file is not enough: update.m:32-39 uploads it as
+# the basebin trustcache and nothing recomputes it from the members it just
+# copied, so a stock tc paired with a replaced member describes binaries that
+# are no longer in the tar and leaves the shipped ones uncovered.  Keep the
+# stock tc in such a tar and this assertion is the one that catches it.
 if [ -f "$work/basebin/basebin.tc" ]; then
 	pass "tar ships basebin/basebin.tc"
+	if [ -f "$HERE/verify-basebin-trustcache.py" ]; then
+		if python3 "$HERE/verify-basebin-trustcache.py" "$work" > "$work/verify-trustcache.txt" 2>&1; then
+			pass "basebin.tc covers every Mach-O member the tar ships"
+			sed -n 's/^/    /p' "$work/verify-trustcache.txt"
+		else
+			fail "basebin.tc does not cover the members this tar ships; jbctl would upload the wrong trustcache"
+			sed -n 's/^/    /p' "$work/verify-trustcache.txt"
+		fi
+	else
+		fail "cannot find $HERE/verify-basebin-trustcache.py to check basebin.tc coverage"
+	fi
 else
 	fail "tar is missing basebin/basebin.tc"
 fi

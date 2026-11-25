@@ -9,7 +9,8 @@ can override the copy inside the dyld shared cache.
 | `0001-dyldhook-allow-framework-override.patch` | Adds `src/framework_override.c` and its trampoline symbols in `src/main.S`. Applies to tag `3.0.13`. |
 | `verify-dyldhook-merge.sh` | Static assertions on the built `dyldhook_merge.*.dylib` or the merged `gen/dyld`. Needs only `llvm-nm`. |
 | `test-verify-dyldhook-merge.py` | Regression tests for the verifier. Needs only `python3`. |
-| `verify-basebin-tar.sh` | Unpacks a built `basebin.tar` and asserts the six dyldhook dylibs are under the names the device asks for, that `systemhook.dylib` and `launchdhook.dylib` both carry the search-path names, then re-runs `verify-dyldhook-merge.sh` on the shipped bytes. |
+| `verify-basebin-tar.sh` | Unpacks a built `basebin.tar` and asserts the six dyldhook dylibs are under the names the device asks for, that `systemhook.dylib` and `launchdhook.dylib` both carry the search-path names, that `basebin.tc` covers every member the tar ships, then re-runs `verify-dyldhook-merge.sh` on the shipped bytes. |
+| `verify-basebin-trustcache.py` | Fails when a member's per-slice cdhash is missing from `basebin.tc`, which is what `jbctl update basebin` uploads as the basebin trustcache. Exempts `dyldhook_merge.*.dylib`. Needs only `python3`. |
 | `verify-merged-dyld.sh` | Runs `MachOMerger` the way `jbctl update basebin` does and asserts the merged dyld carries all four hooks. |
 | `test-verify-basebin-artifacts.py` | Regression tests for both new verifiers. Needs only `python3`. |
 | `verify-systemhook-search-paths.py` | Asserts the four search-path names and both dedicated directories in a built `systemhook.dylib`, or in `launchdhook.dylib` with `--kind launchdhook`. |
@@ -206,6 +207,17 @@ bytes. It copies all six dylibs into a scratch directory and hands that
 directory to `verify-dyldhook-merge.sh`, so the arm64 variants are checked for
 their symbols too, and an arm64 dylib that lost a hook fails the gate. It also
 asserts that the tar carries no `gen/dyld`.
+
+`verify-basebin-trustcache.py` runs on the unpacked tar as part of that gate.
+`basebin.tc` is not a description of the tar: `update.m:32-39` uploads it as the
+basebin trustcache before it copies the members in, `DOJailbreaker.m:348` does
+the same at every jailbreak, and nothing recomputes it from `/var/jb/basebin`
+afterwards. A tar that replaces a member but keeps the stock file therefore
+hands the kernel a trustcache describing binaries it no longer ships. The script
+computes each member's per-slice cdhash the way `BaseBin/Makefile:96-98`
+(`trustcache create .build/basebin.tc .build`) does and fails on any slice that
+is absent from `basebin.tc`. It exempts `dyldhook_merge.*.dylib`, which
+`BaseBin/Makefile:100` keeps out of that trustcache on purpose.
 
 `gen/dyld` is deliberately not in the tar. `libjailbreak/src/basebin_gen.m`
 builds it on the device: `jbctl update basebin` copies `/usr/lib/dyld`, patches

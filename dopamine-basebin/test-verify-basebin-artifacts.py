@@ -24,7 +24,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from macho_fixture import build_macho  # noqa: E402
+from macho_fixture import (  # noqa: E402
+    build_code_directory,
+    build_macho,
+    build_trustcache,
+    cdhash_of,
+)
 
 HERE = Path(__file__).resolve().parent
 TAR_SCRIPT = HERE / "verify-basebin-tar.sh"
@@ -113,12 +118,17 @@ def write_symbol_file(path: Path, symbols: list[str], undefined: list[str] | Non
 def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True,
               extra: dict[str, str] | None = None,
               omit: tuple[str, ...] = (),
-              launchdhook_strings: tuple[str, ...] | None = None) -> Path:
+              launchdhook_strings: tuple[str, ...] | None = None,
+              tc_covers_launchdhook: bool = True) -> Path:
     """Write a tar the way BaseBin/Makefile's basebin.tar target lays it out.
 
     launchdhook.dylib is a real Mach-O because verify-basebin-tar.sh hands it to
     verify-systemhook-search-paths.py.  Passing None leaves the member out, which is the case
     for the tars that predate it; a tuple writes a thin image carrying exactly those strings.
+
+    basebin.tc is written from that image's cdhash, the way `trustcache create` derives it
+    from the build output.  tc_covers_launchdhook=False writes an entry-less tc instead, which
+    is the shape of the tar that replaced a member but kept the stock file.
     """
     staging = root / "staging"
     base = staging / "basebin" if prefixed else staging
@@ -127,10 +137,15 @@ def build_tar(root: Path, dylibs: dict[str, list[str]], *, prefixed: bool = True
         if name in omit:
             continue
         write_symbol_file(base / name, symbols)
-    (base / "basebin.tc").write_text("trustcache\n", encoding="utf-8")
     write_symbol_file(base / "systemhook.dylib", LEGACY)
+    covered: list[bytes] = []
     if launchdhook_strings is not None:
-        (base / "launchdhook.dylib").write_bytes(build_macho(launchdhook_strings))
+        code_directory = build_code_directory(launchdhook_strings[0].encode())
+        image = build_macho(launchdhook_strings, code_directory=code_directory)
+        (base / "launchdhook.dylib").write_bytes(image)
+        if tc_covers_launchdhook:
+            covered.append(cdhash_of(code_directory))
+    (base / "basebin.tc").write_bytes(build_trustcache(covered))
     for rel, content in (extra or {}).items():
         target = base / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -169,6 +184,19 @@ def test_tar_script(root: Path, bin_dir: Path) -> None:
           "jbctl update basebin generates it" in out, out)
     check("tar: healthy tar reports launchdhook carries the search paths",
           "launchdhook.dylib carries the four search-path names" in out, out)
+    check("tar: healthy tar reports basebin.tc covers every member",
+          "basebin.tc covers every Mach-O member the tar ships" in out, out)
+
+    # A tar that replaces a member but keeps the stock trustcache is the state the
+    # basebin tar was in before this gate existed: the file is present, the members
+    # are patched, and nothing ties one to the other.
+    uncovered = build_tar(root / "uncovered", healthy_dylibs(),
+                          launchdhook_strings=LAUNCHDHOOK_PATCHED,
+                          tc_covers_launchdhook=False)
+    rc, out = run(TAR_SCRIPT, [str(uncovered)], bin_dir)
+    check("tar: a trustcache that misses a shipped member fails", rc == 1, out)
+    check("tar: an uncovered member is named",
+          "launchdhook.dylib slice cdhash" in out and "is not in basebin.tc" in out, out)
 
     # launchdhook is the one member whose absence leaves every other gate content: it is
     # built from the same common.c, and the stock build writes only DYLD_INSERT_LIBRARIES.
