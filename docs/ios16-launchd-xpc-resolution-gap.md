@@ -204,7 +204,7 @@ PRODUCT_BUNDLE_IDENTIFIER[sdk=iphone*17.0*] = $(PRODUCT_NAME);
 
 ### 被解释的读数
 
-`build-state.md:396-405`（Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` + `JavaScriptCore` 作固定基数）：
+`build-state.md:465-472`（Chrome，每次 `killall` 后重新 `uiopen <url>`，`WebCore` + `JavaScriptCore` 作固定基数）：
 
 | 覆盖目录内容 | 端点 | 已知缺陷 |
 | --- | --- | --- |
@@ -352,3 +352,423 @@ ls /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.
 **4. `build-state.md:267` 的 `procPath` 记录是否成立。** 它与同一文件第三轮的记录冲突（M63 第七节），两份不能同时为真。定案方式：按第七节第 2 条重测，并在触发前后各存一份 `launchd.log` 的差值段落。
 
 **不受本文结论影响的部分。** 即使第五节假设成立、端点问题解决，全 18.3 仍要过另外两层：helper 与 UI 的 IPC 消息编号差异（`WebKitPlayground/docs/ios16-ipc-layer-audit.md`），以及 16.1 `WebKit` 与 18.3 `WebCore` 同进程的 PAC 崩溃（`build-state.md:344-355`）。本文只处理「端点为什么是 0」这一层。
+
+---
+
+## 九、已排除的替代路线：MachServices
+
+**结论：把四个 WebKit 服务名写成 launchd 任务的 `MachServices`，不能绕开本文的候选集问题。** 判据分两半，强度不同：
+
+- **已确证（源码）**：launchd 对 XPC 域**禁用父域回退**，并且 XPC 域的登记与查表都只落在域自身（`core.c:7155`、`core.c:6358`、`core.c:7167`、`core.c:9058-9060`）。所以只要 app 的查名发生在某个 XPC 域里，写在 `system` 域或 `user/501` 域任务里的 `MachServices` 名就对它不可见。
+- **有源码支撑（前提）**：`xpc_connection_create(name, nullptr)` 查名所用的 manager **是**该进程自己的私有 XPC 域。这一步没有直接读数，只有两条间接设备读数，见 9.1。若它其实是个很小的非 XPC 域，`core.c:9070` 的父域上溯就会生效，本节结论作废——这正是 9.9 第 2 条（决定项）要定的事。
+
+即使前提成立，`MachServices` 也还有第二道坎：plist 声明的任务不会被当成 XPC 服务启动，launchd 也不会向 helper 递送 peer（9.2、9.3）。
+
+本节源码引用取自两份公开源码，行号都可用 9.10 的命令复跑：
+
+| 源码 | 仓库 | tag | commit |
+| --- | --- | --- | --- |
+| launchd | `apple-oss-distributions/launchd` | `launchd-842.1.4` | `d448a1c` |
+| Dopamine | `opa334/Dopamine` | `3.0.13` | `5b1d2c1` |
+
+launchd 的行号路径写作 `core.c:N`、`launchd.c:N`、`runtime.c:N`，都相对源码树的 `src/` 目录。Dopamine 的路径相对仓库根。
+
+本节沿用开头那三档证据标签。**凡本文标「已确证」的，都是能在公开源码里指到具体行且不依赖未验证推断的；凡依赖「app 的 manager 是 XPC 域」这一步的，一律不超过「有源码支撑」。**
+
+### 9.1 查名发生在哪个域
+
+三条源码依据合起来给出这一节的结论。
+
+**1. 查表从哪个 manager 查** — `jobmgr_lookup_service`，`core.c:7153-7159`：
+
+```c
+jobmgr_t where2look = jm;
+// XPC domains are separate from Mach bootstraps.
+if (!(jm->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN)) {
+    if (launchd_flat_mach_namespace && !(jm->properties & BOOTSTRAP_PROPERTY_EXPLICITSUBSET)) {
+        where2look = root_jobmgr;
+    }
+}
+```
+
+`where2look` 的初值是 `jm` 本身；只有当 `jm` **不是** XPC 域时才可能改成 `root_jobmgr`。即：XPC 域永远只在自己的 `ms_hash` 里查。
+
+**2. 客户端的查名请求走哪条分支** — `core.c:9037` 与 `core.c:9055-9070`：
+
+```c
+bool xpc_req = (j->mgr->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN);   // :9037
+
+if (per_pid_lookup) {
+    ms = jobmgr_lookup_service(j->mgr, servicename, false, target_pid);  // :9056
+} else {
+    if (xpc_req) {
+        // Requests from XPC domains stay local.
+        ms = jobmgr_lookup_service(j->mgr, servicename, false, 0);       // :9060  check_parent = false
+    } else {
+        ...
+        ms = jobmgr_lookup_service(j->mgr, servicename, true, 0);        // :9070  check_parent = true
+```
+
+第三个参数就是 `check_parent`。它在 `jobmgr_lookup_service` 末尾唯一的作用是决定要不要沿 `parentmgr` 上溯，`core.c:7167-7171`：
+
+```c
+if (jm->parentmgr == NULL || !check_parent) {
+    return NULL;
+}
+
+return jobmgr_lookup_service(jm->parentmgr, name, true, 0);
+```
+
+XPC 域传进来的是 `false`，所以父域这块根本不看。
+
+**3. root 回退在 pid 1 上不成立** — `launchd.c:227-228`：
+
+```c
+/* PID 1 doesn't have a flat namespace. */
+launchd_flat_mach_namespace = false;
+```
+
+默认值是真，`runtime.c:122`（`bool launchd_flat_mach_namespace = true;`），只有 `launchd.c:230` 的 per-user 分支不重置它。所以 **pid 1 的 launchd 上这两处 `launchd_flat_mach_namespace && ...` 条件都恒假**：查名的 `where2look` 恒等于 `jm`（`core.c:7156`），登记的 `where2put` 也恒等于 `j->mgr`（`core.c:6356-6362`）。
+
+不过真正把名字钉在域内的是**外层那个 `BOOTSTRAP_PROPERTY_XPC_DOMAIN` 判断**，它与 `launchd_flat_mach_namespace` 无关：`core.c:7155` 是 `if (!(jm->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN)) { ... }`，`core.c:6358` 是同一形状的 `if (!(j->mgr->properties & BOOTSTRAP_PROPERTY_XPC_DOMAIN)) { ... }`。XPC 域连进这两个 `if` 都进不去，所以不管哪个 launchd 实例、命名空间平不平，XPC 域的 `where2look` 与 `where2put` 都只能是自己。`launchd.c:227-228` 关掉的是「非 XPC 域但走 root 回退」那条路。**这两条合起来，证据强度是已确证。**
+
+**「app 的 manager 就是私有 XPC 域」这一步不同，它是「有源码支撑」，不是已确证。** 没有任何一次读数直接读出域类型字段。先记一条否定：**报告把 `print pid/N` 的应答归到 `job_mig_info` 这个归因没有验证过。** `job_mig_info`（`core.c:9211` 起）在 `core.c:9233-9241` 按 `launchd_flat_mach_namespace` 决定 `jm`，但 Procursus `launchctl`（`v1.2.0`）的 `print.c:65` 走的是 `XPC_ROUTINE_PRINT` / `XPC_ROUTINE_PRINT_SERVICE` 这条 XPC 消息，不是那个 MIG 例程；`protocol_jobmgr.defs:71` 的 `info` 还标着 `skip; /* last used in 10.4 */`。**无法从公开源码确认 `print pid/N` 落到哪个处理函数**，所以不能拿 `job_mig_info` 的分支当证据。
+
+真正支撑这一步的是两条设备读数：
+
+- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:199`），Chrome 基线 8 条（`build-state.md:465`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
+- 四个 WebKit 服务名在 `system`/`user/501`/`gui/501` 三域都查不到（`build-state.md:371`）。
+
+这两条只说明「`print pid/N` 看到的那个集合很小」，不能单独证明「这个集合来自 XPC 域」，也不能排除「来自某个很小的非 XPC 域」。9.9 第 1 条是能把它定案的读数。
+
+**这一步的强度直接影响本节结论的强度，所以要把话说到底：** 如果 app 的 manager 不是 XPC 域而是某个小的普通域，那么 `core.c:9070` 那条 `check_parent=true` 分支会生效，父域上溯就可能命中 system 域的名字，路线 B 也就没有被否证。9.9 第 2 条（决定项）正是为此设的。
+
+因此：system 域（或 `user/501`）的 `MachServices` 名登记在那个域 manager 的 `ms_hash` 里；app 查名时 `jm` 是自己的私有域、`check_parent=false`、`where2look=jm`，查不到。
+
+### 9.2 `MachServices` 建的是域内普通条目，不是 XPC 服务
+
+`job_import_keys` 处理 `MachServices` 字典时逐个键调用 `machservice_setup`，`core.c:6551-6575`：
+
+```c
+if (unlikely(ms = jobmgr_lookup_service(j->mgr, key, false, 0))) {   // :6557  冲突即放弃
+    job_log(j, LOG_WARNING, "Conflict with job: %s over Mach service: %s", ms->job->label, key);
+    return;
+}
+
+if (!job_assumes(j, (ms = machservice_new(j, key, &p, false)) != NULL)) {   // :6562
+    return;
+}
+
+ms->isActive = false;
+ms->upfront = true;                                                  // :6567
+```
+
+`machservice_new` 的第四个参数是 `pid_local`（声明在 `core.c:208`），函数体里 `ms->per_pid = pid_local;`（`core.c:6337`）。传 `false` 说明这些是**域内普通条目**，不是 per-PID 条目；`upfront = true` 说明端口提前建好。`job_mig_info` 只过滤 `per_pid`，所以它们会出现在 `launchctl print system` 里。
+
+**但 `machservice_setup` 不设 `j->xpc_service`。** 全树把这个标志写真的地方只有一处，`core.c:10134`：
+
+```c
+errno = 0;
+if ((j = jobmgr_import2(where2put, pload))) {
+    bool created = (errno != EEXIST);
+    j->xpc_service = true;              // :10134
+```
+
+（`:10163` 是 alias 复制该标志，`:1897` 是 subjob 复制，两者都读它、不是来源。）它所在的函数是 `_xpc_domain_import_service`（`core.c:10056`），调用者只有 `_xpc_domain_import_services`（`:10178`，调用点在 `:10194`）；再往上是 `xpc_domain_load_services`（`:10328`，调用 `:10355`）与 `xpc_domain_add_services`（`:10451`，调用 `:10473`）。这两个入口都要求**调用方进程**在 `root_jobmgr` 里对应的 job 带 `xpc_bootstrapper`：
+
+```c
+job_t rootj = jobmgr_find_by_pid(root_jobmgr, j->p, false);
+if (!(rootj && rootj->xpc_bootstrapper)) {
+    job_log(j, LOG_ERR, "Attempt to load services into XPC domain by unprivileged job.");   // :10336
+    return BOOTSTRAP_NOT_PRIVILEGED;
+}
+```
+
+（`:10334-10338` 与 `:10458-10461` 同形。）并且服务清单是**由调用方进程传进来的**，`core.c:10350` 的 `launch_data_unpack((void *)services_buff, services_sz, ...)` 直接解这块 buffer。
+
+**所以私有域里的服务条目由客户端自己的 libxpc 提供。** 写在 `/var/jb/Library/LaunchDaemons` 或 `/var/jb/basebin/LaunchDaemons` 的 plist 走不到这条路。它建出的是 system 域里的普通条目，`xpc_service` 为假。
+
+### 9.3 helper 不监听 Mach 服务，只等 launchd 递 peer
+
+18.3 的 iOS helper 入口没有一条「自己登记成 Mach 服务、等人来连」的路径。本仓库的 18.3 构建在非 macOS 上走的是 `patches/ios18-public-sdk-xpc-main.patch` 的 `-271,8 +268,32` 那个 hunk 补出来的等价物：
+
+```objc
+#if PLATFORM(MAC) || PLATFORM(MACCATALYST)
+    xpc_main(XPCServiceEventHandler);
+    return 0;
+#else
+    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does:
+    xpc_connection_t taskConnection = xpc_connection_create(nullptr, nullptr);
+    xpc_connection_set_event_handler(taskConnection, ^(xpc_object_t event) {
+        if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) {
+            // ConnectionInvalid or TerminationImminent: launchd is the only way in, so exit.
+            exitProcess(EXIT_FAILURE);
+        }
+        xpc_connection_t peer = xpc_dictionary_get_remote_connection(event);
+        if (!peer) {
+            RELEASE_LOG_FAULT(IPC, "Exiting: bootstrap message has no remote connection");
+            exitProcess(EXIT_FAILURE);
+        }
+        XPCServiceEventHandler(peer);
+    });
+    xpc_connection_resume(taskConnection);
+    dispatch_main();
+#endif
+```
+
+**这段不是 Apple 上游的原文，是本仓库补丁加进去的。** 上游 `Safari-18.3.1-iOS-18.3.2` 的同一位置只有两行（`git show <tag>:Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm` 第 274-275 行）：
+
+```objc
+    xpc_main(XPCServiceEventHandler);
+    return 0;
+```
+
+补丁之所以要重写，是因为 `xpc_main` 在公开 iOS SDK 下不可用。重写出来的语义与 `xpc_main` 相同：连到 launchd 放进环境里的那个端点，把第一条入站消息当成 launchd 递来的 peer。**「launchd 是唯一进口」这个语义来自 libxpc 的 `xpc_main`，不是本仓库新造的行为**，这条结论的证据强度标为「有源码支撑」——`xpc_main` 的实现未开源。
+
+上面那段手写等价物在**本仓库打过补丁的树**里是 `Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm:329-340`（`:329` 是 `xpc_connection_create(nullptr, nullptr)`，`:340` 是 `XPCServiceEventHandler(peer)`）。这是补丁产物行号，由 `patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +268,32 @@` hunk 把上游的 `xpc_main(XPCServiceEventHandler)` 换成 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 分支加这段等价物；上游同一文件里 `xpc_connection_create` 出现次数为 0，没有这一段。
+
+另有一处可以反过来验证 helper 不走 Mach 服务名这条路。**分上游与本仓库树两种口径，行号不能混用：三处差一行，一处相同。**
+
+**上游 18.3**（`refs/tags/releases/Apple/Safari-18.3.1-iOS-18.3.2`）在 `Source/` 下（`*.mm`/`*.cpp`/`*.m`，排除 `XPCSPI.h` 里的原型声明）有四处 `xpc_connection_create_mach_service` 调用：`Shared/Daemon/DaemonUtilities.mm:39`、`Platform/IPC/cocoa/DaemonConnectionCocoa.mm:67`、`webpushd/webpushtool/WebPushToolConnection.mm:80`、`inspector/remote/cocoa/RemoteInspectorCocoa.mm:332`。**这四个文件在上游里 `PLATFORM(MAC)` 出现次数均为 0**，也就是这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。四者的编译归属不同：`DaemonUtilities.mm` 列在 `Source/WebKit/SourcesCocoa.txt:196`，`DaemonConnectionCocoa.mm` 列在 `Source/WebKit/Platform/SourcesCocoa.txt:15`，`RemoteInspectorCocoa.mm` 列在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30`，这三份列表里 `#if` 行数均为 0；`WebPushToolConnection.mm` 不在任何 `Sources*.txt` 列表里，只出现在 `Source/WebKit/WebKit.xcodeproj/project.pbxproj` 的 Sources 构建阶段，它是否参与 iOS 构建取决于那个 Xcode target，本文件不对它作断言。
+
+**本仓库树**里这四处都多了 `#if PLATFORM(MAC)` 守卫。加入的行在调用之前，所以调用行号各下移一行：`DaemonUtilities.mm:40`、`DaemonConnectionCocoa.mm:68`、`RemoteInspectorCocoa.mm:333`。**`WebPushToolConnection.mm` 是例外，调用仍是 `:80`**：那个 patch 把调用上方原本空着的一行替换成 `#if PLATFORM(MAC)`，没有净增行数（`patches/ios18-public-sdk-webpushtool-mach-service.patch` 的 `@@ -76,7 +76,7 @@` hunk 是 `-<空行>` / `+#if PLATFORM(MAC)`）。守卫由四个 patch 分别加入：`patches/ios18-public-sdk-daemon-xpc-activity.patch`（`DaemonUtilities.mm`）、`patches/ios18-public-sdk-xpc-pid-and-mach-service.patch`（`DaemonConnectionCocoa.mm`）、`patches/ios18-public-sdk-webpushtool-mach-service.patch`、`patches/ios18-public-sdk-remoteinspector.patch`。同理，`webpushd/WebPushDaemonMain.mm:179` 与 `Shared/EntryPointUtilities/Cocoa/Daemon/PCMDaemonEntryPoint.mm:147` 那两个调用点（行号按本仓库树）外面那层 `#if PLATFORM(MAC)` 也是 `patches/ios18-public-sdk-webpushd-and-daemon-entry.patch` 加的，上游这两个文件在函数入口没有这层守卫。
+
+**两种口径下结论相同，但论证要分清是哪一条：**
+
+- **本仓库树**：四处调用都被 `#if PLATFORM(MAC)` 排除在 iOS 编译之外（文件本身是否参与 iOS 构建是另一回事），其中只有 `DaemonUtilities.mm:40` 带 `XPC_CONNECTION_MACH_SERVICE_LISTENER`（即「登记成服务等连接」），其调用者 `WebPushDaemonMain.mm:179` 与 `PCMDaemonEntryPoint.mm:147` 也都在守卫内。
+- **上游**：这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。其中 `DaemonUtilities.mm:39` 服务于 webpushd（`ENABLE_WEB_PUSH_NOTIFICATIONS` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:243-245` 对 `PLATFORM(IOS)` 默认 1），`RemoteInspectorCocoa.mm:332` 属于 JavaScriptCore 的 `RemoteInspector`，连的是 webinspectord relay（`ENABLE_REMOTE_INSPECTOR` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:765-767` 默认 1，文件在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30` 收录）。这两个都不是 WebKit 的 WebContent/Networking/GPU helper；另两个 `DaemonConnectionCocoa.mm:67` 与 `WebPushToolConnection.mm:80` 是客户端侧，flag 为 `0`（`docs/ios16-all-18.3-xpc-endpoint-audit.md:107`）。
+
+**所以「WebKit helper 不走 Mach 服务名」这个结论在两种口径下都成立**，只是它不能靠「iOS 上一行都不编译」这个断言来支撑——上游这四个调用点都没有平台守卫。支撑它的是：四处调用没有一处出现在 WebKit helper 的入口路径上（`XPCServiceMain.mm` 走的是本仓库树里那段 `xpc_main` 等价物或上游的 `xpc_main`，两者都只等 launchd 递 peer）。
+
+launchd 只在有 `waiting4attach` 记录时才走 `xpcproxy` 做端点递送，`core.c:4561-4574`：
+
+```c
+bool use_xpcproxy = false;
+struct waiting4attach *w4a = waiting4attach_find(j->mgr, j);
+if (w4a) {
+    (void)setenv(XPC_SERVICE_ENV_ATTACHED, "1", 1);
+    if (!j->xpc_service) {
+        use_xpcproxy = true;
+    }
+}
+```
+
+`waiting4attach` 由 `xpc_process_attach`（`core.c:11111`）创建（`:11156`、`:11180`），而它做的第一件事是查授权，`core.c:11117-11122`：
+
+```c
+audit_token_t *token = runtime_get_caller_token();
+xpc_object_t entitlement = xpc_copy_entitlement_for_token(XPC_SERVICE_ENTITLEMENT_ATTACH, token);
+if (!entitlement) {
+    job_log(j, LOG_ERR, "Job does not have entitlement: %s", XPC_SERVICE_ENTITLEMENT_ATTACH);
+    return EPERM;
+}
+```
+
+即客户端自己 attach 到已导入私有域的服务。**plist 声明的任务永远不会有 attach 记录**，所以 launchd 不会为它启用 `xpcproxy`，也不会把 peer 递给 helper。
+
+把 9.2 与这一节合起来：`MachServices` 能让名字出现在某个域里，但既不会让 launchd 把 helper 当 XPC 服务启动，也不会递送 peer。若 helper 因为别的原因被拉起来，它会收到 `ConnectionInvalid` 并按上面那个 block 直接 `exitProcess`（退出码 137）。这与 `build-state.md` 记的「覆盖目录含二进制时 spawn 0」表现同形，但是另一个成因。
+
+### 9.4 `/var/jb` 任务的发现路径
+
+Dopamine 的 launchd 钩子只重绑 `xpc_dictionary_get_value`，在 launchd 自己读配置时把 `/var/jb` 下的 plist 塞进去。`BaseBin/launchdhook/src/daemon_hook.m:38-49`：
+
+```objc
+if (!strcmp(key, "LaunchDaemons")) {                                     // :38
+    if (xpc_get_type(origXvalue) == XPC_TYPE_DICTIONARY) {
+        for (NSString *daemonPlistName in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:JBROOT_PATH(@"/basebin/LaunchDaemons") error:nil]) {   // :40
+            ... xpc_dictionary_add_launch_daemon_plist_at_path(origXvalue, ...);    // :42
+        }
+        for (NSString *daemonPlistName in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:JBROOT_PATH(@"/Library/LaunchDaemons") error:nil]) {   // :45
+            ... xpc_dictionary_add_launch_daemon_plist_at_path(origXvalue, ...);    // :47
+        }
+```
+
+`:56-60` 对 `Paths` 键也是两个目录都追加：
+
+```objc
+} else if (!strcmp(key, "Paths")) {                                       // :56
+    if (xpc_get_type(origXvalue) == XPC_TYPE_ARRAY) {
+        xpc_array_set_string(origXvalue, XPC_ARRAY_APPEND, JBROOT_PATH("/basebin/LaunchDaemons"));   // :58
+        xpc_array_set_string(origXvalue, XPC_ARRAY_APPEND, JBROOT_PATH("/Library/LaunchDaemons"));   // :59
+    }
+}
+```
+
+**`LaunchDaemons` 键两个目录都扫，先 `basebin` 后 `Library`；`Paths` 键两个目录都追加。** 只放 `/var/jb/Library/LaunchDaemons` 的 plist **也会**被发现；`basebin` 只因先扫而在 label 重复时抢先生效。外层仓库根目录的 `hotspot-ipv4.md:135`（不是 `WebKitPlayground` 内的路径，内层从来没有这个文件）原句把发现机制写成「钩子在重启用户空间后从 `var/jb/basebin/LaunchDaemons` 发现任务」，与这里的源码冲突，已在该文件更正理由（保留其「补一份 basebin 镜像无害」的实践结论）。
+
+注入进的是 launchd **自己的**配置字典（键是 plist 全路径），所以这些任务的 manager 是 `root_jobmgr`，即 **system 域**。9.2 已说明：`MachServices` 与 `Program` 都会被尊重，但建出来的是域内普通条目。
+
+### 9.5 本仓库自己的实践佐证
+
+外仓库 `VirtualMacOniPad`（外层仓库的子模块，路径不是 `WebKitPlayground` 内）有一处同类问题的记录。`VirtualMacOniPad/VirtualMac/vz/host/vzxpchook.m:3-7`：
+
+```
+// [VZVirtualMachine start] does xpc_connection_create("com.apple.Virtualization.
+// VirtualMachine", q). On rootless iOS that name resolves to nothing, and a launchd
+// MachServices daemon for it can't reach the system domain (it falls to user/501 — see
+// the vmm-xpc-service notes). So instead of launchd, we spawn the VMM ourselves and
+// rendezvous over an anonymous xpc endpoint (validated primitive: vz/development/probes/epprobe.m):
+```
+
+`vzxpchook.m:8-14` 记下了放弃 MachServices 之后的替代做法：建匿名 listener、`xpc_endpoint_create`、把 VMM 以挂起状态 `posix_spawn`、`task_for_pid` 后用 `mach_port_insert_right` 把端口塞进子进程、再 resume，子进程用 `vmmhook` 从那个端口重建 endpoint 连回来。
+
+这正是「MachServices 走不通之后人们会做的事」，反过来佐证 9.1 的判断。**它不能单独当证据**：VirtualMac 的注释是对某个专有服务名（`com.apple.Virtualization.VirtualMachine`）的观察，launchd 对该 label 有特判（`VirtualMacOniPad/VirtualMac/vz/host/vmm-launchd.plist:5-7`、`vmmhook.m:338-340`），所以它的失败里混着 label 特判这个变量。本节的主证据仍是 9.1 的三条源码。
+
+### 9.6 边界条件：root 守护进程能查到
+
+**本节结论只对「连接方的 bootstrap 端口落在私有 XPC 域」成立。** 一个进程能不能解析某个 `MachServices` 名，取决于它的 bootstrap 端口落在哪个域、以及该域是否允许父域上溯（`core.c:7167`），**不取决于 uid**。root 守护进程的 bootstrap 端口在 system 域、`xpc_req` 为假、`check_parent=true`，所以能命中 system 域的名字。
+
+外仓库的同一份 plist 记了这两件事。`VirtualMacOniPad/VirtualMac/vz/host/vmm-launchd.plist:12-19`：
+
+```xml
+	     Loading (the only path that lands it in the system domain so a root host can reach
+	     the MachService): place this in /var/jb/Library/LaunchDaemons/ and `ldrestart`
+	     (userspace reboot). Dopamine's launchdhook hooks xpc_dictionary_get_value in launchd
+	     and injects /var/jb/{basebin,Library}/LaunchDaemons into launchd's "LaunchDaemons"
+	     dict + "Paths" scan, so they load in launchd's system context at (userspace) boot.
+	     Runtime `launchctl bootstrap system` from ssh instead lands in user/501 -> EX_CONFIG.
+	     UserName=root + ProgramArguments (array) match Dopamine's own working daemon plists
+	     (com.opa334.Dopamine.idownloadd); a system daemon without UserName fell to user/501. -->
+```
+
+这一段是 `vmm-launchd.plist:12-19` 的完整内容，同一处注释里写了两件事。12-14 行说 `ldrestart` 是把任务送进 system 域的唯一路径（14 行的「so a root host can reach the MachService」是它的理由）；17 行的 `bootstrap system` 从 ssh 反而落到 `user/501` 并报 `EX_CONFIG`。19 行另记「a system daemon without UserName fell to user/501」，与 `UserName=root` 的必要性有关，但不是本节的判据。
+
+**运行期从 ssh 用 `launchctl bootstrap system` 进不了 system 域；要进只能把 plist 放进 `/var/jb`（`Library` 或 `basebin` 均可，见 9.4）再重启用户空间。** 这条是路线 B 也要遵守的约束，而它可满足——所以路线 B 的否证不是「注册不上」，是「注册上了也查不到」。
+
+### 9.7 这条否证不证实本文的主假设
+
+**路线 B 被排除，不等于路线 A 成立。** 本文 §八 那四项未定项全部不受本节影响：
+
+1. `_imagePathToInfo` 的键是镜像完整路径还是 framework 目录——仍未定。
+2. `XPCServices` 子目录在什么时机被扫——仍未定。
+3. `core` 行（两份镜像 + 端点 5）与「只含二进制」行（两份镜像 + 端点 0）为什么不一致——仍未定。
+4. `build-state.md:267` 的 `procPath` 记录是否成立——仍未定。
+
+结论一节的候选集规则（「app 自身包 ∪ 系统索引」）**仍是假设**，本节没有给它增加任何证据。9.2 只是说明：想绕开这条规则、直接把名字放进某个域，唯一的入口要求清单由客户端自己提供，于是问题原路返回到「launchd 如何从已加载 framework 算候选集」，即候选集规则本身。
+
+把本节读成「路线 A 因此成立」是错的。§八 的四项要用第七节的设备读数才能定，设备离线，全部未执行。
+
+### 9.8 `build-state.md:883` 的 125 与本节无关
+
+`build-state.md:883` 记的是「`launchctl bootstrap gui/501 …` 报 `125: Domain does not support specified action`」，位于该文件第七节「gui/501 图形域丢失」的事故记录里。同组读数还有 `build-state.md:878`（`launchctl print gui/501` **0 行输出**，退出码 125，02:05 复核仍是 0 行）与 `:879`（`launchctl print user/501` 正常，service count 499→501）。
+
+**这条读数是「`gui/501` 域不存在」的证据**，不是「权限不足」也不是「launchd 拒绝加载 `/var/jb` 任务」的证据：三次独立操作都没能让 `print gui/501` 产出任何一行，而 `user/501` 同时正常，丢的是图形登录域这个对象本身。
+
+它与「用户空间重启时注册 `/var/jb` 任务」**不是同一条路径**：
+
+| | `launchctl bootstrap <domain> <plist>` | Dopamine 的 `/var/jb` 任务 |
+| --- | --- | --- |
+| 触发 | 运行期一条 IPC | 用户空间重启时 launchd 读配置 |
+| 谁解析 plist | launchctl 发给 launchd 的请求 | launchd 自己的 `LaunchDaemons` 扫描（9.4） |
+| 目标域 | 调用方指定的域（`gui/501` 当时不存在） | `root_jobmgr`，即 system 域 |
+| 前提 | 该域必须已存在 | 无此前提 |
+
+所以 `:883` 那条 125 不能用来否证路线 B。**那句 `Domain does not support specified action` 的确切来源未验证**：在 `launchd-842.1.4`（`d448a1c`）、`launchd-842.92.1`（`49a9c79`）的 `src/` 与 `liblaunch/`，以及 Procursus `launchctl`（`v1.2.0`，`22906f7`）里 grep `does not support` 都零命中（命令见 9.10）。它应当来自 libxpc 的字符串表或更旧的 launchctl，本节不替它编 errno 含义。
+
+### 9.9 设备读数清单：一次定案本节结论
+
+**设备离线，以下五条全部未执行。** 工具限 `ps`/`launchctl`/`lldb`/`killall`/`uiopen`/`ls`/`grep`/`wc`/`tail`/`sed`/`awk`。所有项先过前置检查（`build-state.md:890-894`）：`launchctl print gui/501` 必须非空且退出 0，否则先重启，读数作废。
+
+**第 1 条：确认 app 的域是私有域**（直接判据，至今未取过）
+
+```sh
+APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -c ' => '
+```
+
+预期：服务名条数是个位数（基线 8）。若达到数百条，说明该 pid 的视图来自 `root_jobmgr`，9.1 的结论要重写。
+
+**第 2 条（决定项）：确认别的域的 `MachServices` 名不进入 app 视图。** 这一条没有覆盖目录也能做，是本节唯一能直接判定「名字落进 app 可见的域」这件事的读数，也是 9.1 那个前提的判据。`$APP` 取第 1 条的结果。
+
+```sh
+sudo launchctl bootstrap user/501 /var/mobile/probe-machservice.plist
+launchctl print user/501/com.example.machprobe | grep -A3 -i machservices
+launchctl print pid/$APP | sed -n '/services = {/,/^\t}/p' | grep -c 'com.example.machprobe'
+```
+
+plist 最小集（写成 `/var/mobile/probe-machservice.plist`）：`Label=com.example.machprobe`、`MachServices={com.example.machprobe=true}`、`Program=/bin/sleep`、`ProgramArguments=["/bin/sleep","300"]`、`UserName=root`。
+
+两处前置：设备上 `/bin/sh` 不存在（`AGENTS.md` 已记），执行 `bootstrap` 前先 `ls -l /bin/sleep` 确认这个路径存在，不存在就换成 `/var/jb/usr/bin/sleep` 对应的绝对路径；`sudo` 按本仓库惯例用 `echo "<密码>" | sudo -S -p ""`，密码不写入任何文档。
+
+预期：第二条能看到 `MachServices` 段；**第三条必须是 `0`**。
+
+> **第三条为 `1` 时本节结论被推翻，路线 B 复活，需立即上报。** 判据只有这一个数：`0` 是本节成立，`1` 是本节作废。不要用第二条的输出替代它——第二条只能证明任务注册成功，不能证明名字对 app 可见。
+
+**第 3 条：区分「名字没找到」与「找到了但递送失败」**
+
+```sh
+L=/var/log/com.apple.xpc.launchd/launchd.log
+B=$(wc -l < $L)
+killall -9 Chrome 2>/dev/null; sleep 4
+uiopen https://example.com
+sleep 12
+A=$(wc -l < $L)
+tail -n +$((B+1)) $L | grep -c 'failed lookup'
+tail -n +$((B+1)) $L | grep -c 'com.example.machprobe'
+```
+
+预期：`failed lookup` 随应用转圈增长（曾到 265，`build-state.md:469`），且**不出现** `com.example.machprobe`。必须先记行号再触发，只看差值，否则历史记录会被算进本次结果。
+
+**第 4 条：闭合「私有域条目由 app 的 libxpc 提供」这一步**（旁证）
+
+```sh
+sudo lldb -b -o "process attach --pid $APP" \
+  -o "image lookup -n _xpc_domain_add_services" \
+  -o "image lookup -n _xpc_domain_load_services" -o detach -o quit 2>/dev/null | grep -c 'Summary:'
+```
+
+预期：`2`。**不要 grep `1 match`**——命中时输出以 `Summary:` 开头，不含 `1 match found` 字样（`AGENTS.md` 第六节记过这个陷阱）。
+
+**第 5 条：若真要试路线 B，注册方式必须是重启而不是 bootstrap**
+
+```sh
+ls -la /var/jb/Library/LaunchDaemons/ | grep -c machprobe
+ls -la /var/jb/basebin/LaunchDaemons/ | grep -c machprobe
+```
+
+预期：两处都可存在（9.4：两个目录都扫，`basebin` 先扫）。运行期 `launchctl bootstrap system` 不可用（9.6，`vmm-launchd.plist:17`）。
+
+### 9.10 本节源码引用的复跑命令
+
+launchd 与 Dopamine 都是公开仓库。以下命令在任意临时目录执行，跑完删除检出即可。
+
+```sh
+# launchd-842.1.4 (d448a1c)
+git clone --depth 1 --branch launchd-842.1.4 https://github.com/apple-oss-distributions/launchd.git launchd-src
+cd launchd-src/src
+git log --oneline -1                                        # 应为 d448a1c launchd-842.1.4
+awk 'NR>=7153 && NR<=7171' core.c                           # 9.1 第 1 条 + check_parent 上溯
+awk 'NR>=9037 && NR<=9070' core.c                           # 9.1 第 2 条 xpc_req 与两条 jobmgr_lookup_service
+awk 'NR>=227 && NR<=228' launchd.c                          # 9.1 第 3 条 pid 1 无 flat namespace
+awk 'NR>=6551 && NR<=6575' core.c                           # 9.2 machservice_setup
+awk 'NR>=10130 && NR<=10136' core.c                         # 9.2 j->xpc_service 唯一写入点
+awk 'NR>=4561 && NR<=4574' core.c                           # 9.3 waiting4attach -> xpcproxy
+awk 'NR>=11111 && NR<=11122' core.c                         # 9.3 attach 授权检查
+grep -rn 'does not support' . ../liblaunch 2>/dev/null | wc -l   # 9.8 应为 0
+```
+
+```sh
+# Dopamine 3.0.13 (5b1d2c1)
+git clone --depth 1 --branch 3.0.13 https://github.com/opa334/Dopamine.git dopa-src
+cd dopa-src
+git log --oneline -1                                        # 应为 5b1d2c1 3.0.13
+awk 'NR>=38 && NR<=49' BaseBin/launchdhook/src/daemon_hook.m    # 9.4 LaunchDaemons 两目录都扫
+awk 'NR>=56 && NR<=60' BaseBin/launchdhook/src/daemon_hook.m    # 9.4 Paths 两目录都追加
+```
+
+```sh
+# 9.3 上游 18.3 的 helper 入口只有两行
+# 在 WebKit 源码检出里执行。tag 全名带 releases/Apple/ 前缀，只写 Safari-... 会报歧义。
+git show refs/tags/releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm \
+  | awk 'NR>=274 && NR<=275'
+# 应为 xpc_main(XPCServiceEventHandler); return 0;
+```
+
+```sh
+# 9.3 本仓库补丁确实把这两行换成了手写等价物
+grep -n -A3 '^@@ -271,8 +268,32 @@' WebKitPlayground/patches/ios18-public-sdk-xpc-main.patch
+```
+
+`git show` 那条依赖本地已存在 `Safari-18.3.1-iOS-18.3.2` 这个 tag 的 WebKit 检出；没有的话先取一份带该 tag 的检出。`grep` 那条相对外层仓库根目录。
+
+本节 9.1 到 9.8 里的 `core.c:N`、`launchd.c:N`、`runtime.c:N`、`daemon_hook.m:N` 行号都取自 9.10 前两段命令检出的那两个 tag。换成别的 tag 时分节标题的源码依据不再成立。
