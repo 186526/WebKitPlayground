@@ -289,6 +289,24 @@ back NULL with `invalid handle`. It also checks that `symbol_find(NULL, …)`
 answers nothing without calling `dlsym`, that a real handle is passed through
 unchanged, and that `library_find` asks for `RTLD_NOLOAD`.
 
+`claim_images_test.c` covers the sequence `test_main.c` stubs out. That file
+replaces `claim_images_run` whole, so the seven paths and their order would go
+unchecked; this binary compiles `src/claim_images.c` itself, renaming `dlopen`,
+`dlerror`, `posix_spawn`, the two spawn-object initialisers, `waitpid`, `getpid`
+and `usleep` to recorders before the include. The seven expected paths are
+written out again rather than read from the array under test, because a test
+that compared the array with itself would pass whatever it held. The cases
+require the order entry by entry, `libwebrtc` and `libANGLE-shared` both ahead
+of `WebCore` (0 duplicate-class warnings in this order, 31 with `WebCore`
+first), `JavaScriptCore` at index 0 and `WebKit` last, and every load made with
+`RTLD_NOW|RTLD_GLOBAL`. The failure cases require the loop to stop at the first
+image that answers nothing, the 1-based position, the path and the `dlerror`
+text to be recorded, and the images after it not to be tried. The marking cases
+require a refused `posix_spawn` to be recorded as its errno, a non-zero child
+exit as its wait status, and a child that never exits not to hold the
+constructor: the wait is polled a bounded number of times and the images are
+still claimed.
+
 The script builds the test twice: once plainly and once with AddressSanitizer
 and UndefinedBehaviorSanitizer. The second run only counts when its log holds
 neither a sanitizer error nor a UBSan report. Everything is written under

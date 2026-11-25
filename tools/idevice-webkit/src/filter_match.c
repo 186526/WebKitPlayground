@@ -152,13 +152,16 @@ static bool bundle_matches(void *lists) {
   return any_element(array, bundle_named, &lookup);
 }
 
-void filter_match_report(const char *filterPath) {
+bool filter_match_report(const char *filterPath) {
   void *lists = filter_lists(dictionary_for_file(filterPath));
   if (class_matches(lists)) {
     dylib_report_set_match(match_classes);
-  } else if (bundle_matches(lists)) {
-    dylib_report_set_match(match_bundles);
-  } else {
-    dylib_report_set_match(match_none);
+    return true;
   }
+  if (bundle_matches(lists)) {
+    dylib_report_set_match(match_bundles);
+    return true;
+  }
+  dylib_report_set_match(match_none);
+  return false;
 }

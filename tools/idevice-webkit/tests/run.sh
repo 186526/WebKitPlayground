@@ -169,6 +169,13 @@ clang -std=c11 -g -fsanitize=address,undefined -fno-sanitize=function \
 
 "$work/test_main"
 
+# The image claim is checked against recorders rather than a device: the seven
+# paths and their order, the stop-at-first-failure rule, and the jbctl spawn.
+# test_main.c stubs claim_images_run, so the sequence itself has no other test.
+clang -std=c11 -Wall -Wextra -Werror -I"$here/../src" \
+  "$here/claim_images_test.c" "$here/../src/textkit.c" -o "$work/claim_images_test"
+"$work/claim_images_test"
+
 status=0
 "$work/test_asan" >>"$work/asan.log" 2>&1 || status=$?
 if [ "$status" -ne 0 ] ||

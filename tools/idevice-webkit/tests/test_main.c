@@ -21,6 +21,7 @@
 #include "../src/filter_match.c"
 #include "../src/idevice_webkit.c"
 
+#include "../src/claim_images.h"
 #define maximum_report_size 4096
 #define work_directory_name "/idevice-webkit-test"
 static char work_directory[256];
@@ -30,6 +31,22 @@ static char work_directory[256];
    load by telling the fixture, and RTLD_NOLOAD keeps its device meaning: it
    answers a handle only for an image already loaded, and the constructor asks
    for the image after the load rather than before it. */
+
+/* The seven-image claim is stubbed here, not run: it spawns jbctl and dlopens
+   /var/jb images that no host test has, and tests/claim_images_test.c checks
+   the sequence itself against recorders. This stub records whether the
+   constructor reached the claim, which is what the two cases below read: it
+   runs once for a process that passed the host check and never for one that
+   did not. */
+
+static int claim_runs;
+
+void claim_images_run(claim_result *result) {
+  claim_runs++;
+  memset(result, 0, sizeof(*result));
+  result->marked = 1;
+  result->loaded = claim_image_count;
+}
 
 void *library_load(const char *path) {
   (void)path;
@@ -215,6 +232,7 @@ static void prepare_keeping_reports(const char *host, const char *self, int with
   fake_filter_add_class("UIApplication");
   fake_class_register("UIApplication");
   stage_reset();
+  claim_runs = 0;
 }
 
 /* A case starts a fresh process, so the files of the previous run are
@@ -334,6 +352,10 @@ static void case_host(const char *name, const char *host, const char *manifest,
            found_in(report, expectations));
     expect("  marker is written next to the report",
            read_report(idevice_webkit_marker_path) != NULL);
+    expect("  the seven images are claimed for this host", claim_runs == 1);
+    expect("  the claim's answer reaches the report",
+           found_in(report, "\t<key>claimMarked</key>\n\t<true/>") &&
+               found_in(report, "\t<key>claimLoaded</key>\n\t<integer>7</integer>"));
   }
 }
 
@@ -894,6 +916,36 @@ int main(void) {
            found_in(report, "\t<key>imagePath</key>\n\t<string></string>"));
     expect("  handleOk is false", found_in(report, "\t<key>handleOk</key>\n\t<false/>"));
   }
+
+  /* The claim runs only for a process the host check accepted. The three cases
+     below reach the constructor and are stopped by a different check each: a
+     process that failed the copy check, a process that passed it and failed
+     the host check, and a process the filter did not match at all. A claim
+     that runs before either check maps seven images into every app the
+     filter names, which is the whole system, so none of the three may reach
+     it. */
+
+  prepare(safari, test_self, 1);
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  expect("a copy outside TweakInject never reaches the claim", claim_runs == 0);
+
+  prepare(safari, installed_self, 1);
+  add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
+  idevice_webkit_start();
+  expect("a host without its manifest never reaches the claim", claim_runs == 0);
+
+  prepare(safari, installed_self, 1);
+  fake_filters_reset(idevice_webkit_filter_path);
+  fake_filter_add_bundle("com.apple.WebKit.WebContent");
+  add_bundle("/Applications/MobileSafari.app", "com.apple.mobilesafari");
+  list_host("/Applications/MobileSafari.app",
+            manifest_path_for("-Applications-MobileSafari.app-MobileSafari"),
+            "com.apple.mobilesafari");
+  idevice_webkit_start();
+  expect("a process the filter did not match never reaches the claim", claim_runs == 0);
 
   /* A fresh process of the same host starts with the stage at zero; the entry
      report is then refused by the file writer, as a device without a writable

@@ -1,10 +1,17 @@
 #include "dylib_report.h"
 
+#include "claim_images.h"
 #include "file_writer.h"
 #include "textkit.h"
 #include "types.h"
 
-#define document_capacity 9216
+/* The claim fields add at most one path and two error texts to a record. The
+   two texts are bounded by claim_error_capacity and the path by
+   claim_path_capacity, and this buffer keeps a third of its room free beside
+   the fields the entry record already carries, so a truncated dlerror text
+   cannot push the closing tags out of the document. */
+
+#define document_capacity 12288
 
 typedef struct report_record {
   char bundle_identifier[plist_value_capacity];
@@ -18,6 +25,13 @@ typedef struct report_record {
   char match_via[16];
   char timestamp[24];
   char stage[16];
+  char claim_marked[8];
+  char claim_mark_status[24];
+  char claim_mark_error[claim_error_capacity];
+  char claim_loaded[16];
+  char claim_failed_index[16];
+  char claim_failed_path[claim_path_capacity];
+  char claim_error[claim_error_capacity];
 } report_record;
 
 typedef struct clock_value {
@@ -104,6 +118,10 @@ void dylib_report_begin(const char *bundleIdentifier) {
   text_copy(record.bundle_identifier, bundleIdentifier, sizeof(record.bundle_identifier));
   text_copy(record.dlopen_status, "false", sizeof(record.dlopen_status));
   text_copy(record.stage, "0", sizeof(record.stage));
+  text_copy(record.claim_marked, "false", sizeof(record.claim_marked));
+  text_copy(record.claim_mark_status, "0", sizeof(record.claim_mark_status));
+  text_copy(record.claim_loaded, "0", sizeof(record.claim_loaded));
+  text_copy(record.claim_failed_index, "0", sizeof(record.claim_failed_index));
   if (gettimeofday(&now, NULL) == 0) {
     render_number(record.timestamp, sizeof(record.timestamp), now.seconds);
   } else {
@@ -136,6 +154,19 @@ void dylib_report_set_stage(u32 stage) {
   render_number(record.stage, sizeof(record.stage), (i64)stage);
 }
 
+void dylib_report_set_claim(bool marked, i32 markStatus, const char *markError, u32 loaded,
+                            u32 failedIndex, const char *failedPath, const char *error) {
+  text_copy(record.claim_marked, marked ? "true" : "false", sizeof(record.claim_marked));
+  render_number(record.claim_mark_status, sizeof(record.claim_mark_status), (i64)markStatus);
+  text_copy(record.claim_mark_error, markError == NULL ? "" : markError,
+            sizeof(record.claim_mark_error));
+  render_number(record.claim_loaded, sizeof(record.claim_loaded), (i64)loaded);
+  render_number(record.claim_failed_index, sizeof(record.claim_failed_index), (i64)failedIndex);
+  text_copy(record.claim_failed_path, failedPath == NULL ? "" : failedPath,
+            sizeof(record.claim_failed_path));
+  text_copy(record.claim_error, error == NULL ? "" : error, sizeof(record.claim_error));
+}
+
 bool dylib_report_write(const char *path) {
   char document[document_capacity];
   usize position = 0;
@@ -159,6 +190,22 @@ bool dylib_report_write(const char *path) {
   append_text(document, &position, "timestamp", record.timestamp);
   append(document, &position, "\t<key>stage</key>\n\t<integer>");
   append(document, &position, record.stage);
-  append(document, &position, "</integer>\n</dict>\n</plist>\n");
+  append(document, &position, "</integer>\n");
+  append(document, &position, "\t<key>claimMarked</key>\n\t<");
+  append(document, &position, record.claim_marked);
+  append(document, &position, "/>\n");
+  append(document, &position, "\t<key>claimMarkStatus</key>\n\t<integer>");
+  append(document, &position, record.claim_mark_status);
+  append(document, &position, "</integer>\n");
+  append_text(document, &position, "claimMarkError", record.claim_mark_error);
+  append(document, &position, "\t<key>claimLoaded</key>\n\t<integer>");
+  append(document, &position, record.claim_loaded);
+  append(document, &position, "</integer>\n");
+  append(document, &position, "\t<key>claimFailedIndex</key>\n\t<integer>");
+  append(document, &position, record.claim_failed_index);
+  append(document, &position, "</integer>\n");
+  append_text(document, &position, "claimFailedPath", record.claim_failed_path);
+  append_text(document, &position, "claimError", record.claim_error);
+  append(document, &position, "</dict>\n</plist>\n");
   return write_file(path, document, text_length(document));
 }

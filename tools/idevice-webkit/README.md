@@ -80,6 +80,48 @@ and no `_dyld_`/`___dyld_` undefined name. It parses the Mach-O itself, because
 the device carries no `llvm-objdump` to run the checks `tests/run.sh` makes on
 the arm64 slice.
 
+## The seven images are claimed in a fixed order
+
+The dylib marks its own process debugged and then loads the seven `/var/jb`
+images itself, in the order `src/claim_images.c` holds:
+
+```
+/var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+/var/jb/usr/lib/libwebrtc.dylib
+/var/jb/usr/lib/libANGLE-shared.dylib
+/var/jb/Library/Frameworks/WebCore.framework/WebCore
+/var/jb/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy
+/var/jb/Library/Frameworks/WebGPU.framework/WebGPU
+/var/jb/Library/Frameworks/WebKit.framework/WebKit
+```
+
+The marking is `/var/jb/basebin/jbctl proc_set_debugged <pid>`, run with
+`posix_spawn` because `system()` is not usable here and `/bin/sh` does not
+exist on the device. It needs no root and lasts only for the process's life.
+The wait for that child is polled for at most half a second, because the
+constructor runs inside the host's launch and an unbounded wait there would
+hold the application at startup.
+
+Two conditions fix the order and neither is visible from the file names:
+
+- `libwebrtc` and `libANGLE-shared` must come before `WebCore`. The `/var/jb`
+  `WebCore` records both as weak dependencies whose install names point at the
+  system paths, so loading it first pulls the system copies in, and the later
+  `/var/jb` loads map a second image of each. On the device that produced 31
+  `Class WK_RTC... is implemented in both` lines; this order produces 0.
+- The order cannot be reversed once a system WebKit has loaded. Asking for
+  `/System/Library/Frameworks/WebKit.framework/WebKit` first then loading the
+  `/var/jb` copy fails with `Symbol not found:
+  _WTFSignpostIndirectLoggingEnabled`, because the 16.1 system
+  `JavaScriptCore` does not define the symbol the 18.x `WebKit` needs.
+
+dyld dedupes by install name, so once these seven are in the process a host's
+own request for the system WebKit path returns the `/var/jb` image already
+loaded. The claim therefore has to run in the constructor, before the host's
+code asks for WebKit. It runs only for a process that passed the filter match,
+the copy check and the host check; a process that failed any of them returns
+before it loads anything.
+
 ## Commands
 
 ```

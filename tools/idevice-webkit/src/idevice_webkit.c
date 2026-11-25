@@ -1,6 +1,7 @@
 #include "idevice_webkit.h"
 
 #include "bundle_lookup.h"
+#include "claim_images.h"
 #include "dylib_report.h"
 #include "dyld_lookup.h"
 #include "file_writer.h"
@@ -468,7 +469,7 @@ void idevice_webkit_start(void) {
     return;
   }
   usleep(stage_pause_microseconds);
-  filter_match_report(filterPath);
+  bool filterMatched = filter_match_report(filterPath);
   stage_reach(stage_filter_read);
   report_stage();
   const char *selfPath = self_image_path();
@@ -489,6 +490,26 @@ void idevice_webkit_start(void) {
   dylib_report_set_self(selfPath, true, NULL);
   stage_reach(stage_bundle_resolved);
   report_stage();
+
+  /* The seven /var/jb images are claimed here, after the filter match and the
+     host check and before the host's own code asks for WebKit. A process the
+     filter named by neither branch, one that failed the copy check, and one
+     that passed it but failed the host check all return above, so none of them
+     loads an image. The host's own request for
+     /System/Library/Frameworks/WebKit.framework/WebKit then resolves to the
+     /var/jb image by its install name; claim_images.c carries the measured
+     readings for the order and for the reverse direction. The claim is written
+     to the report on its own, because a failure there is the answer a run
+     without a debugger has to read. */
+
+  if (filterMatched) {
+    claim_result claim;
+    claim_images_run(&claim);
+    dylib_report_set_claim(claim.marked, claim.mark_status, claim.mark_error, claim.loaded,
+                           claim.failed_index, claim.failed_path, claim.error);
+    report_stage();
+  }
+
   stage_reach(stage_attempted);
   attempt_load(&images);
   report_stage();

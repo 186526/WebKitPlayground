@@ -33,6 +33,15 @@ void dylib_report_set_self(const char *imagePath, bool installedCopy, const char
 void dylib_report_set_match(const char *via);
 void dylib_report_set_stage(u32 stage);
 
+/* The claim of the seven /var/jb images: whether jbctl marked this process,
+   what the marking failed with, how many images loaded, and which one
+   stopped the sequence. Every field is written on the claim's own write, so a
+   process whose marking failed and an image that would not load are both
+   readable from the report. */
+
+void dylib_report_set_claim(bool marked, i32 markStatus, const char *markError, u32 loaded,
+                            u32 failedIndex, const char *failedPath, const char *error);
+
 /* Writes the report and answers whether the file was written. */
 
 bool dylib_report_write(const char *path);
