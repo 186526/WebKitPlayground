@@ -57,7 +57,10 @@ chain was read at the statement's start and still held the guard the statement h
 was wrong code accepted, and the two sentences above are what keep it from coming back. Accepting
 either spelling would need the statement to be cut at the closure, which this check does not do. A
 block comment inside the condition — `if (m /* c */)` — is refused because the condition is read as
-written and the comment is not stripped there.
+written and the comment is not stripped there. A direction word counts only beside a copula, with the
+negation it carries, so `is not refused`, `is never refused` and `is no longer refused` all read as
+accepted; the past-tense sentences above say what happened before the fix and do not answer for the
+present state.
 
 The two-closer boundary is accepted: a statement with two unmatched closers and a call between them —
 `x(); } call; }` — is judged by the chain it started inside, because only the last closer decides
@@ -76,6 +79,7 @@ Usage: python3 scripts/test-check-translation-switch.py
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -85,6 +89,10 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 SCRIPT = SCRIPTS / "check-translation-switch.py"
 REAL_PATCH = SCRIPTS.parent / "patches" / "ios16-ipc-message-number-translation.patch"
+
+# Set in a child run's environment to make it skip the rewrites that spawn children of their own. See
+# `run_full_self_test` for why the recursion has to be cut here and what the child still checks.
+REWRITE_GUARD = "CHECK_TRANSLATION_SWITCH_NO_REWRITES"
 
 # The checker's own matchers, imported rather than restated: the cross-check below has to use the
 # same definition of "a setter call" as the checker, or it would agree with a different question.
@@ -1118,32 +1126,61 @@ def open_boundary_section(module_doc: str) -> str | None:
     return module_doc[start:] if end < 0 else module_doc[start:end]
 
 
+# A direction claim, as a sentence states it: a copula, an optional negation, and the verb.
+#
+# The copula is required. The Open boundary text carries narrative — `Before that fix such a call
+# passed`, `that was wrong code accepted` — where the direction word is not adjacent to `is`, and
+# reading those as claims is what let a past-tense decoy sentence answer for the current state. `was`
+# is deliberately absent from the copula list for the same reason: the sentences in this text that use
+# it describe what the code used to do.
+#
+# The negation is captured rather than ignored. `is not refused` states the opposite of `is refused`,
+# and reading the word only by its presence made a paragraph that says the reverse of the code pass.
+CLAIM_COPULA = re.compile(
+    r"\b(?:is|are|be|remains)\s+(?:(not|never|no\s+longer)\s+)?(refused|accepted)\b")
+
+# Any direction word, with or without a copula. Used only to spot the extra word: a sentence that
+# states a claim and also names the other direction outside a copula — `is refused here but accepted
+# there` — says two things, so it has to read as unstated rather than as whichever word the copula
+# happened to attach to.
+DIRECTION_WORD = re.compile(r"\b(?:refused|accepted)\b")
+
+
 def claimed_direction(paragraph: str, phrase: str) -> bool | None:
     """Whether the paragraph says the call is refused for the spelling `phrase` names.
 
-    True for refused, False for accepted, None when the paragraph says neither or both — a sentence
-    that states no single direction cannot be compared with anything, so it is reported as unstated
-    rather than guessed at, or when the phrase never appears.
+    True for refused, False for accepted, None when the paragraph states no single current direction
+    for that phrase — none at all, or several that disagree, or a phrase no sentence mentions.
 
-    The search is per sentence, not per paragraph: every claim here is one sentence, and reading the
-    whole paragraph would let a `refused` in one sentence vouch for an `accepted` in another.
+    Every sentence that mentions `phrase` is read, not just the first. A first-match search is what a
+    past-tense decoy sentence exploits: `Before that fix the split form was refused.` mentions the
+    phrase, states nothing about the current code, and would otherwise be the sentence the answer
+    came from while the sentence that does state the current direction was never read.
+
+    Each direction word counts only when a copula puts it in the present tense and a negation is read
+    as the opposite. A sentence that also names the other direction outside a copula states two
+    things, so it contributes no single answer. When the sentences yield exactly one direction that is
+    the answer; anything else is `None`, so a paragraph that says two things or says nothing is
+    reported as unstated instead of being resolved by guessing.
     """
-    sentence = sentence_claiming(paragraph, phrase)
-    if sentence is None:
+    claims = set()
+    for sentence in sentences_claiming(paragraph, phrase):
+        matched = CLAIM_COPULA.findall(sentence)
+        if not matched:
+            continue
+        if len(matched) != len(DIRECTION_WORD.findall(sentence)):
+            claims.update((True, False))
+            continue
+        for negation, word in matched:
+            claims.add((word == "refused") != bool(negation))
+    if len(claims) != 1:
         return None
-    refused = "refused" in sentence
-    accepted = "accepted" in sentence
-    if refused == accepted:
-        return None
-    return refused
+    return claims.pop()
 
 
-def sentence_claiming(paragraph: str, phrase: str) -> str | None:
-    """The first sentence of `paragraph` that mentions `phrase`, or None."""
-    for sentence in re.split(r"(?<=[.!?])\s+", paragraph):
-        if phrase in sentence:
-            return sentence
-    return None
+def sentences_claiming(paragraph: str, phrase: str) -> list[str]:
+    """Every sentence of `paragraph` that mentions `phrase`."""
+    return [sentence for sentence in re.split(r"(?<=[.!?])\s+", paragraph) if phrase in sentence]
 
 
 # The claims the paragraph makes, each paired with the fixtures that exercise it. A claim that covers
@@ -1188,6 +1225,14 @@ def open_boundary_fixtures(phrase: str) -> list[tuple[str, str]]:
             for index in indices]
 
 
+# The start of the message that means the paragraph and the build disagree on a direction, as opposed
+# to the paragraph never stating one. The vacuity check keys on this: a mutation is caught only when
+# it produces a disagreement, because "the paragraph states no single direction" is equally what a
+# broken parser produces for every paragraph, and accepting it as a catch would report success while
+# the parser no longer reads anything.
+DIRECTION_DISAGREEMENT = "the paragraph says the call is"
+
+
 def open_boundary_direction_problems(module_doc: str) -> list[str]:
     """Every disagreement between the paragraph's claimed direction and the measured one.
 
@@ -1210,9 +1255,9 @@ def open_boundary_direction_problems(module_doc: str) -> list[str]:
             actually_refused = result.returncode != 0
             if claimed_refused != actually_refused:
                 problems.append(
-                    "the paragraph says the call is %s for %r, but %s exits %d"
-                    % ("refused" if claimed_refused else "accepted", phrase, description,
-                       result.returncode))
+                    "%s %s for %r, but %s exits %d"
+                    % (DIRECTION_DISAGREEMENT, "refused" if claimed_refused else "accepted",
+                       phrase, description, result.returncode))
     return problems
 
 
@@ -1269,18 +1314,25 @@ def check_open_boundary_check_is_not_vacuous() -> int:
         return text.replace(current, rewritten, 1) if current else None
 
     def flip_sentence_claim(phrase: str):
-        """Flip the one direction word in the sentence that states `phrase`'s claim."""
+        """Flip the direction word in the sentence that states `phrase`'s claim.
+
+        The sentence is chosen the way the comparison chooses it — every sentence mentioning the
+        phrase, and the one whose direction word sits next to a copula. Flipping the first mention
+        instead would flip a past-tense decoy and leave the claim untouched, which is the shape this
+        test exists to catch, so it must not take that shape itself.
+        """
         def apply(text: str) -> str | None:
             current = open_boundary_section(text)
             if current is None:
                 return None
-            sentence = sentence_claiming(current, phrase)
-            if sentence is None:
-                return None
-            for word, other in (("refused", "accepted"), ("accepted", "refused")):
-                if word in sentence:
-                    flipped = current.replace(sentence, sentence.replace(word, other, 1), 1)
-                    return text.replace(current, flipped, 1)
+            for sentence in sentences_claiming(current, phrase):
+                if not CLAIM_COPULA.search(sentence):
+                    continue
+                for word, other in (("refused", "accepted"), ("accepted", "refused")):
+                    match = re.search(r"\b%s\b" % word, sentence)
+                    if match:
+                        flipped = sentence[:match.start()] + other + sentence[match.end():]
+                        return text.replace(current, current.replace(sentence, flipped, 1), 1)
             return None
         return apply
 
@@ -1306,14 +1358,169 @@ def check_open_boundary_check_is_not_vacuous() -> int:
                   % description)
             continue
         problems = open_boundary_direction_problems(mutated)
-        if not problems:
+        disagreements = [problem for problem in problems if DIRECTION_DISAGREEMENT in problem]
+        if not disagreements:
             failures += 1
-            print("FAIL: %s was not caught; the paragraph check is green on a paragraph that says "
-                  "the opposite" % description)
+            print("FAIL: %s was not caught by a direction disagreement; the paragraph check "
+                  "reported %r, which is not the same as noticing the paragraph says the opposite"
+                  % (description, problems[0] if problems else None))
         else:
             print("ok: %s is caught (%d failure(s): %s)"
-                  % (description, len(problems), problems[0]))
+                  % (description, len(disagreements), disagreements[0]))
     return failures
+
+
+def check_open_boundary_negation_and_tense_are_read() -> int:
+    """Assert a negated or past-tense paragraph does not pass as a current claim.
+
+    Each case rewrites one sentence of the Open boundary text and runs this whole test file against
+    the rewrite. The implementation is the one under test, not a copy: the rewrite goes into a
+    temporary tree holding this file and the checker, and the exit code is what gets asserted.
+
+    The child run is told to skip this function by `REWRITE_GUARD` in its environment. Without that,
+    every child would run these same rewrites against its own rewritten text, and the recursion would
+    not terminate. Skipping it costs the child nothing the assertion needs: what the child has to
+    report is the direction comparison and the vacuity guard, and both still run there.
+
+    Two shapes are covered, and they are the two that defeated an earlier version of the binding. A
+    negation states the opposite of the word it negates, so `is not refused` has to be read as
+    accepted; reading the word by its presence alone made a paragraph that says the reverse of the
+    code pass. A past-tense sentence describes what the code used to do, so `Before that fix the split
+    form was refused.` must not answer for the current state; taking the first mentioning sentence let
+    exactly that happen.
+
+    The last case is the one that must not be a false alarm: a past-tense sentence in front of an
+    unchanged claim still states the claim, and rewriting the paragraph that way has to keep passing.
+    A test that failed it would be reading the decoy as the answer from the other direction.
+    """
+    module_doc = (SCRIPTS / "test-check-translation-switch.py").read_text(encoding="utf-8")
+
+    negations = (
+        ("the split form denied by `not`",
+         "The split form is refused:", "The split form is not refused:"),
+        ("the split form denied by `never`",
+         "The split form is refused:", "The split form is never refused:"),
+        ("the split form denied by `no longer`",
+         "The split form is refused:", "The split form is no longer refused:"),
+        ("the one-line form denied by `not`",
+         "The one-line form is refused:", "The one-line form is not refused:"),
+        ("the block comment denied by `not`",
+         "is refused because the condition is read as",
+         "is not refused because the condition is read as"),
+        ("the two-closer boundary denied by `not`",
+         "The two-closer boundary is accepted:", "The two-closer boundary is not accepted:"),
+        ("both spellings denied by `not`",
+         "is refused in both spellings", "is not refused in both spellings"),
+    )
+    decoys = (
+        ("a past-tense decoy ahead of a claim that says accepted",
+         "The split form is refused:",
+         "Before that fix the split form was refused. The split form is accepted:"),
+        ("a past-tense decoy ahead of a claim that says refused",
+         "The two-closer boundary is accepted:",
+         "Earlier the two-closer boundary was accepted. The two-closer boundary is refused:"),
+    )
+
+    failures = 0
+    for description, old, new in negations + decoys:
+        if old not in module_doc:
+            failures += 1
+            print("FAIL: %s: the sentence to rewrite is gone, so this case no longer tests anything"
+                  % description)
+            continue
+        result = run_full_self_test(module_doc.replace(old, new, 1))
+        if result.returncode == 0:
+            failures += 1
+            print("FAIL: %s exits 0; the paragraph now says the opposite of the code and the "
+                  "binding stayed green" % description)
+        else:
+            print("ok: %s exits %d" % (description, result.returncode))
+
+    # The shape that must keep passing: the narrative sentence is added, the claim is not changed.
+    narrative_first = (
+        ("a past-tense sentence ahead of an unchanged claim still passes",
+         "The split form is refused:",
+         "Before that fix the split form was refused. The split form is refused:"),
+    )
+    for description, old, new in narrative_first:
+        if old not in module_doc:
+            failures += 1
+            print("FAIL: %s: the sentence to rewrite is gone" % description)
+            continue
+        result = run_full_self_test(module_doc.replace(old, new, 1))
+        if result.returncode != 0:
+            failures += 1
+            print("FAIL: %s exits %d; a past-tense sentence in front of an unchanged claim was "
+                  "read as a contradiction" % (description, result.returncode))
+            print("  stdout tail: %s" % "\n  ".join(result.stdout.strip().splitlines()[-3:]))
+        else:
+            print("ok: %s exits 0" % description)
+
+    failures += check_direction_reading_rules()
+    return failures
+
+
+def check_direction_reading_rules() -> int:
+    """Assert the two readings the rewrite cases depend on, on sentences built for each.
+
+    The rewrite cases prove a whole paragraph cannot be reversed unnoticed. They do not pin the two
+    rules that make that true, and both rules are one careless edit away from the reading they replace:
+    a sentence naming both directions must read as unstated rather than as whichever word the copula
+    attached to, and a sentence with no copula at all must contribute nothing rather than count as a
+    contradiction. The first version of this fix broke both, one after the other, and every rewrite
+    case stayed green while it did.
+    """
+    subject = "open boundary phrase"
+
+    cases = (
+        ("a sentence naming both directions reads as unstated",
+         "The %s is refused here but accepted there." % subject, None),
+        ("a sentence denying both words reads as unstated",
+         "The %s is neither refused nor accepted." % subject, None),
+        ("a plain claim reads as refused", "The %s is refused." % subject, True),
+        ("a past-tense sentence reads as unstated",
+         "Before that fix the %s was refused." % subject, None),
+        ("a present claim after a past-tense sentence still reads",
+         "Before that fix the %s was refused. The %s is accepted." % (subject, subject), False),
+    )
+
+    failures = 0
+    for description, paragraph, expected in cases:
+        actual = claimed_direction(paragraph, subject)
+        if actual is not expected:
+            failures += 1
+            print("FAIL: %s: read %r, expected %r" % (description, actual, expected))
+        else:
+            print("ok: %s (%r)" % (description, actual))
+    return failures
+
+
+def run_full_self_test(module_doc: str) -> subprocess.CompletedProcess:
+    """Run this test file, with `module_doc` in its place, and return the completed process.
+
+    A temporary tree holds the mutated copy and the real checker, so the run exercises the whole file
+    — the direction comparison and the vacuity check that guards it — rather than one function.
+
+    The child is given `REWRITE_GUARD` in its environment, which makes it skip
+    `check_open_boundary_negation_and_tense_are_read`. That function rewrites this file and runs it, so
+    a child that ran it too would rewrite its own already-rewritten text and never terminate. The
+    child still runs everything the assertion depends on: the direction comparison and the vacuity
+    check are both in `main` below the guard.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "scripts").mkdir()
+        for name in (SCRIPT.name, "test-check-translation-switch.py"):
+            source = SCRIPTS / name
+            (root / "scripts" / name).write_text(
+                module_doc if name == "test-check-translation-switch.py"
+                else source.read_text(encoding="utf-8"),
+                encoding="utf-8")
+        (root / "patches").symlink_to(REAL_PATCH.parent)
+        environment = dict(os.environ, **{REWRITE_GUARD: "1"})
+        return subprocess.run(
+            [sys.executable, str(root / "scripts" / "test-check-translation-switch.py")],
+            capture_output=True, text=True, env=environment)
 
 
 def check_needles_are_unique_and_necessary() -> int:
@@ -1472,6 +1679,8 @@ def main() -> int:
 
     failures += check_open_boundary_docstring_matches_behaviour()
     failures += check_open_boundary_check_is_not_vacuous()
+    if not os.environ.get(REWRITE_GUARD):
+        failures += check_open_boundary_negation_and_tense_are_read()
 
     if failures:
         print("%d case(s) failed" % failures)
