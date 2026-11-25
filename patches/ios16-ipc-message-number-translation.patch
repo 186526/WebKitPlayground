@@ -8076,7 +8076,7 @@ index 0c1c42281f8..f5a37301c1a 100644
      if (!delegate.getProcessIdentifier(processIdentifier))
          exitProcess(EXIT_FAILURE);
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-index b8112f7452f..e275375d8dc 100644
+index b8112f7..8ab3835 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
 @@ -26,6 +26,7 @@
@@ -8087,17 +8087,22 @@ index b8112f7452f..e275375d8dc 100644
  #import "SandboxUtilities.h"
  #import "XPCServiceEntryPoint.h"
  #import <JavaScriptCore/JSCConfig.h>
-@@ -84,6 +85,23 @@ bool XPCServiceInitializerDelegate::getClientBundleIdentifier(String& clientBund
-     return !clientBundleIdentifier.isEmpty();
+@@ -235,4 +236,26 @@ void XPCServiceExit()
+     xpc_transaction_exit_clean();
  }
  
 +bool XPCServiceInitializerDelegate::getUIProcessSDKVersion(std::optional<uint32_t>& version)
 +{
-+    // The iOS 16 UI process records its own SDK version here as a decimal string
++    // The UI process records its own SDK version here as a decimal string
 +    // (ProcessLauncherCocoa.mm writes "client-sdk-version" into the bootstrap
 +    // dictionary). A peer that does not send it leaves the value absent, which is
 +    // distinct from a peer that sent a version modern enough not to need
 +    // translation, so the two cases are kept apart.
++    //
++    // Defined at the end of the file rather than after getClientBundleIdentifier:
++    // patches/ios16-xpc-bootstrap-compat.patch inserts its own function at that
++    // anchor, and the .mm has only one blank line there, so a second function
++    // placed there makes the two hunks mutually exclusive in either order.
 +    auto* versionString = xpc_dictionary_get_string(m_initializerMessage, "client-sdk-version");
 +    if (!versionString)
 +        return false;
@@ -8108,9 +8113,7 @@ index b8112f7452f..e275375d8dc 100644
 +    return true;
 +}
 +
- bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehaviors& behaviors)
- {
-     size_t length = 0;
+ } // namespace WebKit
 diff --git a/Source/WebKit/WebKit.xcodeproj/project.pbxproj b/Source/WebKit/WebKit.xcodeproj/project.pbxproj
 index e0202a335c3..9da72589884 100644
 --- a/Source/WebKit/WebKit.xcodeproj/project.pbxproj
