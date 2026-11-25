@@ -840,6 +840,33 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 
 **M127 对这条路线给出的结论是「不安全，不要在这台设备上安装」。** 本节下面记的安装步骤因此**不是待执行的计划**，而是一份历史记录加一份回滚依据：它说明当时装了什么、怎么装、失败后怎么恢复。要再尝试，先解决 M127 那份文档里未解释的 panic 成因，本节不提供再次安装的依据。
 
+**本章的合并裁决，写给合入时解冲突的人。** 本章另有一份较早的快照在内层分支 `feat/m139-inner-union` 上（`9cd84ea`，2026-11-26 05:35，本章 443 行）。它是 M138 联合分支在 `acaa076 Merge M126 round 6` 时把本章整章带进去的第 6 轮版本，此后本分支又改了两轮：第 7 轮在十二·二写明「不引那一行的完整字面量」并把三代断言改写成四代叙述，第 9 轮把 `mislabelled` 补成第三类并给出本 tar 上它为 0 的理由。`git merge-tree --write-tree 9cd84ea b1f00fc` 退出 1，冲突是四条文本，位置如下（行号按合并输出，会变，用段名定位）：
+
+- **十二·二 的两段**（「乙组 1 条是……」与「这条读数的取法要固定在……」）取本分支。union 侧这两行是第 6 轮旧文本：它引整行字面量，且把第 3 代写成「最终那代」。解成它等于同时回退第 7 与第 9 轮。
+- **十二·六「两处行号的出处」那行**取本分支。union 侧写「第七节 `:268`」，而 union 那份文件第 268 行是一条空的代码围栏，`main.m:211-216` 在它那里首次出现在第 272 行；本分支这一行已改成按行首原文定位，两侧的失效原因相同。
+- **十二·九 的两行都要留**。union 侧多出的「运行期 `jbctl trustcache info`」一行是本分支没有的新信息，保留；`verify-basebin-tar.sh` 那一行取本分支的 `(cdhash, hash_type)` 对集合相等写法，union 侧的「双向集合相等」是被第 9 轮取代的旧措辞。
+
+**十二·五 与十二·十 不在冲突里，而它们会自动落到 union 侧，这个方向是对的，不要把它们改回来。** 这两节在共同祖先 `34e6eac` 上与本分支相同（本分支自 `dc29926` 起没有再动过它们），union 侧已由 M135 按 cdhash 重写，所以三方合并直接取 union：十二·五 15 行变 46 行，标题从「`launchdhook` 不在 `basebin.tc` 里是预期状态」换成「把 sha1 换成 cdhash 之后，原来的结论不成立」。十二·十 两侧行数只差一行，差异是同段的两句结论句，本分支写「M135 那版尚未合并进来」，union 写「已按 M135 那版落地」——这组句子与十二·五 取哪一侧绑定，既然取 union 的十二·五，就必须同时取 union 的这两句，否则本文会自述一个已经不存在的前置状态。
+
+核对这一段的命令与期望读数：
+
+```sh
+cd WebKitPlayground
+git merge-base 9cd84ea b1f00fc                                              # 34e6eac
+git merge-tree --write-tree 9cd84ea b1f00fc | grep -c '^100644'             # 3，同一个文件的三份 blob
+git show 34e6eac:docs/dopamine-basebin-webkit-override.md | grep -c '^### 十二·五 信任缓存：`launchdhook`'  # 1
+git show 9cd84ea:docs/dopamine-basebin-webkit-override.md | grep -c '^### 十二·五 信任缓存：把 sha1'          # 1
+git show 9cd84ea:docs/dopamine-basebin-webkit-override.md | sed -n '268p'  # ```，即那一侧 `:268` 落在空围栏上
+git show 9cd84ea:docs/dopamine-basebin-webkit-override.md | grep -n 'main.m:211-216' | head -1   # 272:…
+```
+
+两条 `grep -c` 都锚了行首：不锚定会各命中 2 次，因为本句和十二·十 都提到那两个标题。两条标题计数各为 1，说明十二·五 在两侧各只有一节：本分支那一节与共同祖先逐字相同（下面第一条命令退出 0 即可确认），union 那一节已被 M135 重写。
+
+```sh
+diff <(git show 34e6eac:docs/dopamine-basebin-webkit-override.md | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f') \
+     <(git show b1f00fc:docs/dopamine-basebin-webkit-override.md | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f')   # 无输出，退出 0
+```
+
 ### 十二·一 这份 tar 是怎么来的，逐字节核对了什么
 
 三个可能被动到的成员，连同两个基准的读数：
@@ -1080,7 +1107,9 @@ EOF
 
 **用户空间重启是什么意思，怎么触发。** `jbctl update basebin` 不直接替换 `gen/dyld`。它把 tar 暂存，然后按 `BaseBin/jbctl/src/main.m:211-216` 触发一次 `reboot3(RB2_USERREBOOT)`——用户空间重启，不是整机重启。屏幕上所有应用退出，SpringBoard 重建，但内核不重启、Dopamine 不重启。重启过程中 `BaseBin/launchdhook/src/update.m:223` 调 `basebin_generate(YES)` 用 `dyld.orig` 加上 tar 里的 `dyldhook_merge.arm64e.iOS16-17.dylib` 现场合成新的 `gen/dyld`。
 
-两处行号的出处不同，要分清：`update.m:223` 与根目录 `AGENTS.md` 第 292 行一致；`main.m:211-216` **在本仓库里只出现在本文（第七节 `:266` 与本处），`AGENTS.md` 没有这一条**——该文件全文不含 `main.m`，其第 286 行是 `basebin_gen.m:172`。所以这条行号目前只有源码侧的引用，没有仓库内第二处印证。本节复述的是原有的记录，没有重新核对 `main.m` 的那几行。
+两处行号的出处不同，要分清：`update.m:223` 与根目录 `AGENTS.md` 第 292 行一致；`main.m:211-216` **在本仓库里只出现在本文（第七节里以「`jbctl update basebin` 不会立即替换 `gen/dyld`」开头的那段，与本处），`AGENTS.md` 没有这一条**——该文件全文不含 `main.m`，其第 286 行是 `basebin_gen.m:172`。所以这条行号目前只有源码侧的引用，没有仓库内第二处印证。本节复述的是原有的记录，没有重新核对 `main.m` 的那几行。
+
+第七节那段用行首原文定位，不用行号：以「`jbctl update basebin` 不会立即替换」开头的行全文只有一处，行号则随上方增删漂移。M126 在第十二章开头插入几句引言之后，本节原先写的 `:266` 落在一条空的代码围栏上，`main.m:211-216` 已经被推到它后面。
 
 所以**触发就是那条 `jbctl` 命令本身**，不需要另跑一条重启命令。若想核对 `gen/dyld` 是否真的重建过，重启后用第九节「安装后确认 `gen/dyld` 真的重建过」那三条只读命令：新 `gen/dyld` 里 `_MACHOMERGER_HOOK_` 前缀的 `isOverridablePath` 与 `isAlwaysOverridablePath` 应各为 1（此前自身为 0）。
 
