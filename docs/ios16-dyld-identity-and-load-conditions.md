@@ -233,9 +233,11 @@ dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW | RTLD_GLO
 
 ---
 
-## 五、`libwebrtc` / `libANGLE` 的双份共存
+## 五、`libwebrtc` / `libANGLE` 的双份共存（未解决）
 
-这一条在本仓库此前记为「已知未解决项」。现在机制、判据与修法都测到了，剩下的只是把修法落到真宿主上并复测。**它不是签名问题，也不是 `LC_ID_DYLIB` 问题**：改写 install name 既不造成它，也不修好它。
+**状态：未解决。** 机制与判据已测到，修法在探针里成立，但还没有在任何真实宿主里跑过。所以在真实宿主上它仍然是一个未解决项，判定方法见 5.3。
+
+这一条在本仓库此前记为「已知未解决项」，并且容易被误归因。它**不是签名问题，也不是 `LC_ID_DYLIB` 问题**：改写 install name 既不造成它，也不修好它。
 
 ### 5.1 根因
 
