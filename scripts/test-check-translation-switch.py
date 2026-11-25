@@ -317,6 +317,41 @@ GUARD_INVERSIONS = (
     # A reader that collapses the `&&` to a single factor loses that.
     ("a call under a conjunction or a negated member fails",
      "m_shouldTranslateMessageNames && m_ready || !m_shouldTranslateMessageNames"),
+    # Round 9's P2-3: the member on the right of a disjunction. Every `||` case above put it on the
+    # left, so a reader that discarded the accumulated left value still saw the member and passed.
+    ("a call under a disjunction with the member on the right fails",
+     "ready || m_shouldTranslateMessageNames"),
+    # The same, wrapped: the wrapper is transparent, so it cannot launder a widened condition.
+    ("a call under a wrapped disjunction with a fallback fails",
+     "UNLIKELY(m_shouldTranslateMessageNames || fallbackOn)"),
+    # The wrapper's own parentheses have to stay. Without them `UNLIKELY(m && ready) == other` reads
+    # as `m && ready == other`, which is a conjunction and passes; the real condition is an equality
+    # whose value with the member false is unknown, so it has to be refused.
+    ("a call under a wrapped conjunction compared to another flag fails",
+     "UNLIKELY(m_shouldTranslateMessageNames && m_ready) == m_disabled"),
+)
+
+# Round 9's P2-2: three wrappers that return their argument's boolean value. A send hot path that wraps
+# the guard in `UNLIKELY` is the obvious future edit — Connection.h already has five of them — so each
+# has to read as the bare condition, and a negated one has to read as a negated condition.
+GUARD_WRAPPERS = (
+    ("a call under a member if wrapped in UNLIKELY passes", "UNLIKELY(m_shouldTranslateMessageNames)"),
+    ("a call under a member if wrapped in LIKELY passes", "LIKELY(m_shouldTranslateMessageNames)"),
+    ("a call under a member if wrapped in static_cast<bool> passes",
+     "static_cast<bool>(m_shouldTranslateMessageNames)"),
+    ("a call under a wrapped member if with a conjunct passes",
+     "UNLIKELY(m_shouldTranslateMessageNames) && !m_inDispatchTesting"),
+)
+
+# Round 9's P2-1: an `if` written with its body on the same line is a complete statement, so what
+# follows it is not guarded by it. The condition alone would say it is, which is why the check reads
+# what comes after the closing parenthesis too.
+BRACELESS_BODY_SHAPES = (
+    ("a call after a same-line return body fails", "+    if (m_shouldTranslateMessageNames) { return; }\n"),
+    ("a call after a same-line empty body fails", "+    if (m_shouldTranslateMessageNames) { }\n"),
+    ("a call after a same-line goto body fails", "+    if (m_shouldTranslateMessageNames) goto done;\n"),
+    ("a call after a same-line wrapped return body fails",
+     "+    if (UNLIKELY(m_shouldTranslateMessageNames)) { return; }\n"),
 )
 
 # Round 7's P2-4: the setter's body was matched as one literal line, so a body written on its own lines
@@ -653,6 +688,31 @@ for description, condition in GUARD_INVERSIONS:
         + "+    if (" + condition + ") {\n"
         + "+        translateOutgoingMessageName(x);\n"
         + "+    }\n"
+        + "+}\n",
+        1,
+        "calls the translation outside the member's guard",
+    ),)
+
+for description, condition in GUARD_WRAPPERS:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void ok() {\n"
+        + "+    if (" + condition + ") {\n"
+        + "+        translateOutgoingMessageName(x);\n"
+        + "+    }\n"
+        + "+}\n",
+        0,
+        None,
+    ),)
+
+for description, guard in BRACELESS_BODY_SHAPES:
+    CASES += ((
+        description,
+        BASE + CALL_IN_THIRD_FILE
+        + "+void bad() {\n"
+        + guard
+        + "+    translateOutgoingMessageName(x);\n"
         + "+}\n",
         1,
         "calls the translation outside the member's guard",

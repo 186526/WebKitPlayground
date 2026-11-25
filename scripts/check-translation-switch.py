@@ -51,10 +51,16 @@ What it refuses, and why each combination is a defect rather than a preference:
     with a reassuring name. The condition is read by its boolean structure rather than searched for the
     member's name, because `!m_shouldTranslateMessageNames`, `m_shouldTranslateMessageNames == false`
     and `m_shouldTranslateMessageNames || fallback` all mention the member and all run the block
-    exactly when the switch is off. A caller added to a third file is checked too, because the rule is
-    a property of the call and not a list of the two files that first had one; only the two functions'
-    own definitions and their header declarations are exempt, and that is decided by the file plus the
-    declaration, so a new caller inside an exempt file still has to be guarded.
+    exactly when the switch is off. `UNLIKELY(...)`, `LIKELY(...)` and `static_cast<bool>(...)` are
+    transparent: they return their argument's boolean value, and the guard is a hot-path check that a
+    future edit would plausibly wrap in one, so they are read as the condition they wrap rather than
+    refused. A guard written with its body on the same line — `if (m) { return; }`, `if (m) { }`,
+    `if (m) goto done;` — is a complete statement that guards nothing after it; only an `if` with
+    nothing after its closing parenthesis guards the next statement. A caller added to a third file is
+    checked too, because the rule is a property of the call and not a list of the two files that first
+    had one; only the two functions' own definitions and their header declarations are exempt, and that
+    is decided by the file plus the declaration, so a new caller inside an exempt file still has to be
+    guarded.
 
   - An assignment to the member outside the setter. It may only be written from the setter's own
     parameter. `= true`, a compound `|=`, and a parenthesised `(member) =` all compile and all turn
@@ -348,6 +354,11 @@ MEMBER_NAME = "m_shouldTranslateMessageNames"
 THIS_PREFIX = re.compile(r"\bthis\s*->\s*")
 IF_HEAD = re.compile(r"^if\b")
 
+# The three wrappers that return their argument's boolean value, so a guard written with one asks the
+# same question as the bare condition and has to be read the same way.
+BOOLEAN_WRAPPER = re.compile(
+    r"(?:\b(?:UN)?LIKELY\s*|\bstatic_cast\s*<\s*bool\s*>\s*)\(")
+
 # A guard is not "a condition that mentions the member": `!m`, `m == false`, `m != true` and
 # `m || fallback` all run the block exactly when the switch is off. The condition has to imply the
 # member, so it is parsed and evaluated with the member false, and accepted only when the result is
@@ -358,8 +369,13 @@ CONDITION_TOKEN = re.compile(
     r"\s*(?:(?P<operator>==|!=|&&|\|\||!|\(|\))|(?P<name>[A-Za-z_][A-Za-z_0-9]*))")
 
 
-def if_condition(statement: str) -> str | None:
-    """The text inside the parenthesis of an `if`, or None when the statement is not one."""
+def if_parts(statement: str) -> tuple[str, str] | None:
+    """The `if`'s condition and the text after its closing parenthesis, or None when it is not an `if`.
+
+    The remainder is what separates the two shapes the guard check has to tell apart: a braceless guard
+    is an `if` with nothing after the parenthesis, while `if (m) { return; }` and `if (m) goto done;`
+    carry a body, so they guard nothing that follows them.
+    """
     stripped = statement.strip()
     if not IF_HEAD.match(stripped):
         return None
@@ -373,8 +389,54 @@ def if_condition(statement: str) -> str | None:
         elif stripped[index] == ")":
             depth -= 1
             if depth == 0:
-                return stripped[open_paren + 1:index]
+                return stripped[open_paren + 1:index], stripped[index + 1:].strip()
     return None
+
+
+def matching_paren(text: str, open_index: int) -> int:
+    """The index of the `)` that closes the `(` at `open_index`, or -1."""
+    depth = 0
+    for index in range(open_index, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def strip_boolean_wrappers(condition: str) -> str | None:
+    """Rewrite `UNLIKELY(x)`, `LIKELY(x)` and `static_cast<bool>(x)` as `(x)`.
+
+    These three wrappers return their argument's boolean value, so a guard written with one asks the
+    same question as the bare condition. They are not hypothetical here: Connection.h has five
+    `if (UNLIKELY(...))`, Decoder.h two and Connection.cpp three, so a send hot path that wraps the
+    guard in `UNLIKELY` is the obvious future edit. Only these three are transparent; any other call
+    still reaches the evaluator as an unknown name and is refused.
+
+    The wrapper is replaced in place and the argument kept in parentheses, so `m && UNLIKELY(x)`
+    becomes `m && (x)` and precedence is unchanged. The text is rewritten recursively, so a nested
+    wrapper is stripped too. A `(` with no closing `)` means the condition is malformed and the answer
+    is None.
+    """
+    result = []
+    position = 0
+    while position < len(condition):
+        match = BOOLEAN_WRAPPER.match(condition, position)
+        if not match:
+            result.append(condition[position])
+            position += 1
+            continue
+        close = matching_paren(condition, match.end() - 1)
+        if close < 0:
+            return None
+        inner = strip_boolean_wrappers(condition[match.end():close])
+        if inner is None:
+            return None
+        result.append("(" + inner + ")")
+        position = close + 1
+    return "".join(result)
 
 
 def tokenise_condition(condition: str) -> list[str] | None:
@@ -501,13 +563,18 @@ def condition_implies_member(statement: str) -> bool:
     member settles a conjunction whatever else is in it, including a conjunct the parser cannot read.
     `!m`, `m == false`, `m != true`, `!this->m` and `m || fallbackOn` are refused, because each can be
     true with the member false, which runs the translation exactly when the switch is supposed to be
-    off. Anything outside the grammar — a comma operator, another object's member, a call where the
-    member's value is still needed — is unknown, and an unknown top-level result is refused.
+    off. So are `UNLIKELY(m)`, `LIKELY(m)` and `static_cast<bool>(m)`, which are read as the condition
+    they wrap. Anything outside the grammar — a comma operator, another object's member, a call where
+    the member's value is still needed — is unknown, and an unknown top-level result is refused.
     """
-    condition = if_condition(statement)
-    if condition is None:
+    parts = if_parts(statement)
+    if parts is None:
         return False
-    tokens = tokenise_condition(THIS_PREFIX.sub("", condition))
+    condition, _remainder = parts
+    unwrapped = strip_boolean_wrappers(condition)
+    if unwrapped is None:
+        return False
+    tokens = tokenise_condition(THIS_PREFIX.sub("", unwrapped))
     if tokens is None:
         return False
     return evaluate_disjunction(tokens) is False
@@ -598,17 +665,27 @@ def brace_opens(statement: str) -> list[tuple[int, str]]:
 
 
 def braceless_guard_before(statements: list[tuple[str, str]], index: int) -> bool:
-    """True when the statement just before `index` is a member `if` with no brace.
+    """True when the statement just before `index` is a member `if` with no body of its own.
 
     `if (m_shouldTranslateMessageNames)` on its own line guards the next statement, and that guard is
     not part of any block the chain can see.
+
+    Nothing may follow the closing parenthesis. `if (m_shouldTranslateMessageNames) { return; }` and
+    `if (m_shouldTranslateMessageNames) goto done;` are complete statements with their own body: what
+    comes after them is not guarded by them, however short the body is. Telling them apart by "does the
+    line end with `{`" accepted all of these, because a body written on the same line ends with `}` or
+    `;` and the condition was then read as the guard of the following statement.
     """
     if index == 0:
         return False
     previous_path, previous = statements[index - 1][0], statements[index - 1][1]
     if previous_path != statements[index][0]:
         return False
-    return not previous.rstrip().endswith("{") and condition_implies_member(previous)
+    parts = if_parts(previous)
+    if parts is None:
+        return False
+    _condition, remainder = parts
+    return remainder == "" and condition_implies_member(previous)
 
 
 def check_read_sites(patch: str) -> list[Violation]:
