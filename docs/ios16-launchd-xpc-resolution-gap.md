@@ -62,7 +62,7 @@ xpc_connection_set_bootstrap(m_xpcConnection.get(), initializationMessage.get())
 
 `_CFBundleSetupXPCBootstrap` 在 CoreFoundation 的私有头里有声明（`apple-oss-distributions/CF`, `CFBundlePriv.h:259-260`，`CF_AVAILABLE(10_10, 8_0)`），但 CF 开源树只有 CFLite，**实现不在其中**（`grep -c XPCBootstrap CFBundle.c` = 0）。所以「bootstrap 字典里到底带了哪些 framework 路径」无源码可查。
 
-这一点很重要：launchd 若要从「该 pid 域加载了什么」推算候选集，最直接的通道就是这份握手时提交的 bootstrap 字典。另一条可能的通道是 launchd 在 `dlopen` 时收到 dyld 的通知（dyld 有 `dlopen_from` 一类的回调点，Dopamine 的 dyld 补丁就挂在它上面，`docs/ios16-all-18.3-xpc-endpoint-audit.md:204` 记录过在设备二进制里数到 `dlopen_from` 命中 1 次），所以「launchd 完全不知道进程 dlopen 了什么」这个说法不能成立。两条通道的区别在于时机：bootstrap 字典只在启动时提交一次，dyld 通知则随每次 `dlopen` 发生。
+这一点很重要：launchd 若要从「该 pid 域加载了什么」推算候选集，最直接的通道就是这份握手时提交的 bootstrap 字典。另一条可能的通道是 launchd 在 `dlopen` 时收到 dyld 的通知（dyld 有 `dlopen_from` 一类的回调点，Dopamine 的 dyld 补丁就挂在它上面，`docs/ios16-all-18.3-xpc-endpoint-audit.md:210` 记录过设备 `gen/dyld` 的判定 (b) 里 `dlopen_from` 计数为 1），所以「launchd 完全不知道进程 dlopen 了什么」这个说法不能成立。两条通道的区别在于时机：bootstrap 字典只在启动时提交一次，dyld 通知则随每次 `dlopen` 发生。
 
 现有读数无法区分这两条通道，但它们对本文结论的影响相同：**两个通道都只在「有镜像被加载」时才带回 framework 路径**。空目录与只含 `Info.plist` 的目录不产生新镜像，两条通道都不触发，于是仍是系统那份 `WebKit` 的条目。
 
@@ -436,7 +436,7 @@ launchd_flat_mach_namespace = false;
 
 真正支撑这一步的是两条设备读数：
 
-- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:202`），Chrome 基线 8 条（`build-state.md:502`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
+- Safari（pid 69370）的 `services = {` 只有六条（`docs/ios16-all-18.3-xpc-endpoint-audit.md:207`），Chrome 基线 8 条（`build-state.md:502`）。若是 `root_jobmgr`，列出的是全系统服务（数百条），不可能是六条或八条。
 - 四个 WebKit 服务名在 `system`/`user/501`/`gui/501` 三域都查不到（`build-state.md:408`）。
 
 这两条只说明「`print pid/N` 看到的那个集合很小」，不能单独证明「这个集合来自 XPC 域」，也不能排除「来自某个很小的非 XPC 域」。9.9 第 1 条是能把它定案的读数。
@@ -536,7 +536,7 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
 **两种口径下结论相同，但论证要分清是哪一条：**
 
 - **本仓库树**：四处调用都被 `#if PLATFORM(MAC)` 排除在 iOS 编译之外（文件本身是否参与 iOS 构建是另一回事），其中只有 `DaemonUtilities.mm:40` 带 `XPC_CONNECTION_MACH_SERVICE_LISTENER`（即「登记成服务等连接」），其调用者 `WebPushDaemonMain.mm:179` 与 `PCMDaemonEntryPoint.mm:147` 也都在守卫内。
-- **上游**：这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。其中 `DaemonUtilities.mm:39` 服务于 webpushd（`ENABLE_WEB_PUSH_NOTIFICATIONS` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:243-245` 对 `PLATFORM(IOS)` 默认 1），`RemoteInspectorCocoa.mm:332` 属于 JavaScriptCore 的 `RemoteInspector`，连的是 webinspectord relay（`ENABLE_REMOTE_INSPECTOR` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:765-767` 默认 1，文件在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30` 收录）。这两个都不是 WebKit 的 WebContent/Networking/GPU helper；另两个 `DaemonConnectionCocoa.mm:67` 与 `WebPushToolConnection.mm:80` 是客户端侧，flag 为 `0`（`docs/ios16-all-18.3-xpc-endpoint-audit.md:107`）。
+- **上游**：这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。其中 `DaemonUtilities.mm:39` 服务于 webpushd（`ENABLE_WEB_PUSH_NOTIFICATIONS` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:243-245` 对 `PLATFORM(IOS)` 默认 1），`RemoteInspectorCocoa.mm:332` 属于 JavaScriptCore 的 `RemoteInspector`，连的是 webinspectord relay（`ENABLE_REMOTE_INSPECTOR` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:765-767` 默认 1，文件在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30` 收录）。这两个都不是 WebKit 的 WebContent/Networking/GPU helper；另两个 `DaemonConnectionCocoa.mm:67` 与 `WebPushToolConnection.mm:80` 是客户端侧，flag 为 `0`（`docs/ios16-all-18.3-xpc-endpoint-audit.md:112`）。
 
 **所以「WebKit helper 不走 Mach 服务名」这个结论在两种口径下都成立**，只是它不能靠「iOS 上一行都不编译」这个断言来支撑——上游这四个调用点都没有平台守卫。支撑它的是：四处调用没有一处出现在 WebKit helper 的入口路径上（`XPCServiceMain.mm` 走的是本仓库树里那段 `xpc_main` 等价物或上游的 `xpc_main`，两者都只等 launchd 递 peer）。
 

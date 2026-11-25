@@ -50,7 +50,7 @@ git show 4bad538:scripts/probe-webkit-override-endpoints.sh
 
 ### 1.1 判据命令
 
-`docs/ios16-all-18.3-xpc-endpoint-audit.md:78-81`（下称 M63 审计）：
+`docs/ios16-all-18.3-xpc-endpoint-audit.md:78-84`（下称 M63 审计）：
 
 ```sh
 APP=$(ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '{print $1}' | head -1)
