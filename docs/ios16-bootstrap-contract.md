@@ -240,7 +240,7 @@ M85 落地前，`patches/ios16-xpc-bootstrap-compat.patch` 在 `getClientSDKAlig
 1. 16.1 **发送** `client-sdk-aligned-behaviors` 且长度为 8，`!length` 为假，回退分支不进入，控制直接到 `RELEASE_ASSERT`。
 2. 16.1 **不发送** `client-sdk-version`（上文 `git grep` 计数为 0），即使进了分支也取不到字符串，回退在第二个 `if` 处返回 false，位图保持全零。
 
-所以修补后的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（`feat/p9-make-the-aligned-behaviors-fallback-r`）已经落地这个修法，但收在更窄的形式里：`RELEASE_ASSERT` 与 `memcpy` 都删除，只保留「宽度不超过本端时清零走默认、更宽则拒绝，任何外来位图都不拷贝」。三个提交是 `97cfd79`、`ddfaa5f`、`30ae1b9`，截至本文写作时尚未合入 `main`。
+所以修补后的补丁仍不能解决 16.1 UI 配 18.3 helper 的断言。当初设想的修法是按**数据块长度**而不是键是否存在分派。M85（内层 `feat/p9-inner-aligned-behaviors-fallback-and-constant`，外层 `feat/p9-make-the-aligned-behaviors-fallback-r`）已经落地这个修法，但收在更窄的形式里：`RELEASE_ASSERT` 与 `memcpy` 都删除，只保留「宽度不超过本端时清零走默认、更宽则拒绝，任何外来位图都不拷贝」。三个提交是 `97cfd79`、`ddfaa5f`、`30ae1b9`，截至本文写作时尚未合入 `main`。
 
 ### 8 字节的分支不能把 16.1 的位图翻译成 18.3 的位图
 
