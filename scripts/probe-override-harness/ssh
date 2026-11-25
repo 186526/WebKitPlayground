@@ -216,8 +216,17 @@ if "install-webkit-override.sh" in command:
     if scenario.get("install_fails"):
         reply("preflight: missing source", 1, stderr=True)
     open(marker, "w").close()
-    reply("  copied     /var/jb/Library/WebKitOverride/WebKit.framework\n"
-          "  pruned     /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices")
+    if scenario.get("override_prunes_xpc_services", True):
+        reply("  copied     /var/jb/Library/WebKitOverride/WebKit.framework\n"
+              "  pruned     /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices")
+    reply("  copied     /var/jb/Library/WebKitOverride/WebKit.framework")
+
+# Step 2 reads the installed shape instead of trusting the install script's name.
+if "WebKit.framework/XPCServices" in command and command.startswith("ls "):
+    if scenario.get("override_xpc_services_unreadable"):
+        reply("ls: /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices: "
+              "No such file or directory", 1, stderr=True)
+    reply(str(scenario.get("override_xpc_bundles", 0)))
 
 if "[ -d /var/jb/Library/WebKitOverride ]" in command:
     present = os.path.exists(marker) or scenario.get("override_initial") == "present"

@@ -238,11 +238,34 @@ expect_contains 'a-stub says A cannot settle the question here' "${CASE_DIR}/log
 expect_contains 'a-stub points at the unpruned run' "${CASE_DIR}/log/probe.log" 'docs/ios16-branch-a-deployment-path.md'
 
 printf '\n== A from an override .xpc is named as its own mechanism\n'
-new_case a-override-xpc "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8302, \"path\": \"${OVR_XPC}\", \"frameworks\": [\"${OVR_FW}\"]}]}"
+new_case a-override-xpc "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8302, \"path\": \"${OVR_XPC}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_prunes_xpc_services\": false, \"override_xpc_bundles\": 5}"
 run_probe
 expect_status 'a-override-xpc exit' "${CASE_STATUS}" 0
 expect_contains 'a-override-xpc reason names the resolved bundle' "${CASE_DIR}/log/probe.log" 'PROBE_REASON=all_four_services_present_and_a_helper_started_from_the_override_xpc_loaded_a_var_jb_framework'
 expect_contains 'a-override-xpc counter' "${CASE_DIR}/log/probe.log" 'PROBE_JB_FRAMEWORK_FROM_OVERRIDE_XPC=1'
+expect_contains 'a-override-xpc reads the installed shape' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: present (5 bundles)'
+expect_contains 'a-override-xpc is not called a reproduction' "${CASE_DIR}/log/probe.log" 'This run is NOT the build-state.md:402 configuration'
+expect_not_contains 'a-override-xpc never retracts A' "${CASE_DIR}/log/probe.log" 'A cannot come from launchd scanning the override tree'
+expect_contains 'a-override-xpc says A is direct evidence' "${CASE_DIR}/log/probe.log" 'which is (A)'
+
+printf '\n== an override whose XPCServices cannot be read withholds the comparison\n'
+# The install script's name cannot settle which of the two on-device shapes was
+# produced, so a run that cannot read the directory must not claim to reproduce
+# build-state.md:402 either way.
+new_case xpc-unreadable "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8304, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_xpc_services_unreadable\": true}"
+run_probe
+expect_contains 'xpc-unreadable records unknown' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: unknown'
+expect_contains 'xpc-unreadable withholds the comparison' "${CASE_DIR}/log/probe.log" 'Comparison withheld'
+expect_not_contains 'xpc-unreadable never claims a reproduction' "${CASE_DIR}/log/probe.log" 'is therefore a reproduction of'
+
+printf '\n== the pruned shape still reproduces build-state.md:402 and still retracts A\n'
+# build-state.md:402 is the pruned shape, so this is the one run where a zero
+# endpoint reading is a reproduction and where A does contradict that row.
+new_case xpc-pruned "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8305, \"path\": \"${SYS_GPU}\", \"frameworks\": [\"${OVR_FW}\"]}], \"override_prunes_xpc_services\": true, \"override_xpc_bundles\": 0}"
+run_probe
+expect_contains 'xpc-pruned records absent' "${CASE_DIR}/log/probe.log" 'XPCServices in the override: absent'
+expect_contains 'xpc-pruned reproduces the known row' "${CASE_DIR}/log/probe.log" 'is therefore a reproduction of'
+expect_contains 'xpc-pruned retracts A' "${CASE_DIR}/log/probe.log" 'A cannot come from launchd scanning the override tree'
 
 printf '\n== A from the /var/jb Frameworks copy is named separately again\n'
 new_case a-jb-copy "{\"services\": ${SERVICES}, \"helpers\": [{\"pid\": 8303, \"path\": \"${SYS_XPC}\", \"frameworks\": [\"${JB_FW}\"]}]}"

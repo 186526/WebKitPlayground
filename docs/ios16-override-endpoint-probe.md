@@ -11,11 +11,19 @@ M63 第四节的问题：一个位于 launchd 索引外、被进程 `dlopen` 进
 
 第八节第 1 条把这条列为「本文最重要的未知量」，并提醒必须同时排除 dyld 中止，否则端点归零的成因无法区分。
 
-**这套配置 `build-state.md` 已经测过。** `scripts/install-webkit-override.sh` 的 `prune_xpc_services` 会删掉覆盖目录里的 `WebKit.framework/XPCServices`，所以本脚本装载出来的目录内容是「`Info.plist` + `WebKit` 二进制，无 `XPCServices`」，与 `build-state.md:402` 那一行（「再加只含 `WebKit` 二进制的 `WebKit.framework`」，端点 0、spawn 0、lookup 失败 265）是同一个配置。因此：
+**这套配置是否等于 `build-state.md:402`，由第 2 步装完后的读数决定，不由脚本名推断。** 仓库里的 `scripts/install-webkit-override.sh` 调 `prune_xpc_services` 删掉 `WebKit.framework/XPCServices`，但本脚本调用的是**设备上**的 `/var/mobile/install-webkit-override.sh`，实测那版把每个 framework 目录整树 `cp -a` 过去，**保留** `XPCServices`（13598 字节，mtime `Nov 24 21:27`，`sha256 7bb77e09…`；源目录 `/var/jb/Library/Frameworks/WebKit.framework/XPCServices` 下有 5 个 `.xpc`）。所以第 2 步装完后脚本自己数一次：
 
-- 读到 0 到 2 个端点（B）**复现**一个已知结果，不是新归因；
-- 读到 4 个端点（A）与该行矛盾，说明那次读数受它未记录的变量影响，必须重做；
-- 只有 A 才携带新信息。
+```sh
+ls -1 /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices 2>/dev/null | wc -l | tr -d ' '
+```
+
+读数记进 `OVERRIDE_XPC_SERVICES`，结论文字按它分支：
+
+- `absent`（0 个）——这是 `build-state.md:402` 那个配置（「再加只含 `WebKit` 二进制的 `WebKit.framework`」，端点 0、spawn 0、lookup 失败 265）。读到 0 到 2 个端点（B）**复现**已知结果；读到 4 个端点（A）与该行矛盾，必须重做。
+- `present (N bundles)`——**不是** `build-state.md:402` 那个配置。0 个端点是关于未剪枝形态的新读数，应与 `build-state.md:264-278` 对照；A 也不再只能来自系统桩，`comm` 落在覆盖目录的 helper 就是 launchd 直接从覆盖目录 `.xpc` 起进程的直接证据。
+- `unknown`——`ls` 失败或输出的不是数字。结论文字直接 withheld，不猜。
+
+两种形态下 A 都携带新信息，但含义不同，`PROBE_REASON` 与两个计数器负责区分。
 
 这个探针的价值不在于「第一次测这个配置」，而在于第一次把四项读数对齐在同一份带时间顺序的日志里：
 
@@ -75,11 +83,13 @@ DEVICE_SUDO_PASSWORD='...' scripts/probe-webkit-override-endpoints.sh
 | `..._a_helper_started_by_the_system_stub_loaded_the_override_framework` | helper 是系统桩，`__XPC_DYLD_FRAMEWORK_PATH` 把覆盖的 `WebKit` 交给它 | 不是 (A)：launchd 解析的是索引内路径 |
 | `..._a_helper_loaded_the_var_jb_frameworks_copy` | helper 加载的是 `/var/jb/Library/Frameworks` 那一份，不是本次安装的覆盖目录 | 与本次覆盖目录无关，属第 5 步的环境变量副作用 |
 
-本脚本调用安装脚本，而它的 `prune_xpc_services` 删掉了 `XPCServices`，所以在这个配置下第一种**不可能**出现：A 只能意味着第二种。要真正判定 (A)，需要在**未剪枝**的覆盖目录上重跑，见 `docs/ios16-branch-a-deployment-path.md:187` 的「第 2 步」。已有的部分 (A) 证据是 `build-state.md:264-278`：未剪枝配置下崩溃报告的 `procPath` 是 `.../WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU`，证明 launchd 真的从覆盖目录启动了那个 `.xpc`。那次运行随后死在 `xpc_dictionary_apply`，没有读到端点计数，所以它是机制证据而不是端点证据。
+两张 `PROBE_REASON` 都可出现，取决于第 2 步装出来的形态，不由安装脚本的名字决定。设备上的 `/var/mobile/install-webkit-override.sh` 保留 `XPCServices`，所以用**它**跑时第一种是可达的：`comm` 落在覆盖目录的 helper 就说明 launchd 真的从索引外路径起了 `.xpc`。仓库里的 `scripts/install-webkit-override.sh` 会剪掉 `XPCServices`，用它跑时第一种不可达，A 只能意味着第二种。脚本在第 2 步数出 `XPCServices` 的个数并记进 `OVERRIDE_XPC_SERVICES`，结论文字按这个读数分支，不复用任何默认假设。
 
-A 与 `build-state.md:402` 矛盾，说明那次读数（以及依赖它的「(B) 已成立」的推论）受未记录变量影响，需要重做；全 18.3 路线的内容改为 helper 与 UI 的协议、ABI 工作。
+要在一个确定的**未剪枝**目录上判定 (A)，见 `docs/ios16-branch-a-deployment-path.md:187` 的「第 2 步」，它显式补回 `XPCServices`。已有的部分 (A) 证据是 `build-state.md:264-278`：未剪枝配置下崩溃报告的 `procPath` 是 `.../WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.GPU.xpc/com.apple.WebKit.GPU`，证明 launchd 真的从覆盖目录启动了那个 `.xpc`。那次运行随后死在 `xpc_dictionary_apply`，没有读到端点计数，所以它是机制证据而不是端点证据。
 
-**B**：四个服务里最多剩两个，读窗口（第 3、4、5 步）内没有 DYLD 或 PAC_EXCEPTION 崩溃，且每个读到了 framework 的新 helper 加载的都是系统那份。注意「没有新 helper 加载 `/var/jb` framework」这条不能从「一个 framework 路径都没读到」推出，所以这种情况下判 UNKNOWN 而不是 B（理由 `services_gone_but_no_helper_framework_path_read`），与 A 侧的 `four_services_present_but_no_helper_framework_path_read` 对称。这与 `build-state.md:402` 一致，是对已知结果的复现，多出的是崩溃差分与 helper framework 路径。按 M63 第四节「若 (B) 成立」，UI 进程没有注册这四个名字的代码（`Source/WebKit/UIProcess/` 下 `XPC_CONNECTION_MACH_SERVICE_LISTENER` 命中 0），所以「16.1 上换 18.3 UI 进程」不成立，资源转到「16.1 UI + 18.3 helper」的协议转换。
+在 `OVERRIDE_XPC_SERVICES=absent` 的剪枝形态下，A 与 `build-state.md:402` 矛盾，说明那次读数（以及依赖它的「(B) 已成立」的推论）受未记录变量影响，需要重做；带 `XPCServices` 时那条对照不成立，A 只是关于未剪枝形态的新读数。两种情况下全 18.3 路线的内容都按 `PROBE_REASON` 落到 helper 与 UI 的协议、ABI 工作。
+
+**B**：四个服务里最多剩两个，读窗口（第 3、4、5 步）内没有 DYLD 或 PAC_EXCEPTION 崩溃，且每个读到了 framework 的新 helper 加载的都是系统那份。注意「没有新 helper 加载 `/var/jb` framework」这条不能从「一个 framework 路径都没读到」推出，所以这种情况下判 UNKNOWN 而不是 B（理由 `services_gone_but_no_helper_framework_path_read`），与 A 侧的 `four_services_present_but_no_helper_framework_path_read` 对称。`OVERRIDE_XPC_SERVICES=absent` 时这与 `build-state.md:402` 一致，是对已知结果的复现，多出的是崩溃差分与 helper framework 路径；带 `XPCServices` 时那条对照不成立，这次 B 是未剪枝形态的新读数。按 M63 第四节「若 (B) 成立」，UI 进程没有注册这四个名字的代码（`Source/WebKit/UIProcess/` 下 `XPC_CONNECTION_MACH_SERVICE_LISTENER` 命中 0），所以「16.1 上换 18.3 UI 进程」不成立，资源转到「16.1 UI + 18.3 helper」的协议转换。
 
 **UNKNOWN**，`PROBE_REASON` 逐条说明原因：
 
@@ -123,14 +133,14 @@ M63 的实测与 `AGENTS.md` 记过设备缺哪些工具：没有 `plutil`、`st
 
 ## 六、局限
 
-- **完整七步仍未在真机上跑过。** 编写期间设备不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：29 个场景、122 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形会话缺失中止、空 `gui/501` 不中止，以及崩溃排除的五条路径（读不出正文、after 列表失败、before 列表失败因而没有基线、读窗口外的报告只记不拦、读窗口内缺基线时连 A 也不给），外加两个理由的优先级（缺基线而 after 成功时取基线那一条，同一步 before 与 after 都失败时取另一条），每条断言检查退出码或日志里的关键行。
+- **完整七步仍未在真机上跑过。** 编写期间设备不可达（`No route to host`）。所有分支都是在主机侧用一个假 `ssh` 覆盖出来的，那个假 `ssh` 模仿真 `ssh` 读走 stdin 的行为：29 个场景、132 条断言，场景与断言都在 `scripts/probe-override-harness/`，可以随时重跑（`bash scripts/probe-override-harness/run.sh`），覆盖 A 的三种机制、B、每一条 UNKNOWN 理由、三个 `while read` 循环在两种 sudo 模式下都跑满、同一 helper 两份 framework 与行序无关、残留 helper、回滚、拒绝安装、图形会话缺失中止、空 `gui/501` 不中止、覆盖目录带与不带 `XPCServices` 两种形态（以及读不到时结论 withheld），以及崩溃排除的五条路径（读不出正文、after 列表失败、before 列表失败因而没有基线、读窗口外的报告只记不拦、读窗口内缺基线时连 A 也不给），外加两个理由的优先级（缺基线而 after 成功时取基线那一条，同一步 before 与 after 都失败时取另一条），每条断言检查退出码或日志里的关键行。
 - **前置闸门已在真机上单独验证过，七步里的其余六步没有。** 2026-11-25 20:41 CST 把脚本里 `read_gui_domain_facts`、`read_springboard_facts`、`graphics_session_healthy`、`abort_graphics_session_missing` 四个函数的原文抽出来，对着 `192.168.2.136` 运行：旧判据（`gui/501` 非空且退出 0）判定中止，新判据判定通过，说明这条修正是真的改变了结论而不是措辞。四个失败形态（SpringBoard job 缺失、`state = not running`、`state = exited`、`user/501` 域缺失）在主机侧用贴写读数逐一验证退出码为 3。第 2 至 6 步在真机上没有执行，因为第 2 步会写覆盖目录。
 - `bash -n` 通过。`shellcheck` 在本机不可用（`which shellcheck` 无输出），**没有跑**，所以本节不声称它通过。
 - 因此下列事实只有 `AGENTS.md` 的间接依据，没有实测：`ps -Ao pid,ppid,comm` 在 iPadOS 16.1 上是否接受 ppid 列；`sudo lldb` 附着 helper 是否被允许；`image list -o -f` 的实际行格式（脚本按「路径是行末字段、可含空格」解析）。
 - 一个 helper 也可能在 lldb 附着前就退出。此时 framework 路径读不到，A 与 B 都不可达，脚本会给出对应的 `..._no_helper_framework_path_read` 而不是猜。
 - 端点数只统计 Safari。`build-state.md` 那张表用的是 Chrome，两者的 per-pid 域结构相同但读数不必一一对应；比对时看的是「四个 WebKit 服务在不在」这个定性结论。
-- 本探针只覆盖安装脚本产出的那一种目录内容。要测「带 `XPCServices` 的覆盖目录」，需要先改安装脚本，那属于另一个实验，本脚本检测到覆盖目录已存在时会拒绝安装。在本探针的配置下 A 只能来自系统桩的 framework 交接，判定 (A) 需要未剪枝的覆盖目录。
-- **两种安装脚本产出的目录不同，不能混用读数。** 设备上那份 `/var/mobile/install-webkit-override.sh`（2026-11-25 实测 13598 字节、mtime `Nov 24 21:27`）只有一条 `cp -a`，**保留** `XPCServices`；仓库里的 `scripts/install-webkit-override.sh` 在 `:259` 定义 `prune_xpc_services()`、`:285` 在 `copy_all()` 里调用，**删除**它。上面那句「A 只能来自系统桩的 framework 交接」只对仓库那份脚本成立；用设备那份跑时覆盖目录里带着 `XPCServices`，launchd 有可能直接从覆盖目录的 `.xpc` 起进程，A 的第一种机制就重新可达。跑之前先记下用的是哪一份、字节数与 `sha256`。
+- **两种安装脚本产出的目录不同，不能混用读数，所以脚本实测而不是按名字推断。** 设备上那份 `/var/mobile/install-webkit-override.sh`（2026-11-25 实测 13598 字节、mtime `Nov 24 21:27`、`sha256 7bb77e09…`）只有一条 `cp -a`，**保留** `XPCServices`，源目录下有 5 个 `.xpc`；仓库里的 `scripts/install-webkit-override.sh` 在 `:259` 定义 `prune_xpc_services()`、`:285` 在 `copy_all()` 里调用，**删除**它。探针第 2 步装完后数一次覆盖目录里的 `.xpc`，记进 `OVERRIDE_XPC_SERVICES`，结论文字按这个读数分支：剪枝形态复现 `build-state.md:402` 且 A 只能来自系统桩的 framework 交接；带 `XPCServices` 时那条对照不成立，A 的第一种机制可达，`comm` 落在覆盖目录的 helper 就是 launchd 直接从覆盖目录 `.xpc` 起进程的证据。跑之前先记下用的是哪一份、字节数与 `sha256`。
+- 本探针不修改安装脚本，也不能切换它的形态。要在一个不受设备脚本版本影响的确定目录上判定 (A)，用 `docs/ios16-branch-a-deployment-path.md:187` 的「第 2 步」，它显式补回 `XPCServices`。
 - **端点数取去重后的基础服务名，不取行数。** `services = {` 段里每个活着的页面各注册一条带 UUID 后缀的实例条目，所以按行 `grep -c` 随页面数浮动。2026-11-25 20:41 CST 实测 Chrome pid 626：按行 `grep -cE` 得 9，其中 5 条带 UUID，去重后基础名 4 个。脚本的 `count_service` 一直按整词边界匹配，从来没数过实例条目，所以脚本读数不受这个影响；日志里额外打印行数与 UUID 实例数，只是为了让新日志与 `build-state.md` 旧表里那个「8」对得上。
 
 ## 七、与 M63 的关系

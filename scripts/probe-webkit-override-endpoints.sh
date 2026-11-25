@@ -93,6 +93,12 @@ GUI_RC=0
 GUI_OUTPUT=''
 OVERRIDE_PRESENT_BEFORE=unknown
 INSTALL_RC=not-run
+# Whether the installed override carries WebKit.framework/XPCServices. This is
+# read from the device after the install rather than assumed from the install
+# script's name: two copies of that script exist and they disagree, the device's
+# /var/mobile one copies the tree whole while the repo's scripts/ one prunes it.
+# The verdict narrative below depends on which one this run used.
+OVERRIDE_XPC_SERVICES=unknown
 OVERRIDE_PRESENT_AFTER=unknown
 UNINSTALL_RC=not-run
 SAFARI_PID=''
@@ -126,11 +132,13 @@ BASELINE_HELPERS_RECORDED=0
 # different fact from "a report could not be read".
 BASELINE_MISSING_STEPS=''
 BASELINE_MISSING_SEPARATOR=''
-# The override prunes WebKit.framework/XPCServices (install-webkit-override.sh
-# :235-251), so every helper's executable lives under the system .xpc bundle and
-# comm alone can never say which WebKit framework it loaded. The framework path
-# comes from lldb's image list, one attach per new helper, because that is the
-# only reader the device has.
+# comm names each helper's executable, but a helper can run from the override
+# .xpc bundle (when the override carries WebKit.framework/XPCServices) or from
+# the system .xpc bundle (when it does not), so comm alone cannot say which
+# WebKit framework it loaded. Which shape this run installed is measured in
+# step 2 and recorded in OVERRIDE_XPC_SERVICES. The framework path comes from
+# lldb's image list, one attach per new helper, because that is the only reader
+# the device has.
 HELPER_FRAMEWORK_PATHS_RECORDED=0
 HELPER_FRAMEWORK_OVERRIDE=0
 HELPER_FRAMEWORK_JB=0
@@ -141,8 +149,8 @@ HELPER_FRAMEWORK_UNKNOWN=0
 # indexed. If the helper's own executable (comm) is under the override tree,
 # launchd started the override's .xpc; if it is the system stub, launchd started
 # the indexed stub and the dyld environment handed the override framework over.
-# The install script prunes XPCServices, so in this configuration the first
-# mechanism cannot occur and A can only mean the second.
+# Both are reachable whenever the override carries XPCServices, so the counters
+# are read from the comm paths rather than assumed from the install script.
 HELPER_JB_FRAMEWORK_FROM_OVERRIDE_XPC=0
 HELPER_JB_FRAMEWORK_THROUGH_STUB=0
 VERDICT=UNKNOWN
@@ -707,9 +715,28 @@ step_install() {
         OVERRIDE_INSTALLED=1
         run 'override directory after install' "[ -d ${OVERRIDE_ROOT} ] && echo present || echo absent"
         emit "  ${OVERRIDE_ROOT}: $(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^(present|absent)$' | tail -n 1)"
+        read_override_xpc_services
     fi
     step_end
     [ "${INSTALL_RC}" -eq 0 ]
+}
+
+# The install script's name does not say whether the result carries XPCServices:
+# the device's /var/mobile copy copies each framework tree whole, while the repo's
+# scripts/install-webkit-override.sh calls prune_xpc_services. Read it instead of
+# assuming it, because the verdict narrative is different for the two shapes.
+read_override_xpc_services() {
+    OVERRIDE_XPC_SERVICES=unknown
+    run 'does the installed override carry XPCServices' \
+        "ls -1 ${OVERRIDE_ROOT}/WebKit.framework/XPCServices 2>/dev/null | wc -l | tr -d ' '"
+    local bundles
+    bundles=$(printf '%s\n' "${REMOTE_OUTPUT}" | grep -E '^[0-9]+$' | tail -n 1)
+    case ${bundles} in
+        ''|*[!0-9]*) OVERRIDE_XPC_SERVICES=unknown ;;
+        0) OVERRIDE_XPC_SERVICES=absent ;;
+        *) OVERRIDE_XPC_SERVICES="present (${bundles} bundles)" ;;
+    esac
+    emit "  WebKit.framework/XPCServices in the override: ${OVERRIDE_XPC_SERVICES}"
 }
 
 # ---------------------------------------------------------------------------
@@ -984,11 +1011,13 @@ classify_helper_path() {
     esac
 }
 
-# comm names each helper's executable, which is always under the system .xpc
-# because the override prunes XPCServices. Which WebKit framework that helper
-# actually loaded is a separate fact and only lldb's image list reports it. The
-# attach needs root, and the ObjC expression parser on this device cannot install
-# its checkers, so `image list -o -f` is the whole vocabulary used here.
+# comm names each helper's executable, which lands under the system .xpc bundle
+# when the override carries no XPCServices and under the override .xpc bundle
+# when it does; OVERRIDE_XPC_SERVICES records which shape this run installed.
+# Which WebKit framework that helper actually loaded is a separate fact and only
+# lldb's image list reports it. The attach needs root, and the ObjC expression
+# parser on this device cannot install its checkers, so `image list -o -f` is the
+# whole vocabulary used here.
 #
 # Two same-named WebKit images in one process is normal here (outer AGENTS.md,
 # 设备 section): the system copy and the override copy both stay loaded. So every
@@ -1137,10 +1166,10 @@ step_tally_helpers() {
     emit "    total: ${HELPER_STALE_TOTAL}"
     emit "    signalled with kill -9 in step 3: ${HELPER_KILLED}"
 
-    # The comm classification cannot answer the question the verdict asks,
-    # because the override prunes XPCServices: every helper's executable lives
-    # in the system bundle whatever framework it loads. So each new helper is
-    # attached once and its WebKit framework path is read from lldb.
+    # The comm classification alone cannot answer the question the verdict asks:
+    # comm gives the executable path, not the framework the process loaded. So
+    # each new helper is attached once and its WebKit framework path is read
+    # from lldb.
     emit ""
     emit '  WebKit framework each new helper loaded (lldb image list):'
     if [ "${HELPER_NEW_TOTAL}" -eq 0 ]; then
@@ -1234,8 +1263,7 @@ baseline_missing_in_reading_window() {
 }
 
 # Which /var/jb framework the new helpers loaded. The executable path cannot
-# answer this (the override prunes XPCServices, so every helper runs from the
-# system .xpc), so this counts the lldb framework paths only.
+# answer this on its own, so this counts the lldb framework paths only.
 new_helper_framework_jb_count() {
     printf '%s' $((HELPER_FRAMEWORK_OVERRIDE + HELPER_FRAMEWORK_JB))
 }
@@ -1362,7 +1390,7 @@ step_summary() {
     emit 'Facts:'
     emit "  gui/501 at step 1: exit=${GUI_RC}, ${GUI_LINES} line(s) (diagnostic, not a gate)"
     emit "  SpringBoard under user/501 at step 1: exit=${SPRINGBOARD_RC}, state=${SPRINGBOARD_STATE} (this is the gate)"
-    emit "  override directory before: ${OVERRIDE_PRESENT_BEFORE}; install exit: ${INSTALL_RC}"
+    emit "  override directory before: ${OVERRIDE_PRESENT_BEFORE}; install exit: ${INSTALL_RC}; XPCServices in the override: ${OVERRIDE_XPC_SERVICES}"
     emit "  Safari pid: ${SAFARI_PID:-none}; launch: ${SAFARI_LAUNCH_MODE}"
     emit "  WebKit services present: ${webkit_count} of 4 (WebContent=${SVC_WEBCONTENT}, GPU=${SVC_GPU}, Networking=${SVC_NETWORKING}, CaptivePortal=${SVC_CAPTIVEPORTAL})"
     emit "  BrailleTranslation=${SVC_BRAILLE}, MTLCompilerService=${SVC_MTL}, distinct dotted names=${SVC_DISTINCT}"
@@ -1375,33 +1403,73 @@ step_summary() {
     emit "  steps that could not rule out a crash (a DYLD or PAC_EXCEPTION report appeared, or the exclusion could not be established): ${invalid}"
 
     emit ""
-    emit 'Comparison. build-state.md:402 is this configuration: "再加只含 WebKit 二进制的'
-    emit 'WebKit.framework", endpoints 0, spawn 0, lookup failures 265. install-webkit-override.sh'
-    emit 'prunes XPCServices, so the override it installs carries the Info.plist and the binary'
-    emit 'and nothing else. A reading of 0 endpoints here is therefore a reproduction of a known'
-    emit 'result, and only a divergence from that row is new information.'
-    emit ''
-    emit 'What A can and cannot mean here. With XPCServices pruned, launchd has no override'
-    emit '.xpc bundle to resolve, so A cannot come from launchd scanning the override tree.'
-    emit 'The only route left is the system stub plus the dyld framework handover: launchd'
-    emit 'starts the indexed /System stub, and the dyld environment the UI process carries'
-    emit 'loads the override WebKit into it. PROBE_REASON names which of the two happened for'
-    emit 'this run, and the two counters above say how many helpers each. Separating them'
-    emit 'definitively needs an unpruned run, i.e. an override that still carries'
-    emit 'XPCServices; docs/ios16-branch-a-deployment-path.md section 第 2 步 describes it.'
-    emit 'Existing partial (A) evidence for the unpruned configuration is at'
-    emit 'build-state.md:264-278, where launchd launched GPU from the override .xpc.'
+    case ${OVERRIDE_XPC_SERVICES} in
+        absent)
+            emit 'Comparison. build-state.md:402 is this configuration: "再加只含 WebKit 二进制的'
+            emit 'WebKit.framework", endpoints 0, spawn 0, lookup failures 265. This run measured no'
+            emit 'WebKit.framework/XPCServices in the override, so it installs the Info.plist and the'
+            emit 'binary and nothing else. A reading of 0 endpoints here is therefore a reproduction of'
+            emit 'a known result, and only a divergence from that row is new information.'
+            emit ''
+            emit 'What A can and cannot mean here. With XPCServices absent from the override, launchd'
+            emit 'has no override .xpc bundle to resolve, so A cannot come from launchd scanning the override tree.'
+            emit 'The only route left is the system stub plus the dyld framework handover: launchd'
+            emit 'starts the indexed /System stub, and the dyld environment the UI process carries'
+            emit 'loads the override WebKit into it. PROBE_REASON names which of the two happened for'
+            emit 'this run, and the two counters above say how many helpers each.'
+            emit 'Separating them definitively needs an unpruned run; docs/ios16-branch-a-deployment-path.md'
+            emit 'section 第 2 步 describes one. Existing partial (A) evidence for that configuration'
+            emit 'is at build-state.md:264-278, where launchd launched GPU from the override .xpc.'
+            ;;
+        present*)
+            emit 'Comparison. This run is NOT the build-state.md:402 configuration. That row is the'
+            emit 'pruned shape (Info.plist plus the WebKit binary, no XPCServices), while this run'
+            emit 'measured WebKit.framework/XPCServices inside the override. A 0-endpoint reading here'
+            emit 'is a new observation about the unpruned shape rather than a reproduction, and it is'
+            emit 'directly comparable with build-state.md:264-278 instead.'
+            emit ''
+            emit 'What A can mean here. With XPCServices present in the override, both routes are live'
+            emit 'and the two counters above separate them: a helper whose own executable (comm) is'
+            emit 'under the override tree was started by launchd from the override .xpc, which is (A)'
+            emit 'directly; a helper that is the /System stub but loaded the override framework came'
+            emit 'through the dyld handover, which does not answer whether launchd scans paths it has'
+            emit 'not indexed. PROBE_REASON names which one this run actually saw.'
+            ;;
+        *)
+            emit 'Comparison withheld: the run could not establish whether the installed override'
+            emit 'carries WebKit.framework/XPCServices, so it cannot say which configuration'
+            emit 'build-state.md:402 corresponds to. Read the step 2 line above; the ls of the override'
+            emit 'directory failed or printed something that is not a count. Re-run before citing this'
+            emit 'log as a reproduction of that row.'
+            ;;
+    esac
 
     emit ""
     emit 'Verdict. M63 docs/ios16-all-18.3-xpc-endpoint-audit.md section 4 (情形的判据) and section 8 item 1:'
     case ${VERDICT} in
         A)
             emit '  A: all four WebKit services are in the Safari section and a new helper loaded a'
-            emit '  /var/jb WebKit framework. That contradicts build-state.md:402 (same configuration,'
-            emit '  endpoints 0), so that reading was affected by a variable it did not record and has'
-            emit '  to be redone. It does not by itself show that launchd resolved an unindexed path:'
-            emit '  see the paragraph above. The whole-18.3 route stays open; what remains is the'
-            emit '  helper-to-UI protocol and ABI work.'
+            emit '  /var/jb WebKit framework.'
+            case ${OVERRIDE_XPC_SERVICES} in
+                absent)
+                    emit '  That contradicts build-state.md:402 (same pruned configuration, endpoints 0),'
+                    emit '  so that reading was affected by a variable it did not record and has to be'
+                    emit '  redone. It does not by itself show that launchd resolved an unindexed path:'
+                    emit '  see the paragraph above.'
+                    ;;
+                present*)
+                    emit '  This run installed XPCServices inside the override, so it is not the'
+                    emit '  build-state.md:402 configuration and does not contradict that row. Read the'
+                    emit '  reason line to see whether launchd started the override .xpc itself or the'
+                    emit '  /System stub handed the framework over.'
+                    ;;
+                *)
+                    emit '  The installed override shape could not be established, so whether this'
+                    emit '  contradicts build-state.md:402 is not decided here.'
+                    ;;
+            esac
+            emit '  The whole-18.3 route stays open; what remains is the helper-to-UI protocol and'
+            emit '  ABI work.'
             ;;
         B)
             emit '  B: every new helper whose framework was read loaded the system copy, and at most'

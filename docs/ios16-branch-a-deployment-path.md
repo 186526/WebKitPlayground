@@ -203,7 +203,11 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 
 **对 (A) 路线的结论不变，且不依赖那条前提。** 剪枝确实删掉了覆盖目录里的 `XPCServices`，而 (A) 路线要问的正是「launchd 会不会从覆盖目录的 `XPCServices` 解析服务」，被剪掉的目录不可能成为这个问题的输入。所以 (A) 路线的覆盖目录必须**带** `XPCServices`；这只用到「剪枝删除了目录」这个已确证的动作，不需要 launchd 的行为成立。
 
-同时这也意味着 `scripts/probe-webkit-override-endpoints.sh` 测的配置（它调用安装脚本，因而是剪枝版，脚本 `:1106` 自述「prunes XPCServices」）对应的是 `build-state.md:402` 那一行，**不是** (A)/(B) 判据真正要问的配置。它的 `PROBE_VERDICT=A` 分支要求「至少一个新 helper 加载 `/var/jb` 的 framework」，而在剪枝配置下每个 helper 都由系统桩起动、不带 `LC_DYLD_ENVIRONMENT`，那条分支接近不可达。
+同时这也意味着 `scripts/probe-webkit-override-endpoints.sh` 测的配置**取决于它调用的那份安装脚本**，而两份不同：它调用设备上的 `/var/mobile/install-webkit-override.sh`，实测那版整树 `cp -a`，**保留** `XPCServices`；仓库里的 `scripts/install-webkit-override.sh` 调 `prune_xpc_services`，会剪掉。脚本不按名字推断，第 2 步装完后自己数一次覆盖目录里的 `.xpc` 个数，记进 `OVERRIDE_XPC_SERVICES`，结论文字按这个读数分支。
+
+设备那版产出的是未剪枝目录，所以用探针直接跑就可能落在本步要问的配置上；它的 `PROBE_VERDICT=A` 分支要求「至少一个新 helper 加载 `/var/jb` 的 framework」，并再按 `comm` 区分「launchd 从覆盖目录 `.xpc` 起进程」与「系统桩加 dyld 交接」，前者才是 (A) 的直接证据。若把探针指向仓库那份脚本，覆盖目录会被剪枝，那种情形下 A 只剩系统桩一条路。
+
+本步仍然显式补回 `XPCServices`，因为要在一个不依赖设备脚本版本的确定目录上判定 (A)。
 
 **前置条件**：`/var/jb/Library/Frameworks` 下五个 framework 与 `/var/jb/usr/lib` 下两个 dylib 齐全（安装脚本的 `preflight_sources` 会先查，缺一个就拒绝写，M69 之后在 `:140-161`）。
 
