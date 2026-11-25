@@ -50,14 +50,21 @@ cases are the ways the switch can come back and the ways the check could pass by
   settled.
 
 Open boundary: a call that follows a closed guard block inside the same statement — `if (m) { x();
-} call;` — is refused, in both spellings. The one-line form was refused because its chain is empty
-and no closure sits before the call; the split form used to *pass*, because the chain is read at the
-statement's start and still held the guard the statement had just closed. That was a false accept —
-wrong code accepted — so the check now stops consulting the chain once a closer in the call's own
-statement precedes the call, and asks only the call's own statement. Accepting the call in either
-spelling would need the statement to be cut at the closure, which this check does not do. A block
-comment inside the condition — `if (m /* c */)` — is refused because the condition is read as written
-and the comment is not stripped there.
+} call;` — is refused in both spellings. The one-line form is refused: its chain is empty and no
+closure sits before the call. The split form is refused: the check stops consulting the chain once a
+closer in the call's own statement precedes the call. Before that fix such a call passed, because the
+chain was read at the statement's start and still held the guard the statement had just closed; that
+was wrong code accepted, and the two sentences above are what keep it from coming back. Accepting
+either spelling would need the statement to be cut at the closure, which this check does not do. A
+block comment inside the condition — `if (m /* c */)` — is refused because the condition is read as
+written and the comment is not stripped there.
+
+The two-closer boundary is accepted: a statement with two unmatched closers and a call between them —
+`x(); } call; }` — is judged by the chain it started inside, because only the last closer decides
+where the chain stops being consulted and that closer sits after the call. Measured on a 898065-line
+WebKit tree: 96 lines carry two unmatched closers and none of them places a call between the two; the
+mirror shape, an inner block closing mid-line while the guard is still open, is also zero. Both are
+recorded here rather than fixed.
 
 The "as committed" case reads the real patch, so a patch edited without updating this check fails
 here rather than in the build. Two further passes read the real patch too: every rationale needle
@@ -69,6 +76,7 @@ Usage: python3 scripts/test-check-translation-switch.py
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import tempfile
@@ -1096,48 +1104,215 @@ for description, lines in GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT:
     ),)
 
 
-def check_open_boundary_docstring_matches_behaviour() -> int:
-    """Assert the Open boundary paragraph describes what the checker does, in both directions.
+def open_boundary_section(module_doc: str) -> str | None:
+    """The Open boundary text of `module_doc`, or None when it is gone.
 
-    The paragraph is the only place a reader learns which spellings of a closed guard are refused and
-    why. It said "a false reject, not a false accept" while the split spelling was accepted, so the
-    document disagreed with the code on the one question it exists to answer. Each claim below is a
-    sentence the paragraph has to carry *and* a behaviour it has to match: the wrong direction is
-    refused, and the checker refuses exactly the spellings the sentence names.
+    Both paragraphs are included: the first names the spellings of a closed guard, the second records
+    the two-closer boundary. A direction stated in either has to match the build, and a check that
+    read only the first paragraph would leave the second one free to say anything.
     """
-    module_doc = (SCRIPTS / "test-check-translation-switch.py").read_text(encoding="utf-8")
     start = module_doc.find("Open boundary:")
     if start < 0:
-        print("FAIL: the Open boundary paragraph is gone from this file's docstring")
+        return None
+    end = module_doc.find('\n\nThe "as committed"', start)
+    return module_doc[start:] if end < 0 else module_doc[start:end]
+
+
+def claimed_direction(paragraph: str, phrase: str) -> bool | None:
+    """Whether the paragraph says the call is refused for the spelling `phrase` names.
+
+    True for refused, False for accepted, None when the paragraph says neither or both — a sentence
+    that states no single direction cannot be compared with anything, so it is reported as unstated
+    rather than guessed at, or when the phrase never appears.
+
+    The search is per sentence, not per paragraph: every claim here is one sentence, and reading the
+    whole paragraph would let a `refused` in one sentence vouch for an `accepted` in another.
+    """
+    sentence = sentence_claiming(paragraph, phrase)
+    if sentence is None:
+        return None
+    refused = "refused" in sentence
+    accepted = "accepted" in sentence
+    if refused == accepted:
+        return None
+    return refused
+
+
+def sentence_claiming(paragraph: str, phrase: str) -> str | None:
+    """The first sentence of `paragraph` that mentions `phrase`, or None."""
+    for sentence in re.split(r"(?<=[.!?])\s+", paragraph):
+        if phrase in sentence:
+            return sentence
+    return None
+
+
+# The claims the paragraph makes, each paired with the fixtures that exercise it. A claim that covers
+# both spellings is measured against both, because a sentence saying both are refused must match both.
+# The block-comment claim is measured on its own shape: with the bare `m` the paragraph writes, the
+# condition cannot be settled, so the call inside it is refused. The two-closer claim is measured on
+# the boundary the second paragraph records.
+OPEN_BOUNDARY_CLAIMS = (
+    "both spellings",
+    "one-line form",
+    "split form",
+    "block comment",
+    "two-closer boundary",
+)
+
+# Fixtures for the claims that do not name a closure spelling. They are separate from the two closure
+# fixtures because they exercise different rules: the condition, and where the chain stops.
+OPEN_BOUNDARY_EXTRA_FIXTURES = {
+    "block comment": (
+        ("a call under a condition holding a block comment",
+         BASE.replace(SEND_GUARD,
+                      "+    if (m /* c */) {\n+        auto name = encoder->messageName();\n", 1)),
+    ),
+    "two-closer boundary": (
+        ("a call between two unmatched closers",
+         BASE.replace(RECEIVE_GUARD,
+                      "+    if (m_shouldTranslateMessageNames) {\n"
+                      "+        x(); } translateIncomingMessageName(decoder->messageName()); }\n", 1)),
+    ),
+}
+
+
+def open_boundary_fixtures(phrase: str) -> list[tuple[str, str]]:
+    """The (description, patch text) pairs the claim `phrase` has to agree with."""
+    if phrase in OPEN_BOUNDARY_EXTRA_FIXTURES:
+        return list(OPEN_BOUNDARY_EXTRA_FIXTURES[phrase])
+    indices = {"both spellings": (0, 1), "one-line form": (0,), "split form": (1,)}[phrase]
+    return [(GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT[index][0],
+             BASE.replace(RECEIVE_GUARD,
+                          "".join("+    " + line + "\n"
+                                  for line in GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT[index][1]), 1))
+            for index in indices]
+
+
+def open_boundary_direction_problems(module_doc: str) -> list[str]:
+    """Every disagreement between the paragraph's claimed direction and the measured one.
+
+    Pure apart from running the checker: it returns the problems instead of printing them, so the
+    vacuity check below can reuse the same comparison against paragraphs it has broken on purpose and
+    report only its own verdict.
+    """
+    section = open_boundary_section(module_doc)
+    if section is None:
+        return ["the Open boundary text is gone from this file's docstring"]
+
+    problems = []
+    for phrase in OPEN_BOUNDARY_CLAIMS:
+        claimed_refused = claimed_direction(section, phrase)
+        if claimed_refused is None:
+            problems.append("the paragraph states no single direction for %r" % phrase)
+            continue
+        for description, patch_text in open_boundary_fixtures(phrase):
+            result = run(patch_text)
+            actually_refused = result.returncode != 0
+            if claimed_refused != actually_refused:
+                problems.append(
+                    "the paragraph says the call is %s for %r, but %s exits %d"
+                    % ("refused" if claimed_refused else "accepted", phrase, description,
+                       result.returncode))
+    return problems
+
+
+def check_open_boundary_docstring_matches_behaviour() -> int:
+    """Compare the direction the Open boundary paragraph claims with the direction the checker takes.
+
+    Each claim is parsed out of the paragraph into a boolean — did the paragraph say this spelling is
+    refused? — and each spelling is measured by running the checker on a fixture of that spelling,
+    giving another boolean. The two are then asserted equal, so the paragraph and the code cannot
+    disagree on the one question the paragraph exists to answer.
+
+    This is deliberately not a search for the words themselves. An earlier version only required that
+    `refused` appear, which stayed green when every `refused` in the paragraph was replaced by
+    `accepted`: it bound the vocabulary, not the direction, and a green light on a paragraph saying
+    the opposite is worse than no test at all.
+    """
+    module_doc = (SCRIPTS / "test-check-translation-switch.py").read_text(encoding="utf-8")
+    problems = open_boundary_direction_problems(module_doc)
+    for problem in problems:
+        print("FAIL: %s" % problem)
+    if not problems:
+        print("ok: every direction the Open boundary paragraph claims matches the measured build")
+    return len(problems)
+
+
+def check_open_boundary_check_is_not_vacuous() -> int:
+    """Break the Open boundary text every way a rewrite could, and assert the comparison notices.
+
+    A comparison test is only worth what it catches. Every `refused` and `accepted` in the section is
+    flipped to the other word one at a time, with the implementation left alone: each flip changes the
+    direction claimed for exactly one spelling, so each must produce a disagreement. The last case
+    rewrites the whole paragraph to call the split form accepted, which is the defect the paragraph
+    was written to record, reintroduced into the paragraph itself.
+
+    The flips are enumerated from the text rather than listed here, so adding a claim adds a flip in
+    the same edit instead of leaving a claim unguarded.
+    """
+    module_doc = (SCRIPTS / "test-check-translation-switch.py").read_text(encoding="utf-8")
+    section = open_boundary_section(module_doc)
+    if section is None:
+        print("FAIL: the Open boundary text is gone from this file's docstring")
         return 1
-    paragraph = module_doc[start:module_doc.find("\n\n", start)]
-    normalised = " ".join(paragraph.split())
+
+    rewritten = (
+        "Open boundary: a call that follows a closed guard block inside the same statement is refused\n"
+        "in the one-line spelling. The one-line form is refused: its chain is empty and no closure\n"
+        "sits before the call. The split form is accepted: the statement is cut at the closure. A\n"
+        "block comment inside the condition — `if (m /* c */)` — is refused because the condition is\n"
+        "read as written and the comment is not stripped there."
+    )
+
+    def rewrite(text: str) -> str | None:
+        current = open_boundary_section(text)
+        return text.replace(current, rewritten, 1) if current else None
+
+    def flip_sentence_claim(phrase: str):
+        """Flip the one direction word in the sentence that states `phrase`'s claim."""
+        def apply(text: str) -> str | None:
+            current = open_boundary_section(text)
+            if current is None:
+                return None
+            sentence = sentence_claiming(current, phrase)
+            if sentence is None:
+                return None
+            for word, other in (("refused", "accepted"), ("accepted", "refused")):
+                if word in sentence:
+                    flipped = current.replace(sentence, sentence.replace(word, other, 1), 1)
+                    return text.replace(current, flipped, 1)
+            return None
+        return apply
+
+    # One flip per claim, each aimed at the sentence that states it. A direction word in narrative —
+    # "that was wrong code accepted" — states no claim, so flipping it changes nothing the comparison
+    # can test; aiming at the claiming sentence is what makes each flip a real test.
+    mutations = [
+        ("the claim for %r flipped" % phrase, flip_sentence_claim(phrase))
+        for phrase in OPEN_BOUNDARY_CLAIMS
+    ]
+    if not mutations:
+        print("FAIL: the Open boundary text contains no direction to flip, so nothing here tests "
+              "the comparison")
+        return 1
+    mutations.append(("the paragraph rewritten to call the split form accepted", rewrite))
 
     failures = 0
-    if "wrong code accepted" not in normalised:
-        failures += 1
-        print("FAIL: the Open boundary paragraph no longer says the split form was "
-              "wrong code accepted")
-    if "a false reject, not a false accept" in normalised:
-        failures += 1
-        print("FAIL: the Open boundary paragraph still claims 'a false reject, not a false accept'; "
-              "the split spelling is refused today, so that sentence describes the code as it was "
-              "before the fix and the direction it names is the opposite of the measured one")
-    if "Refused" not in paragraph and "refused" not in paragraph:
-        failures += 1
-        print("FAIL: the Open boundary paragraph no longer says the call is refused")
-
-    # The paragraph's claim, executed: the one-line spelling and the split spelling are both refused.
-    for description, lines in GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT:
-        result = run(BASE.replace(RECEIVE_GUARD,
-                                  "".join("+    " + line + "\n" for line in lines), 1))
-        if result.returncode != 1:
+    for description, mutate in mutations:
+        mutated = mutate(module_doc)
+        if mutated is None:
             failures += 1
-            print("FAIL: the Open boundary paragraph says the call is refused, but %s exits %d"
-                  % (description, result.returncode))
-
-    if not failures:
-        print("ok: the Open boundary paragraph matches the checker on both spellings")
+            print("FAIL: %s: the text to mutate is gone, so this check no longer tests anything"
+                  % description)
+            continue
+        problems = open_boundary_direction_problems(mutated)
+        if not problems:
+            failures += 1
+            print("FAIL: %s was not caught; the paragraph check is green on a paragraph that says "
+                  "the opposite" % description)
+        else:
+            print("ok: %s is caught (%d failure(s): %s)"
+                  % (description, len(problems), problems[0]))
     return failures
 
 
@@ -1296,6 +1471,7 @@ def main() -> int:
             print("ok: %s: closers(%r) is %d" % (description, statement, actual))
 
     failures += check_open_boundary_docstring_matches_behaviour()
+    failures += check_open_boundary_check_is_not_vacuous()
 
     if failures:
         print("%d case(s) failed" % failures)
