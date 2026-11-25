@@ -142,7 +142,9 @@ _MACHOMERGER_HOOK___fcntl
 
 两个 hook 解除的是「dyld 愿不愿意去磁盘找」。要找到，还得有目录被放进搜索路径。
 
-本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 内，且都是 `DYLD_INSERT_LIBRARIES`：`:333` 在 `shouldInsertJBEnv` 真分支内，`:358` 在其 else 分支内。全文没有 `DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`，也没有 `DYLD_ROOT_PATH`。本机 `/var/jb/basebin/` 下的二进制 `grep -a -l DYLD_FRAMEWORK_PATH` 同样无命中。
+本机 Dopamine 3.0.13 的 `BaseBin/systemhook/src/common/common.c` 里，`envbuf_setenv` 只有两处，都在 `spawn_exec_hook_common` 内，且都是 `DYLD_INSERT_LIBRARIES`：`:333` 在 `shouldInsertJBEnv` 真分支内，`:358` 在其 else 分支内。全文没有 `DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`，也没有 `DYLD_ROOT_PATH`。
+
+**读这类二进制里的变量名要比 NUL 切出来的整条 entry，不能用 `grep -a` 数子串。** `__XPC_DYLD_FRAMEWORK_PATH` 含子串 `DYLD_FRAMEWORK_PATH`，所以 `grep -a -l DYLD_FRAMEWORK_PATH` 在只有前缀版本的文件上也会命中；那个命中不证明裸名在场，而 dyld 只读裸名。方向也要注意：子串法对「命中」是假阳性，对「无命中」才是有效的否定。2026-11-26T01:20:01+0800 在本设备上按整条 entry 比较，`/var/jb/basebin/systemhook.dylib`（233520 字节，sha256 前 16 位 `6f16c545abda8b0e`）与 `launchdhook.dylib`（312848 字节，sha256 前 16 位 `449a96068dbc22f7`）的 `DYLD_FRAMEWORK_PATH` 与 `__XPC_DYLD_FRAMEWORK_PATH` 计数都是 `0`；`gen/dyld`（974016 字节，`486620f0c5ce26e6`）的裸名为 `1`、前缀名为 `0`。这两份 dylib 都还没有搜索路径这一半，与本节其余部分一致。
 
 所以需要单独改的一处是：`spawn_exec_hook_common` 里 `shouldInsertJBEnv` 为真的分支（`common.c:325` 起的 `if (shouldInsertJBEnv) { ... }`），在那里追加 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH`（各带一个 `__XPC_` 版本），分别指向两个专用目录。
 

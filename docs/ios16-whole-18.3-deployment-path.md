@@ -528,17 +528,22 @@ PY
 
 helper 对了不等 UI 对了。UI 进程的 18.3 来自 basebin 注入的环境变量或 tweak 的 `dlopen`，与 helper 走的是两条不同的路径。
 
+**读 UI 进程的环境要用整条 entry 比较，不能按子串 `grep`。** `__XPC_DYLD_FRAMEWORK_PATH` 含子串 `DYLD_FRAMEWORK_PATH`，所以 `grep -i DYLD` 或 `grep DYLD_FRAMEWORK_PATH` 会把带前缀的拼写报成裸名命中；而 dyld 只读裸名，`__XPC_` 那份由 `xpcproxy` 转交，是另一个未验证的机制。这一节原来的那条命令就是按子串 `grep` 的，已换成下面这个按首字节比较的脚本，它与本次实测的对照见 `../../webkit-install-runbook.md` 的「设备排查：读进程环境变量」一节。
+
 ```sh
-launchctl print pid/<UI_PID> 2>/dev/null | sed -n '/environment = {/,/^\t}/p' | grep -i DYLD
+sudo -S -p "" /var/jb/usr/bin/python3 scripts/inspect-process-env.py --check <UI_PID>
 ```
+
+这个脚本读的是进程真实的 `envp`（`sysctl(KERN_PROCARGS2)`），不是 `launchctl print` 那个域级列表，两者对同一个 pid 会给出不同答案。它把裸名与前缀名分开计数，并在读不到 `envp` 时报错退出 2 而不是报 0 条：设备对**由 shell 启动**的进程会返回一个不含 `envp` 的完整缓冲区，那种 0 条说明的是启动方式，不是进程没有变量。
 
 ```sh
 lldb -b -o "process attach --pid <UI_PID>" -o "image list -o -f" -o detach -o quit 2>/dev/null \
   | grep -E 'WebKit.framework/WebKit$|WebCore.framework/WebCore$|JavaScriptCore.framework/JavaScriptCore$'
 ```
 
-**预期：** 环境变量段落里 `DYLD_FRAMEWORK_PATH` 的值，与 `image list` 里三个 framework 实测路径的前缀**逐字相同**，且该前缀与第 3b 步里 helper 的前缀相同。
-**不成立时：** 若 UI 的路径含 `WebKitOverride`（形态是 preboot 绝对路径，见第三节路径清单表）而 helper 指向 `/var/jb/Library/Frameworks`，就是 3.1 节说明的两项搜索列表在运行时显形：第一项没被选中、只能落到后备目录，此时不要继续读端点。判据同样用「路径含不含 `WebKitOverride`」，不要拿 `/var/jb/Library/WebKitOverride` 字面去比。
+**预期：** 脚本输出里 `DYLD_FRAMEWORK_PATH` 的值为 1 时，它与 `image list` 里三个 framework 实测路径的前缀**逐字相同**，且该前缀与第 3b 步里 helper 的前缀相同。
+**不成立时：** 值为 0 时有三种成因，不要合并成一种。裸名为 0 而前缀名大于 0，说明进程只拿到 dyld 不读的拼写；两个都大于 0 才是两个写入源都在。裸名与前缀名**同时为 0** 时，这个读数对「UI 进程能不能拿到变量」不构成否定结果，它只说明当前这一次运行没有让进程携带任何拼写，该问题仍未测（第六节未验证项第 7 条）。2026-11-26T01:20:01+0800 在本设备上，Chrome（pid 684）、MobileSafari（pid 1103）、WebContent（pid 1105）三个进程的裸名与前缀名都是 0，此时 `gen/dyld` 为 974016 字节、sha256 前 16 位 `486620f0c5ce26e6`，hook 四元组 `1 0 0 1`，即 hook 不在场；这两个状态必须一起写，只写前一个会把「变量没送到」当成结论，只写后一个会把「hook 不在」当成变量这一层的原因。
+**不成立时（路径对不上）：** 若 UI 的路径含 `WebKitOverride`（形态是 preboot 绝对路径，见第三节路径清单表）而 helper 指向 `/var/jb/Library/Frameworks`，就是 3.1 节说明的两项搜索列表在运行时显形：第一项没被选中、只能落到后备目录，此时不要继续读端点。判据同样用「路径含不含 `WebKitOverride`」，不要拿 `/var/jb/Library/WebKitOverride` 字面去比。
 
 **这一步要特别读 `WebKit` 这一项。** 18.3 的 `WebKit` 可以完全不经过 `DYLD_FRAMEWORK_PATH`、由 tweak 的 `dlopen` 直接进宿主（外层仓库 `build-state.md` 的「注入路径的真实面貌」一节，原文「`path = /var/jb/Library/Frameworks/WebKit.framework/WebKit`」），那时环境变量与 `image list` 会不一致，而进程里仍有两份 `WebKit`（系统 `[20]` 与 `JB/Library/Frameworks` 的 `[904]`）。遇到这种情况，以 `image list` 为准并记录两份各自的来源：IPC 编码端由 `WebProcessCreationParameters` 的写者决定，也就是 `WebKit` 里 `WebProcessProxy` 所在的那一份。这一步同样**待设备回网后执行**。
 
@@ -644,6 +649,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 8. **`_CodeSignature` 目录缺失的影响。** 系统那份有、`/var/jb` 那份没有。外层仓库 `build-state.md` 的「已排除的假设（均有实测）」一节排除的「代码签名因复制失效」（原文表行「| 代码签名因复制到新路径失效 |」）比的是二进制内嵌的 `LC_CODE_SIGNATURE` 偏移与大小（两边同为 49536 / 21856），不是这个目录。
 9. **`/var/jb` 的 `WebContent.Development.xpc` 多出来的影响。** 系统的 `XPCServices` 有 4 个，`/var/jb` 有 5 个。`ProcessLauncherCocoa.mm:196` 按「是否为非合法注入代码」在 `.Development` 与裸名之间取一，多出来的这一份在什么条件下被选中没有实测。
 10. **编号 38 的确切枚举名。** M64 的 512 种守卫组合全遍历确定接收者是 `GPUConnectionToWebProcess`（见 M64 第 8 节）。具体名字取决于 iOS 编译时各宏的取值：1.2 节的三套 iOS 求值给出 `CreateGraphicsContextGL`（3786 条）或 `CreateGPU`（3790、3802 条），差别只由 `EventDispatcher_TouchEvent` 一条是否排在 38 之前决定。要在真机上定案，需要读真实 iOS 构建产物里的 `MessageNames.h`。这一条不影响结论：两条候选的参数形状都与 16.1 的无参数消息不同（三个参数与四个参数），16.1 的字节无论落在哪一条都会被按另一组字段解码。
+11. **UI 进程在 hook 在场时能否拿到 dyld 会读的变量。** 这是一个空白，不是否定结果。2026-11-26T01:20:01+0800 在本设备上，Chrome（pid 684）、MobileSafari（pid 1103）、WebContent（pid 1105）的裸名与前缀名计数都是 0，同时 `gen/dyld` 为 974016 字节、sha256 前 16 位 `486620f0c5ce26e6`、hook 四元组 `1 0 0 1`。两个条件同时成立时这个读数不能说任何一方有用或没用：变量没送到，而 hook 也不在，后者会让任何送到的裸名在 `dyld/Loader.cpp:565` 被拒。验证方式是第四节第 4 步的 `scripts/inspect-process-env.py --check`，条件是 hook 四元组为 `1 1 1 1`。此前的文档用「Chrome 带着裸 `DYLD_FRAMEWORK_PATH` 却仍加载 16.1」当证据，那句话来自 `grep DYLD_FRAMEWORK_PATH` 的子串误判（`__XPC_` 前缀含该子串），实测三个进程都没有任何一种拼写，所以那句话不成立，也没有任何读数支持过「变量送到了但没用」。
 
 ---
 
