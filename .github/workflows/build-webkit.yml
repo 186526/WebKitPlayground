@@ -514,6 +514,9 @@ jobs:
           echo "unguarded proxyConfigurations write in ${WEBKIT_REF}: ${ref_writes_proxy_configurations}"
           echo "the XPC bootstrap compat patch is required in ${WEBKIT_REF}: ${ref_needs_xpc_bootstrap_compat}"
           echo "the message number translation patch is required in ${WEBKIT_REF}: ${ref_needs_message_name_translation}"
+          # Patches that were skipped above are not part of the tree, so the include check after
+          # this loop must not read them. This collects the ones that applied.
+          applied_patches=""
           for p in patches/*.patch; do
             test -f "$p" || { echo "MISSING PATCH FILE: $p"; exit 1; }
             echo "== $p"
@@ -656,18 +659,75 @@ jobs:
             fi
             git -C WebKit apply -v "$PWD/$p"
             echo "APPLIED: $p"
-            # git apply's exit status covers whether the hunks landed, not whether the result carries
-            # the edit: a patch whose hunks were rewritten to touch the right lines but drop the new
-            # code still applies cleanly. This grep covers that case, and only that case. It is a text
-            # search, so a declaration, a call site, or a comment naming the symbol satisfies it; what
-            # shows the translation actually behaves is compiling the tables, which happens in Build.
-            # Read it as a check that the edit landed, not as a check that it compiles.
+            applied_patches="${applied_patches} $p"
+            # git apply's exit status says the hunks landed; it does not say the files the patch
+            # declares it creates are on disk afterwards. Measured on a scratch tree: git apply
+            # rejects a `new file mode` header whose path disagrees with the `+++` line, and it
+            # writes a file the section does describe, so a section that lands wrong is not the
+            # failure this catches. What it catches is the file being gone again by the time this
+            # step runs its checks -- an earlier patch in this same loop deleting a path a later
+            # one declares, or a mode-120000 section whose target does not exist (test -f follows
+            # the link, so a dangling link reads as absent). Neither is reported by any exit code.
+            # So read the declared paths out of the patch itself and require each one on disk.
+            # A patch that lost its `new file mode` section entirely declares nothing here; the
+            # include check after this loop covers that shape, and it is the shape the negative
+            # test in docs/ reuses.
+            declared_new_files=$(awk '/^diff --git /{path=$4; sub(/^b\//,"",path)} /^new file mode/{print path}' "$p")
+            if [ -n "$declared_new_files" ]; then
+              while IFS= read -r new_file; do
+                test -n "$new_file" || continue
+                if [ ! -f "WebKit/${new_file}" ]; then
+                  echo "PATCH NEW FILE MISSING: ${new_file} (declared by ${p})"
+                  exit 1
+                fi
+              done <<< "$declared_new_files"
+              echo "declared new files present: $(printf '%s' "$declared_new_files" | tr '\n' ' ')"
+            fi
+            # The new-file check above and the include check after this loop cover the patch's shape
+            # on disk. Neither covers a patch whose hunks were rewritten to touch the right lines but
+            # drop the new code, which applies cleanly and satisfies both. This grep covers that case,
+            # and only that case. It is a text search, so a declaration, a call site, or a comment
+            # naming the symbol satisfies it; what shows the translation actually behaves is compiling
+            # the tables, which happens in Build. Read it as a check that the edit landed, not as a
+            # check that it compiles.
             if [ "$(basename "$p")" = ios16-ipc-message-number-translation.patch ] && \
                 ! git -C WebKit grep -q translateOutgoingMessageName -- Source/WebKit/Platform/IPC/Encoder.cpp; then
               echo "PATCH APPLIED BUT HAS NO EFFECT: $p"
               exit 1
             fi
           done
+          # git apply does not resolve includes, so a patch whose new header is on disk but whose
+          # #include names a different file still applies and still passes every check above. The
+          # compile is the first thing that objects, and it happens after the build has spent its
+          # hours. Require each include the applied patches added to name a file the tree can
+          # resolve: any file under Source/, including the ones those patches just created and which
+          # git therefore does not track yet, or a DerivedSources product the tree lists in one of
+          # its DerivedSources-output.xcfilelist files. The index is built once, from the tree
+          # itself, so a product the generator adds later needs no edit here.
+          resolvable_headers=$(mktemp)
+          unresolved_includes=$(mktemp)
+          {
+            find WebKit/Source -type f | sed -E 's#.*/##'
+            cat WebKit/Source/*/DerivedSources-output.xcfilelist 2>/dev/null | sed -E 's#.*/##' || true
+          } | sort -u > "$resolvable_headers"
+          for p in $applied_patches; do
+            while IFS= read -r included; do
+              test -n "$included" || continue
+              if ! grep -qxF "$included" "$resolvable_headers"; then
+                echo "${included} (added by ${p})" >> "$unresolved_includes"
+              fi
+            done <<< "$(grep -h -oE '^\+[[:space:]]*#(include|import)[[:space:]]*"[^"]+"' "$p" \
+                       | sed -E 's/.*"([^"]+)".*/\1/' | sed -E 's#.*/##' | sort -u)"
+          done
+          if [ -s "$unresolved_includes" ]; then
+            echo "PATCH INCLUDE UNRESOLVED:"
+            cat "$unresolved_includes"
+            echo "each of these names neither a file under WebKit/Source nor a DerivedSources product listed in WebKit/Source/*/DerivedSources-output.xcfilelist"
+            rm -f "$resolvable_headers" "$unresolved_includes"
+            exit 1
+          fi
+          rm -f "$resolvable_headers" "$unresolved_includes"
+          echo "every include the applied patches add resolves under WebKit/Source"
 
       - name: Refuse a build that ships a WebCore which cannot dlopen
         env:
