@@ -836,7 +836,7 @@ harness 确实能抓到缺陷，用四个变异版本验证过（临时副本，
 - **本 mission 只读**：全部读数在本机对三份 tar 做，没有向设备写入任何文件，没有跑 `jbctl`，没有触发重启。
 - **这份 tar 在别的 mission 里被执行过**：M127 于 2026-11-26 00:50:43 对同一个文件 `/var/mobile/Documents/bb/basebin-lh.tar` 跑过 `jbctl update basebin`，其后 00:51:11 起连续五次内核 panic（`00:51:11` 一次 `initproc exited -- exit reason namespace 2 subcode 0x5`，随后 `00:56:21`、`00:56:58`、`00:58:58`、`01:00:37` 四次 `pmap_mark_page_as_ppl_page_internal: page still has mappings`），用户手动重新越狱才恢复。经过写在 M127 的 `docs/ios16-launchdhook-basebin-install-panic.md`，**该文件只存在于内层分支 `feat/y2-inner-record-the-launchdhook-panic-outcome`，尚未合入 `main`**；本节不复述它的全部内容、也不把它的读数当成自己的测量，只把与本 mission 判据直接相关的五个时间点抄在上句里，使这一段不依赖那个分支。
 
-**所以「设备上此刻是出厂 basebin」这个读数不是「没人试过」的证据。** 它是「试过、panic 了、重新越狱把 basebin 整包还原了」的结果。设备当前状态分两半记，出处不同：`gen/dyld` 判定 (b) 为 `1 0 0 1`（只带 Dopamine 原有的两个 hook）照 `AGENTS.md` 第 186、207 行；`launchdhook` 312848 / `449a9606` 是 M127 那次安装失败后重新越狱复读的读数，`AGENTS.md` 全文不含 `312848` 与 `449a9606`，这条不挂在它上面，本节的十二·七也把这两个值用作回滚基线。
+**所以「设备上此刻是出厂 basebin」这个读数不是「没人试过」的证据。** 它是「试过、panic 了、重新越狱把 basebin 整包还原了」的结果。设备当前状态分两半记，出处不同：`gen/dyld` 判定 (b) 为 `1 0 0 1`（只带 Dopamine 原有的两个 hook）照 `AGENTS.md` 五之二「确认 basebin 的两个注入点是否生效」里那两张表——第一张「文件 | 补丁版（`basebin.tar`） | 设备上 | 结论」的 `gen/dyld` 行给 974016 与判定 (b) `1 0 0 1`，第二张「文件 | 字节 | hook token 数 | 判定 (b)」的「设备上的 `gen/dyld` | 974016 | 2 | `1 0 0 1`」行给 token 数。这两处按表头与行文定位，不写行号：行号会随文档增删漂移。`launchdhook` 312848 / `449a9606` 是 M127 那次安装失败后重新越狱复读的读数，`AGENTS.md` 全文不含 `312848` 与 `449a9606`，这条不挂在它上面，本节的十二·七也把这两个值用作回滚基线。
 
 **M127 对这条路线给出的结论是「不安全，不要在这台设备上安装」。** 本节下面记的安装步骤因此**不是待执行的计划**，而是一份历史记录加一份回滚依据：它说明当时装了什么、怎么装、失败后怎么恢复。要再尝试，先解决 M127 那份文档里未解释的 panic 成因，本节不提供再次安装的依据。
 
@@ -1131,7 +1131,7 @@ EOF
 
 **用户空间重启是什么意思，怎么触发。** `jbctl update basebin` 不直接替换 `gen/dyld`。它把 tar 暂存，然后按 `BaseBin/jbctl/src/main.m:211-216` 触发一次 `reboot3(RB2_USERREBOOT)`——用户空间重启，不是整机重启。屏幕上所有应用退出，SpringBoard 重建，但内核不重启、Dopamine 不重启。重启过程中 `BaseBin/launchdhook/src/update.m:223` 调 `basebin_generate(YES)` 用 `dyld.orig` 加上 tar 里的 `dyldhook_merge.arm64e.iOS16-17.dylib` 现场合成新的 `gen/dyld`。
 
-两处行号的出处不同，要分清：`update.m:223` 与根目录 `AGENTS.md` 第 292 行一致；`main.m:211-216` **在本仓库里只出现在本文（第七节里以「`jbctl update basebin` 不会立即替换 `gen/dyld`」开头的那段，与本处），`AGENTS.md` 没有这一条**——该文件全文不含 `main.m`，其第 286 行是 `basebin_gen.m:172`。所以这条行号目前只有源码侧的引用，没有仓库内第二处印证。本节复述的是原有的记录，没有重新核对 `main.m` 的那几行。
+两处行号的出处不同，要分清：`update.m:223` 与根目录 `AGENTS.md` 五之三「Dopamine 的开机流程决定了补丁能活多久」里那张「位置 / 行为」表的一行一致——该行以 `BaseBin/launchdhook/src/update.m:223` 开头，行为列写 `jbctl update basebin` 走 `basebin_generate(YES)`；`main.m:211-216` **在本仓库里只出现在本文（第七节里以「`jbctl update basebin` 不会立即替换 `gen/dyld`」开头的那段，与本处），`AGENTS.md` 没有这一条**——该文件全文不含 `main.m`，同一张表里以 `BaseBin/libjailbreak/src/basebin_gen.m:172` 开头的那行写的是 `basebin_generate(comingFromJBUpdate)`，参数为 `false` 时走另一条分支。两处都按表格行首的源码路径定位，不写行号：行号会随文档增删漂移。所以这条行号目前只有源码侧的引用，没有仓库内第二处印证。本节复述的是原有的记录，没有重新核对 `main.m` 的那几行。
 
 第七节那段用行首原文定位，不用行号：以「`jbctl update basebin` 不会立即替换」开头的行全文只有一处，行号则随上方增删漂移。M126 在第十二章开头插入几句引言之后，本节原先写的 `:266` 落在一条空的代码围栏上，`main.m:211-216` 已经被推到它后面。
 
