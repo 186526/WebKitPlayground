@@ -31,7 +31,7 @@
 
 ### 已知的字符串与结构（推断来源，非源码）
 
-M47 在设备上从 launchd 与 libxpc 的二进制里取到这些符号与字符串：`_imagePathToInfo`、`_serviceBundles`、`_infoPlist`、`_executablePath`、`"Found XPCService bundle by executable: %s"`，以及 `/System/Library/xpc/launchd.plist` 的 `SystemLibraryTreeState`。**这一整段的证据强度是假设**：libxpc 与 launchd 的源码不在 `apple-oss-distributions` 里，`libxpc` 仓库 404，`launchd` 仓库只有 `support/launchproxy.c`（`WebKitPlayground/docs/dopamine-basebin-webkit-override.md:712` 已记录这一点）。字符串能证明这些名字存在于二进制里，不能证明它们的语义。
+M47 在设备上从 launchd 与 libxpc 的二进制里取到这些符号与字符串：`_imagePathToInfo`、`_serviceBundles`、`_infoPlist`、`_executablePath`、`"Found XPCService bundle by executable: %s"`，以及 `/System/Library/xpc/launchd.plist` 的 `SystemLibraryTreeState`。**这一整段的证据强度是假设**：libxpc 与 launchd 的源码不在 `apple-oss-distributions` 里，`libxpc` 仓库 404，`launchd` 仓库只有 `support/launchproxy.c`（`WebKitPlayground/docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节已记录这一点）。字符串能证明这些名字存在于二进制里，不能证明它们的语义。
 
 按命名推断各自角色，标为假设：
 

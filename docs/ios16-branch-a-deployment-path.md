@@ -13,7 +13,7 @@
 | 标签 | 判据 |
 | --- | --- |
 | **已确证** | 有源码行号（可用本文给的命令复现）或设备读数，且不依赖未验证的推断 |
-| **有源码支撑** | 能指出代码位置，但「这段代码在设备上产生什么行为」这一步没有公开源码可查（`launchd` 与 `libxpc` 未开源，见 `docs/dopamine-basebin-webkit-override.md:712`） |
+| **有源码支撑** | 能指出代码位置，但「这段代码在设备上产生什么行为」这一步没有公开源码可查（`launchd` 与 `libxpc` 未开源，见 `docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节） |
 | **假设** | 无源码、无直接读数，只有间接证据与文献推断 |
 
 一条论断的强度取它最弱的一环。多个事实合并成的推论，不因为其中某一条已确证就升级。
@@ -220,7 +220,7 @@ sudo cp -a /var/jb/Library/Frameworks/WebKit.framework/XPCServices \
 /var/jb/usr/bin/plutil -p /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/Info.plist
 ```
 
-（`plutil` 的可用性在仓库里有两份互相矛盾的记录：`docs/dopamine-basebin-webkit-override.md:726` 用 `/var/jb/usr/bin/plutil` 修改 `config.plist`，而 `docs/ios16-override-endpoint-probe.md` 第五节把 `plutil` 列入「设备没有」的清单。本 mission 的工具清单也列入 `plutil`。**这个矛盾未在设备上裁决**，因为设备离线。所以本步给一条不依赖 `plutil` 的兜底：用 `python3` 读 plist，`plistlib` 是标准库，设备上的 `python3` 一直可用。）
+（`plutil` 的可用性在仓库里有两份互相矛盾的记录：`docs/dopamine-basebin-webkit-override.md` 的「十一·八 开关与回退」一节用 `/var/jb/usr/bin/plutil` 修改 `config.plist`，而 `docs/ios16-override-endpoint-probe.md` 第五节把 `plutil` 列入「设备没有」的清单。本 mission 的工具清单也列入 `plutil`。**这个矛盾未在设备上裁决**，因为设备离线。所以本步给一条不依赖 `plutil` 的兜底：用 `python3` 读 plist，`plistlib` 是标准库，设备上的 `python3` 一直可用。）
 
 ```sh
 /var/jb/usr/bin/python3 -c 'import plistlib,sys
@@ -253,7 +253,7 @@ print(d.get("CFBundleIdentifier"))' \
 
 **改动**：只保留一个目录作为 18.3 的唯一来源，二选一。
 
-- **推荐（M69 已落地）**：`patches/ios18-public-sdk-xpc-main.patch:16` 定义唯一字面量 `/var/jb/Library/WebKitOverride`，`:22` 的两条 `-dyld_env` 以它为首项，`/var/jb/Library/Frameworks` 作后备。这让 UI 与 helper 都首先命中覆盖目录，`/var/jb/Library/Frameworks` 退回为纯粹的上游安装位置。**改后必须重建并重新打包**，因为 `LC_DYLD_ENVIRONMENT` 是链接期常量，只能重新链接才能改（`docs/dopamine-basebin-webkit-override.md:316`，**已确证**）。补丁改了但构建没重跑时，设备上的 `.xpc` 仍是旧值，见下面的失败判据。
+- **推荐（M69 已落地）**：`patches/ios18-public-sdk-xpc-main.patch:16` 定义唯一字面量 `/var/jb/Library/WebKitOverride`，`:22` 的两条 `-dyld_env` 以它为首项，`/var/jb/Library/Frameworks` 作后备。这让 UI 与 helper 都首先命中覆盖目录，`/var/jb/Library/Frameworks` 退回为纯粹的上游安装位置。**改后必须重建并重新打包**，因为 `LC_DYLD_ENVIRONMENT` 是链接期常量，只能重新链接才能改（`docs/dopamine-basebin-webkit-override.md` 第九节「风险」里「内嵌的 library 路径无条件生效，不受任何开关控制」一段，**已确证**）。补丁改了但构建没重跑时，设备上的 `.xpc` 仍是旧值，见下面的失败判据。
 - **备选**：删掉覆盖目录，让 UI 与 helper 都走 `/var/jb/Library/Frameworks`。这条路被 basebin 的设计明确排除：那个目录带 `AltList.framework` 与 `CydiaSubstrate.framework`，把它们变成每个被 spawn 进程的候选是 `dopamine-basebin/0001-systemhook-set-search-paths.patch:86-89` 注释里写明要避免的事（**已确证**）。仅在推荐方案不可行时使用。
 
 **失败判据**：
@@ -509,7 +509,7 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 
 **命令本身只读**；`launchctl print` 不动任何状态。但判定需要装/卸覆盖目录这一步写操作，所以判据的完整取法在第二节第 2、4 步。
 
-**为什么只能在这里测**：`launchd` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md:712`，**已确证**），「索引外目录会不会被现扫」在公开材料里没有答案。
+**为什么只能在这里测**：`launchd` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节，**已确证**），「索引外目录会不会被现扫」在公开材料里没有答案。
 
 ### 6.2 helper 实际加载了哪一份 `WebKit`
 
