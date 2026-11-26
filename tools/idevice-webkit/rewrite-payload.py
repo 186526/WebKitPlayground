@@ -1,71 +1,54 @@
 #!/usr/bin/env python3
-# Rewrites the load commands of the 18.3 WebKit payload so that the seven images
-# name themselves and each other by their /var/jb paths, then writes the result
-# as copies under a staging directory.
+# Rewrites eleven dependency edges inside the seven 18.3 images so each binds its
+# 18.3 siblings instead of the system copies, in the directory that is already the
+# install location. Every LC_ID_DYLIB keeps the /System name it carries.
 #
-#   ./rewrite-payload.py plan      SOURCE_ROOT STAGING_ROOT [--deps-only]
-#   ./rewrite-payload.py write     SOURCE_ROOT STAGING_ROOT [--deps-only]
-#   ./rewrite-payload.py verify           STAGING_ROOT [--deps-only]
+#   ./rewrite-payload.py plan   ROOT [--prefix /var/jb]
+#   ./rewrite-payload.py rewrite ROOT [--prefix /var/jb]
+#   ./rewrite-payload.py verify ROOT [--prefix /var/jb]
 #
-# --deps-only is a MECHANISM PROBE, not a fix. It rewrites only the dependency
-# strings and leaves each image's LC_ID_DYLIB claiming its /System identity.
+# ROOT is a directory that stands for the device's /. A payload unpacked from a
+# .deb at /tmp/x has its files at /tmp/x/var/jb/..., so ROOT is /tmp/x. `rewrite`
+# edits those files where they are; there is no second output tree.
 #
-# Why that is not a fix: dyld matches a request against resident images by install
-# name first and by file identity second, and the install name wins. An image that
-# keeps the system identity therefore matches the resident system twin — which in
-# any application that links WebKit is already mapped before an injected
-# constructor runs — so the rewritten /var/jb dependency string resolves to the
-# 16.1 image anyway. Measured on the device by worker-t1-r2: loading the /var/jb
-# copy while it still claimed the system install name made a later /System request
-# return that copy (same handle, 1 image); the reverse order produces two images
-# and duplicate-class warnings.
+# WHY THIS REWRITE EXISTS
 #
-# The probe exists to answer one question with a reading rather than with this
-# reasoning: does an image that keeps the system identity and is loaded beside a
-# resident system twin get returned for a later /System request? Reasoning says it
-# binds the resident twin; the probe either confirms that or contradicts it, and
-# a contradiction would be the better route. Ship shape (i), the full rewrite.
-#
-# SOURCE_ROOT is the payload as com.82flex.custom-webkit installed it, i.e. the
-# directory that corresponds to /var/jb on the device. On this host a deb unpacked
-# at /tmp/newdeb/x puts it at /tmp/newdeb/x/var/jb.
-#
-# STAGING_ROOT is a local directory that stands for the device's /. A file whose
-# device path is DESTINATION_ROOT/WebKit.framework/WebKit is written to
-# STAGING_ROOT/var/jb/Library/WebKit18/WebKit.framework/WebKit and is copied
-# there unchanged. The split exists so the strings inside the binaries are always
-# the device's own paths while the bytes can still be produced and checked on the
-# host: a staging directory is a place to build a tree, not a second opinion
-# about where it gets installed.
-#
-# `plan` parses everything and prints what it would change without writing a
-# byte, which is the form to run first against a payload that came from
-# somewhere else. `write` performs the same plan after copying. `verify` reads a
-# staging root back and holds it to the properties the rewrite exists to produce.
-#
-# WHY THE REWRITE IS NEEDED
-#
-# The 18.3 images as that payload ships them name the system paths:
-#
-#   WebKit          LC_ID_DYLIB   /System/Library/Frameworks/WebKit.framework/WebKit
-#                   LC_LOAD_DYLIB /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
-#   JavaScriptCore  LC_ID_DYLIB   /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
-#   ... and likewise for WebCore, WebKitLegacy, WebGPU, libwebrtc, libANGLE-shared
-#
-# Those strings are what dyld resolves. An 18.3 WebKit opened by its /var/jb path
-# still binds its dependencies by the literal /System strings inside it, so it
-# binds the 16.1 JavaScriptCore. The device recorded exactly that:
+# An 18.3 WebKit opened by its /var/jb path still binds its dependencies by the
+# literal /System strings inside it, so it binds the 16.1 JavaScriptCore. The
+# device recorded exactly that:
 #
 #   dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001):
 #     Symbol not found: _WTFSignpostIndirectLoggingEnabled
 #     Referenced from: <787DFAB1-...> .../WebKit.framework/WebKit
 #     Expected in:     <D309AA36-...> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
 #
-# The same install names also make dyld treat a /var/jb image and its /System
-# twin as one identity, so in a process where the system copy arrived first a
-# later dlopen of the /var/jb path only adds a reference to it. Rewriting
-# LC_ID_DYLIB to the /var/jb path gives the 18.3 image an identity of its own;
-# rewriting the dependency strings makes its binds resolve to the 18.3 siblings.
+# Eleven load commands account for every edge one of the seven has on another of
+# the seven. The measured table is in docs/ios16-framework-load-chain.md; the
+# eleven are WebCore's four (JavaScriptCore, WebGPU, libwebrtc, libANGLE), both of
+# WebKitLegacy's, WebGPU's one, and WebKit's four (WebKitLegacy through an
+# LC_REEXPORT_DYLIB, plus JavaScriptCore, WebCore and libwebrtc). JavaScriptCore,
+# libwebrtc and libANGLE depend on none of the seven.
+#
+# WHY THE IDENTITY IS NOT REWRITTEN
+#
+# dyld matches a request against resident images by install name first and by file
+# identity second, and the install name wins. Keeping LC_ID_DYLIB at the /System
+# name is therefore what lets dyld's install-name dedup answer a later
+# /System/.../WebKit request with this rewritten image: once the /var/jb copy is
+# resident under the system install name, a request spelled the system way finds
+# it. Measured on the device by worker-t1-r2: loading the /var/jb copy while it
+# claimed the system install name made a later /System request return that copy —
+# same handle, one image. The reverse order produces two images and duplicate-class
+# warnings, and an identity rewritten to the /var/jb path can never be returned for
+# any /System request at all.
+#
+# That property says nothing about whether the rewritten image is resident early
+# enough in an application process. An application's main binary carries
+# LC_LOAD_DYLIB /System/Library/Frameworks/WebKit.framework/WebKit as a static
+# binding that dyld resolves at launch, before any injected constructor runs, so in
+# an application that arrives first and the dedup answers with the 16.1 image. This
+# script establishes the first property only. See "What this does and does not
+# achieve" in docs/rewrite-payload.md.
 #
 # WHY ABSOLUTE PATHS AND NOT @rpath
 #
@@ -89,13 +72,13 @@
 # rather than left to a signer.
 #
 # The repair is a page-hash recomputation, not a re-sign, and that is enough
-# because of one property of this payload, which `write` asserts: the
+# because of one property of this payload, which `rewrite` asserts: the
 # signature's dataoff equals its CodeDirectory's codeLimit in all seven images.
 # The signature therefore lies entirely past the last hashed page, so rewriting
 # page hashes cannot disturb the signature itself and no loop can run.
 #
-# The three special slots are what would break a naive recomputation, and none of
-# them is a page hash:
+# The two special slots are what would break a naive recomputation, and neither is
+# a page hash:
 #
 #   slot -1  the info.plist hash     all zeros in this payload
 #   slot -2  the requirements hash   the SHA-1 of the slot 2 blob, which is not
@@ -113,7 +96,7 @@
 # It does not produce a signature that a stock kernel would accept as Apple's. It
 # produces a self-consistent one, which is the property the device measurement
 # showed matters for mapping under Dopamine's pmap_cs_allow_invalid. Nothing has
-# been loaded from a repaired copy yet, so `write` reports the shape it produced
+# been loaded from a repaired copy yet, so `rewrite` reports the shape it produced
 # and does not call it proven.
 import hashlib
 import os
@@ -136,81 +119,100 @@ MH_MAGIC_64 = 0xFEEDFACF
 # a rewrite target.
 NAME_COMMANDS = (LC_LOAD_DYLIB, LC_ID_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_RPATH)
 
-# The destination root as the device sees it. It is the value inside the
-# binaries and the value the tweak's load chain uses, so both name one root and a
-# reader never has to reconcile two. Nothing here writes into
-# /var/jb/Library/Frameworks, which belongs to the package.
-DESTINATION_ROOT = "/var/jb/Library/WebKit18"
+# The install prefix this payload targets. Dopamine is rootless and the tweak's
+# seven paths are spelled with /var/jb, so that is the default. The flag exists
+# because the packager supports a rootful prefix, and a package that wrote /var/jb
+# strings while installing under /Library would name files it never installs.
+DEFAULT_PREFIX = "/var/jb"
 
-# The seven images: name, directory in the payload, directory under the
-# destination root, binary leaf. The payload keeps the frameworks under
-# Library/Frameworks beside a usr/lib for the two bare dylibs; the destination is
-# flat because the destination prefix is longer while the load-command slots are
-# fixed, and a nested Library/Frameworks there overflows most of them.
+# The seven images: name, path relative to the install prefix, and the identity the
+# binary carries today. The identity is what `verify` holds the file to, so "the
+# LC_ID_DYLIB did not change" is a check rather than a claim, and the identity is
+# never written by this script.
 #
-# The order is the load order build-state.md 第八轮 measured: JavaScriptCore
-# first, WebKit last. This script does not depend on the order, but stating the
-# seven in the order they are loaded keeps the three places that spell them — here,
-# the tweak, and its test — readable side by side.
+# The paths are where com.82flex.custom-webkit already installs the seven, and the
+# five frameworks are where the tweak's filter loads WebKit from. They are not a
+# new tree: rewriting in place is what makes the deployed files the rewritten ones
+# without a second copy for the loader to pick between.
 IMAGES = (
-    ("JavaScriptCore", "Library/Frameworks/JavaScriptCore.framework", "JavaScriptCore.framework", "JavaScriptCore"),
-    ("WebCore", "Library/Frameworks/WebCore.framework", "WebCore.framework", "WebCore"),
-    ("WebKitLegacy", "Library/Frameworks/WebKitLegacy.framework", "WebKitLegacy.framework", "WebKitLegacy"),
-    ("WebGPU", "Library/Frameworks/WebGPU.framework", "WebGPU.framework", "WebGPU"),
-    ("libwebrtc", "usr/lib", "usr/lib", "libwebrtc.dylib"),
-    ("libANGLE", "usr/lib", "usr/lib", "libANGLE-shared.dylib"),
-    ("WebKit", "Library/Frameworks/WebKit.framework", "WebKit.framework", "WebKit"),
+    ("JavaScriptCore", "Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+     "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+    ("WebCore", "Library/Frameworks/WebCore.framework/WebCore",
+     "/System/Library/PrivateFrameworks/WebCore.framework/WebCore"),
+    ("WebKitLegacy", "Library/Frameworks/WebKitLegacy.framework/WebKitLegacy",
+     "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy"),
+    ("WebGPU", "Library/Frameworks/WebGPU.framework/WebGPU",
+     "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU"),
+    ("libwebrtc", "usr/lib/libwebrtc.dylib",
+     "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"),
+    ("libANGLE", "usr/lib/libANGLE-shared.dylib",
+     "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib"),
+    ("WebKit", "Library/Frameworks/WebKit.framework/WebKit",
+     "/System/Library/Frameworks/WebKit.framework/WebKit"),
 )
 
-# The system strings the 18.3 images use for the seven, mapped to the path each
-# becomes under the destination root. Anything absent here is a dependency on a
-# real system framework and keeps pointing at /System: Foundation,
-# CoreFoundation, Security, Metal, IOKit and the roughly fifty others are left
-# byte for byte alone, which is what makes them keep resolving to the system
-# copies the process already has.
-SYSTEM_TO_DESTINATION = {
-    "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore":
-        DESTINATION_ROOT + "/JavaScriptCore.framework/JavaScriptCore",
-    "/System/Library/Frameworks/WebKit.framework/WebKit":
-        DESTINATION_ROOT + "/WebKit.framework/WebKit",
-    "/System/Library/PrivateFrameworks/WebCore.framework/WebCore":
-        DESTINATION_ROOT + "/WebCore.framework/WebCore",
-    "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy":
-        DESTINATION_ROOT + "/WebKitLegacy.framework/WebKitLegacy",
-    "/System/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy":
-        DESTINATION_ROOT + "/WebKitLegacy.framework/WebKitLegacy",
-    "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU":
-        DESTINATION_ROOT + "/WebGPU.framework/WebGPU",
-    "/System/Library/Frameworks/WebGPU.framework/WebGPU":
-        DESTINATION_ROOT + "/WebGPU.framework/WebGPU",
-    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib":
-        DESTINATION_ROOT + "/usr/lib/libwebrtc.dylib",
-    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib":
-        DESTINATION_ROOT + "/usr/lib/libANGLE-shared.dylib",
+# The system spellings the seven use for one another, mapped to the member each
+# becomes. Both WebKitLegacy spellings are here because WebKit re-exports it from
+# PrivateFrameworks while WebCore loads it from Frameworks; WebGPU and WebCore
+# likewise have two each. Anything absent is a dependency on a real system
+# framework — Foundation, CoreFoundation, Security, Metal, IOKit and the fifty
+# others — and is left byte for byte alone, which is what keeps it resolving to the
+# copy the process already has.
+SYSTEM_ALIASES = {
+    "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore": "JavaScriptCore",
+    "/System/Library/Frameworks/WebKit.framework/WebKit": "WebKit",
+    "/System/Library/PrivateFrameworks/WebCore.framework/WebCore": "WebCore",
+    "/System/Library/Frameworks/WebCore.framework/WebCore": "WebCore",
+    "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy": "WebKitLegacy",
+    "/System/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy": "WebKitLegacy",
+    "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU": "WebGPU",
+    "/System/Library/Frameworks/WebGPU.framework/WebGPU": "WebGPU",
+    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib": "libwebrtc",
+    "/System/Library/Frameworks/WebCore.framework/Frameworks/libwebrtc.dylib": "libwebrtc",
+    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib": "libANGLE",
+    "/System/Library/Frameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib": "libANGLE",
 }
 
-# The device paths the seven must end up naming, in load order. load_chain.c
-# spells the same seven and tests/load_chain_test.c asserts that the two agree,
-# so a change here without a change there fails on the host rather than on the
-# device.
-DESTINATION_PATHS = (
-    DESTINATION_ROOT + "/JavaScriptCore.framework/JavaScriptCore",
-    DESTINATION_ROOT + "/usr/lib/libwebrtc.dylib",
-    DESTINATION_ROOT + "/usr/lib/libANGLE-shared.dylib",
-    DESTINATION_ROOT + "/WebCore.framework/WebCore",
-    DESTINATION_ROOT + "/WebKitLegacy.framework/WebKitLegacy",
-    DESTINATION_ROOT + "/WebGPU.framework/WebGPU",
-    DESTINATION_ROOT + "/WebKit.framework/WebKit",
-)
+# The order the chain loads them in, measured in build-state.md 第八轮: JavaScriptCore
+# first because it exports the WTF symbols the rest bind, WebKit last because it
+# re-exports WebKitLegacy. src/load_chain.c spells this order and
+# tests/load_chain_test.c asserts the two agree, so a change here without a change
+# there fails on the host rather than on the device.
+LOAD_ORDER = ("JavaScriptCore", "libwebrtc", "libANGLE", "WebCore", "WebKitLegacy",
+              "WebGPU", "WebKit")
+
+# How many edges one of the seven has on another, read off the device on
+# 2026-11-26 02:03 CST. `verify` holds a rewritten tree to this number so a tree
+# that was only partly written, or one from a different payload, is a failure
+# rather than a smaller success.
+MEASURED_EDGES = 11
 
 
 class PayloadError(Exception):
     """A payload this script refuses to write."""
 
 
-def staged(staging_root, device_path):
-    """Where a device path lives inside a staging root that stands for /."""
-    return os.path.join(staging_root, device_path.lstrip("/"))
+def device_path(prefix, relative):
+    """A member's path as the device spells it."""
+    return prefix + "/" + relative
+
+
+def staged(root, path):
+    """Where a device path lives inside a root that stands for the device's /."""
+    return os.path.join(root, path.lstrip("/"))
+
+
+def members(prefix):
+    """The seven as (name, device path, identity), in the order IMAGES lists them."""
+    return [(name, device_path(prefix, relative), identity)
+            for name, relative, identity in IMAGES]
+
+
+def destination_of(name, prefix):
+    for member_name, path, _ in members(prefix):
+        if member_name == name:
+            return path
+    raise PayloadError("no member is named %r" % name)
 
 
 def command_name(data, offset, size):
@@ -276,7 +278,6 @@ def signature_command(data):
 CODE_DIRECTORY_MAGIC = 0xFADE0C02
 EMBEDDED_SIGNATURE_MAGIC = 0xFADE0CC0
 HASH_ALGORITHMS = {1: hashlib.sha1, 2: hashlib.sha256}
-CD_HEADER_SIZE = 44
 
 
 def code_directories(data):
@@ -363,22 +364,6 @@ def repair_signature(data):
     return bytes(repaired), stale
 
 
-def signature_report(data):
-    """What `verify` prints per image, so a reader judges the signature by its
-    shape rather than by this script's word for it."""
-    signature = signature_command(data)
-    if signature is None:
-        return None, []
-    dataoff, datasize = signature
-    magic, length, count = struct.unpack_from(">III", data, dataoff)
-    slot_types = []
-    for index in range(count):
-        slot_type, entry = struct.unpack_from(">II", data, dataoff + 12 + 8 * index)
-        blob_magic, = struct.unpack_from(">I", data, dataoff + entry)
-        slot_types.append((slot_type, blob_magic))
-    return (dataoff, datasize, magic, length), slot_types
-
-
 def signature_stale(data):
     """The CodeDirectory pages whose stored hash does not describe the bytes.
 
@@ -400,40 +385,53 @@ def signature_stale(data):
     return stale
 
 
-def plan_image(path, display, rewrite_identity):
+def edges_of(data, prefix):
+    """Yields (offset, command, size, current name, member) for every edge on one
+    of the seven that the image carries today.
+
+    `member` is the name of the sibling the string means, so a caller does not look
+    the alias table up twice.
+    """
+    for offset, command, size, name in load_commands(data):
+        if command == LC_ID_DYLIB or name is None:
+            continue
+        member = SYSTEM_ALIASES.get(name)
+        if member is not None:
+            yield offset, command, size, name, member
+
+
+def plan_image(path, display, prefix):
     """The rewrites one image needs, with every slot checked before any write.
 
-    The identity command is only a rewrite target for the full shape. Under
-    --deps-only it stays as it is, because keeping the system install name is what
-    that probe is measuring.
+    Only dependency commands are targets. LC_ID_DYLIB is never rewritten: keeping
+    the system identity is the property that lets dyld's install-name dedup answer
+    a later /System request with this image.
     """
     with open(path, "rb") as handle:
         data = handle.read()
     rewrites = []
-    for offset, command, size, name in load_commands(data):
-        replacement = SYSTEM_TO_DESTINATION.get(name)
-        if replacement is None:
-            continue
-        if command == LC_ID_DYLIB and not rewrite_identity:
+    for offset, command, size, name, member in edges_of(data, prefix):
+        replacement = destination_of(member, prefix)
+        if name == replacement:
             continue
         start, capacity = name_slot(data, offset, size)
         if len(replacement) + 1 > capacity:
             raise PayloadError(
                 "%s: %s needs %d bytes in the %d-byte slot that held %r; refusing to write"
-                % (display, name, len(replacement) + 1, capacity, replacement))
+                % (display, replacement, len(replacement) + 1, capacity, name))
         rewrites.append((offset, command, name, replacement, start, capacity))
     return data, rewrites
 
 
-def plan_payload(source_root, rewrite_identity=True):
-    """Plans all seven images. Nothing is written and nothing is copied."""
+def plan_payload(root, prefix):
+    """Plans all seven images. Nothing is written."""
     plans = []
-    for name, directory, destination_directory, leaf in IMAGES:
-        source = os.path.join(source_root, directory, leaf)
-        if not os.path.exists(source):
-            raise PayloadError("%s: %s is not in the payload" % (name, source))
-        data, rewrites = plan_image(source, name, rewrite_identity)
-        plans.append((name, source, destination_directory, leaf, data, rewrites))
+    for name, relative, identity in IMAGES:
+        path = staged(root, device_path(prefix, relative))
+        if not os.path.exists(path):
+            raise PayloadError("%s: %s is not in the payload" % (name, path))
+        data, rewrites = plan_image(path, name, prefix)
+        plans.append((name, path, identity, device_path(prefix, relative), data, rewrites))
     return plans
 
 
@@ -451,18 +449,22 @@ def print_plan(plans):
     """Prints every planned rewrite and counts the /System references it leaves.
 
     The two counts answer different questions, and the plan is only the shape it
-    claims to be when both are right. The rewrites are the seven identities plus
-    the eleven edges between the seven; the preserved count is every dependency on
-    a real system library, which must keep naming /System so it keeps binding the
-    copies the process already has. A run that rewrote more, or preserved fewer,
-    would be changing something this shape does not touch.
+    claims to be when both are right. The rewrites are the eleven edges between the
+    seven; the preserved count is every dependency of those images, on a real
+    system library or on a stale spelling of a sibling, that is not rewritten. A
+    run that rewrote more, or preserved fewer, would be changing something this
+    shape does not touch.
     """
     total = 0
     preserved = 0
-    for name, _, _, _, data, rewrites in plans:
+    identities = 0
+    for name, _, identity, _, data, rewrites in plans:
         rewritten = set(start for _, _, _, _, start, _ in rewrites)
         kept = []
-        for offset, _, size, current in load_commands(data):
+        for offset, command, size, current in load_commands(data):
+            if command == LC_ID_DYLIB:
+                identities += 1 if current == identity else 0
+                continue
             if current is None or not current.startswith("/System/"):
                 continue
             start, _ = name_slot(data, offset, size)
@@ -473,25 +475,26 @@ def print_plan(plans):
             print("  %-15s no rewrite needed, %d /System reference(s) kept"
                   % (name, len(kept)))
             continue
-        print("  %-15s %d load command(s), %d /System reference(s) kept"
+        print("  %-15s %d edge(s), %d /System reference(s) kept"
               % (name, len(rewrites), len(kept)))
         for _, command, current, replacement, start, capacity in rewrites:
             total += 1
             print("    %-8s slot %3d  now %3d  ->  %3d  %s"
                   % (describe(command), capacity, len(current), len(replacement), replacement))
-    print("Planned %d rewrite(s) across %d image(s); %d /System reference(s) left byte "
-          "for byte alone." % (total, len(plans), preserved))
+    print("Planned %d edge(s) across %d image(s); %d /System reference(s) left byte "
+          "for byte alone; %d of %d identities match the recorded table."
+          % (total, len(plans), preserved, identities, len(plans)))
     print("Nothing was written.")
 
 
 def write_image(data, rewrites, destination, name):
-    """Writes one rewritten copy and repairs its signature, holding both to the
-    invariants they rely on.
+    """Writes one rewritten image in place and repairs its signature, holding both
+    to the invariants they rely on.
 
     Each name is written at the offset its own command names and padded with
     nulls to the end of that command, so no other byte of the image moves and no
     load command grows. The result is then read back the way the loader reads it,
-    so a write at a wrong offset fails here rather than producing a copy that
+    so a write at a wrong offset fails here rather than producing an image that
     names a file which does not exist.
 
     The signature repair comes after the names, because it hashes the bytes the
@@ -500,6 +503,9 @@ def write_image(data, rewrites, destination, name):
     its boundaries and the two CodeDirectories keep their offsets, and the
     signature lies past the last hashed byte, so writing page hashes cannot
     disturb the signature that holds them.
+
+    Returns the number of bytes changed, so a second run over an already rewritten
+    tree reports zero instead of claiming work it did not do.
     """
     rewritten = bytearray(data)
     for _, _, _, replacement, start, capacity in rewrites:
@@ -512,9 +518,9 @@ def write_image(data, rewrites, destination, name):
         if resolved != replacement:
             raise PayloadError("%s: wrote %r at %d but the command now resolves %r"
                                % (name, replacement, start, resolved))
-        if len(current) <= len(replacement):
-            raise PayloadError("%s: %r is not strictly shorter than the name it replaces"
-                               % (name, replacement))
+        if len(replacement) + 1 > capacity:
+            raise PayloadError("%s: %r does not fit the %d-byte slot it was written into"
+                               % (name, replacement, capacity))
     if len(rewritten) != len(data):
         raise PayloadError("%s: the rewrite changed the file length" % name)
     if signature_command(bytes(rewritten)) != signature_command(data):
@@ -539,102 +545,82 @@ def write_image(data, rewrites, destination, name):
             raise PayloadError("%s: %d page(s) whose hash disagreed are not the %d page(s) "
                                "the rewrite changed (first disagreement: %s)"
                                % (name, len(found), len(touched), sorted(found)[:8]))
-    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    changed = sum(1 for left, right in zip(data, repaired) if left != right)
     with open(destination, "wb") as handle:
         handle.write(repaired)
+    return changed
 
 
-def copy_tree(source_root, staging_root):
-    """Copies each framework directory wholesale, then the two bare dylibs.
+def verify(root, prefix=DEFAULT_PREFIX):
+    """Reads a rewritten tree back and holds it to the properties it exists for.
 
-    A framework is not only its Mach-O. WebKit carries Assets.car and localized
-    strings, WebCore carries images and the blocked-page HTML, JavaScriptCore
-    carries a sandbox profile and its Helpers directory. A destination holding
-    only the seven binaries is not a framework tree, so the rest travels with
-    them. The seven binaries are copied too and then overwritten by their
-    rewritten forms, so nothing in the tree is a file this script invented.
+    Each problem below is a failure the device would report as a symbol or path
+    error rather than as a rewrite error, which is how earlier rounds were lost:
 
-    Nothing under the source root is written, opened for writing, or removed:
-    the payload belongs to the package, and the destination root is a separate
-    directory so that uninstalling this tree is removing one directory.
-    """
-    placed = 0
-    for _, directory, destination_directory, _ in IMAGES:
-        source_directory = os.path.join(source_root, directory)
-        destination_directory = staged(staging_root, DESTINATION_ROOT + "/" + destination_directory)
-        for current, _, files in os.walk(source_directory):
-            relative = os.path.relpath(current, source_directory)
-            target_directory = destination_directory if relative == "." else os.path.join(
-                destination_directory, relative)
-            os.makedirs(target_directory, exist_ok=True)
-            for name in sorted(files):
-                target = os.path.join(target_directory, name)
-                if os.path.exists(target):
-                    continue
-                with open(os.path.join(current, name), "rb") as handle:
-                    content = handle.read()
-                with open(target, "wb") as handle:
-                    handle.write(content)
-                placed += 1
-    return placed
-
-
-def verify(staging_root, rewrite_identity=True):
-    """Reads a staging root back and holds it to the properties it exists for.
-
-    Each problem below is a failure the device would report as a symbol error
-    rather than as a path error, which is how the last several rounds were lost:
-
-      1. No image still names one of the seven by a /System path. That string is
-         the bug the rewrite removes.
-      2. Every destination path an image names exists in the tree. A rewrite
-         pointing at a file that is not there fails at bind time with the same
+      1. No image still names one of the seven by a system spelling. That string
+         is the bug the rewrite removes.
+      2. Every /var/jb path an image names exists in the tree. A rewrite pointing
+         at a file that is not there fails at bind time with the same
          Symbol not found text as the bug it replaced.
-      3. Under the full shape, the binary names itself by the path it occupies, so
-         LC_ID_DYLIB and the location cannot disagree. Under --deps-only the
-         identity is deliberately left as the system path, so the difference is
-         reported and not failed: the check is a consistency requirement, not a
-         demand that identity drift.
+      3. Every LC_ID_DYLIB still carries the identity recorded in IMAGES, so
+         "the identity did not change" is checked rather than asserted.
+      4. The number of rewritten edges is the number the device's load commands
+         carry, so a tree that was only partly written fails instead of passing
+         with a smaller count.
+      5. Every CodeDirectory describes the bytes in the file, or the device kills
+         the image on load.
 
-    The signature is the other property, and it is a failure rather than a note
-    now that the repair happens here: every CodeDirectory must describe the bytes
-    in the file, or the device kills the image on load. Where the signature sits
-    relative to the last hashed byte is reported beside it, because that is what
-    makes the one-pass repair correct.
+    The return value is (problems, report) where report carries the counts a
+    reader judges the tree by: rewritten edges, identities matching, identities
+    that do not, and whether the signature sits past the last hashed byte.
+    `problems` is the only list of what is wrong; a missing image is reported
+    there and nowhere else, so it prints once.
     """
     problems = []
     signatures = []
-    identity_kept = []
-    if not os.path.isdir(staging_root):
-        return ["%s does not exist" % staging_root], signatures, identity_kept
-    for name, _, destination_directory, leaf in IMAGES:
-        device_path = DESTINATION_ROOT + "/" + destination_directory + "/" + leaf
-        path = staged(staging_root, device_path)
-        if not os.path.exists(path):
-            problems.append("%s: missing, expected at %s" % (name, device_path))
+    rewritten_edges = 0
+    identity_matches = 0
+    identity_mismatches = []
+    if not os.path.isdir(root):
+        return ["%s does not exist" % root], {
+            "edges": 0, "identities": 0, "mismatched": [], "signatures": []}
+    # Membership in this set, not a prefix test, is what makes "this command names
+    # one of the seven" true: a rootful tree has no /var/jb in it at all, and a
+    # prefix test would count every absolute dependency as an edge.
+    seven = set(device_path(prefix, relative) for _, relative, _ in IMAGES)
+    for name, relative, identity in IMAGES:
+        path = device_path(prefix, relative)
+        local = staged(root, path)
+        if not os.path.exists(local):
+            # The packager decides whether to ship a tree by this function's exit
+            # code, so a missing image belongs in `problems`, which is the only
+            # place the caller reads problems from.
+            problems.append("%s: missing, expected at %s" % (name, path))
             continue
-        with open(path, "rb") as handle:
+        with open(local, "rb") as handle:
             data = handle.read()
-        identity = None
-        for _, command, _, current in load_commands(data):
+        own_identity = None
+        for offset, command, size, current in load_commands(data):
+            if command == LC_ID_DYLIB:
+                own_identity = current
+                continue
             if current is None:
                 continue
-            if command == LC_ID_DYLIB:
-                identity = current
-                continue
-            if current in SYSTEM_TO_DESTINATION:
+            if current in SYSTEM_ALIASES:
                 problems.append("%s: %s still names the system path %s"
                                 % (name, describe(command), current))
                 continue
-            if current.startswith(DESTINATION_ROOT) and not os.path.exists(staged(staging_root, current)):
-                problems.append("%s: names %s, which is not in the tree" % (name, current))
-        if identity is None:
+            if current in seven:
+                rewritten_edges += 1
+                if not os.path.exists(staged(root, current)):
+                    problems.append("%s: names %s, which is not in the tree" % (name, current))
+        if own_identity is None:
             problems.append("%s: carries no LC_ID_DYLIB" % name)
-        elif identity != device_path:
-            if rewrite_identity:
-                problems.append("%s: calls itself %s but lives at %s" % (name, identity, device_path))
-            else:
-                identity_kept.append(name)
+        elif own_identity == identity:
+            identity_matches += 1
+        else:
+            identity_mismatches.append("%s: calls itself %s, the recorded identity is %s"
+                                       % (name, own_identity, identity))
         directories = list(code_directories(data))
         if signature_command(data) is None:
             problems.append("%s: carries no LC_CODE_SIGNATURE, so nothing covers the "
@@ -651,7 +637,22 @@ def verify(staging_root, rewrite_identity=True):
             "limit": directories[0][6] if directories else 0,
             "signature": signature_command(data),
         }))
-    return problems, signatures, identity_kept
+    problems.extend(identity_mismatches)
+    # Both counts are asserted even when a file is missing. A tree with one image
+    # gone has fewer edges and fewer identities, so skipping the assertion here
+    # would make that tree the one case where the two numbers go unchecked.
+    if rewritten_edges != MEASURED_EDGES:
+        problems.append("%d /var/jb edge(s) rewritten, the device's images carry %d"
+                        % (rewritten_edges, MEASURED_EDGES))
+    if identity_matches != len(IMAGES):
+        problems.append("%d of %d identities match the recorded table"
+                        % (identity_matches, len(IMAGES)))
+    return problems, {
+        "edges": rewritten_edges,
+        "identities": identity_matches,
+        "mismatched": identity_mismatches,
+        "signatures": signatures,
+    }
 
 
 def code_directory_flags(data):
@@ -689,71 +690,81 @@ def describe_signature(name, shape):
     return "; ".join(parts)
 
 
+def print_report(report):
+    """The three counts a reader judges a rewritten tree by, then the signatures.
+
+    What is wrong with the tree is printed by the caller from `problems` alone. A
+    second loop over the missing images here made every absent image print twice,
+    in two different wordings, and nothing read the copy.
+    """
+    print("  %d /var/jb edge(s) among the seven, %d expected"
+          % (report["edges"], MEASURED_EDGES))
+    print("  %d of %d LC_ID_DYLIB still carry the recorded /System identity"
+          % (report["identities"], len(IMAGES)))
+    for name, shape in report["signatures"]:
+        print("  %s" % describe_signature(name, shape))
+
+
 def main(argv):
-    usage = ("usage: rewrite-payload.py plan   SOURCE_ROOT STAGING_ROOT [--deps-only]\n"
-             "       rewrite-payload.py write  SOURCE_ROOT STAGING_ROOT [--deps-only]\n"
-             "       rewrite-payload.py verify        STAGING_ROOT [--deps-only]\n")
-    if len(argv) < 2:
+    usage = ("usage: rewrite-payload.py plan    ROOT [--prefix /var/jb]\n"
+             "       rewrite-payload.py rewrite ROOT [--prefix /var/jb]\n"
+             "       rewrite-payload.py verify  ROOT [--prefix /var/jb]\n"
+             "\nROOT stands for the device's /. A deb unpacked at /tmp/x has its\n"
+             "files at /tmp/x/var/jb/..., so ROOT is /tmp/x.\n")
+    if len(argv) < 3:
         sys.stderr.write(usage)
         return 2
     action = argv[1]
-    arguments = [value for value in argv[2:] if value != "--deps-only"]
-    rewrite_identity = "--deps-only" not in argv
+    prefix = DEFAULT_PREFIX
+    arguments = []
+    remaining = argv[2:]
+    while remaining:
+        value = remaining.pop(0)
+        if value == "--prefix":
+            if not remaining:
+                sys.stderr.write("--prefix needs a value\n")
+                return 2
+            prefix = remaining.pop(0).rstrip("/")
+            continue
+        arguments.append(value)
+    if len(arguments) != 1:
+        sys.stderr.write(usage)
+        return 2
+    root = os.path.abspath(arguments[0])
+    if prefix.startswith("/") is False and prefix != "":
+        sys.stderr.write("--prefix must be an absolute path or empty, not %r\n" % prefix)
+        return 2
     try:
-        if action in ("plan", "write"):
-            if len(arguments) != 2:
-                sys.stderr.write(usage)
-                return 2
-            source_root, staging_root = arguments[0], os.path.abspath(arguments[1])
-            if os.path.abspath(source_root) == staging_root:
-                sys.stderr.write("%s is the payload itself; the destination root is "
-                                 "%s, which is a separate directory\n"
-                                 % (staging_root, DESTINATION_ROOT))
-                return 2
+        if action == "plan":
+            print_plan(plan_payload(root, prefix))
+            return 0
+        if action == "rewrite":
             # The whole plan is built and every slot is checked before the first
-            # byte is copied, so a payload that cannot fit leaves the staging
-            # directory untouched instead of half written.
-            plans = plan_payload(source_root, rewrite_identity)
-            if action == "plan":
-                if not rewrite_identity:
-                    print("--deps-only: LC_ID_DYLIB is left claiming the system name, so the\n"
-                          "seven match the resident system images by install name. This is a\n"
-                          "mechanism probe, not a fix.")
-                print_plan(plans)
-                return 0
-            placed = copy_tree(source_root, staging_root)
+            # byte is written, so a payload that cannot be rewritten is left
+            # untouched instead of half written.
+            plans = plan_payload(root, prefix)
             total = 0
-            for name, _, destination_directory, leaf, data, rewrites in plans:
-                destination = staged(staging_root, DESTINATION_ROOT + "/"
-                                     + destination_directory + "/" + leaf)
-                write_image(data, rewrites, destination, name)
+            changed_bytes = 0
+            for name, path, _, _, data, rewrites in plans:
+                changed = write_image(data, rewrites, path, name)
+                changed_bytes += changed
                 total += len(rewrites)
-                print("  %-15s %2d load command(s) rewritten, signature page hashes "
-                      "recomputed" % (name, len(rewrites)))
-            print("Wrote %d rewrite(s) across %d image(s) under %s; copied %d other file(s)."
-                  % (total, len(plans), staged(staging_root, DESTINATION_ROOT), placed))
-            print("Every copy's CodeDirectory page hashes describe the bytes written, which")
-            print("`verify` reads back. That is a self-consistent signature, not a claim that")
-            print("a device admits it: nothing has been loaded from a repaired copy yet.")
+                print("  %-15s %2d edge(s) rewritten, %d byte(s) changed, signature "
+                      "page hashes recomputed" % (name, len(rewrites), changed))
+            print("Rewrote %d edge(s) across %d image(s) under %s; %d byte(s) changed."
+                  % (total, len(plans), staged(root, prefix), changed_bytes))
+            print("LC_ID_DYLIB is unchanged in all seven, so dyld's install-name dedup can")
+            print("answer a later /System request with these images. `verify` reads that back.")
             return 0
         if action == "verify":
-            if len(arguments) != 1:
-                sys.stderr.write(usage)
-                return 2
-            problems, signatures, identity_kept = verify(os.path.abspath(arguments[0]),
-                                                         rewrite_identity)
+            problems, report = verify(root, prefix)
+            print_report(report)
             for problem in problems:
                 print("  FAIL %s" % problem)
-            if identity_kept:
-                print("  --deps-only: %s still claim their system identity, as this probe"
-                      % ", ".join(identity_kept))
-                print("        intends; the seven will match the resident system images first")
-            for name, shape in signatures:
-                print("  %s" % describe_signature(name, shape))
             if problems:
                 return 1
-            print("  no image names one of the seven by a system path, every named path "
-                  "exists, and every signature describes its own bytes")
+            print("  every edge among the seven names a /var/jb path that exists, every "
+                  "identity is unchanged, and every signature describes its own bytes")
             return 0
         sys.stderr.write("unknown action %r\n" % action)
         sys.stderr.write(usage)

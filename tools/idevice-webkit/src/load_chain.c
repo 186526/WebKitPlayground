@@ -8,18 +8,19 @@
 /* The seven, in the order build-state.md 第八轮 measured. The three facts that
    fix a position are in load_chain.h; this file is the run of them.
 
-   The paths name the rewritten tree. rewrite-payload.py writes it, and
-   tests/load_chain_test.c asserts this list against that script's
-   DESTINATION_PATHS so the two cannot drift. */
+   The paths are where the package installs the seven and where the filter loads
+   WebKit, so the rewritten images and the loaded files are the same files.
+   rewrite-payload.py rewrites them in place, and tests/load_chain_test.c asserts
+   this list against that script's IMAGES so the two cannot drift. */
 
 const char *const load_chain_paths[load_chain_count] = {
-    "/var/jb/Library/WebKit18/JavaScriptCore.framework/JavaScriptCore",
-    "/var/jb/Library/WebKit18/usr/lib/libwebrtc.dylib",
-    "/var/jb/Library/WebKit18/usr/lib/libANGLE-shared.dylib",
-    "/var/jb/Library/WebKit18/WebCore.framework/WebCore",
-    "/var/jb/Library/WebKit18/WebKitLegacy.framework/WebKitLegacy",
-    "/var/jb/Library/WebKit18/WebGPU.framework/WebGPU",
-    "/var/jb/Library/WebKit18/WebKit.framework/WebKit",
+    "/var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+    "/var/jb/usr/lib/libwebrtc.dylib",
+    "/var/jb/usr/lib/libANGLE-shared.dylib",
+    "/var/jb/Library/Frameworks/WebCore.framework/WebCore",
+    "/var/jb/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy",
+    "/var/jb/Library/Frameworks/WebGPU.framework/WebGPU",
+    "/var/jb/Library/Frameworks/WebKit.framework/WebKit",
 };
 
 /* The image table is how the run counts what it gained. dyld exports these with

@@ -4,20 +4,28 @@
 # the script's own report.
 #
 # The payload is synthetic for the same reason tests/signature_test.py builds its
-# dylib: the real one is a 50 MB install from a package, and a test that needed
-# it could not run on a fresh checkout. The synthetic images carry the same
-# load commands the seven real ones do where it matters — an
-# LC_ID_DYLIB claiming the system identity, an LC_LOAD_DYLIB on the system
-# JavaScriptCore, WebCore's three LC_LOAD_WEAK_DYLIB commands on the other six,
-# a dependency on a real system framework that must be left alone, and an
-# LC_CODE_SIGNATURE past the load commands.
+# dylib: the real one is a 200 MB install from a package, and a test that needed
+# it could not run on a fresh checkout. The synthetic images carry the commands
+# the seven real ones carry where it matters — the recorded LC_ID_DYLIB, edges on
+# the siblings, a dependency on a real system framework that must be left alone,
+# and an LC_CODE_SIGNATURE past the load commands.
 #
 # What is checked, and the failure each one would cause on the device:
 #
 #   the seven paths here and in src/load_chain.c are one list
 #                                      the tweak would load a file the rewrite
-#                                      never wrote, and dyld would answer the
+#                                      never touched, and dyld would answer the
 #                                      dlopen with the system twin
+#   the tree is rewritten in place, and no second tree appears
+#                                      a copy at a path the filter does not name
+#                                      is a tree nothing loads
+#   eleven edges are rewritten
+#                                      an edge left naming /System binds the 16.1
+#                                      sibling, which is the recorded failure
+#   every LC_ID_DYLIB is unchanged
+#                                      an identity rewritten to /var/jb can never
+#                                      be returned for a /System request, so the
+#                                      dedup that makes the image reachable stops
 #   a replacement longer than its slot is refused
 #                                      a write past the slot overwrites the next
 #                                      load command and the image stops parsing
@@ -25,18 +33,11 @@
 #   LC_CODE_SIGNATURE keeps its offset and size
 #                                      the signature moves and dyld refuses the
 #                                      image before its constructor runs
-#   only the bytes inside the rewritten slots differ
-#                                      anything else changed is a byte nobody
-#                                      planned, and the CodeDirectory covers it
-#   the source payload is untouched
-#                                      the package's own tree would be corrupted
-#                                      in place instead of copied
-#   each image names itself by the path it occupies
-#                                      dyld matches install name first, so an
-#                                      image that keeps the system name binds the
-#                                      resident 16.1 twin
-#   --deps-only leaves the identity alone and says so
-#                                      the probe must measure the thing it claims
+#   every CodeDirectory describes the bytes written
+#                                      the device kills a modified image, exit 137
+#   a rewritten tree is a fixed point
+#                                      a second run must ship the same bytes the
+#                                      first one produced
 import hashlib
 import importlib.util
 import os
@@ -50,54 +51,85 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "rewrite-payload.py")
 LOAD_CHAIN = os.path.join(HERE, "..", "src", "load_chain.c")
 
+LC_SEGMENT_64 = 0x19
 LC_LOAD_DYLIB = 0x0C
 LC_ID_DYLIB = 0x0D
 LC_LOAD_WEAK_DYLIB = 0x80000018
+LC_REEXPORT_DYLIB = 0x8000001F
 LC_CODE_SIGNATURE = 0x1D
 MH_MAGIC_64 = 0xFEEDFACF
 MH_DYLIB = 6
 MACH_HEADER_SIZE_64 = 32
 NAME_OFFSET = 24
 SIGNATURE_OFFSET = 0x4000
-SIGNATURE_SIZE = 0x100
+SIGNATURE_SIZE = 0x1000
 
-# The system identity each of the seven carries as the payload ships, and the
-# directory it occupies in a payload unpacked from the deb.
+DYLIB_COMMANDS = (LC_LOAD_DYLIB, LC_ID_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB)
+
+# The seven as the device carries them on 2026-11-26: path relative to /var/jb and
+# the identity each binary claims. The five frameworks sit under
+# Library/Frameworks and the two bare dylibs under usr/lib, which is where the
+# installed package puts them.
 IMAGES = (
-    ("JavaScriptCore", "Library/Frameworks/JavaScriptCore.framework", "JavaScriptCore",
+    ("JavaScriptCore", "Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
      "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
-    ("WebCore", "Library/Frameworks/WebCore.framework", "WebCore",
+    ("WebCore", "Library/Frameworks/WebCore.framework/WebCore",
      "/System/Library/PrivateFrameworks/WebCore.framework/WebCore"),
-    ("WebKitLegacy", "Library/Frameworks/WebKitLegacy.framework", "WebKitLegacy",
+    ("WebKitLegacy", "Library/Frameworks/WebKitLegacy.framework/WebKitLegacy",
      "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy"),
-    ("WebGPU", "Library/Frameworks/WebGPU.framework", "WebGPU",
+    ("WebGPU", "Library/Frameworks/WebGPU.framework/WebGPU",
      "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU"),
-    ("libwebrtc", "usr/lib", "libwebrtc.dylib",
+    ("libwebrtc", "usr/lib/libwebrtc.dylib",
      "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"),
-    ("libANGLE", "usr/lib", "libANGLE-shared.dylib",
+    ("libANGLE", "usr/lib/libANGLE-shared.dylib",
      "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib"),
-    ("WebKit", "Library/Frameworks/WebKit.framework", "WebKit",
+    ("WebKit", "Library/Frameworks/WebKit.framework/WebKit",
      "/System/Library/Frameworks/WebKit.framework/WebKit"),
 )
 
-JAVASCRIPTCORE_SYSTEM = "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"
+# The command each edge uses on the device, measured 2026-11-26 02:03 CST. WebKit
+# reaches WebKitLegacy through LC_REEXPORT_DYLIB, not a load, which is why the
+# test builds one: a rewrite that skipped re-exports would leave the 16.1
+# WebKitLegacy in the process.
+EDGES = {
+    "JavaScriptCore": (),
+    "WebCore": (
+        (LC_LOAD_WEAK_DYLIB, "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU"),
+        (LC_LOAD_WEAK_DYLIB,
+         "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib"),
+        (LC_LOAD_WEAK_DYLIB,
+         "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"),
+        (LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+    ),
+    "WebKitLegacy": (
+        (LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+        (LC_LOAD_DYLIB, "/System/Library/PrivateFrameworks/WebCore.framework/WebCore"),
+    ),
+    "WebGPU": (
+        (LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+    ),
+    "libwebrtc": (),
+    "libANGLE": (),
+    "WebKit": (
+        (LC_REEXPORT_DYLIB,
+         "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy"),
+        (LC_LOAD_WEAK_DYLIB,
+         "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"),
+        (LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+        (LC_LOAD_DYLIB, "/System/Library/PrivateFrameworks/WebCore.framework/WebCore"),
+    ),
+}
+
+EDGE_COUNT = sum(len(commands) for commands in EDGES.values())
+
 FOUNDATION_SYSTEM = "/System/Library/Frameworks/Foundation.framework/Foundation"
 
-# WebCore's three LC_LOAD_WEAK_DYLIB commands that name one of the seven. The
-# real image carries exactly these three as weak (besides nine on system
-# libraries), and the count matters to the load order: the two dylibs are loaded
-# before WebCore, WebGPU after it, and all three strings have to end up under
-# /var/jb or the weak import binds the resident 16.1 copy. The synthetic payload
-# carries them so a rewrite that dropped one, or that rewrote it to a path
-# outside the destination root, fails here instead of on the device.
-WEAK_DEPENDENCIES = (
-    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib",
-    "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU",
-    "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib",
-)
+# The line `verify` prints only when it has no problem left to report. A tree it
+# refuses must not print it, whatever else it prints.
+SUCCESS_LINE = "every edge among the seven names a /var/jb path that exists"
 
-# Wide enough for every replacement the rewrite writes, and the same for all
-# seven so a failure is about the name rather than about a slot chosen to fit.
+# Wide enough for every replacement the rewrite writes, and the same for all seven
+# so a failure is about the name rather than about a slot chosen to fit.
 SLOT = 128
 
 failures = []
@@ -113,6 +145,7 @@ def check(name, condition, detail=""):
 
 def name_command(command, name, slot=SLOT):
     encoded = name.encode() + b"\0"
+    assert len(encoded) <= slot, "%r does not fit the %d-byte slot this builds" % (name, slot)
     size = NAME_OFFSET + slot
     body = struct.pack("<IIIIII", command, size, NAME_OFFSET, 0, 0x10000, 0x10000)
     return body + encoded + b"\0" * (slot - len(encoded))
@@ -122,100 +155,88 @@ def signature_command(dataoff, size):
     return struct.pack("<IIII", LC_CODE_SIGNATURE, 16, dataoff, size)
 
 
-def build_signature(code, code_limit, hash_types=(1, 2), page=0x1000, flags=0):
+def code_directory(algorithm, hash_type, slot, code, code_limit, page, flags=0):
+    """One CodeDirectory over `code`, laid out as the payload's are.
+
+    Two special slots are written as zeros, as the payload writes them; neither is
+    a page hash, and the repair in rewrite-payload.py does not recompute them.
+    """
+    hash_size = algorithm().digest_size
+    pages = (code_limit + page - 1) // page
+    special_slots = 2
+    hash_offset = 44 + special_slots * hash_size
+    body = bytearray(44)
+    struct.pack_into(">IIIIIIIII", body, 0, 0xFADE0C02, 0, 0x20001, flags, hash_offset,
+                     0, special_slots, pages, code_limit)
+    struct.pack_into(">BBBB", body, 36, hash_size, hash_type, 0, page.bit_length() - 1)
+    body += b"\0" * (special_slots * hash_size)
+    for index in range(pages):
+        body += algorithm(code[index * page:min((index + 1) * page, code_limit)]).digest()
+    struct.pack_into(">II", body, 4, len(body), slot)
+    return bytes(body)
+
+
+def build_signature(code, code_limit, page=0x1000, flags=0):
     """A SuperBlob holding a requirements blob and one CodeDirectory per hashType.
 
     It mirrors the payload's shape: slot 2 with the requirements, then a slot per
     algorithm, both covering the same codeLimit with the same page count and the
     same flags word. A real payload puts SHA-1 at slot 0 and SHA-256 at slot 4096,
     so the test does too.
-
-    The CodeDirectory is the 44-byte version (0x20001): nine 32-bit header fields,
-    then hashSize, hashType, platform and pageSize as bytes, then spare2. Both
-    special slots are written as zeros, as the payload writes them.
     """
-    algorithms = {1: hashlib.sha1, 2: hashlib.sha256}
-    n_code = (code_limit + page - 1) // page
-    blobs = {2: struct.pack(">III", 0xFADE0C01, 12, 0)}
-    for hash_type in hash_types:
-        algorithm = algorithms[hash_type]
-        hash_size = len(algorithm(b"").digest())
-        identifier = b"test\0"
-        header_size = 44
-        hash_offset = header_size + 2 * hash_size
-        ident_offset = hash_offset + n_code * hash_size
-        body = b"".join(
-            algorithm(code[index * page:min(index * page + page, code_limit)]).digest()
-            for index in range(n_code))
-        blob = struct.pack(">9IBBBB I", 0xFADE0C02, header_size + 2 * hash_size +
-                           n_code * hash_size + len(identifier),
-                           0x20001, flags, hash_offset, ident_offset, 2, n_code, code_limit,
-                           hash_size, hash_type, 0, page.bit_length() - 1, 0)
-        blob += b"\0" * (2 * hash_size) + body + identifier
-        blobs[0 if hash_type == 1 else 4096] = blob
-    count = len(blobs)
-    index_size = 12 + 8 * count
-    offset = index_size
-    entries = b""
-    bodies = b""
-    for slot in sorted(blobs):
-        entries += struct.pack(">II", slot, offset)
-        bodies += blobs[slot]
-        offset += len(blobs[slot])
-    return struct.pack(">III", 0xFADE0CC0, index_size + len(bodies), count) + entries + bodies
+    import hashlib
+
+    blobs = [
+        (2, b"\xfa\xde\x0c\x01" + struct.pack(">I", 16) + b"\0" * 8),
+        (0, code_directory(hashlib.sha1, 1, 0, code, code_limit, page, flags)),
+        (4096, code_directory(hashlib.sha256, 2, 4096, code, code_limit, page, flags)),
+    ]
+    offset = 12 + 8 * len(blobs)
+    index = b""
+    body = b""
+    for slot, blob in blobs:
+        index += struct.pack(">II", slot, offset + len(body))
+        body += blob
+    return struct.pack(">III", 0xFADE0CC0,
+                       12 + len(index) + len(body), len(blobs)) + index + body
 
 
-def build_image(path, identity, dependencies, slot=SLOT, sign=True, weak_dependencies=()):
-    """A thin Mach-O whose signature covers every byte before its own offset.
+def build_image(path, identity, dependencies, slot=SLOT, dependency_slot=None):
+    """One thin little-endian 64-bit image with the commands the test needs.
 
-    The CodeDirectory lands at a fixed offset in all seven images, and the test's
-    invariants compare the signature command before and after a rewrite, so the
-    blob's own size has to be the same every time it is built. `build_signature`
-    gives that: its length depends only on codeLimit and the page size.
+    `dependency_slot` lets one case give the dependencies a slot narrower than the
+    identities, which is how the capacity guard is reached: the guard is about the
+    name being replaced, not about every command in the image.
     """
+    if dependency_slot is None:
+        dependency_slot = slot
     commands = [name_command(LC_ID_DYLIB, identity, slot)]
-    for dependency in dependencies:
-        commands.append(name_command(LC_LOAD_DYLIB, dependency, slot))
-    for dependency in weak_dependencies:
-        commands.append(name_command(LC_LOAD_WEAK_DYLIB, dependency, slot))
-    if sign:
-        head = b"".join(commands) + signature_command(0, 0)
-        header = struct.pack("<IiIIIIII", MH_MAGIC_64, 0x0100000C, 0x0, MH_DYLIB,
-                             len(commands) + 1, len(head), 0, 0)
-        data = bytearray(header + head)
-        if len(data) > SIGNATURE_OFFSET:
-            raise RuntimeError("the load commands do not fit before the signature")
-        data.extend(b"\0" * (SIGNATURE_OFFSET - len(data)))
-        data.extend(build_signature(bytes(data), SIGNATURE_OFFSET))
-        blob_length = len(data) - SIGNATURE_OFFSET
-        marker = struct.pack("<II", LC_CODE_SIGNATURE, 16)
-        index = bytes(data).index(marker)
-        data[index:index + 16] = signature_command(SIGNATURE_OFFSET, blob_length)
-        # The datasize field is inside the hashed region, so the signature is built
-        # once more over the header's final form.
-        del data[SIGNATURE_OFFSET:]
-        data.extend(build_signature(bytes(data), SIGNATURE_OFFSET))
-    else:
-        commands.append(signature_command(SIGNATURE_OFFSET, SIGNATURE_SIZE))
-        head = b"".join(commands)
-        header = struct.pack("<IiIIIIII", MH_MAGIC_64, 0x0100000C, 0x0, MH_DYLIB,
-                             len(commands), len(head), 0, 0)
-        data = bytearray(header + head)
-        data.extend(b"\0" * (SIGNATURE_OFFSET - len(data)))
-        data.extend(b"\0" * SIGNATURE_SIZE)
+    for command, name in dependencies:
+        commands.append(name_command(command, name, dependency_slot))
+    commands.append(name_command(LC_LOAD_DYLIB, FOUNDATION_SYSTEM, slot))
+    body = b"".join(commands)
+    segment_and_section = struct.pack("<II16sQQQQiiII", LC_SEGMENT_64, 72 + 80, b"__TEXT",
+                                      0, 0x10000, 0, 0x10000, 5, 5, 1, 0) + struct.pack(
+        "<16s16sQQIIIIIIII", b"__text", b"__TEXT", 0x1000, 0x10, 0x1000, 4, 0, 0, 0, 0, 0, 0)
+    # LC_CODE_SIGNATURE is the last command so its dataoff and datasize are known
+    # before the code region is hashed.
+    signature_text = signature_command(SIGNATURE_OFFSET, SIGNATURE_SIZE)
+    command_bytes = body + signature_text + segment_and_section
+    image = struct.pack("<IiiIIIII", MH_MAGIC_64, 0x0100000C, 0, MH_DYLIB,
+                        len(commands) + 2, len(command_bytes), 0, 0) + command_bytes
+    assert len(image) <= SIGNATURE_OFFSET
+    image += b"\0" * (SIGNATURE_OFFSET - len(image))
+    signature = build_signature(image, SIGNATURE_OFFSET)
+    assert len(signature) <= SIGNATURE_SIZE, len(signature)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as handle:
-        handle.write(bytes(data))
+        handle.write(image + signature + b"\0" * (SIGNATURE_SIZE - len(signature)))
 
 
-def build_payload(root, slot=SLOT):
-    for name, directory, leaf, identity in IMAGES:
-        dependencies = [FOUNDATION_SYSTEM]
-        if identity != JAVASCRIPTCORE_SYSTEM:
-            dependencies.append(JAVASCRIPTCORE_SYSTEM)
-        weak = WEAK_DEPENDENCIES if name == "WebCore" else ()
-        build_image(os.path.join(root, directory, leaf), identity, dependencies, slot,
-                    weak_dependencies=weak)
+def build_payload(root, prefix="/var/jb", slot=SLOT):
+    for name, relative, identity in IMAGES:
+        build_image(os.path.join(root, (prefix + "/" + relative).lstrip("/")),
+                    identity, EDGES[name], slot)
 
 
 def read(path):
@@ -223,8 +244,17 @@ def read(path):
         return handle.read()
 
 
-def digest(path):
-    return hashlib.sha256(read(path)).hexdigest()
+def state(root):
+    """Every file under a root with its size and digest, for before/after reads."""
+    return {os.path.relpath(path, root): (os.path.getsize(path),
+                                         hashlib.sha256(read(path)).hexdigest())
+            for path in walk(root)}
+
+
+def walk(root):
+    for current, _, files in os.walk(root):
+        for name in sorted(files):
+            yield os.path.join(current, name)
 
 
 def run(*arguments):
@@ -232,16 +262,8 @@ def run(*arguments):
                           capture_output=True, text=True)
 
 
-def source_paths(module):
-    """The path each image occupies under the destination root, keyed by name.
-
-    IMAGES is ordered for reading, not for loading, so it answers which file
-    lives where rather than which comes first. The order is DESTINATION_PATHS,
-    and both are compared against the chain: this one as a set, that one in
-    sequence.
-    """
-    return {name: module.DESTINATION_ROOT + "/" + destination_directory + "/" + leaf
-            for name, _, destination_directory, leaf in module.IMAGES}
+def member_paths(prefix="/var/jb"):
+    return {name: prefix + "/" + relative for name, relative, _ in IMAGES}
 
 
 def load_chain_paths():
@@ -259,310 +281,264 @@ def load_chain_paths():
     return tuple(paths)
 
 
+def commands_of(data):
+    """(offset, command, size, name) for every dylib command, read from the header."""
+    count, _ = struct.unpack_from("<II", data, 16)
+    offset = MACH_HEADER_SIZE_64
+    for _ in range(count):
+        command, size = struct.unpack_from("<II", data, offset)
+        name = None
+        if command in DYLIB_COMMANDS:
+            name_offset, = struct.unpack_from("<I", data, offset + 8)
+            start = offset + name_offset
+            name = data[start:data.index(b"\0", start)].decode()
+        yield offset, command, size, name
+        offset += size
+
+
+def identity_of(data):
+    for _, command, _, name in commands_of(data):
+        if command == LC_ID_DYLIB:
+            return name
+    return None
+
+
+def dependency_names(data):
+    return [name for _, command, _, name in commands_of(data)
+            if command != LC_ID_DYLIB and name is not None]
+
+
+def put_name(data, offset, size, replacement):
+    """Writes a name into a command's slot, the way the rewrite does, and returns it."""
+    name_offset, = struct.unpack_from("<I", data, offset + 8)
+    start = offset + name_offset
+    capacity = offset + size - start
+    encoded = replacement.encode() + b"\0"
+    assert len(encoded) <= capacity
+    data[start:start + capacity] = encoded + b"\0" * (capacity - len(encoded))
+    return data
+
+
 def main():
     spec = importlib.util.spec_from_file_location("rewrite_payload", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    paths = source_paths(module)
+    # The script, this file and the C source agree on the layout, then on the
+    # identities. A path only one of the three knows is a tree nobody loads.
+    script_paths = {name: module.device_path(module.DEFAULT_PREFIX, relative)
+                    for name, relative, _ in module.IMAGES}
+    check("rewrite-payload.py lists the seven where the device carries them",
+          script_paths == member_paths(), "%r" % script_paths)
+    check("rewrite-payload.py records the identity each binary carries",
+          [(name, identity) for name, _, identity in module.IMAGES]
+          == [(name, identity) for name, _, identity in IMAGES])
+    check("the test's edge table is the eleven the device carries",
+          module.MEASURED_EDGES == EDGE_COUNT and EDGE_COUNT == 11, str(EDGE_COUNT))
+
     chain = load_chain_paths()
     check("every path src/load_chain.c spells is one of the seven files",
-          set(chain) == set(paths.values()),
-          "chain %r, files %r" % (chain, sorted(paths.values())))
-    check("the chain names the seven in the order rewrite-payload.py lists them",
-          chain == module.DESTINATION_PATHS)
+          set(chain) == set(script_paths.values()),
+          "chain %r, files %r" % (chain, sorted(script_paths.values())))
+    # The chain's order is not IMAGES' order: IMAGES is grouped for reading, while
+    # the chain follows the measured load order, so it is compared against
+    # LOAD_ORDER. A path only one of the two knows already failed above.
+    by_name = {name: path for name, path in script_paths.items()}
+    check("the chain names the seven in the measured load order",
+          list(chain) == [by_name[name] for name in module.LOAD_ORDER],
+          "chain %r" % (chain,))
 
     with tempfile.TemporaryDirectory() as work:
-        payload = os.path.join(work, "payload")
-        staging = os.path.join(work, "staging")
-        build_payload(payload)
-        before = {path: digest(path) for path in walk(payload)}
+        root = os.path.join(work, "payload")
+        build_payload(root)
+        before = state(root)
 
-        result = run("plan", payload, staging)
+        result = run("plan", root)
         check("plan exits 0 on a payload that fits", result.returncode == 0, result.stderr)
-        check("plan writes nothing", not os.path.exists(staging))
-        check("plan counts the rewrites and the preserved /System references apart",
-              "Planned 16 rewrite(s)" in result.stdout
-              and "7 /System reference(s) left byte for byte alone" in result.stdout,
+        check("plan writes nothing", before == state(root))
+        check("plan counts eleven edges", "Planned 11 edge(s)" in result.stdout, result.stdout)
+        check("plan counts the preserved system references apart",
+              "7 /System reference(s) left byte for byte alone" in result.stdout,
               result.stdout)
 
-        result = run("write", payload, staging)
-        check("write exits 0", result.returncode == 0, result.stderr)
-        check("write leaves the source payload byte for byte as it was",
-              before == {path: digest(path) for path in walk(payload)})
+        result = run("rewrite", root)
+        check("rewrite exits 0", result.returncode == 0, result.stderr)
+        check("rewrite reports eleven edges", "Rewrote 11 edge(s)" in result.stdout,
+              result.stdout)
+        after = state(root)
+        check("rewrite adds no file and removes none", sorted(before) == sorted(after))
+        check("rewrite keeps every file's length",
+              all(before[name][0] == after[name][0] for name in before),
+              [name for name in before if before[name][0] != after[name][0]])
+        check("rewrite leaves the signature past the hashed region",
+              all(module.signature_command(read(os.path.join(root, name)))[0]
+                  >= min(limit for _, _, _, _, _, _, limit, _
+                         in module.code_directories(read(os.path.join(root, name))))
+                  for name in after))
 
-        # Sixteen edges in this synthetic tree: seven identities, six
-        # dependencies on the system JavaScriptCore — every image except
-        # JavaScriptCore itself — and WebCore's three LC_LOAD_WEAK_DYLIB commands.
-        # The one dependency on a real system framework each image carries is what
-        # the preserved count above stands for.
-        plans = module.plan_payload(payload)
-        total = sum(len(rewrites) for _, _, _, _, _, rewrites in plans)
-        check("every planned rewrite is an identity or a dependency on the seven",
-              total == 16, str(total))
+        problems, report = module.verify(root)
+        check("verify finds no problem in the rewritten tree", not problems, repr(problems))
+        check("verify counts eleven /var/jb edges", report["edges"] == 11, str(report["edges"]))
+        check("verify finds all seven identities unchanged",
+              report["identities"] == 7 and not report["mismatched"],
+              repr(report["mismatched"]))
+        check("all seven still carry LC_CODE_SIGNATURE", len(report["signatures"]) == 7)
 
-        problems, signed, identity_kept = module.verify(staging)
-        check("verify finds no problem in the written tree", not problems, repr(problems))
-        check("all seven still carry LC_CODE_SIGNATURE", len(signed) == 7, repr(signed))
-        check("the full shape leaves no identity claiming a system path",
-              not identity_kept, repr(identity_kept))
-
-        for name, _, destination_directory, leaf, _, rewrites in plans:
-            device_path = module.DESTINATION_ROOT + "/" + destination_directory + "/" + leaf
-            original = read(os.path.join(payload, source_directory(name), leaf))
-            rewritten = read(os.path.join(staging, device_path.lstrip("/")))
-            check("%s: length unchanged" % name, len(original) == len(rewritten),
-                  "%d vs %d" % (len(original), len(rewritten)))
-            check("%s: LC_CODE_SIGNATURE offset and size unchanged" % name,
-                  module.signature_command(original) == module.signature_command(rewritten))
-            touched = set()
-            for _, _, _, _, start, capacity in rewrites:
-                touched.update(range(start, start + capacity))
-            # The repair writes page hashes, so those byte ranges are expected to
-            # change too. Nothing else may: a byte changed outside the rewritten
-            # slots and the page-hash arrays is a byte nobody planned, and the
-            # CodeDirectory covers it.
-            for base, _, hash_offset, hash_size, _, n_code, _, _ in module.code_directories(original):
-                touched.update(range(base + hash_offset,
-                                     base + hash_offset + n_code * hash_size))
-            outside = [index for index in range(len(original))
-                       if index not in touched and original[index] != rewritten[index]]
-            check("%s: nothing changed outside the rewritten slots and the page hashes"
-                  % name, not outside, "%d byte(s), first at %s" % (len(outside), outside[:4]))
+        for name, relative, identity in IMAGES:
+            path = os.path.join(root, (module.DEFAULT_PREFIX + "/" + relative).lstrip("/"))
+            data = read(path)
+            check("%s: still calls itself %s" % (name, identity),
+                  identity_of(data) == identity, repr(identity_of(data)))
+            check("%s: no dependency on a sibling still names /System" % name,
+                  not [current for current in dependency_names(data)
+                       if current in module.SYSTEM_ALIASES],
+                  [current for current in dependency_names(data)
+                   if current in module.SYSTEM_ALIASES])
+            check("%s: every edge names a file in the tree" % name,
+                  all(os.path.exists(os.path.join(root, current.lstrip("/")))
+                      for current in dependency_names(data)
+                      if current in set(member_paths().values())))
+            check("%s: Foundation keeps its system path" % name,
+                  FOUNDATION_SYSTEM in dependency_names(data))
             check("%s: every CodeDirectory describes the bytes written" % name,
-                  not module.signature_stale(rewritten))
-            check("%s: both CodeDirectories are still present" % name,
-                  len(list(module.code_directories(rewritten))) ==
-                  len(list(module.code_directories(original))))
-            if rewrites:
-                check("%s: every byte after its name inside the slot is null" % name,
-                      all_all_zero_after_name(rewritten, rewrites))
+                  not module.signature_stale(data))
+            check("%s: LC_CODE_SIGNATURE offset and size unchanged" % name,
+                  module.signature_command(data) == (SIGNATURE_OFFSET, SIGNATURE_SIZE))
 
-        # The identity check reads the written file the way dyld does.
-        for name, _, destination_directory, leaf in module.IMAGES:
-            device_path = module.DESTINATION_ROOT + "/" + destination_directory + "/" + leaf
-            identity = identity_of(read(os.path.join(staging, device_path.lstrip("/"))))
-            check("%s: calls itself the path it occupies" % name,
-                  identity == device_path, repr(identity))
-
-        # WebCore's weak set is what the load order in src/load_chain.c exists to
-        # satisfy, so it is read back rather than assumed: the three weak commands
-        # that name one of the seven have to come out naming /var/jb, and none may
-        # still name /System. A rewrite that skipped one of them leaves the weak
-        # import binding the resident 16.1 copy, which is the failure the order and
-        # the rewrite are both there to prevent.
-        web_core = read(os.path.join(staging, module.DESTINATION_ROOT.lstrip("/"),
-                                     "WebCore.framework", "WebCore"))
-        weak_after = weak_dependencies_of(web_core)
-        check("WebCore keeps exactly three weak dependencies on the seven",
-              len(weak_after) == len(WEAK_DEPENDENCIES), repr(weak_after))
-        # The two checks below would pass on an empty list, so both state the count
-        # first: a tree whose weak commands were dropped would otherwise report
-        # "every one names /var/jb" over nothing, which is one of the regressions
-        # these four checks exist to catch.
-        check("every one of WebCore's three weak dependencies names /var/jb",
-              len(weak_after) == len(WEAK_DEPENDENCIES) and
-              all(path.startswith(module.DESTINATION_ROOT) for path in weak_after),
-              repr(weak_after))
-        check("none of WebCore's weak dependencies still names /System",
-              len(weak_after) == len(WEAK_DEPENDENCIES) and
-              not any(path.startswith("/System") for path in weak_after),
-              repr(weak_after))
-        # A mapping that is missing one of the three is the state a dropped entry
-        # leaves behind, so the expectation must not index the mapping: a KeyError
-        # here would abort this file's remaining checks instead of failing this one.
-        # The placeholder keeps the comparison ordered and names the unmapped string.
-        expected_weak = sorted(module.SYSTEM_TO_DESTINATION.get(name) or
-                               "<unmapped: %s>" % name for name in WEAK_DEPENDENCIES)
-        check("the weak set survived the rewrite unchanged in membership",
-              sorted(weak_after) == expected_weak,
-              "%r vs %r" % (sorted(weak_after), expected_weak))
-
-        # The capacity guard, exercised in process because the seven real
-        # replacements are all strictly shorter than the names they replace: no
-        # payload built from the real strings can reach it. The guard is what
-        # stands between a longer rewrite and a write that runs into the next
-        # load command, so it is held to a replacement that does not fit.
-        tight = os.path.join(work, "tight")
-        build_image(os.path.join(tight, "Library/Frameworks/WebKit.framework", "WebKit"),
-                    IMAGES[6][3], [FOUNDATION_SYSTEM], slot=SLOT)
-        inflated = dict(module.SYSTEM_TO_DESTINATION)
-        inflated[IMAGES[6][3]] = module.DESTINATION_ROOT + "/" + "W" * SLOT
-        original_mapping = module.SYSTEM_TO_DESTINATION
-        module.SYSTEM_TO_DESTINATION = inflated
+        # The capacity guard. The real replacements all fit, so the guard is
+        # exercised with a short source name mapped to a member: the replacement
+        # cannot fit the slot that held it, and a write that overran would
+        # overwrite the next load command.
+        tight = os.path.join(work, "tight", "var/jb/usr/lib/libwebrtc.dylib")
+        build_image(tight, IMAGES[4][2], [(LC_LOAD_DYLIB, "/S/JSC")],
+                    slot=SLOT, dependency_slot=16)
+        module.SYSTEM_ALIASES["/S/JSC"] = "JavaScriptCore"
         try:
-            module.plan_image(os.path.join(tight, "Library/Frameworks/WebKit.framework",
-                                           "WebKit"), "WebKit", True)
+            module.plan_image(tight, "libwebrtc", module.DEFAULT_PREFIX)
         except module.PayloadError as error:
             check("a replacement longer than its slot is refused",
                   "refusing to write" in str(error), str(error))
-            check("the refusal names the slot and the name",
-                  "slot" in str(error) and str(SLOT) in str(error), str(error))
+            check("the refusal names the slot", "slot" in str(error), str(error))
         else:
             check("a replacement longer than its slot is refused", False, "it was accepted")
         finally:
-            module.SYSTEM_TO_DESTINATION = original_mapping
+            del module.SYSTEM_ALIASES["/S/JSC"]
 
-        # Refusal happens while planning, so the tree is never copied.
-        short = os.path.join(work, "short")
-        build_image(os.path.join(short, "Library/Frameworks/WebKit.framework", "WebKit"),
-                    IMAGES[6][3], [FOUNDATION_SYSTEM], slot=SLOT)
-        module.SYSTEM_TO_DESTINATION = inflated
-        try:
-            module.plan_payload(short)
-        except module.PayloadError:
-            blocked = os.path.join(work, "blocked")
-            check("planning stops before anything is copied",
-                  not os.path.exists(blocked))
-        finally:
-            module.SYSTEM_TO_DESTINATION = original_mapping
-
-        # --deps-only is the probe: it must leave the identity claiming the system
-        # name, and verify must report that as the probe's intent rather than as a
-        # problem.
-        probe = os.path.join(work, "probe")
-        result = run("write", payload, probe, "--deps-only")
-        check("--deps-only exits 0", result.returncode == 0, result.stderr)
-        problems, _, identity_kept = module.verify(probe, rewrite_identity=False)
-        check("--deps-only rewrites the nine dependencies and no identity",
-              count_rewrites(probe, module) == 9, str(count_rewrites(probe, module)))
-        check("--deps-only is reported as keeping all seven system identities",
-              len(identity_kept) == 7, repr(identity_kept))
-        check("--deps-only raises no problem of its own", not problems, repr(problems))
-        strict, _, kept = module.verify(probe)
-        check("the full-shape verify rejects the same tree",
-              len(strict) == 7 and not kept, repr(strict[:2]))
-
-        # Writing onto the payload itself would corrupt the package's tree.
-        result = run("write", payload, payload)
-        check("write refuses to use the payload as its own destination",
-              result.returncode == 2, "exit %d" % result.returncode)
-
-        # A signature with one altered page hash is a different failure from a
-        # missing one, and the repair must not be able to paper over it: the check
-        # below makes `verify` report it as a hash problem.
-        broken = os.path.join(work, "broken", "var", "jb", "Library", "WebKit18",
-                              "WebKit.framework")
-        broken_image = os.path.join(broken, "WebKit")
-        build_image(broken_image, IMAGES[6][3], [FOUNDATION_SYSTEM])
-        data = bytearray(read(broken_image))
-        base, _, hash_offset, _, _, _, _, _ = next(iter(module.code_directories(data)))
-        data[base + hash_offset] ^= 0xFF
-        with open(broken_image, "wb") as handle:
+        # A tree with one edge back on /System is refused, which is the reading
+        # the device gives as Symbol not found.
+        partial = os.path.join(work, "partial")
+        shutil.copytree(root, partial)
+        path = os.path.join(partial, "var/jb/Library/Frameworks/WebKit.framework/WebKit")
+        data = bytearray(read(path))
+        for offset, command, size, name in commands_of(bytes(data)):
+            if name == "/var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore":
+                put_name(data, offset, size,
+                         "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore")
+                break
+        with open(path, "wb") as handle:
             handle.write(bytes(data))
-        check("a signature with one altered page hash is reported",
-              bool(module.signature_stale(bytes(data))))
+        problems, _ = module.verify(partial)
+        check("a tree with one edge back on /System is refused",
+              any("still names the system path" in problem for problem in problems),
+              repr(problems[:3]))
 
-        # The rewrite is what makes pages stale, and the repair clears exactly that.
-        # This is the direct reading the write path's assertion rests on: before the
-        # repair the stale set is the rewritten pages, after it the set is empty.
-        original = read(os.path.join(payload, "Library/Frameworks/WebKit.framework", "WebKit"))
-        webkit_plan = next(plan for plan in module.plan_payload(payload) if plan[0] == "WebKit")
-        rewrites = webkit_plan[5]
-        staged_copy = bytearray(original)
-        for _, _, _, replacement, start, capacity in rewrites:
-            encoded = replacement.encode()
-            staged_copy[start:start + capacity] = encoded + b"\0" * (capacity - len(encoded))
-        repaired, stale_seen = module.repair_signature(bytes(staged_copy))
-        page = next(iter(module.code_directories(bytes(staged_copy))))[7]
-        expected = set()
-        for _, _, _, _, start, capacity in rewrites:
-            for index in range(start, start + capacity):
-                expected.add(index // page)
-        found = set(index for _, index in stale_seen)
-        check("the pages stale before the repair are the pages the rewrite changed",
-              found == expected, "%s vs %s" % (sorted(found), sorted(expected)))
-        check("the repair leaves every page hash matching", not module.signature_stale(repaired))
-        check("the repair changes nothing when the signature already matches",
-              module.repair_signature(original)[0] == original)
+        # A tree whose identity moved is refused: an identity rewritten to the
+        # /var/jb path can never answer a /System request.
+        moved = os.path.join(work, "moved")
+        shutil.copytree(root, moved)
+        path = os.path.join(moved,
+                            "var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore")
+        data = bytearray(read(path))
+        for offset, command, size, name in commands_of(bytes(data)):
+            if command == LC_ID_DYLIB:
+                put_name(data, offset, size,
+                         "/var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore")
+                break
+        with open(path, "wb") as handle:
+            handle.write(bytes(data))
+        problems, _ = module.verify(moved)
+        check("a tree whose identity moved off the system name is refused",
+              any("the recorded identity is" in problem for problem in problems),
+              repr(problems[:3]))
 
-    return report()
+        # A signature whose page hash no longer describes the bytes is reported.
+        broken = os.path.join(work, "broken")
+        shutil.copytree(root, broken)
+        path = os.path.join(broken, "var/jb/Library/Frameworks/WebKit.framework/WebKit")
+        data = bytearray(read(path))
+        base, _, hash_offset, _, _, _, _, _ = next(iter(module.code_directories(bytes(data))))
+        data[base + hash_offset] ^= 0xFF
+        with open(path, "wb") as handle:
+            handle.write(bytes(data))
+        problems, _ = module.verify(broken)
+        check("a tree with one altered page hash is refused",
+              any("do not describe the file" in problem for problem in problems),
+              repr(problems[:3]))
 
+        # A tree with one image gone must fail the reading the packager gates on.
+        # The counts fall with the image, so checking them only when nothing is
+        # missing left this one tree passing with a smaller number.
+        short = os.path.join(work, "short")
+        shutil.copytree(root, short)
+        os.remove(os.path.join(short, "var/jb/Library/Frameworks/WebKit.framework/WebKit"))
+        problems, report = module.verify(short)
+        check("a tree missing WebKit is refused",
+              any("WebKit: missing" in problem for problem in problems), repr(problems[:3]))
+        # WebKit carries four of the eleven edges, so the count a reader sees is
+        # the seven the other six images still name.
+        check("a tree missing WebKit falls short of eleven edges",
+              report["edges"] == 7, str(report["edges"]))
+        check("a tree missing WebKit fails the edge count",
+              any("7 /var/jb edge(s)" in problem for problem in problems),
+              repr(problems[:3]))
+        check("a tree missing WebKit fails the identity count",
+              any("6 of 7 identities" in problem for problem in problems),
+              repr(problems[:3]))
+        result = run("verify", short)
+        check("verify exits 1 on a tree missing WebKit", result.returncode == 1,
+              "%d %s" % (result.returncode, result.stdout))
+        check("verify prints no success line for a tree missing WebKit",
+              SUCCESS_LINE not in result.stdout, result.stdout)
 
-def walk(root):
-    for current, _, files in os.walk(root):
-        for name in sorted(files):
-            yield os.path.join(current, name)
+        # An empty tree is the same failure at its extreme, and the one a caller
+        # reaches by pointing at the wrong directory.
+        empty = os.path.join(work, "empty")
+        os.mkdir(empty)
+        result = run("verify", empty)
+        check("verify exits 1 on an empty tree", result.returncode == 1,
+              "%d %s" % (result.returncode, result.stdout))
+        check("verify names all seven as missing in an empty tree",
+              result.stdout.count("missing, expected at") == 7,
+              str(result.stdout.count("missing, expected at")))
+        # One line per missing image, whatever its wording: seven images that are
+        # all absent must produce seven lines and not fourteen. Counting a wording
+        # instead was what let the duplicate go unnoticed, since the second copy
+        # said "FAIL missing X: expected at" and the first said "X: missing".
+        missing_lines = [line for line in result.stdout.splitlines()
+                         if "expected at" in line and "missing" in line]
+        check("verify prints each of the seven missing images on one line",
+              len(missing_lines) == 7, "%d line(s): %r" % (len(missing_lines), missing_lines))
+        check("verify prints no second wording for a missing image",
+              "FAIL missing " not in result.stdout, result.stdout)
+        check("verify fails both counts on an empty tree",
+              "0 /var/jb edge(s) among the seven, 11 expected" in result.stdout
+              and "0 of 7 LC_ID_DYLIB" in result.stdout, result.stdout)
+        check("verify prints no success line for an empty tree",
+              SUCCESS_LINE not in result.stdout, result.stdout)
 
+        # A second run over a rewritten tree changes nothing: the tree a package
+        # ships is the fixed point of the rewrite.
+        settled = state(root)
+        result = run("rewrite", root)
+        check("rewriting a rewritten tree exits 0", result.returncode == 0, result.stderr)
+        check("rewriting a rewritten tree changes no byte", settled == state(root))
+        check("rewriting a rewritten tree reports no edge",
+              "Rewrote 0 edge(s)" in result.stdout, result.stdout)
 
-def source_directory(name):
-    for image_name, directory, _, _ in IMAGES:
-        if image_name == name:
-            return directory
-    raise KeyError(name)
-
-
-def weak_dependencies_of(data):
-    """The LC_LOAD_WEAK_DYLIB names in a written image, in command order.
-
-    Read from the bytes rather than from the plan, because the plan says what was
-    intended and this says what dyld will see. The page hashes change under the
-    rewrite and nothing else, so a name read here is the name that was written.
-    """
-    names = []
-    offset = MACH_HEADER_SIZE_64
-    count, _ = struct.unpack_from("<II", data, 16)
-    for _ in range(count):
-        command, size = struct.unpack_from("<II", data, offset)
-        if command == LC_LOAD_WEAK_DYLIB:
-            name_offset, = struct.unpack_from("<I", data, offset + 8)
-            start = offset + name_offset
-            end = data.index(b"\0", start)
-            names.append(data[start:end].decode())
-        offset += size
-    return names
-
-
-def identity_of(data):
-    offset = MACH_HEADER_SIZE_64
-    count, _ = struct.unpack_from("<II", data, 16)
-    for _ in range(count):
-        command, size = struct.unpack_from("<II", data, offset)
-        if command == LC_ID_DYLIB:
-            name_offset, = struct.unpack_from("<I", data, offset + 8)
-            start = offset + name_offset
-            end = data.index(b"\0", start)
-            return data[start:end].decode()
-        offset += size
-    return None
-
-
-def all_all_zero_after_name(data, rewrites):
-    for _, _, _, replacement, start, capacity in rewrites:
-        encoded = replacement.encode()
-        tail = data[start + len(encoded):start + capacity]
-        if tail.strip(b"\0"):
-            return False
-    return True
-
-
-def count_rewrites(root, module):
-    """How many load commands in a written tree now name a /var/jb path that the
-    source named a system path for. Counts every command kind the rewrite targets,
-    LC_LOAD_WEAK_DYLIB included: WebCore's three weak commands are edges like the
-    strong ones, and leaving them out would let a tree that still binds the 16.1
-    dylibs pass."""
-    rewritten = 0
-    for _, directory, destination_directory, leaf in module.IMAGES:
-        device_path = module.DESTINATION_ROOT + "/" + destination_directory + "/" + leaf
-        data = read(os.path.join(root, device_path.lstrip("/")))
-        offset = MACH_HEADER_SIZE_64
-        count, _ = struct.unpack_from("<II", data, 16)
-        for _ in range(count):
-            command, size = struct.unpack_from("<II", data, offset)
-            if command in (LC_LOAD_DYLIB, LC_ID_DYLIB, LC_LOAD_WEAK_DYLIB):
-                name_offset, = struct.unpack_from("<I", data, offset + 8)
-                start = offset + name_offset
-                end = data.index(b"\0", start)
-                name = data[start:end].decode()
-                if name not in module.SYSTEM_TO_DESTINATION and name.startswith(
-                        module.DESTINATION_ROOT):
-                    rewritten += 1
-            offset += size
-    return rewritten
+    return report_all()
 
 
-def report():
+def report_all():
     if failures:
         print("\n%d rewrite-payload check(s) failed" % len(failures))
         return 1

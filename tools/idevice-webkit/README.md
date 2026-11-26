@@ -83,7 +83,7 @@ rule bears on that question — identity is decided by install name and the resi
 copy wins, and the `/var/jb` copy shares its install name with the shared-cache
 one — but its row for that case is marked not directly measured. So the 31 proves
 a second copy for `libwebrtc`, and for neither of the other two either way. In the
-rewritten tree all three strings are `/var/jb/.../WebKit18`, so the System string
+rewritten tree all three strings are `/var/jb/.../siblings`, so the System string
 is gone and no weak import of the three can name the system image — which is why
 the rewrite, not the ordering alone, is what makes the weak set safe.
 
@@ -101,9 +101,20 @@ class and function lookups go through the global table
 chain's own edges do not need it: each of the seven names its siblings by
 absolute `/var/jb` path.
 
-The paths name `/var/jb/Library/WebKit18`, which `rewrite-payload.py` produces and
-repairs the signature of. Without that rewrite the seven keep their system install
-names and bind the resident 16.1 siblings. See `docs/rewrite-payload.md`.
+The paths are where the package installs the seven: the five frameworks under
+`/var/jb/Library/Frameworks` and the two bare dylibs under `/var/jb/usr/lib`.
+WebKit's is the only `/var/jb` path inside `WebSafeWebKitFilter.dylib`, so the
+file the filter admits the process for and the file this chain opens are one
+file. `rewrite-payload.py` rewrites those same files in place: it points the
+eleven edges among the seven at their `/var/jb` siblings and leaves every
+`LC_ID_DYLIB` claiming its `/System` name, which is what lets dyld's install-name
+dedup answer a later `/System` request with these images. Without that rewrite the
+seven bind the resident 16.1 siblings. See `docs/rewrite-payload.md`.
+
+That makes the seven a self-consistent set that binds to itself. It does not make
+an application run 18.3: an app's main binary binds
+`/System/Library/Frameworks/WebKit.framework/WebKit` at launch, before any
+injected constructor, and that path exists only in the shared cache.
 
 The report states two readings separately, because they are different questions:
 the seven UUIDs are what the chain loaded, and the three system UUIDs are what the

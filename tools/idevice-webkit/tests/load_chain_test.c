@@ -205,10 +205,14 @@ int main(void) {
   check("no step asks for RTLD_LAZY alone, the 0x0001 in the recorded error",
         !any_step_lazy_only);
 
-  /* Property 3: the paths. */
+  /* Property 3: the paths.
+
+     These are the files the package installs, which is also what
+     rewrite-payload.py rewrites in place, so there is one file per image and no
+     second tree for the loader to choose between. A path outside the install
+     prefix would name a file no package writes. */
   int every_path_absolute = 1;
-  int every_path_rewritten = 1;
-  int every_path_device_root = 0;
+  int every_path_installed = 0;
   for (int index = 0; index < load_chain_count; index++) {
     const char *path = load_chain_paths[index];
     if (path[0] != '/') {
@@ -217,19 +221,23 @@ int main(void) {
     if (strstr(path, "@rpath") != NULL) {
       every_path_absolute = 0;
     }
-    if (strstr(path, "/var/jb/Library/WebKit18/") == path + 0 || strncmp(
-            path, "/var/jb/Library/WebKit18/", strlen("/var/jb/Library/WebKit18/")) == 0) {
-      every_path_device_root++;
-    }
-    /* The payload's own tree is deliberately not used: those images carry the
-       system install names, so loading them reproduces the recorded failure. */
-    if (strncmp(path, "/var/jb/Library/Frameworks/", strlen("/var/jb/Library/Frameworks/")) == 0) {
-      every_path_rewritten = 0;
+    if (strncmp(path, "/var/jb/Library/Frameworks/", strlen("/var/jb/Library/Frameworks/")) == 0 ||
+        strncmp(path, "/var/jb/usr/lib/", strlen("/var/jb/usr/lib/")) == 0) {
+      every_path_installed++;
     }
   }
   check("every path is absolute and carries no @rpath", every_path_absolute);
-  check("every path is under the rewritten tree, not the package's",
-        every_path_device_root == load_chain_count && every_path_rewritten);
+  check("every path is a file the package installs, so the rewrite reaches it",
+        every_path_installed == load_chain_count);
+
+  /* WebKit's path is the one the ellekit filter admits the process for:
+     /var/jb/Library/Frameworks/WebKit.framework/WebKit is the only /var/jb path
+     in WebSafeWebKitFilter.dylib, measured on the device. If the chain opened a
+     different file the filter would admit the process and this chain would load
+     something else. */
+  check("the last step is the path the filter names",
+        strcmp(load_chain_paths[load_chain_count - 1],
+               "/var/jb/Library/Frameworks/WebKit.framework/WebKit") == 0);
 
   /* Property 4: a JavaScriptCore failure stops the chain. */
   reset();

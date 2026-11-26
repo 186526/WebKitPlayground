@@ -26,14 +26,25 @@
    another of the seven has to resolve to the 18.3 copy, which is what
    rewrite-payload.py produces and what tests/load_chain_test.c asserts.
 
-   WHY THESE PATHS AND NOT THE PACKAGE'S
+   WHY THESE PATHS
 
-   load_chain_paths names the rewritten tree under /var/jb/Library/WebKit18, not
-   the payload under /var/jb/Library/Frameworks. The two differ in a way that
-   matters: the payload's images carry the system install names and system
-   dependency strings, so loading them binds the 16.1 siblings. The rewritten
-   copies name themselves and each other by /var/jb paths. Loading the payload's
-   paths would reproduce the recorded failure exactly.
+   load_chain_paths names the files the package installs: the five frameworks
+   under /var/jb/Library/Frameworks and the two bare dylibs under /var/jb/usr/lib.
+   WebKit's is the path the ellekit filter names, so the file the filter admits
+   the process for and the file this chain opens are one file.
+
+   Those same files are what rewrite-payload.py rewrites, in place. The payload as
+   it ships carries the system dependency strings, so an image opened by its
+   /var/jb path binds the 16.1 siblings and reproduces the recorded failure. After
+   the rewrite the eleven edges among the seven name /var/jb paths, and
+   LC_ID_DYLIB still carries the /System name, which is what lets dyld's
+   install-name dedup answer a later /System request with these images.
+
+   The two statements are separate. These paths make the seven load and bind to
+   one another; they do not make an application run 18.3, because an application's
+   main binary carries /System/Library/Frameworks/WebKit.framework/WebKit as a
+   static binding that dyld resolves before any injected constructor runs. See
+   docs/rewrite-payload.md.
 
    WHY THIS WORKS WITH NO HOOK AND NO ENVIRONMENT VARIABLE
 
@@ -83,10 +94,10 @@
    took the count to 0 moved those two dylibs ahead of WebCore, and the count
    itself is libwebrtc's duplicate-class warnings alone: libwebrtc carries the
    WK_RTC names, WebGPU carries none, and libANGLE-shared defines no classes. So
-   WebGPU, the third weak dependency and step 6, is untested as a variable. In the
-   rewritten tree the three strings are /var/jb/.../WebKit18, so the /System string
-   WebCore used to name is gone and no weak import of the three can reach a 16.1
-   image.
+   WebGPU, the third weak dependency and step 6, is untested as a variable. After
+   the rewrite the three strings name their /var/jb siblings, so the /System
+   string WebCore used to name is gone and no weak import of the three can reach
+   a 16.1 image.
 
    WHAT IS MEASURED AND WHAT IS NOT. The order is measured: build-state.md 第八轮
    took the duplicate count from 31 to 0 at 7/7 with this sequence. What that
