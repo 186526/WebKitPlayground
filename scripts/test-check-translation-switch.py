@@ -139,35 +139,40 @@ diff --git a/Source/WebKit/Platform/IPC/Connection.h b/Source/WebKit/Platform/IP
 +bool m_shouldTranslateMessageNames { false };
 +void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }
 diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp
-+// dense enumeration over every message in the tree, so 946 more entries inserted
-+// anywhere before a name reassigns the numbers after them.
-+// This tree has 4086 numbers. Read against the shipped 16.1 enumeration
-+// (releases/Apple/Safari-16.1-iOS-16.1, 3185 numbers) only 5 land on a message
-+// with the same name, 3180 land on a different message, and 901 fall off its end.
-+// built on tag Safari-614.1.9, which holds 3140 numbers; see the paragraph on
-+// that tag below. Read against 614.1.9 the same measurement gives 5, 3135 and
-+// 946. Both readings are here because both matter.
-+// basis, so both are named. `InitializeConnection` is number 3076 in this tree.
-+// The incoming table switches over the older numbering and answers case 3076
-+// with MessageName::WebPageProxy_RootViewToAccessibilityScreen, the message that
-+// occupies 3076 in 614.1.9. Against the shipped 16.1 enumeration the same number
-+// instead names MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged,
-+// which is what a peer running that build would be misread as.
++// `MessageName` is a dense enumeration over every message in the tree: this one has 4086 entries
++// and the shipped 16.1 enumeration has 3185, so 4086 - 3185 = 901 entries were inserted, and any
++// one of them landing before a name reassigns that name and every number after it.
++// This tree has 4086 numbers and the shipped 16.1 enumeration
++// (releases/Apple/Safari-16.1-iOS-16.1) has 3185, so no 16.1 number falls off this enumeration's
++// end. Of the 2911 names the two enumerations share, 5 happen to carry the same number on both
++// sides and 2906 do not. 274 names exist only in 16.1 and 1175 only in this tree.
++// `InitializeConnection` is number 3076 in this tree. The shipped 16.1 enumeration
++// puts it at 2478, and 2478 is the entry the incoming table needs for it:
++// `case 2478: return MessageName::InitializeConnection;`. Against the shipped 16.1 enumeration
++// the number at this build's 3076 is
++// MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged, which is what an
++// incoming 16.1 number 3076 would become.
 +// ConnectionCocoa.mm's `decoder->messageName() == MessageName::InitializeConnection`
 +// then never fires and the connection never completes its handshake.
-+// whose anchors are firstSynchronousOldMessageNumber 2899, InitializeConnection
-+// 2444 and Last 3139. That is not the 16.1 the device runs. The device runs
-+// releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10), which has 3185 numbers and
-+// anchors 2946, 2478 and 3184. Every one of those three numbers differs: 45 at
-+// Last, 34 at InitializeConnection and 47 at the first synchronous message.
-+// So these tables are a 16.0-generation snapshot, not 16.1.
-+    case MessageName::InitializeConnection: return static_cast<MessageName>(2444);
-+    case MessageName::WebPageProxy_RootViewToAccessibilityScreen: return static_cast<MessageName>(3076);
-+    case MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged: return static_cast<MessageName>(3024);
-+    case MessageName::WrappedAsyncMessageForTesting: return static_cast<MessageName>(3139);
-+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;
-+    case 3024: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;
-+    case 2899: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;
++// The tables this file carries are generated from that shipped 16.1 tag. Its anchors are
++// firstSynchronousOldMessageNumber 2946, InitializeConnection 2478 and Last 3184, all three read
++// out of the header that tag's own generate-message-receiver.py wrote. The boundary is
++// Read from the 16.1 header's own messageIsSync comparison rather than counted here.
++// The older side is generated from releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10), the same
++// build the system framework on the device is.
++// One message this build cannot map is worth naming. In the shipped 16.1 enumeration `Terminate`
++// is number 2483, and 2483 is in this file's isKnownUnmappedIncomingNumber list.
++// Outside the newer synchronous section 852 of the 1126 that are outside it carry a number at or
++// below `Last`, so the peer would not reject them at all.
++    case MessageName::InitializeConnection: return static_cast<MessageName>(2478);
++    case MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged: return static_cast<MessageName>(3076);
++    case MessageName::WebSharedWorkerServerConnection_SuspendForBackForwardCache: return static_cast<MessageName>(2444);
++    case MessageName::WrappedAsyncMessageForTesting: return static_cast<MessageName>(3184);
++    case 2478: return MessageName::InitializeConnection;
++    case 3076: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;
++    case 2444: return MessageName::WebSharedWorkerServerConnection_SuspendForBackForwardCache;
++    case 3184: return MessageName::WrappedAsyncMessageForTesting;
++    case 2946: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;
 diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp
 +    if (m_shouldTranslateMessageNames) {
 +        auto name = encoder->messageName();
@@ -707,60 +712,80 @@ GUARD_WITH_CAST_FIRST_LINE = (
 # replace. This is the wrap the line-at-a-time check used to miss.
 FOLDED_CALL = "+    m_connection->setShouldTranslateMessageNames\n+        (true);\n"
 
-# The five needles that used to be bare numbers, and the wrong value each must now fail on. Every
-# number here is also a real case label in the tables, which is why a needle that searched the whole
-# patch matched whatever the prose said.
+# The needles that used to be bare numbers, and the wrong value each must now fail on. Every number
+# here is also a real case label in the tables, which is why a needle that searched the whole patch
+# matched whatever the prose said.
 DRIFTED_COUNTS = (
-    ("the beyond-range count against shipped 16.1", "and 901 fall off", "and 903 fall off"),
-    ("the net growth over the 614.1.9 snapshot", "946 more entries", "948 more entries"),
-    ("the different-message and beyond-range counts against the 614.1.9 basis",
-     "gives 5, 3135 and", "gives 5, 3134 and"),
+    ("the entry-count difference, written as a subtraction",
+     "4086 - 3185 = 901 entries", "4086 - 3186 = 900 entries"),
+    ("the two one-sided counts", "1175 only in this tree", "1174 only in this tree"),
+    ("the same-number count of the index comparison",
+     "5 happen to carry the same number", "6 happen to carry the same number"),
 )
 
-ROOT_VIEW = "MessageName::WebPageProxy_RootViewToAccessibilityScreen"
 VIDEO_FRAME = "MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"
+ROOT_VIEW = "MessageName::WebPageProxy_RootViewToAccessibilityScreen"
 SWAPPED_NAMES = (
-    BASE.replace("with " + ROOT_VIEW, "with " + VIDEO_FRAME)
-    .replace("names " + VIDEO_FRAME, "names " + ROOT_VIEW)
+    BASE.replace("is " + VIDEO_FRAME, "is " + ROOT_VIEW)
+    .replace("`case 2478: return MessageName::InitializeConnection;`",
+             "`case 2478: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;`")
 )
 
-# The bare markers that stayed behind when the first five needles were fixed. Each must now fail on a
-# sentence deletion or a value change, which is what "the needle is unique and necessary" means.
+# Each must fail on a sentence deletion or a value change, which is what "the needle is unique and
+# necessary" means.
 SENTENCE_NEEDLES = (
     (
         "a patch that deletes the InitializeConnection-is-3076 sentence fails",
-        "// basis, so both are named. `InitializeConnection` is number 3076 in this tree.\n",
-        "// basis, so both are named. The connection handshake is the message discussed here.\n",
+        "// `InitializeConnection` is number 3076 in this tree. The shipped 16.1 enumeration\n",
+        "// The connection handshake is the message discussed here.\n",
         "InitializeConnection is 3076 in this tree",
     ),
     (
-        "a patch that drifts 3180 to 3181 fails",
-        "+// with the same name, 3180 land on a different message",
-        "+// with the same name, 3181 land on a different message",
-        "the different-message count against shipped 16.1",
+        "a patch that drifts 2906 to 2905 fails",
+        "+// sides and 2906 do not",
+        "+// sides and 2905 do not",
+        "the different-number count",
     ),
     (
-        "a patch that retags Safari-614.1.9 fails",
-        "+// built on tag Safari-614.1.9, which holds 3140 numbers",
-        "+// built on tag Safari-614.2.0, which holds 3140 numbers",
-        "the tag the tables were generated from",
+        "a patch that retags the shipped 16.1 tag fails",
+        "+// (releases/Apple/Safari-16.1-iOS-16.1) has 3185",
+        "+// (releases/Apple/Safari-16.2-iOS-16.2) has 3185",
+        "the shipped 16.1 enumeration's size and tag",
+    ),
+    (
+        "a patch that drifts the incoming InitializeConnection case fails",
+        "// `case 2478: return MessageName::InitializeConnection;`",
+        "// `case 2479: return MessageName::InitializeConnection;`",
+        "that incoming case written out",
     ),
 )
 
-# P2-2's two cases: the table can be retargeted or renumbered while the prose still reads correctly,
-# which is exactly the silent rename this check exists to prevent.
+# The table can be retargeted or renumbered while the prose still reads correctly, which is exactly
+# the silent rename this check exists to prevent.
 TABLE_CASES = (
     (
         "a patch that retargets incoming case 3076 at another real message fails",
+        "+    case 3076: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;\n",
         "+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;\n",
-        "+    case 3076: return MessageName::WebPageProxy_RootViewToScreen;\n",
-        "3076 declares WebPageProxy_RootViewToAccessibilityScreen",
+        "3076 declares RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged",
     ),
     (
         "a patch that renumbers incoming case 3076 to 3075 fails",
-        "+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;\n",
-        "+    case 3075: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;\n",
-        "no entry for 3076 declares WebPageProxy_RootViewToAccessibilityScreen",
+        "+    case 3076: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;\n",
+        "+    case 3075: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;\n",
+        "no entry for 3076 declares RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged",
+    ),
+    (
+        "a patch that retargets the handshake's outgoing number fails",
+        "+    case MessageName::InitializeConnection: return static_cast<MessageName>(2478);\n",
+        "+    case MessageName::InitializeConnection: return static_cast<MessageName>(2444);\n",
+        "InitializeConnection translates to its shipped 16.1 number",
+    ),
+    (
+        "a patch that gives 2444 back to the handshake fails",
+        "+    case 2444: return MessageName::WebSharedWorkerServerConnection_SuspendForBackForwardCache;\n",
+        "+    case 2444: return MessageName::InitializeConnection;\n",
+        "the message that owns the number the handshake used to be translated to",
     ),
 )
 
@@ -789,26 +814,26 @@ CASES = (
     ("the setter's declaration passes", BASE + DECLARATION, 0, None),
     ("a macro initialiser fails", BASE + MACRO_INITIALISER, 1, "initialiser is not the literal false"),
     (
-        "a patch that drops the wrong-tag fact fails",
-        BASE.replace("Safari-614.1.9", "the current 16.1 tag"),
+        "a patch that drops the tag fact fails",
+        BASE.replace("(releases/Apple/Safari-16.1-iOS-16.1) has 3185", "(that release) has 3185"),
         1,
         "no longer records",
     ),
     (
         "a patch that drops the measured counts fails",
-        BASE.replace("3180", "many"),
+        BASE.replace("2906 do not", "many do not"),
         1,
         "no longer records",
     ),
     (
-        "a patch that calls the tables 16.1 without qualifying it fails",
-        BASE + "+// This table is the 16.1 numbering.\n",
+        "a patch that puts the snapshot back as the tables' basis fails",
+        BASE + "+// These tables come from the Safari-614.1.9 snapshot.\n",
         1,
-        "without saying which 16.1",
+        "16.0-generation snapshot",
     ),
     (
-        "the same claim qualified by the tag passes",
-        BASE + "+// This table is the 614.1.9 numbering.\n",
+        "the same mention allowed as superseded passes",
+        BASE + "+// An earlier table came from the Safari-614.1.9 snapshot and was wrong.\n",
         0,
         None,
     ),
@@ -1817,13 +1842,15 @@ def check_needles_are_unique_and_necessary() -> int:
         "+void setShouldTranslateMessageNames(bool shouldTranslate) { m_shouldTranslateMessageNames = shouldTranslate; }",
         "diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC/Encoder.cpp",
         "+// " + prose,
-        "+    case MessageName::InitializeConnection: return static_cast<MessageName>(2444);",
-        "+    case MessageName::WebPageProxy_RootViewToAccessibilityScreen: return static_cast<MessageName>(3076);",
-        "+    case MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged: return static_cast<MessageName>(3024);",
-        "+    case MessageName::WrappedAsyncMessageForTesting: return static_cast<MessageName>(3139);",
-        "+    case 3076: return MessageName::WebPageProxy_RootViewToAccessibilityScreen;",
-        "+    case 3024: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;",
-        "+    case 2899: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;",
+        "+    case MessageName::InitializeConnection: return static_cast<MessageName>(2478);",
+        "+    case MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged: return static_cast<MessageName>(3076);",
+        "+    case MessageName::WebSharedWorkerServerConnection_SuspendForBackForwardCache: return static_cast<MessageName>(2444);",
+        "+    case MessageName::WrappedAsyncMessageForTesting: return static_cast<MessageName>(3184);",
+        "+    case 2478: return MessageName::InitializeConnection;",
+        "+    case 3076: return MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged;",
+        "+    case 2444: return MessageName::WebSharedWorkerServerConnection_SuspendForBackForwardCache;",
+        "+    case 3184: return MessageName::WrappedAsyncMessageForTesting;",
+        "+    case 2946: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;",
         "diff --git a/Source/WebKit/Platform/IPC/Connection.cpp b/Source/WebKit/Platform/IPC/Connection.cpp",
         "+    if (m_shouldTranslateMessageNames) {",
         "+        auto name = encoder->messageName();",
