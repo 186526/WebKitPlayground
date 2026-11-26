@@ -144,9 +144,10 @@ the file that defines peerIsOlderGeneration().
 Exit 0 when the setter call is the single guarded one, it is outside every preprocessor conditional
 and before `m_connection->open(`, its predicate is defined with all three width branches writing the
 flag, the reads ask the member, the rationale is present, the table anchors hold and every hunk header
-matches its body; 1 on any violation, including a bootstrap patch that cannot be read, because
-check_predicate_is_defined reports that as a violation rather than as a usage error; 2 when the
-translation patch named by `--patch` cannot be read.
+matches its body; 1 on any violation, including a bootstrap patch that cannot be read or decoded,
+because check_predicate_is_defined reports that as a violation rather than as a usage error; 2 when
+the translation patch named by `--patch` cannot be read or decoded. A file that is not UTF-8 fails
+each check the same way a missing one does: both are read errors, so neither escapes as a traceback.
 """
 from __future__ import annotations
 
@@ -1707,7 +1708,7 @@ def check_predicate_is_defined(patch: str, bootstrap_patch: Path) -> list[Violat
     """
     try:
         bootstrap = bootstrap_patch.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         return [
             Violation(
                 "the predicate's definition patch cannot be read",
@@ -1912,7 +1913,7 @@ def check_hunk_counts(patch: str) -> list[Violation]:
 def run(patch_path: Path, bootstrap_patch: Path | None = None) -> int:
     try:
         patch = patch_path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         print("check-translation-switch: cannot read %s: %s" % (patch_path, error), file=sys.stderr)
         return 2
 
