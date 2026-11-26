@@ -1277,10 +1277,9 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 # two counts as unsigned counters and decrements them line by line, so a wrong count is never
 # reported as a wrong count.
 #
-# The outcome of a wrong count is not decided by which side runs long. What the counts themselves do
-# was measured in two shapes: a counter decremented after it reached zero wraps, and a counter still
-# positive when the body ends stays positive. Both stop the parse with
-# `corrupt patch at <patch>:<line>` and rc 128. A third shape leaves the parse cleanly: the read
+# What the counters themselves do was measured in two shapes: a counter decremented after it reached
+# zero wraps, and a counter still positive when the body ends stays positive. Both stop the parse
+# with `corrupt patch at <patch>:<line>` and rc 128. A third shape leaves the parse cleanly: the read
 # stops at the body line that takes the second counter to zero, and every line after it is never
 # parsed — not read and rejected, never looked at. Two counters reaching zero on the same line is not
 # required for that: `@@ -1,1 +1,2 @@` over `-a` / `+A` / `+B` parses because the old counter
@@ -1322,10 +1321,9 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 #
 # So a wrong count does not have one outcome, and the rows above are the ones measured: it applies
 # correctly, applies with a later edit never parsed, reports `patch does not apply`, or stops with
-# `corrupt patch`. Which of those four the counts reach follows from the counters where the body's
-# lines allow it, and from the lines the target file happens to have where they do not. Hunk kind
-# decides none of the four, but it does decide whether the patch gets that far: the new-file check in
-# `parse_single_patch` above turns a shape that applies as a modification into a fatal new-file hunk.
+# `corrupt patch`. Hunk kind decides none of the four, but it does decide whether the patch gets that
+# far: the new-file check in `parse_single_patch` above turns a shape that applies as a modification
+# into a fatal new-file hunk.
 #
 # Both hunks that prompted this check had a header their body outgrew, and the two did not share an
 # outcome. The new-file hunk at b70ce36 declared `@@ -0,0 +1,184 @@` over a 194-line body: its old
@@ -1337,7 +1335,7 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 # truncated output was never reached.
 #
 # That is what earns this check its place. `git apply` reports a consequence — a corrupt patch, a
-# refused context, or nothing at all — and two of the four outcomes leave a short file and a success
+# refused context, or nothing at all — and one of the four outcomes leaves a short file and a success
 # status. `check_hunk_counts` is the only gate that reports the header itself, with its line number
 # and both counts, so the diagnosis names the line to edit.
 #
