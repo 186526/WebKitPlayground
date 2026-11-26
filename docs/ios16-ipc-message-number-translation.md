@@ -389,11 +389,11 @@ bool m_shouldTranslateMessageNames { false };
 
 ```cpp
 m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
-#if IOS_16_MESSAGE_NUMBER_TRANSLATION
-    if (peerIsOlderGeneration()) {
-        m_connection->setShouldTranslateMessageNames(true);
-    }
-#endif
+// peerIsOlderGeneration() 与 setShouldTranslateMessageNames() 都无条件声明，调用不包 #if：
+// IOS_16_MESSAGE_NUMBER_TRANSLATION 定义在本文件看不到的头里，包上去会让整段调用被预处理掉。
+if (peerIsOlderGeneration()) {
+    m_connection->setShouldTranslateMessageNames(true);
+}
 initializeConnection(m_connection.get());
 m_connection->open(*this);
 ```
@@ -412,7 +412,24 @@ m_connection->open(*this);
 
 静态量零初始化，所以「UI 进程没有发位图」读成 `false`，即不翻译。方向选得对：需要翻译的连接如果没翻，握手会立刻失败，是可观察的；不需要翻译的连接被翻了，失败是静默的。
 
-**盲区必须写清。** 宽度只把 16.0 到 16.3（8 字节）与 16.4 及以后（12 字节）分开。16.4、17.0、18.0 到 18.2 与本构建同为 12 字节，被判为同代，**不会翻译**。本项目不做这样的配对，所以盲区不影响已交付的两种形态，但它是一个真实的上限：一个 16.4 或 17.x 的 UI 进程配本构建，会走进「同代」分支，握手按未翻译的编号比较，与今天不装补丁的表现相同。
+**宽度判据有两个盲区，方向相反，都不是本项目交付的配对。** 宽度只把 16.0 到 16.3（8 字节）与 16.4 及以后（12 字节）分开，所以两种误判各自成立。
+
+第一个是假阴性：16.4、17.0、18.0 到 18.2 与本构建同为 12 字节，被判为同代，**不会翻译**。一个 16.4 或 17.x 的 UI 进程配本构建，握手按未翻译的编号比较，与今天不装补丁的表现相同。
+
+第二个是假阳性，同样要写清：16.0、16.2 与 16.3 也是 8 字节，被判为更早的世代，**会被翻译**，而它们用的是 16.1 的编号表。用 `scripts/regen-ipc-message-number-headers.py` 对这三个 tag 各生成一份头文件后读到，`InitializeConnection` 在 16.0 是 2472、在 16.2 与 16.3 是 2485，而表里写的是 2478：三条连接都会把 `InitializeConnection` 翻成别的消息或翻错号。这不是「更安全的方向」，只是另一种错，只是这三个版本也不在本项目的交付配对里。
+
+三份头文件的读数，供复核：
+
+| tag | 生成条目 | `#if` | `InitializeConnection` | `GPUConnectionToWebProcess_EnsureAudioSession` |
+| --- | --- | --- | --- | --- |
+| `Safari-16-iOS-16.0` | 3174 | 0 | 2472 | 2936 |
+| `Safari-16.1-iOS-16.1` | 3185 | 0 | 2478 | 2946 |
+| `Safari-16.2-iOS-16.2` | 3192 | 0 | 2485 | 2953 |
+| `Safari-16.3-iOS-16.3` | 3193 | 0 | 2485 | 2953 |
+
+`Safari-16.4-iOS-16.4` 的头文件有 655 个 `#if`，生成器的断言拒绝它（表只能按声明顺序读一侧，这个前提只在计数为 0 时成立），所以 16.4 的编号本轮没有算，而它落在 12 字节那一侧，本来就不翻译。
+
+要同时分开这两个方向需要比宽度更细的信号：位图长度只有 8 与 12 两种取值，而同一个长度下面挂着不止一个世代。
 
 **两种形态都靠同一个判据分开，不靠编译期开关。** 路线 B 两侧都是本构建，位图等宽，`peerIsOlderGeneration()` 为假，开关保持关闭；路线 A 的 UI 是 `/System` 的 16.1，位图 8 字节，为真，开关打开。设备上的实测读数（`ios16-patched-dyld-install-and-verify.md:501-515`）就是路线 A：MobileSafari 加载 `/System`，WebContent 与 Networking 加载 `/var/jb`。
 
@@ -748,9 +765,15 @@ patches=25 applied=23 skipped=2 fail=0
 
 **（i）16.1 的真实 `MessageName` 编号不是从设备二进制里取出来的。** 两张表的 16.1 一侧来自 `releases/Apple/Safari-16.1-iOS-16.1` 这个 tag 自带的生成器输出（`scripts/regen-ipc-message-number-headers.py`），四个锚点 `InitializeConnection`=2478、`GPUConnectionToWebProcess_EnsureAudioSession`=2946、`WrappedAsyncMessageForTesting`=3184、`Last`=3184 是从这份生成出来的头文件读的，不是从设备上 `/System/Library/Frameworks/WebKit.framework/WebKit` 反查的。若设备上的系统 WebKit 不是 `614.2.9.0.10`，这四个数都要重算。定案方法二选一：从设备二进制反查枚举，或对运行中的 UI 进程 dump 一条已知消息头部的第 2、3 字节。
 
-**（ii）`sdkAlignedBehaviors()` 在 16.1 的 UI 进程里实际返回 8 字节这件事没有测过。** 这个宽度是判据的唯一依据，而它现在只是按 `SDKAlignedBehavior` 的枚举个数推出来的（16.0 与 16.1 是 63 个 behavior，`Bitmap<63, uint32_t>` 占 8 字节；本构建 94 个，占 12 字节）。设备上的验证方法：在 16.1 的 MobileSafari 进程里读 `SDKAlignedBehaviors::storageLengthInBytes()`，或在 helper 的日志里读 `getClientSDKAlignedBehaviors` 写下的那两条 `RELEASE_LOG_ERROR`。**在这一条被实测之前，判据在真机上是否触发是未知的**，不是「应当触发」。
+**（ii）`sdkAlignedBehaviors()` 在 16.1 的 UI 进程里实际返回 8 字节这件事没有测过。** 这个宽度是判据的唯一依据，而它现在只是按 `SDKAlignedBehavior` 的枚举个数推出来的：`Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h` 里 `enum class SDKAlignedBehavior` 到 `};` 之间的枚举行，16.0 与 16.1 是 63 行，16.2 与 16.3 是 64 行，`Bitmap<63, uint32_t>` 与 `Bitmap<64, uint32_t>` 都占 8 字节；本构建 94 个，占 12 字节。设备上的验证方法：在 16.1 的 MobileSafari 进程里读 `SDKAlignedBehaviors::storageLengthInBytes()`，或在 helper 的日志里读 `getClientSDKAlignedBehaviors` 写下的那两条 `RELEASE_LOG_ERROR`。**在这一条被实测之前，判据在真机上是否触发是未知的**，不是「应当触发」。
 
-**（iii）宽度判据对 16.4 到 17.x 的盲区没有量化。** 16.4 是 73 个 behavior、17.0 是 79 个、18.0 是 93 个、本构建 94 个，四者都是 12 字节，宽度分不开，所以这类 UI 进程配本构建会被判为同代、不翻译。盲区的大小取决于「有多少种 UI 进程组合会落进这个区间」，而本项目只交付「16.1 UI 配本构建」与「本构建配本构建」两种，所以盲区在这两种形态里不出现。量化它需要一个 16.4 或 17.x 的设备，本轮没有。
+**（iii）宽度判据两侧的盲区都没有量化。** 宽度只把 8 字节与 12 字节分成两组，每个组里挂着多个世代，所以误判有两个方向。
+
+假阴性一侧：16.4 是 73 个 behavior、17.0 是 79 个、18.0 到 18.2 也都是 12 字节，与本构建（94 个）等宽，被判为同代、**不翻译**。一个 16.4 或 17.x 的 UI 进程配本构建，握手按未翻译的编号比较，与今天不装补丁的表现相同。
+
+假阳性一侧：16.0、16.2 与 16.3 只有 8 字节，被判为更早的世代、**会被翻译**，而它们用的是 16.1 的编号表。用 `scripts/regen-ipc-message-number-headers.py` 对三个 tag 各生成一份头文件后读到，`InitializeConnection` 在 16.0 是 2472、在 16.2 与 16.3 是 2485，表里写的是 16.1 的 2478，三条连接都会翻成别的消息或翻错号。这个方向不比另一个安全，只是错法不同。
+
+两个方向都不在本项目的交付配对里：本项目只交付「16.1 UI 配本构建」与「本构建配本构建」两种形态，前者 8 字节对 12 字节、后者等宽，都落在判据能分开的位置。**但这只说明两种交付形态不落入盲区，不说明盲区不存在**，也不构成「宽度判据等价于世代判据」的理由。量化任一方向都需要相应版本的真机，本轮没有。
 
 **消息编号的真实编译值没有取到。** 本文 18.3 的所有编号都是把 `MessageNames.h` 当平坦下标读出来的，而 18.3 的生成器会输出 `#if` 条件（`/tmp/t4gen/regen/Names18.h` 共 703 个 `#if`），被条件剔除的条目会让后续编号前移。举一个本机算过的例子：`InitializeConnection` 在 18.3 的平坦下标是 3076，但它被 `#if PLATFORM(COCOA)` 包住，且它之前有大量位于 `PLATFORM(MAC)`、`PLATFORM(GTK)`、`OS(LINUX)` 等 iOS 上为假的分支，iOS 编译后的真实编号小于 3076。
 

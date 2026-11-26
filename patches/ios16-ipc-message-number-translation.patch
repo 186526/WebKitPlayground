@@ -8289,19 +8289,19 @@ index 30487740bbe50..ebf65fdbb37b3 100644
 +    // of the SDK aligned behavior bitmap it sent is the one run-time signal that separates that case.
 +    // XPCServiceEntryPoint.mm records it before this function runs, so the answer is already in place.
 +    //
-+    // This is not the deployment target speaking. IOS_16_MESSAGE_NUMBER_TRANSLATION keys on the
-+    // deployment target, which is 16.1 for every build this project makes, so it is constant here and
-+    // decides nothing about a peer.
++    // Nothing here is wrapped in IOS_16_MESSAGE_NUMBER_TRANSLATION. That macro is defined in
++    // MessageNumberTranslation.h, which this file does not include, so an #if on it here evaluates to
++    // zero and would silently drop the call. The setter and the predicate are both declared
++    // unconditionally, so the block compiles either way and needs no condition.
 +    //
-+    // The blind spot belongs to the width test: 16.0 through 16.3 send 8 bytes and 16.4 onwards send
-+    // 12, so a 16.4 or 17.x UI process paired with this build reads as same-generation and is not
-+    // translated. This project builds no such pairing, and separating those releases would need a
++    // The width has two blind spots, in opposite directions, and neither is a pairing this project
++    // ships. 16.4 through 18.2 send 12 bytes, so their UI process reads as same-generation and is not
++    // translated. 16.0, 16.2 and 16.3 send the same 8 bytes as 16.1, so they read as older and are
++    // translated with 16.1 tables that do not match their numbering. Telling them apart would need a
 +    // signal narrower than the width.
-+#if IOS_16_MESSAGE_NUMBER_TRANSLATION
 +    if (peerIsOlderGeneration()) {
 +        m_connection->setShouldTranslateMessageNames(true);
 +    }
-+#endif
      initializeConnection(m_connection.get());
      m_connection->open(*this);
  }

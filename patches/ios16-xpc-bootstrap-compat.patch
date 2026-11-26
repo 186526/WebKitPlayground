@@ -2,7 +2,7 @@ diff --git a/Source/WebKit/Shared/AuxiliaryProcess.h b/Source/WebKit/Shared/Auxi
 index e0329d9..dbf3011 100644
 --- a/Source/WebKit/Shared/AuxiliaryProcess.h
 +++ b/Source/WebKit/Shared/AuxiliaryProcess.h
-@@ -213,5 +213,16 @@ struct AuxiliaryProcessInitializationParameters {
+@@ -213,5 +213,18 @@ struct AuxiliaryProcessInitializationParameters {
  #endif
  };
  
@@ -12,9 +12,11 @@ index e0329d9..dbf3011 100644
 +// process by XPCServiceEntryPoint.mm, read once by AuxiliaryProcess::initialize.
 +//
 +// The width test separates 16.0 through 16.3, which send two words, from 16.4 onwards, which send
-+// three. A 16.4 or 17.x peer therefore reads as same-generation and is not translated; that is the
-+// blind spot of the signal, not of this call. The builds this project ships are only ever paired
-+// with a 16.1 UI process or with another copy of this build, and the width settles both.
++// three. It does not separate generations inside either group: a 16.4 or 17.x peer reads as
++// same-generation and is not translated, while a 16.0, 16.2 or 16.3 peer reads as older and gets
++// translated with 16.1 tables that do not match its numbering. Both are blind spots of the signal,
++// not of this call. The pairings this project ships, a 16.1 UI process with this build and this
++// build with another copy of itself, sit on opposite sides of the width and are settled by it.
 +bool peerIsOlderGeneration();
 +
  } // namespace WebKit

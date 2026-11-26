@@ -120,6 +120,9 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 SCRIPT = SCRIPTS / "check-translation-switch.py"
 REAL_PATCH = SCRIPTS.parent / "patches" / "ios16-ipc-message-number-translation.patch"
+# The patch that defines the predicate the call is guarded by. The checker reads it too, so this file
+# exercises the rule that ties the call to its definition rather than only the call itself.
+REAL_BOOTSTRAP_PATCH = SCRIPTS.parent / "patches" / "ios16-xpc-bootstrap-compat.patch"
 
 # Passed on a child run's command line to make it skip the rewrites that spawn children of their own.
 # See `run_full_self_test` for why the recursion has to be cut here and what the child still checks. A
@@ -193,12 +196,11 @@ diff --git a/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm b/Source/WebKit
 +    }
 diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp
 +    m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
-+#if IOS_16_MESSAGE_NUMBER_TRANSLATION
 +    if (peerIsOlderGeneration()) {
 +        m_connection->setShouldTranslateMessageNames(true);
 +    }
-+#endif
 +    initializeConnection(m_connection.get());
++    m_connection->open(*this);
 """
 
 def with_hunk_headers(text: str, delta: int = 0) -> str:
@@ -800,6 +802,56 @@ FOLDED_UNGUARDED_CALL = (
     "+        (true);\n"
 )
 
+# Round 2's P1: the call wrapped in a preprocessor conditional. `IOS_16_MESSAGE_NUMBER_TRANSLATION` is
+# defined in MessageNumberTranslation.h, which AuxiliaryProcess.cpp does not include, so `#if` on it is
+# 0 and the block preprocesses away. The file then reads as wired while the predicate is never called.
+# A macro the file cannot see is the general shape; the named one is the instance that shipped.
+CONDITIONAL_WRAPPERS = (
+    (
+        "a call wrapped in #if IOS_16_MESSAGE_NUMBER_TRANSLATION fails",
+        "+#if IOS_16_MESSAGE_NUMBER_TRANSLATION\n" + GUARDED_CALL + "+#endif\n",
+    ),
+    (
+        "a call wrapped in #ifdef on an unseen macro fails",
+        "+#ifdef SOME_OTHER_EVERYTHING\n" + GUARDED_CALL + "+#endif\n",
+    ),
+    (
+        "a call wrapped in a nested conditional fails",
+        "+#if OUTER\n+#if INNER\n" + GUARDED_CALL + "+#endif\n+#endif\n",
+    ),
+)
+
+# Round 2's P2-1: the call has to stay between creating the connection and opening it. `open` sends
+# InitializeConnection immediately, so a flag set afterwards leaves the handshake untranslated. The
+# opener is a context line in the real patch, which is why the ordering rule reads physical lines
+# rather than the added-statement list.
+CALL_AFTER_OPEN = (
+    "+    m_connection->open(*this);\n" + GUARDED_CALL
+)
+
+# Round 2's P2-2: the predicate's definition lives in the other patch, so nothing tied the call to it.
+# Each entry here mutates the bootstrap patch and must fail through `--bootstrap-patch`.
+BOOTSTRAP_MUTATIONS = (
+    (
+        "a bootstrap patch with no definition of the predicate fails",
+        "+bool peerIsOlderGeneration()\n",
+        "+bool peerIsOlderGenerationRenamed()\n",
+        "does not define peerIsOlderGeneration()",
+    ),
+    (
+        "a bootstrap patch whose narrower branch records nothing fails",
+        "+        peerIsOlderGenerationFlag() = true;\n",
+        "",
+        "narrower-width branch does not record the predicate as true",
+    ),
+    (
+        "a bootstrap patch with a widened comparison fails",
+        "+    if (length < ownLength) {",
+        "+    if (length <= ownLength) {",
+        "no narrower-width branch",
+    ),
+)
+
 # The needles that used to be bare numbers, and the wrong value each must now fail on. Every number
 # here is also a real case label in the tables, which is why a needle that searched the whole patch
 # matched whatever the prose said.
@@ -890,7 +942,7 @@ TABLE_CASES = (
 )
 
 
-def run(patch_text: str | None) -> subprocess.CompletedProcess:
+def run(patch_text: str | None, bootstrap_text: str | None = None) -> subprocess.CompletedProcess:
     if patch_text is None:
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--patch", "/nonexistent/patch"],
@@ -900,11 +952,12 @@ def run(patch_text: str | None) -> subprocess.CompletedProcess:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "fixture.patch"
         path.write_text(patch_text, encoding="utf-8")
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), "--patch", str(path)],
-            capture_output=True,
-            text=True,
-        )
+        command = [sys.executable, str(SCRIPT), "--patch", str(path)]
+        if bootstrap_text is not None:
+            bootstrap = Path(directory) / "bootstrap.patch"
+            bootstrap.write_text(bootstrap_text, encoding="utf-8")
+            command += ["--bootstrap-patch", str(bootstrap)]
+        return subprocess.run(command, capture_output=True, text=True)
 
 
 CASES = (
@@ -1210,6 +1263,24 @@ CASES += (
         BASE + GUARD_WITH_CAST_FIRST_LINE,
         0,
         None,
+    ),
+)
+
+for description, wrapper in CONDITIONAL_WRAPPERS:
+    CASES += ((
+        description,
+        BASE.replace(GUARDED_CALL, wrapper, 1),
+        1,
+        "is inside a preprocessor conditional",
+    ),)
+
+CASES += (
+    (
+        "a call moved after m_connection->open fails",
+        BASE.replace(GUARDED_CALL + "+    initializeConnection(m_connection.get());\n",
+                     "+    initializeConnection(m_connection.get());\n" + CALL_AFTER_OPEN, 1),
+        1,
+        "runs after m_connection->open(",
     ),
 )
 
@@ -2195,6 +2266,35 @@ def main() -> int:
         if result.returncode != expected_code:
             problems.append("expected exit %d, got %d" % (expected_code, result.returncode))
         if expected_message is not None and expected_message not in (result.stderr + result.stdout):
+            problems.append("expected %r in the output" % expected_message)
+        if problems:
+            failures += 1
+            print("FAIL: %s" % description)
+            for problem in problems:
+                print("  %s" % problem)
+            print("  stdout: %s" % result.stdout.strip())
+            print("  stderr: %s" % result.stderr.strip())
+        else:
+            print("ok: %s" % description)
+
+    # The predicate's other half. Each case here mutates the bootstrap patch, so the rule that ties the
+    # call to its definition is exercised rather than asserted in prose.
+    real_bootstrap = REAL_BOOTSTRAP_PATCH.read_text(encoding="utf-8")
+    if run(BASE, real_bootstrap).returncode != 0:
+        failures += 1
+        print("FAIL: the fixture with the real bootstrap patch does not pass")
+    else:
+        print("ok: the fixture passes with the real bootstrap patch")
+    for description, right, wrong, expected_message in BOOTSTRAP_MUTATIONS:
+        if right not in real_bootstrap:
+            failures += 1
+            print("FAIL: %s: the needle is not in the real bootstrap patch" % description)
+            continue
+        result = run(BASE, real_bootstrap.replace(right, wrong, 1))
+        problems = []
+        if result.returncode != 1:
+            problems.append("expected exit 1, got %d" % result.returncode)
+        if expected_message not in (result.stderr + result.stdout):
             problems.append("expected %r in the output" % expected_message)
         if problems:
             failures += 1
