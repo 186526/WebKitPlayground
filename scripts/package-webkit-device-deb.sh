@@ -37,6 +37,7 @@ PACKAGE_ID="com.82flex.custom-webkit"
 PACKAGE_NAME="Custom WebKit"
 PACKAGE_VERSION=""
 PACKAGE_AUTHOR="WebKitPlayground Builder"
+VERIFY_DEB=""
 PACKAGE_DESCRIPTION="Custom-built WebKit frameworks for iOS device injection."
 STEP_INDEX=0
 TOTAL_STEPS=0
@@ -82,6 +83,7 @@ Options:
   --name    <name>        Debian package display name (default: ${PACKAGE_NAME})
   --version <ver>         Debian package version      (default: auto from WebKit Version.xcconfig)
   --author  <author>      Maintainer field            (default: ${PACKAGE_AUTHOR})
+  --verify-deb <deb>      Check an already built .deb and exit, building nothing
   -h, --help              Show this help
 
 Notes:
@@ -109,6 +111,14 @@ PrivateFrameworks/(WebCore|WebKitLegacy)\\.framework)' \\
   WebKit re-exports WebKitLegacy through one.  This script's own STEP 7
   reads the load commands directly and does catch it; the one-liner above
   cannot.
+
+  --verify-deb runs that same STEP 7 reader over the payload inside a built
+  .deb instead of the staging tree, so the check covers the bytes dpkg-deb
+  actually wrote:
+    ${SCRIPT_NAME} --verify-deb packages/webkit-rootless.deb --rootless
+  It exits non-zero on any image that still names a system framework path,
+  which is what makes an unrewritten payload fail the build rather than
+  only print a line.
 EOF
 }
 
@@ -123,20 +133,26 @@ while [[ $# -gt 0 ]]; do
         --name)      PACKAGE_NAME="${2:?missing value for --name}"; shift 2 ;;
         --version)   PACKAGE_VERSION="${2:?missing value for --version}"; shift 2 ;;
         --author)    PACKAGE_AUTHOR="${2:?missing value for --author}"; shift 2 ;;
+        --verify-deb) VERIFY_DEB="${2:?missing value for --verify-deb}"; shift 2 ;;
         -h|--help)   usage; exit 0 ;;
         *)           log_error "Unknown argument: $1"; usage >&2; exit 1 ;;
     esac
 done
 
 # ── validate prerequisites ───────────────────────────────────
-if [[ ! -d "${PRODUCT_DIR}" ]]; then
-    log_error "Product directory does not exist: ${PRODUCT_DIR}"
-    exit 1
-fi
+# --verify-deb reads a built package and nothing else, so it needs neither the
+# build product nor a Mach-O signer; requiring either would make the workflow's
+# post-build check depend on files it does not use.
+if [[ -z "${VERIFY_DEB}" ]]; then
+    if [[ ! -d "${PRODUCT_DIR}" ]]; then
+        log_error "Product directory does not exist: ${PRODUCT_DIR}"
+        exit 1
+    fi
 
-if ! command -v ldid >/dev/null 2>&1; then
-    log_error "ldid not found in PATH. Install it first (brew install ldid)."
-    exit 1
+    if ! command -v ldid >/dev/null 2>&1; then
+        log_error "ldid not found in PATH. Install it first (brew install ldid)."
+        exit 1
+    fi
 fi
 
 if ! command -v dpkg-deb >/dev/null 2>&1; then
@@ -215,7 +231,13 @@ fi
 TOTAL_STEPS=9
 
 # ── working directory ────────────────────────────────────────
-WORK_BASE_DIR="$(cd "$(dirname "${PRODUCT_DIR}")" && pwd)"
+if [[ -n "${VERIFY_DEB}" ]]; then
+    # --verify-deb has no build product to sit beside, so the scratch directory
+    # goes under TMPDIR rather than beside a product directory that may not exist.
+    WORK_BASE_DIR="${TMPDIR:-/tmp}"
+else
+    WORK_BASE_DIR="$(cd "$(dirname "${PRODUCT_DIR}")" && pwd)"
+fi
 WORK_DIR="$(mktemp -d "${WORK_BASE_DIR}/.webkit-deb-package.XXXXXX")"
 DEB_ROOT="${WORK_DIR}/deb-root"
 PAYLOAD_DIR="${DEB_ROOT}${INSTALL_FRAMEWORKS_DIR}"
@@ -224,198 +246,6 @@ PAYLOAD_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1
 
 cleanup() { rm -rf "${WORK_DIR}"; }
 trap cleanup EXIT
-
-# ══════════════════════════════════════════════════════════════
-# STEP 1 — Collect artifacts
-# ══════════════════════════════════════════════════════════════
-log_step "Collecting required/recommended/on-demand artifacts..."
-mkdir -p "${PAYLOAD_DIR}" "${USRLIB_DIR}"
-
-typeset -a required_items=(
-    "WebKit.framework"
-    "WebCore.framework"
-    "WebKitLegacy.framework"
-    "JavaScriptCore.framework"
-    "libwebrtc.dylib"
-)
-
-typeset -a recommended_items=(
-    "libANGLE-shared.dylib"
-    "WebGPU.framework"
-    "com.apple.WebKit.WebContent.xpc"
-    "com.apple.WebKit.Networking.xpc"
-    "com.apple.WebKit.GPU.xpc"
-    "com.apple.WebKit.WebContent.CaptivePortal.xpc"
-    "com.apple.WebKit.WebContent.Crashy.xpc"
-    "com.apple.WebKit.WebContent.Development.xpc"
-)
-
-typeset -a ondemand_items=(
-    "webpushd"
-    "adattributiond"
-    "com.apple.WebKit.WebAuthn.xpc"
-)
-
-copy_item_if_exists() {
-    local item="$1" dst_dir="$2"
-    local src="${PRODUCT_DIR}/${item}"
-    local dst="${dst_dir}/${item}"
-    if [[ -e "${src}" ]]; then
-        ditto "${src}" "${dst}"
-        return 0
-    fi
-    return 1
-}
-
-item_is_already_covered_in_framework() {
-    local item="$1"
-    [[ -e "${PAYLOAD_DIR}/WebKit.framework/XPCServices/${item}" ]] && return 0
-    [[ -e "${PAYLOAD_DIR}/WebKit.framework/Daemons/${item}" ]]    && return 0
-    return 1
-}
-
-for item in "${required_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        log_error "Missing required artifact: ${item}"
-        exit 1
-    fi
-done
-
-# The build product keeps the real overlay at top level and puts a symlink to it
-# at WebKit.framework/Frameworks/libWebKitSwift.dylib.  Copying WebKit.framework
-# alone therefore carries a link whose target never enters the payload, and the
-# symlink pass below would delete it.  Copy the real file over that link instead.
-install_swift_overlay() {
-    local source="${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}"
-    local destination="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
-    [[ -e "${source}" ]] || return 1
-    mkdir -p "$(dirname "${destination}")"
-    rm -f "${destination}"
-    cp -fL "${source}" "${destination}"
-    log_info "Placed Swift overlay at ${SWIFT_OVERLAY_REL}"
-}
-
-install_swift_overlay || log_note "Swift overlay not in the product: ${SWIFT_OVERLAY_NAME}"
-
-# A symlink satisfies -e but not the check below: dyld opens the path at runtime and a relative
-# link in the payload has no sibling file to reach.  This runs before STEP 2 so the build stops
-# on the real defect rather than on the deletion STEP 2 would make of it.
-verify_swift_overlay() {
-    local payload="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
-    [[ -e "${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}" ]] || return 0
-    if [[ -L "${payload}" ]]; then
-        log_error "Payload has ${SWIFT_OVERLAY_REL} as a symlink; WebKit needs a regular file there."
-        return 1
-    fi
-    if [[ ! -f "${payload}" ]]; then
-        log_error "Payload is missing ${SWIFT_OVERLAY_REL}: the product has ${SWIFT_OVERLAY_NAME} but the package does not ship it."
-        return 1
-    fi
-    log_info "Verified ${SWIFT_OVERLAY_REL} is a regular file in the payload."
-}
-
-verify_swift_overlay || exit 1
-
-for item in "${recommended_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
-        log_warn "recommended artifact not found: ${item}"
-    fi
-done
-
-for item in "${ondemand_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
-        log_note "on-demand artifact not found: ${item}"
-    fi
-done
-
-# ══════════════════════════════════════════════════════════════
-# STEP 2 — Resolve external/broken symlinks
-# ══════════════════════════════════════════════════════════════
-log_step "Resolving external/broken symlinks inside payload..."
-while IFS= read -r -d '' link_path; do
-    target_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${link_path}")"
-    if [[ ! -e "${target_path}" ]]; then
-        log_warn "removing broken symlink: ${link_path} -> ${target_path}"
-        rm "${link_path}"
-        continue
-    fi
-    case "${target_path}" in
-        "${PAYLOAD_REALPATH}"/*) continue ;;
-    esac
-    rm "${link_path}"
-    ditto "${target_path}" "${link_path}"
-done < <(find "${PAYLOAD_DIR}" -type l -print0)
-
-# ══════════════════════════════════════════════════════════════
-# STEP 3 — Prune non-runtime files
-# ══════════════════════════════════════════════════════════════
-log_step "Pruning non-runtime files..."
-rm -rf "${PAYLOAD_DIR}/DerivedSources"
-find "${PAYLOAD_DIR}" -type d \( -name Headers -o -name PrivateHeaders \) -prune -exec rm -rf {} +
-find "${PAYLOAD_DIR}" -type f -name '*.tbd' -delete
-
-# Move top-level .xpc bundles into WebKit.framework/XPCServices.
-XPC_FALLBACK_DIR="${PAYLOAD_DIR}/WebKit.framework/XPCServices"
-mkdir -p "${XPC_FALLBACK_DIR}"
-while IFS= read -r -d '' top_level_xpc; do
-    xpc_name="$(basename "${top_level_xpc}")"
-    dst="${XPC_FALLBACK_DIR}/${xpc_name}"
-    if [[ -L "${dst}" ]]; then
-        rm -f "${dst}"; mv "${top_level_xpc}" "${dst}"; continue
-    fi
-    if [[ -e "${dst}" ]]; then
-        rm -rf "${top_level_xpc}"; continue
-    fi
-    mv "${top_level_xpc}" "${dst}"
-done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type d -name '*.xpc' -print0)
-
-# ══════════════════════════════════════════════════════════════
-# STEP 4 — Move dylibs to usr/lib
-# ══════════════════════════════════════════════════════════════
-log_step "Moving dylibs to ${INSTALL_USRLIB_DIR}..."
-while IFS= read -r -d '' dylib; do
-    base="$(basename "${dylib}")"
-    if [[ "${base}" == "${SWIFT_OVERLAY_NAME}" ]]; then
-        # The bundle-relative copy is the one WebKit loads.  A top-level copy
-        # would only add a second file the loader never reads.
-        log_note "Keeping ${base} inside WebKit.framework only; dropping the top-level copy."
-        rm -f "${dylib}"
-        continue
-    fi
-    cp -f "${dylib}" "${USRLIB_DIR}/${base}"
-    rm -f "${dylib}"
-done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type f -name '*.dylib' -print0)
-
-# ══════════════════════════════════════════════════════════════
-# STEP 5 — Rewrite framework load paths to @rpath
-# ══════════════════════════════════════════════════════════════
-# Runs after STEP 4 so every destination in the install table already exists,
-# and before STEP 6 so the existing ldid pass re-signs the rewritten images.
-# Editing a load command invalidates the existing LC_CODE_SIGNATURE: the
-# command area of the shipped WebKit spans 8.8 KB, inside the code pages the
-# signature hashes, so a rewrite that is not followed by a re-sign ships a
-# broken seal.  Re-signing is ldid's job here rather than a hand-recomputed
-# LC_CODE_SIGNATURE because ldid is already required and already runs over
-# every Mach-O in this payload, and because the XPC services need their
-# entitlements on the new seal.
-#
-# llvm-install-name-tool is not used: it rejects every image in this payload
-# with "unsupported load command", and it has no way to leave a command it does
-# not know alone.  Measured on the shipped payload, the rejected command is
-# 0x1e (LC_SEGMENT_SPLIT_INFO) in WebKit.framework/WebKit and 0x27
-# (LC_DYLD_ENVIRONMENT) in the XPC helpers.  LC_LAZY_LOAD_DYLIB is 0x20 and
-# appears zero times in this payload, so it is not what stops that tool.  The
-# rewrite is a small Mach-O reader below instead, which needs no tool beyond the
-# python3 this script already requires.
-log_step "Rewriting framework load paths to @rpath..."
 
 MACHO_LOAD_PATHS_TOOL="${WORK_DIR}/macho-load-paths.py"
 
@@ -483,6 +313,7 @@ FORBIDDEN_PREFIXES = (
     "/System/Library/Frameworks/JavaScriptCore.framework/",
     "/System/Library/Frameworks/WebKitLegacy.framework/",
     "/System/Library/Frameworks/WebGPU.framework/",
+    "/System/Library/PrivateFrameworks/WebGPU.framework/",
     "/System/Library/PrivateFrameworks/WebCore.framework/",
     "/System/Library/PrivateFrameworks/WebKitLegacy.framework/",
 )
@@ -508,6 +339,12 @@ INSTALL_PATHS = (
      "@rpath/WebKitLegacy.framework/WebKitLegacy",
      "Library/Frameworks/WebKitLegacy.framework/WebKitLegacy"),
     ("/System/Library/Frameworks/WebGPU.framework/WebGPU",
+     "@rpath/WebGPU.framework/WebGPU",
+     "Library/Frameworks/WebGPU.framework/WebGPU"),
+    # WebCore reaches WebGPU through PrivateFrameworks with LC_LOAD_WEAK_DYLIB,
+    # while WebGPU itself claims the Frameworks name. Both spellings are the same
+    # image in this package, so both rows point at the one file the package ships.
+    ("/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU",
      "@rpath/WebGPU.framework/WebGPU",
      "Library/Frameworks/WebGPU.framework/WebGPU"),
     ("/System/Library/PrivateFrameworks/WebCore.framework/WebCore",
@@ -859,6 +696,250 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv))
 MACHO_LOAD_PATHS_PYTHON
 }
+
+# ══════════════════════════════════════════════════════════════
+# --verify-deb — Run STEP 7's reader over a built package
+# ══════════════════════════════════════════════════════════════
+# STEP 7 reads DEB_ROOT, the staging tree, before dpkg-deb writes the archive.
+# That leaves the bytes inside the archive unchecked: a packaging step that
+# dropped, replaced or re-signed an image after STEP 7 would still ship. This
+# mode unpacks the finished .deb and runs the same reader over what the archive
+# actually contains, so the check covers the artifact the workflow uploads.
+#
+# It is a separate invocation rather than a step inside the build path because
+# the build path would have to unpack what it just packed, and because a
+# standalone mode can be pointed at any .deb — including one pulled back from a
+# CI run — without a build product on the machine.
+if [[ -n "${VERIFY_DEB}" ]]; then
+    if [[ ! -f "${VERIFY_DEB}" ]]; then
+        log_error "Package to verify does not exist: ${VERIFY_DEB}"
+        exit 1
+    fi
+    if ! command -v dpkg-deb >/dev/null 2>&1; then
+        log_error "dpkg-deb not found in PATH; it is needed to unpack ${VERIFY_DEB}."
+        exit 1
+    fi
+
+    VERIFY_ROOT="${WORK_DIR}/deb-root"
+    mkdir -p "${VERIFY_ROOT}"
+    dpkg-deb -x "${VERIFY_DEB}" "${VERIFY_ROOT}"
+
+    # The prefix decides where the reader looks for images, so it must match the
+    # package rather than the flag. A rootless archive puts its frameworks under
+    # var/jb; anything else puts them at the root. Reading the tree and refusing
+    # on a disagreement keeps a wrong --rootless from silently scanning nothing.
+    DETECTED_PREFIX=""
+    if [[ -d "${VERIFY_ROOT}/var/jb/Library/Frameworks" ]]; then
+        DETECTED_PREFIX="/var/jb"
+    fi
+    if [[ "${DETECTED_PREFIX}" != "${PREFIX}" ]]; then
+        log_error "Package prefix is '${DETECTED_PREFIX:-/}', but the flags asked for '${PREFIX:-/}'."
+        log_error "Pass --rootless for a rootless package and no mode flag for a rootful one."
+        exit 1
+    fi
+
+    write_macho_load_path_tool
+    log_info "Verifying the load paths inside $(basename "${VERIFY_DEB}") (prefix '${PREFIX:-/}')..."
+    if ! python3 "${MACHO_LOAD_PATHS_TOOL}" verify "${VERIFY_ROOT}" "${PREFIX}"; then
+        log_error "The packaged payload still names a system framework path; this .deb cannot load its own copies."
+        exit 1
+    fi
+    log_success "Verified ${VERIFY_DEB}: every shipped image resolves inside the package."
+    exit 0
+fi
+
+# ══════════════════════════════════════════════════════════════
+# STEP 1 — Collect artifacts
+# ══════════════════════════════════════════════════════════════
+log_step "Collecting required/recommended/on-demand artifacts..."
+mkdir -p "${PAYLOAD_DIR}" "${USRLIB_DIR}"
+
+typeset -a required_items=(
+    "WebKit.framework"
+    "WebCore.framework"
+    "WebKitLegacy.framework"
+    "JavaScriptCore.framework"
+    "libwebrtc.dylib"
+)
+
+typeset -a recommended_items=(
+    "libANGLE-shared.dylib"
+    "WebGPU.framework"
+    "com.apple.WebKit.WebContent.xpc"
+    "com.apple.WebKit.Networking.xpc"
+    "com.apple.WebKit.GPU.xpc"
+    "com.apple.WebKit.WebContent.CaptivePortal.xpc"
+    "com.apple.WebKit.WebContent.Crashy.xpc"
+    "com.apple.WebKit.WebContent.Development.xpc"
+)
+
+typeset -a ondemand_items=(
+    "webpushd"
+    "adattributiond"
+    "com.apple.WebKit.WebAuthn.xpc"
+)
+
+copy_item_if_exists() {
+    local item="$1" dst_dir="$2"
+    local src="${PRODUCT_DIR}/${item}"
+    local dst="${dst_dir}/${item}"
+    if [[ -e "${src}" ]]; then
+        ditto "${src}" "${dst}"
+        return 0
+    fi
+    return 1
+}
+
+item_is_already_covered_in_framework() {
+    local item="$1"
+    [[ -e "${PAYLOAD_DIR}/WebKit.framework/XPCServices/${item}" ]] && return 0
+    [[ -e "${PAYLOAD_DIR}/WebKit.framework/Daemons/${item}" ]]    && return 0
+    return 1
+}
+
+for item in "${required_items[@]}"; do
+    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
+        log_error "Missing required artifact: ${item}"
+        exit 1
+    fi
+done
+
+# The build product keeps the real overlay at top level and puts a symlink to it
+# at WebKit.framework/Frameworks/libWebKitSwift.dylib.  Copying WebKit.framework
+# alone therefore carries a link whose target never enters the payload, and the
+# symlink pass below would delete it.  Copy the real file over that link instead.
+install_swift_overlay() {
+    local source="${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}"
+    local destination="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
+    [[ -e "${source}" ]] || return 1
+    mkdir -p "$(dirname "${destination}")"
+    rm -f "${destination}"
+    cp -fL "${source}" "${destination}"
+    log_info "Placed Swift overlay at ${SWIFT_OVERLAY_REL}"
+}
+
+install_swift_overlay || log_note "Swift overlay not in the product: ${SWIFT_OVERLAY_NAME}"
+
+# A symlink satisfies -e but not the check below: dyld opens the path at runtime and a relative
+# link in the payload has no sibling file to reach.  This runs before STEP 2 so the build stops
+# on the real defect rather than on the deletion STEP 2 would make of it.
+verify_swift_overlay() {
+    local payload="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
+    [[ -e "${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}" ]] || return 0
+    if [[ -L "${payload}" ]]; then
+        log_error "Payload has ${SWIFT_OVERLAY_REL} as a symlink; WebKit needs a regular file there."
+        return 1
+    fi
+    if [[ ! -f "${payload}" ]]; then
+        log_error "Payload is missing ${SWIFT_OVERLAY_REL}: the product has ${SWIFT_OVERLAY_NAME} but the package does not ship it."
+        return 1
+    fi
+    log_info "Verified ${SWIFT_OVERLAY_REL} is a regular file in the payload."
+}
+
+verify_swift_overlay || exit 1
+
+for item in "${recommended_items[@]}"; do
+    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
+        if item_is_already_covered_in_framework "${item}"; then
+            log_info "${item} already covered via WebKit.framework subdirectory."
+            continue
+        fi
+        log_warn "recommended artifact not found: ${item}"
+    fi
+done
+
+for item in "${ondemand_items[@]}"; do
+    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
+        if item_is_already_covered_in_framework "${item}"; then
+            log_info "${item} already covered via WebKit.framework subdirectory."
+            continue
+        fi
+        log_note "on-demand artifact not found: ${item}"
+    fi
+done
+
+# ══════════════════════════════════════════════════════════════
+# STEP 2 — Resolve external/broken symlinks
+# ══════════════════════════════════════════════════════════════
+log_step "Resolving external/broken symlinks inside payload..."
+while IFS= read -r -d '' link_path; do
+    target_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${link_path}")"
+    if [[ ! -e "${target_path}" ]]; then
+        log_warn "removing broken symlink: ${link_path} -> ${target_path}"
+        rm "${link_path}"
+        continue
+    fi
+    case "${target_path}" in
+        "${PAYLOAD_REALPATH}"/*) continue ;;
+    esac
+    rm "${link_path}"
+    ditto "${target_path}" "${link_path}"
+done < <(find "${PAYLOAD_DIR}" -type l -print0)
+
+# ══════════════════════════════════════════════════════════════
+# STEP 3 — Prune non-runtime files
+# ══════════════════════════════════════════════════════════════
+log_step "Pruning non-runtime files..."
+rm -rf "${PAYLOAD_DIR}/DerivedSources"
+find "${PAYLOAD_DIR}" -type d \( -name Headers -o -name PrivateHeaders \) -prune -exec rm -rf {} +
+find "${PAYLOAD_DIR}" -type f -name '*.tbd' -delete
+
+# Move top-level .xpc bundles into WebKit.framework/XPCServices.
+XPC_FALLBACK_DIR="${PAYLOAD_DIR}/WebKit.framework/XPCServices"
+mkdir -p "${XPC_FALLBACK_DIR}"
+while IFS= read -r -d '' top_level_xpc; do
+    xpc_name="$(basename "${top_level_xpc}")"
+    dst="${XPC_FALLBACK_DIR}/${xpc_name}"
+    if [[ -L "${dst}" ]]; then
+        rm -f "${dst}"; mv "${top_level_xpc}" "${dst}"; continue
+    fi
+    if [[ -e "${dst}" ]]; then
+        rm -rf "${top_level_xpc}"; continue
+    fi
+    mv "${top_level_xpc}" "${dst}"
+done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type d -name '*.xpc' -print0)
+
+# ══════════════════════════════════════════════════════════════
+# STEP 4 — Move dylibs to usr/lib
+# ══════════════════════════════════════════════════════════════
+log_step "Moving dylibs to ${INSTALL_USRLIB_DIR}..."
+while IFS= read -r -d '' dylib; do
+    base="$(basename "${dylib}")"
+    if [[ "${base}" == "${SWIFT_OVERLAY_NAME}" ]]; then
+        # The bundle-relative copy is the one WebKit loads.  A top-level copy
+        # would only add a second file the loader never reads.
+        log_note "Keeping ${base} inside WebKit.framework only; dropping the top-level copy."
+        rm -f "${dylib}"
+        continue
+    fi
+    cp -f "${dylib}" "${USRLIB_DIR}/${base}"
+    rm -f "${dylib}"
+done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type f -name '*.dylib' -print0)
+
+# ══════════════════════════════════════════════════════════════
+# STEP 5 — Rewrite framework load paths to @rpath
+# ══════════════════════════════════════════════════════════════
+# Runs after STEP 4 so every destination in the install table already exists,
+# and before STEP 6 so the existing ldid pass re-signs the rewritten images.
+# Editing a load command invalidates the existing LC_CODE_SIGNATURE: the
+# command area of the shipped WebKit spans 8.8 KB, inside the code pages the
+# signature hashes, so a rewrite that is not followed by a re-sign ships a
+# broken seal.  Re-signing is ldid's job here rather than a hand-recomputed
+# LC_CODE_SIGNATURE because ldid is already required and already runs over
+# every Mach-O in this payload, and because the XPC services need their
+# entitlements on the new seal.
+#
+# llvm-install-name-tool is not used: it rejects every image in this payload
+# with "unsupported load command", and it has no way to leave a command it does
+# not know alone.  Measured on the shipped payload, the rejected command is
+# 0x1e (LC_SEGMENT_SPLIT_INFO) in WebKit.framework/WebKit and 0x27
+# (LC_DYLD_ENVIRONMENT) in the XPC helpers.  LC_LAZY_LOAD_DYLIB is 0x20 and
+# appears zero times in this payload, so it is not what stops that tool.  The
+# rewrite is a small Mach-O reader below instead, which needs no tool beyond the
+# python3 this script already requires.
+log_step "Rewriting framework load paths to @rpath..."
+
 
 write_macho_load_path_tool
 python3 "${MACHO_LOAD_PATHS_TOOL}" rewrite "${DEB_ROOT}" "${PREFIX}"

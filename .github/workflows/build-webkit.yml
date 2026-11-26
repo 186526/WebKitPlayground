@@ -1257,6 +1257,41 @@ jobs:
             --output "$PWD/packages/webkit-rootless.deb"
           ls -lh packages/
 
+      - name: Assert the packaged images carry the @rpath load chain
+        if: success()
+        run: |
+          set -euo pipefail
+          # STEP 7 of the packaging script reads its staging tree, before dpkg-deb
+          # writes the archive, so nothing in that run inspects the bytes inside the
+          # finished .deb. This step unpacks the package and runs that same reader
+          # over it, so a payload still naming /System/Library/Frameworks/WebKit
+          # fails this run instead of being uploaded.
+          DEB="$PWD/packages/webkit-rootless.deb"
+          zsh scripts/package-webkit-device-deb.sh --verify-deb "$DEB" --rootless
+
+          # The check is also held to its negative result, because a verifier that
+          # cannot reject an unrewritten payload is what let an all-system-path deb
+          # reach a device once already. The control is the build product's own
+          # binary, which is the file STEP 5 rewrites: putting it back into the
+          # unpacked tree reproduces exactly the payload a skipped STEP 5 leaves,
+          # with no hand-written Mach-O bytes.
+          NEG="$PWD/packages/negative-root"
+          rm -rf "$NEG" && mkdir -p "$NEG"
+          dpkg-deb -x "$DEB" "$NEG"
+          PRODUCT="$PWD/WebKit/WebKitBuild/Release-iphoneos"
+          cp -f "$PRODUCT/WebKit.framework/WebKit" \
+                "$NEG/var/jb/Library/Frameworks/WebKit.framework/WebKit"
+          mkdir -p "$NEG/DEBIAN"
+          dpkg-deb -e "$DEB" "$NEG/DEBIAN"
+          dpkg-deb --build --root-owner-group "$NEG" "$PWD/packages/negative.deb" >/dev/null
+          if zsh scripts/package-webkit-device-deb.sh \
+               --verify-deb "$PWD/packages/negative.deb" --rootless >/dev/null 2>&1; then
+            echo "The load-path check accepted a payload whose WebKit names the system framework."
+            echo "Such a check cannot gate this build: it would pass an unrewritten package."
+            exit 1
+          fi
+          echo "Load-path check rejected the unrewritten control package, as it must."
+
       - name: Assert the packaged XPC services carry the identifiers iOS asks for
         if: success()
         run: |
