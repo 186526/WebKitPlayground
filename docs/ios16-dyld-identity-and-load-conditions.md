@@ -510,7 +510,7 @@ for (uint32_t i = 0; i < after; i++) {
 
 **`LC_UUID` 是一条 load command（`cmd == 0x1b`），不是 `mach_header_64` 的字段。** 头结构只有 `magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved` 共 32 字节，`header + 8` 落在 `cpusubtype`，把那里当 uuid 打印出来是垃圾值。要拿 uuid 必须从 `header->sizeofcmds` 之前的那段 `load_commands` 里逐条走，跳过 `cmdsize`，命中 `cmd == 0x1b` 时读它 `+8` 起的 16 字节。上面这段就是按这个写的，`<mach-o/loader.h>` 提供 `struct mach_header_64`、`struct load_command`、`LC_UUID` 与 `MH_MAGIC_64`。
 
-这处错在本轮的原稿里出现过一次，并在评审时用真实 arm64 Mach-O 实测抓到。用同一份文件比较两种读法（`/home/real186/webkit-work/paytest/` 下 `/var/jb` 那份的两个 dylib，本机 `llvm-objdump --macho --private-headers` 给出真值）：
+这处错在本轮的原稿里出现过一次，并在评审时用真实 arm64 Mach-O 实测抓到。用同一份文件比较两种读法（`artifacts/webkit-rootless-620.2.4-20261125052704.deb` 里 `var/jb/usr/lib` 的那两个 dylib，`dpkg-deb -x` 解开后本机 `llvm-objdump --macho --private-headers` 给出真值）：
 
 | 文件 | `header + 8` 读法 | 遍历 `LC_UUID` 读法 | `llvm-objdump` |
 | --- | --- | --- | --- |

@@ -982,7 +982,7 @@ rm -rf "$W"
 | --- | --- | --- |
 | 本 tar | 6103040 | `d5bd3ef3e0b281e12016dd76a0ddc01b353f0d9b591db0c2f14f3b5a5d08bd60` |
 | 设备 tar（`basebin-hybrid.tar`） | 6092800 | `e06c9aa2c2d1c06ce2ce9517ca429f5024f142d58e782bc9cb49f2eeb3618f25` |
-| 出厂 tar（本机副本 `webkit-work/hybrid/orig.tar`） | 6082560 | `52607d787d01efa34a28815cd522b20b05e7e3d648fe94432171abcac3c9e828` |
+| 出厂 tar（本机副本 `artifacts/basebin/hybrid/orig.tar`） | 6082560 | `52607d787d01efa34a28815cd522b20b05e7e3d648fe94432171abcac3c9e828` |
 
 第三行是本机的一份副本。设备上那份 `/var/mobile/Documents/bb/device-basebin-orig.tar` 的**字节内容本轮没有测过**，只按现有记录标为 6082560 字节。它与 `Dopamine.app/basebin.tar` 是否逐位相同也只在尺寸一级确认（两者都是 6082560），没有逐位比对。回滚前应先按十二·六那段 `python3` 核对设备上那份的实际 sha256，再决定用哪一份。
 
@@ -1023,7 +1023,7 @@ rm -rf "$W"
 
 **这条读数的取法要固定在一个会随合入而稳定的对象上，不挂在某个提交号上。** 本节的读数取自 **M125 合入后的 `dopamine-basebin/verify-basebin-tar.sh`**（连同它调用的 `verify-basebin-trustcache.py`），不引用 M125 分支上任何中间提交的编号。这条 `basebin.tc` 断言在 M125 分支上改过四版：最早那版没有它，同一份 tar 只报 7 行；第二版只做单向覆盖、对每个 CodeDirectory 一律按 SHA-256 算 cdhash，本 tar 上明细写作 `8 slice(s) of 16 members`，而其中四个值内核根本不会算出；第三版改成双向集合相等、按 `hashType` 取 cdhash；第四版把比较从 cdhash 集合扩成 `(cdhash, hash_type)` 对的集合，并加了 `mislabelled` 那一类。本节按第四版描述——按提交号会立刻过期，M126 前两轮已经在这上面错过两次，所以这里只用「合入后」定位。
 
-要复核本节读数，用合入后 `main` 上的那份脚本跑 `/tmp/basebin-lh.tar`，期望 8 行 `^FAIL`：6 条甲组 + 1 条乙组 + 1 条汇总。同一份脚本跑 CI 产物 tar（`/home/real186/webkit-work/basebin-ci/basebin.tar`，6144000 字节）应得退出 0 与 `Result: PASS`——这一条同时是「拿到的是哪一代脚本」的判别：中间那代在这个 CI tar 上报退出 1。
+要复核本节读数，用合入后 `main` 上的那份脚本跑 `/tmp/basebin-lh.tar`，期望 8 行 `^FAIL`：6 条甲组 + 1 条乙组 + 1 条汇总。同一份脚本跑 CI 产物 tar（`artifacts/basebin/basebin-ci/basebin.tar`，6144000 字节）应得退出 0 与 `Result: PASS`——这一条同时是「拿到的是哪一代脚本」的判别：中间那代在这个 CI tar 上报退出 1。
 
 **六个名字之外还有一项，已经由 M125 加进同一个 gate。** 上面那张表说的是 `verify-dyldhook-merge.sh` 那一组，它只管六个 dyldhook dylib。本 tar 里真正会被这台设备选中的第二个成员 `basebin/launchdhook.dylib` 现在也在断言范围内：M125 的 `dopamine-basebin/verify-basebin-tar.sh` 里有一段专门检查它（从 `# launchdhook is the other binary built from systemhook/src/common/common.c` 那句注释起，到对应的 `fi` 止），实现是复用 `verify-systemhook-search-paths.py --kind launchdhook`，断言它在每个切片的 `__cstring` 里带四个搜索路径名与两个覆盖目录。这一段不写行号：它在 M125 分支上随每次改动前移，写死会像提交号一样过期，用那段注释原文定位更稳。
 
