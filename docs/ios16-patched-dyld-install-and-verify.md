@@ -65,7 +65,7 @@
 gen/dyld 字节数 = MachOMerger 产物字节数 + 2 + 该产物重签名后的 CodeDirectory 与 CMS 总长
 ```
 
-这条模型能解释两个曾经看起来矛盾的读数：`docs/ios16-next-build-go-no-go.md:274` 记下那份 974608 读数（两个 hook 计数为 1）已被后来的 974016 / `1 0 0 1` 取代，而 974608 正是 949006 + 2 + 25600，即由 `basebin.tar` 里那份 75952 字节的 hook 合成；11-25 白天的设备上是 **974016** 字节（948414 + 2 + 25600），即由 74352 字节的原版 hook 合成；11-25 23:53 装上补丁之后又回到 **974608**，这次是由 75952 那份合成。外层 `AGENTS.md` 里「用设备上那份 hook dylib 合并得到 948414 字节」那一句与本文相反，它写「948414 比 974016 小，这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的」——前半句对，后半句错，差的那 25602 字节全部是重签名产物，不是 hook 尺寸差。同目录的 `docs/dopamine-basebin-webkit-override.md:87` 记的是对的（它把 974016 归给设备上那份 74352 的 hook）。这同时给出一个离线判据：**只看 `gen/dyld` 的字节数就能说出它是哪份 hook 合成的**，不需要重启去试。
+这条模型能解释两个曾经看起来矛盾的读数：`docs/ios16-next-build-go-no-go.md:274` 记下那份 974608 读数（两个 hook 计数为 1）已被后来的 974016 / `1 0 0 1` 取代，而 974608 正是 949006 + 2 + 25600，即由 `basebin.tar` 里那份 75952 字节的 hook 合成；11-25 白天的设备上是 **974016** 字节（948414 + 2 + 25600），即由 74352 字节的原版 hook 合成；11-25 23:53 装上补丁之后又回到 **974608**，这次是由 75952 那份合成。外层 `AGENTS.md` 里「用设备上那份 hook dylib 合并得到 948414 字节」那一句与本文相反，它写「948414 比 974016 小，这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的」——前半句对，后半句错，差的那 25602 字节全部是重签名产物，不是 hook 尺寸差。同目录的 `docs/dopamine-basebin-webkit-override.md` 第二节「官方 3.0.13 为什么不能覆盖共享缓存」的「本机的实测」一小节记的是对的（它把 974016 归给设备上那份 74352 的 hook）。这同时给出一个离线判据：**只看 `gen/dyld` 的字节数就能说出它是哪份 hook 合成的**，不需要重启去试。
 
 ### 1.2 谁触发它，替换它要重启什么
 
@@ -267,7 +267,7 @@ WEBKIT_IMAGES=1
 
 ### 3.3 可行性剩下的一处，源码与离线产物支持
 
-装上 hook 之后，`Loader.cpp:558` 的 `originalPathIsOverridableInDyldCache` 变成真，`:565` 不再短路，`:623` 去 `stat()` 磁盘副本；缓存里已序列化的 PrebuiltLoader 走 `PrebuiltLoader::invalidateInIsolation`（`:630-655`）的另一条判定，由 `isAlwaysOverridablePath` 放行。这两处判定函数在本机 `gen/dyld` 里都是本地符号，四个调用点全是 `bl` 直调（`docs/dopamine-basebin-webkit-override.md:89-107`，读的设备 `gen/dyld.orig`，本次读到同一份 `dyld.orig` 的 `sha256 7eb2e72f…`）。
+装上 hook 之后，`Loader.cpp:558` 的 `originalPathIsOverridableInDyldCache` 变成真，`:565` 不再短路，`:623` 去 `stat()` 磁盘副本；缓存里已序列化的 PrebuiltLoader 走 `PrebuiltLoader::invalidateInIsolation`（`:630-655`）的另一条判定，由 `isAlwaysOverridablePath` 放行。这两处判定函数在本机 `gen/dyld` 里都是本地符号，四个调用点全是 `bl` 直调（`docs/dopamine-basebin-webkit-override.md` 第二节的「目标函数确实存在，且被直接调用」一小节，读的设备 `gen/dyld.orig`，本次读到同一份 `dyld.orig` 的 `sha256 7eb2e72f…`）。
 
 补丁本身在 `dopamine-basebin/0001-dyldhook-allow-framework-override.patch`，两个函数都是裸 `return true`。CI 在 `.github/workflows/basebin-build.yml:216-241` 对构建出的 hook 跑 `verify-dyldhook-merge.sh`，`:331` 断言 mangled 名字，`:344` 跑 `verify-merged-dyld.sh`。设备上 `basebin.tar` 里那份 hook 的 `dyldhook_merge.arm64e.iOS16-17.dylib` 是 75952 字节、判定 `1 1 1 1`，即已经带上两个新 hook。
 

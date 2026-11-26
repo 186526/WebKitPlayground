@@ -196,7 +196,7 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 **5. `_CodeSignature` 目录缺失的影响。** 塔提出的第 5 点。系统 `/System/Library/Frameworks/WebKit.framework/` 有 `_CodeSignature` 与 `preferences.sb`，`install-webkit-override.sh` 的 `copy_framework_tree` 用 `cp -a "${path_source}/."` 复制整目录，是否带上这两项取决于 deb 里那份有没有。源码侧可判的部分：`preferences.sb` 是 `Source/WebKit/Shared/Sandbox/preferences.sb`，被 `GPUProcess/mac/com.apple.WebKit.GPUProcess.sb.in:25`、`WebProcess/com.apple.WebProcess.sb.in:25` 等以 `#include` 引用，是沙箱配置模板，不参与 XPC 服务清单；`WebKit.framework` 的 `Source/WebKit/Info.plist` 也没有 `XPCService` 键。所以 `preferences.sb` 缺失不影响端点解析。`_CodeSignature` 目录是否影响端点解析没有实测覆盖：`build-state.md:407` 排除的「代码签名因复制失效」比的是二进制内嵌的 `LC_CODE_SIGNATURE` 偏移与大小（两边同为 49536 / 21856），不是这个目录。需在设备上 `ls -la` 两个目录对比，并在缺目录时补测端点计数。
 
-**未验证的判定：第四节 (A)/(B) 都还没定。** 本文不替它下结论，因为两种情形所需的源代码证据（launchd 是否现扫索引外目录）在公开材料里不存在——`libxpc` 与 `launchd` 的源码不在 `apple-oss-distributions`（`WebKitPlayground/docs/dopamine-basebin-webkit-override.md:712` 记录过这一点）。
+**未验证的判定：第四节 (A)/(B) 都还没定。** 本文不替它下结论，因为两种情形所需的源代码证据（launchd 是否现扫索引外目录）在公开材料里不存在——`libxpc` 与 `launchd` 的源码不在 `apple-oss-distributions`（`WebKitPlayground/docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节记录过这一点）。
 
 ---
 

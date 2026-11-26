@@ -143,8 +143,8 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 
 **`prune_xpc_services` 的理由依赖一处未验证的行为。** `install-webkit-override.sh` 的 `prune_xpc_services()` 会删掉覆盖目录里的 `XPCServices`，脚本头部的注释说明了理由：留着会让 launchd 去启动复制件而不是系统桩，而系统桩是「四条指令的尾调用」，`DYLD_FRAMEWORK_PATH` 已经把 `WKXPCServiceMain` 指向被覆盖的 `WebKit`。这条理由依赖三件事，逐条核对过：
 
-1. `xpcproxy` 会把环境变量转交给 `.xpc` 进程——**未验证**。`__XPC_` 前缀的转交位置在 `/usr/libexec/xpcproxy` 的字符串表、`/sbin/launchd`、共享缓存三处都查不到，`xpcproxy` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md:712`）；
-2. 转交的是 `__XPC_` 前缀版本、不是裸名——**这是按 Lessica 分支的既有实现推断的**，不是本机验证过的结论（同文件 `:714`）；
+1. `xpcproxy` 会把环境变量转交给 `.xpc` 进程——**未验证**。`__XPC_` 前缀的转交位置在 `/usr/libexec/xpcproxy` 的字符串表、`/sbin/launchd`、共享缓存三处都查不到，`xpcproxy` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节）；
+2. 转交的是 `__XPC_` 前缀版本、不是裸名——**这是按 Lessica 分支的既有实现推断的**，不是本机验证过的结论（`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节里「所以『`xpcproxy` 只透传 `__XPC_` 版本』这句话是按 Lessica 分支的既有实现推断的」一段）；
 3. 有谁设了 `__XPC_` 前缀版本——**补丁里有，设备上没生效**。`dopamine-basebin/0001-systemhook-set-search-paths.patch:100-103` 的 `searchPathVariables` 四个变量都在：`DYLD_FRAMEWORK_PATH`、`__XPC_DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`__XPC_DYLD_LIBRARY_PATH`。补丁自己的注释（`:139`）写着「Both spellings are set: where an XPC service's `__XPC_` copy is forwarded from is not verified」。**但这条答的是补丁的形态，不是设备的形态**：2026-11-25 实测设备上 `/var/jb/basebin/systemhook.dylib` 是 233520 字节的原版，里面 `DYLD_FRAMEWORK_PATH` 出现 0 次（读数与判据见附录 B 的 B.1）。打上补丁的那份是 234336 字节。
 
 因此这一节的三条前置条件今天只有第二条未定、第三条不成立。**「前置条件齐备，缺的只有一个转交行为」这句话在本轮不成立**：连「有谁设了变量」这一条都没落地。转交行为仍未测，但它现在排在重装 basebin 之后（附录 B 的 B.9）。
@@ -445,7 +445,7 @@ PY
 
 **3d. 分开「转交生效」「内嵌生效」「都不生效」。** `__XPC_DYLD_FRAMEWORK_PATH` 的转交、`.xpc` 自己的 `LC_DYLD_ENVIRONMENT`、以及两者都不生效，这三者在 `image list` 里都会表现为「加载了某一份 `WebKit`」，只有搜索候选行能把它们分开。直接跑 `.xpc` 可执行文件是最短的取数路径，但要注意它测的是哪一条链：从 shell 启动的进程不经过 `xpcproxy`，所以这一次运行**测不到转交**，只测桩自己的 load command。转交要另做一次（3d-3）。
 
-**3d-1. 主路径：直接跑 `/var/jb` 的 `WebContent` 桩，看它自己的候选行。** `DYLD_PRINT_SEARCHING` 默认写 stderr，而这类进程的 stderr 未必落在终端；`DYLD_PRINT_TO_FILE` 在共享缓存允许的变量里同样可用（`docs/dopamine-basebin-webkit-override.md:340`），所以直接写文件。直接运行 `.xpc` 二进制会一直等 XPC 连接，必须包 `timeout`（`../../AGENTS.md` 的记录）。
+**3d-1. 主路径：直接跑 `/var/jb` 的 `WebContent` 桩，看它自己的候选行。** `DYLD_PRINT_SEARCHING` 默认写 stderr，而这类进程的 stderr 未必落在终端；`DYLD_PRINT_TO_FILE` 在共享缓存允许的变量里同样可用（`docs/dopamine-basebin-webkit-override.md` 的「上线后怎么确认 hook 真的在起作用」一小节），所以直接写文件。直接运行 `.xpc` 二进制会一直等 XPC 连接，必须包 `timeout`（`../../AGENTS.md` 的记录）。
 
 ```sh
 L=/var/mobile/dyld-webcontent.log
@@ -664,7 +664,7 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 按重要性排列。每一条写明验证方式与预期结果。**「第四节全部步骤待设备回网后执行」是本文写作时的状态**：本文收尾时设备执行 `launchctl reboot` 后没有回网，`192.168.2.135` 报 `No route to host`，`172.20.10.1` 超时。2026-11-25 本轮设备已经回网，第四节第 2 步与第 4 步已按本节命令逐字执行并取到读数，见附录 B 的 B.6 与 B.7。**这两个读数说明 dyld 层没生效，不说明路径对齐与否**（B.7 末段），所以下面各条的验证方式仍按原文执行，但涉及「helper 或 UI 进程加载了哪一份 `WebKit`」的判据要等重装 basebin 之后（B.9）才给得出结论；第 2 条已按本轮读数改写。
 
 1. **helper 是否拿到覆盖路径。** 这是起点，排在 launchd 解析之前。三种可能（转交生效、只有内嵌生效、都不生效），判据是第四节第 3d-1 至 3d-3 步的候选行与 `image list`，配合 `DisableJBFrameworkPath` 的检查。三者任一结果都直接决定 helper 加载哪一份 `WebKit`，也就直接决定「全 18.3」是否只差 launchd 解析这一步。
-2. **`__XPC_` 前缀版本的转交是否发生。** 机制在 `/usr/libexec/xpcproxy`、`/sbin/launchd`、共享缓存里都查不到实现，`libxpc` 与 `xpcproxy` 源码不公开（`docs/dopamine-basebin-webkit-override.md:712`）。「只透传前缀版本」是按 Lessica 分支推断的（同文件 `:714`）。**这一项原先写「basebin 四个变量都设了，所以这一条是唯一的空格」，那句在 2026-11-25 不成立**：设备上 `systemhook.dylib` 是 233520 字节的原版，`DYLD_FRAMEWORK_PATH` 出现 0 次，四个变量一个都没设（附录 B 的 B.1）。所以转交问题现在排在「重装 basebin」之后。第四节第 3d-3 步靠加载结果反推它；直接跑 `.xpc` 的 3d-1 测不到它，因为从 shell 起的进程不经过 `xpcproxy`。
+2. **`__XPC_` 前缀版本的转交是否发生。** 机制在 `/usr/libexec/xpcproxy`、`/sbin/launchd`、共享缓存里都查不到实现，`libxpc` 与 `xpcproxy` 源码不公开（`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节）。「只透传前缀版本」是按 Lessica 分支推断的（同节「所以『`xpcproxy` 只透传 `__XPC_` 版本』这句话是按 Lessica 分支的既有实现推断的」一段）。**这一项原先写「basebin 四个变量都设了，所以这一条是唯一的空格」，那句在 2026-11-25 不成立**：设备上 `systemhook.dylib` 是 233520 字节的原版，`DYLD_FRAMEWORK_PATH` 出现 0 次，四个变量一个都没设（附录 B 的 B.1）。所以转交问题现在排在「重装 basebin」之后。第四节第 3d-3 步靠加载结果反推它；直接跑 `.xpc` 的 3d-1 测不到它，因为从 shell 起的进程不经过 `xpcproxy`。
 3. **转交与 `.xpc` 内嵌路径谁优先。** 两者第一项现在同为 `/var/jb/Library/WebKitOverride`，差别只在 `.xpc` 那条还带 `/var/jb/Library/Frameworks` 作后备。`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节记的是 app 进程的读数（原文「两者现在指向同一组目录：内嵌那条也是 `/var/jb/Library/WebKitOverride` 在首位」），`.xpc` 上是否成立没有实测。第四节第 3d-2 步直接读 3d-1 日志里的 `found:` 落点，能给出直接运行下的答案；`xpcproxy` 拉起时的优先级仍要靠 3d-3。
 4. **launchd 能否为索引外的 `XPCServices` 目录解析服务。** 第四节第 5 步。预期 (A) 四条以上，(B) 两条以内。这一条是终点：在 1 至 3 通过之前，它的读数无法归因。
 5. **「端点归零」的成因。** 外层仓库 `build-state.md` 的「端点数目表（目标应用 Chrome，每次 `killall` 后重新 `uiopen <url>`）」一节（该表首行是「| 覆盖目录内容 | 端点 | spawn | lookup 失败 |」）的每一次「0」都没有记录崩溃报告字段，因此无法区分「dyld 中止」与「launchd 不解析」。第四节第 2 步的差分是为了补上这个缺口。
