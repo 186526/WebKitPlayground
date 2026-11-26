@@ -1083,20 +1083,105 @@ iOS15 两个成员本来就该是 `1001`（补丁的 hook 用 `#if IOS >= 16` �
 
 `DYLD_FALLBACK_FRAMEWORK_PATH`、`DYLD_FALLBACK_LIBRARY_PATH` 两个版本都是 0，补丁没有引入回退目录。
 
-### 十二·五 信任缓存：`launchdhook` 不在 `basebin.tc` 里是预期状态
+### 十二·五 信任缓存：把 sha1 换成 cdhash 之后，原来的结论不成立
 
-`basebin.tc` 640 字节，结构是 4 字节版本（实测 `1`）、16 字节 uuid、4 字节条目数（实测 `28`），随后 28 条 22 字节记录（20 字节 cdhash + 2 字节 flags）。`24 + 28 × 22 = 640`，长度自洽。
+`basebin.tc` 640 字节，结构是 4 字节版本（实测 `1`）、16 字节 uuid、4 字节条目数（实测 `28`），随后 28 条 22 字节记录（20 字节 cdhash + 2 字节 flags）。`24 + 28 × 22 = 640`，长度自洽。设备上这份的 uuid 是 `a3e4647f…`。
 
-四个待装文件（补丁版与原版各两个）的文件 sha1 全部**不在**这 28 条里：
+**这张表存的是 CodeDirectory 的 cdhash，不是文件 sha1。** 两者不是同一个量，差别在于被哈希的输入是哪段字节：文件 sha1 的输入是整个文件（本节四份是 312848、330144、233520、234336 字节），cdhash 的输入是签名里那个 CodeDirectory blob（本节八个 `0x0` 槽位是 645 到 1354 字节）。两者被哈希的输入长度差两个多数量级，但两个摘要本身都是 20 字节、十六进制都是 40 个字符，所以**长度不能用来区分这两种量**，只能看这个 40 字符是从哪段字节算出来的。用文件 sha1 去查这张表，无论文件在不在表里都会读成「不在」——本节实测的四个文件 sha1 一个都不在那 28 条里。本节原先就是这么比的，下面按正确的量重算。
 
-| 文件 | 版本 | sha1 | 在 `basebin.tc` 里 |
-| --- | --- | --- | --- |
-| `launchdhook.dylib` | 补丁版 330144 | `005a70a6a2914ab54f9f4e429b8d2d1d4ba01c40` | 否 |
-| `launchdhook.dylib` | 原版 312848 | `a4e3d0a0b607a989ec5f8c1e741775744baddac6` | 否 |
-| `systemhook.dylib` | 补丁版 234336 | `f4367ca8ad939b01ce6ad34ec54f7fc4c3419b23` | 否 |
-| `systemhook.dylib` | 原版 233520 | `11b7ef6d414254e3f1a1c04ea19ef40daa84e50c` | 否 |
+2026-11-25T17:23Z 设备实测，用 `/var/jb/usr/bin/python3` 从每个架构切片里取出 `LC_CODE_SIGNATURE` 的 `0x0` 槽位 CodeDirectory，按它自己的 `hashType` 求哈希，再查 `basebin.tc` 的 28 条：
 
-原版的两个也不在，这一条比「补丁版不在」更有说服力：同名的原版文件本来就以不在表里的状态在这台设备上正常工作。`systemhook.dylib` 上一次被单独换掉时同样不在，那次用户空间重启成功了。两者都由 `launchd` 或 `dyld` 在越狱环境下加载，走的是 basebin 的信任路径，不是这张表的 cdhash 匹配。
+| 文件 | 版本 | 文件 sha1 | 切片 cdhash（`hashType`） | 在 `basebin.tc` 里 |
+| --- | --- | --- | --- | --- |
+| `launchdhook.dylib` | 原版 312848 | `a4e3d0a0b607…` | `0e59e39881d8ed71…`、`a7438ed3dc79bcda…`（2） | **是，两条都命中** |
+| `launchdhook.dylib` | 补丁版 330144 | `005a70a6a291…` | `fe83a746623ac9cc…`、`6e8952fb386181b0…`（1） | 否 |
+| `systemhook.dylib` | 原版 233520 | `11b7ef6d4142…` | `dd3f99c4a4ba13da…`、`d3c4e949ddb14907…`（2） | **是，两条都命中** |
+| `systemhook.dylib` | 补丁版 234336 | `f4367ca8ad93…` | `8d580b8510297956…`、`bd93fa08208960d6…`（1） | 否 |
+
+cdhash 按 CodeDirectory 自己的 `hashType` 算：`hashType` 为 2 时取 `SHA256(CodeDirectory)` 的前 20 字节，为 1 时取 `SHA1(CodeDirectory)` 的前 20 字节，两者都截到 20 字节，所以表里的 cdhash 都是 40 个十六进制字符。原版两份是 `hashType` 2，补丁版两份是 `hashType` 1，这是替换签名时换了算法，不是同一个量算了两遍。补丁版两个切片还各多一个 `0x1000` 槽位，那也是 `hashType` 2，它的 cdhash 同样不在表里。
+
+上面这套取法可用下面这段脚本复跑，参数依次是 `basebin.tc` 与要比对的文件；它按同一个 `LC_CODE_SIGNATURE` 槽位取 CodeDirectory、按其 `hashType` 求哈希、截前 20 字节，同时打印「被哈希的输入有多少字节」和「摘要的十六进制有多少字符」两项，用来看清长度指的是哪一层。`in_table` 是拿那 20 字节的十六进制去 `basebin.tc` 里逐条比。
+
+```python
+import hashlib, struct, sys
+
+def slices(data):
+    if struct.unpack('>I', data[0:4])[0] in (0xcafebabe, 0xcafebabf):
+        count, = struct.unpack('>I', data[4:8])
+        return [struct.unpack('>II', data[16 + i * 20:24 + i * 20]) for i in range(count)]
+    return [(0, len(data))]
+
+def code_directories(image):
+    magic, = struct.unpack('<I', image[0:4])
+    if magic not in (0xfeedface, 0xfeedfacf):
+        return []
+    ncmds, = struct.unpack('<I', image[16:20])
+    p = 32 if magic == 0xfeedfacf else 28
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack('<II', image[p:p + 8])
+        if cmd == 0x1d:
+            dataoff, datasize = struct.unpack('<II', image[p + 8:p + 16])
+            blob = image[dataoff:dataoff + datasize]
+            count, = struct.unpack('>I', blob[8:12])
+            out = []
+            for k in range(count):
+                slot, offset = struct.unpack('>II', blob[12 + k * 8:20 + k * 8])
+                cd = blob[offset:]
+                cd = cd[:struct.unpack('>I', cd[4:8])[0]]
+                digest = hashlib.sha1 if cd[37] == 1 else hashlib.sha256
+                out.append((slot, cd[37], len(cd), digest(cd).hexdigest()[:40]))
+            return out
+        p += cmdsize
+    return []
+
+data = open(sys.argv[1], 'rb').read()
+count, = struct.unpack('<I', data[20:24])
+table = [data[24 + i * 22:44 + i * 22].hex() for i in range(count)]
+print('table bytes=%d count=%d record_hexlen=%s' % (len(data), count, sorted({len(h) for h in table})))
+
+for path in sys.argv[2:]:
+    data = open(path, 'rb').read()
+    sha1 = hashlib.sha1(data).hexdigest()
+    print('%s bytes=%d sha1=%s sha1_hexlen=%d in_table=%s'
+          % (path, len(data), sha1, len(sha1), sha1 in table))
+    for index, (offset, size) in enumerate(slices(data)):
+        for slot, hash_type, cd_length, cdhash in code_directories(data[offset:offset + size]):
+            if slot not in (0x0, 0x1000):
+                continue
+            print('    slice=%d slot=0x%x hashType=%d CodeDirectory_bytes=%d cdhash=%s hexlen=%d in_table=%s'
+                  % (index, slot, hash_type, cd_length, cdhash, len(cdhash), cdhash in table))
+```
+
+2026-11-25T22:10Z 在本机用同一段脚本重跑，输入是两组能与本节读数逐字节对应的副本。补丁版两份取自 tar `d5bd3ef3…`（与下方「先看磁盘这一层」引用的 tar 是同一个 sha256）：`launchdhook` 为 `150270a5…`/330144、`systemhook` 为 `d7045cd4…`/234336。原版两份取自工厂 tar `52607d78…`/6082560（与 §十二·一 那张 tar 表第三行记的出厂包同一个 sha256）：`launchdhook` 为 `449a9606…`/312848、`systemhook` 为 `6f16c545…`/233520。两份 tar 里的 `basebin.tc` 都是 `12bdb75e…`/640，与设备上那份相同，所以四份二进制是拿同一张表比对的。脚本输出的三个长度字段给出本节开头那句「被哈希的输入长度差两个多数量级，摘要都是 40 个字符」的读数：`CodeDirectory_bytes` 落在 645 到 1354，`sha1_hexlen` 全为 40，`record_hexlen=[40]`。同一轮重跑里，表复现为 640 字节 / `count=28`，八个 `0x0` 槽位的 cdhash 与上表逐位相同（原版两条都命中，补丁版都不在），四个文件 sha1 的 `in_table` 全为 `False`。
+
+同一套取法作用在设备上另外两个 basebin 文件上，`libjailbreak.dylib` 与 `jbctl` 的各两个切片也都命中 `basebin.tc`，所以这套取法本身是对的，不是只会读到「不在」。
+
+**补丁版不在表里这一差别，不足以单独解释 panic。** 有一条独立的实测反例：`systemhook.dylib` 的 234336 字节版本（`d7045cd4…`）同样不在 `basebin.tc` 里，而它在 2026-11-24 已经以那份字节在这台设备上被加载并生效过。`webkit-install-runbook.md` 第五阶段那条「basebin 层已更新的设备上，(c) 与 (d-2) 仍可能失败」记录 2026-11-24 05:58Z 设备上 `systemhook.dylib` 是 234336 字节且 (d-1) 通过；该二进制自带的六项计数按整条 entry 计是 `2 2 2 2 4 2`，按裸子串计是 `4 2 4 2 4 2`（前四项多出来的那一份来自 `__XPC_DYLD_*` 里嵌的裸名）；这两个读数都是本节在本机 tar `d5bd3ef3…` 的副本上测的。同一天的 (d-1) 判定输出见该文件「第一步 (d-1)」里那段 `2026-11-24 05:58Z 实测输出`，一个由 `python3` 拉起的探针进程拿到了 `possible path(DYLD_FRAMEWORK/LIBRARY_PATH): ".../procursus/Library/WebKitOverride/NoSuchX.framework/NoSuchX"` 这一行，而这行只可能由已注入该进程的 `systemhook` 产生——它正是那个「不在表里」的二进制。
+
+2026-11-25T17:2xZ 查设备上现存的内核 panic 报告，只有八份：`Retired/` 下三份 `2026-11-25-1018…`、`1019…`、`1020…`，当前目录五份 `2026-11-26-0051…` 到 `0100…`；2026-11-24 一份都没有。（旧报告的保留期不由本文控制，11-24 缺少记录不等于绝对没发生过；这里只能说现存记录不支持「它 panicked」。）
+
+所以「补丁版 `systemhook` 不在 `basebin.tc` 里」这一状态在 2026-11-24 已经以「被加载、生效、无 panic 记录」的形式存在过，它不是这次安装专有的异常。补丁版 `launchdhook` 与它同为 `hashType` 1、同样不在表里，但前者是否也因为「不在表里」而被拦，这个反例并不回答。它证到的是：「不在表里」这一条不是**充分**原因——有的二进制不在表里却照常工作。它没有证明「不在表里」与 panic 无关，因为「工作正常」本身也可能是另一条准入路径放行的结果（见本节末 M133 的读数）。
+
+**先看磁盘这一层：它根本不是这次实验里的变量。** 实验用的那份 tar（`/var/mobile/Documents/bb/basebin-lh.tar`，`d5bd3ef3…`）里的 `basebin.tc` 是 `12bdb75e6962…`/640，与设备上 `/var/jb/basebin/basebin.tc` 逐字节相同，`version` 与 28 条记录也相同。也就是说不论装前装后，这个磁盘文件都是同一份内容，它没有随补丁一起变化，因此不可能是新旧两态之间的差异来源。2026-11-26 00:50Z 那次安装之后设备被重新越狱、`basebin` 整包回到出厂版本，本节读数是恢复之后在设备上重新取的。
+
+**磁盘 uuid 与 `jbctl trustcache info` 的 uuid 不同，但这不是两张表。** 两个读数的来源不同，先分清：磁盘 `/var/jb/basebin/basebin.tc` 的 uuid `a3e4647f…` 与 28 条是本节在设备上直接读到的；`jbctl trustcache info` 报的 `A65DF2BA30F543B1B9A2FC3032D5ED8E` 与 178 条**不是本节取的**——该命令需 root，`mobile` 下退出码 3，本轮没有读到，这里按 M127 的设备记录引用，那个数也无法独立复算。下面的机制解释只依赖 Dopamine 3.0.13 的源码，不依赖 178 这个值。
+
+`BaseBin/libjailbreak/src/trustcache.h:11` 把 `BASEBIN_TRUSTCACHE_UUID` 定义成字面量 `{'B','A','S','E','B','I','N','\0',…}`；`trustcache.c:370-373` 的 `trustcache_file_upload_with_uuid` 用 `memcpy` 把这段 UUID 盖在文件自带的 uuid 上。所以上传之后链里那份的 uuid 是 `BASEBIN…` 而不是磁盘上的 `a3e4647f…`，后者不出现是上传的规定结果。
+
+`trustcache.c:139-150` 的 `_is_jb_trustcache` 要求 `fileptr == tcKaddr + offsetof(jb_trustcache, file)`，即 `+0x48`；而 `trustcache.c:355` 的上传路径写的是 `tcKaddr + ksizeof(trustcache)`，iOS 16 上 `ksizeof` 取 `info.c:354-361` 设的 `0x28`。两者不等，所以 `jbctl trustcache info` 只列出 `JB_MAGIC` 池那 178 条，它不覆盖上传进去的那一段。
+
+信任判定走的是另一条：`trustcache.c:449-460` 的 `is_cdhash_trustcached` 经 `_trustcache_list_enumerate`（`trustcache.c:50-60`，无过滤）到 `trustcache_contains_cdhash`。`basebin.tc` 的 28 条记录在这条无过滤链上，会被查到。所以上面那张表的命中与否就是判定用的读数，不是只能核对 tar 内容的旁证。
+
+`jbctl trustcache info` 本轮没有读（需 root，`mobile` 下退出码 3、`ERROR: trustcache subcommand requires root.`）。它对本节也没有判别力：那 178 条是 `JB_MAGIC` 池，结构上不会包含 `basebin.tc` 的任何条目，所以「其中没有某个 cdhash」是同义反复，不能当证据。上一轮曾把它当作「原版也在表外却工作正常」的方向性证据引用，那条用法取消。
+
+**「一直加载正常」不能当作「通过了信任判定」的证据。** 上面那个 `systemhook` 反例的力度取决于一个没被验证的前提：这台设备的准入来自信任缓存。M133 的设备实测（转引，非本节测量）说的正相反：在一个 `CS_DEBUGGED=False` 的进程里不做任何授权，按依赖顺序 `dlopen` 七个 `/var/jb` 镜像，`7/7` 全部加载成功；Dopamine 3.0.13 的准入走 `pmap_cs_allow_invalid`（`BaseBin/libjailbreak/src/kernel.c:339`，对 arm64e 无条件执行），`proc_set_debugged` 不是开关。所以「加载成功」说明不了该 cdhash 通过了 `is_cdhash_trustcached`。
+
+**本节原先的结论「原版的两个也不在，所以 trust 状态无所谓」予以撤回。** 那句话是从一次错量的比对里得出来的，前提本身不成立。按正确量算，情况是：原版的每个切片都在 `basebin.tc` 的 28 条里，补丁版两份都不在。但这组命中关系与 panic 的关系**没有被判定**：
+
+- 「补丁版不在表里所以出事」不成立——缺席没有被证明会导致加载失败，那次判定本身没有被做过。
+- 「在不在表里与 panic 无关」同样不成立——补丁版确实不在那 28 条里，而这条链确实参与信任判定，两边不能互推。
+
+两个方向都缺少同一样东西：一次在 panic 之前读到的 `is_cdhash_trustcached` 对补丁版那个 cdhash 的返回值。本轮没有这个读数。所以本节只能说 `systemhook` 那条已经证到的一步——「不在 `basebin.tc` 里」不是**加载失败**的充分原因，因为确实有不在表里的二进制照常工作；至于这是不是通过信任缓存放行的，M133 的读数说明未必。再往前一步，说它是不是这次 panic 的可解释原因，两边都没有依据。**panic 的病因在这条轴线上未知。**
 
 ### 十二·六 安装步骤（**本 mission 未执行；M127 已执行且失败**）
 
@@ -1266,6 +1351,8 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 | 三个成员的依赖加载命令逐切片比对 | **已执行**（本机），逐条相同 | 未做 |
 | 三个成员的未定义符号比对 | **已执行**（本机，每切片去表头）：`launchdhook` 273 / 273、hook dylib 0 / 0、`systemhook` arm64 131 / 130 与 arm64e 126 / 125，见十二·三 | 未做 |
 | 四个成员（两版各两个）的 cdhash 与 `basebin.tc` 的比对 | **已执行**（本机），含 11 个槽位的反面对照，见十二·十 | 未做 |
+| `basebin.tc` 的 28 条 cdhash 核对 | **已执行**（设备，2026-11-25T17:23Z）：原版两份每切片命中，补丁版两份不命中，见十二·五 | 未做 |
+| 运行期 `jbctl trustcache info` | **未执行**：需 root，本节在 `mobile` 账户下取数 | 未执行 |
 | 用 `verify-basebin-tar.sh` 判定本 tar | **已执行**（本机），退出 1：7 条具体断言失败（6 条 dyldhook + 1 条 `basebin.tc` 的 `(cdhash, hash_type)` 对集合相等）+ 1 条汇总行，见十二·二 | 未做 |
 | 把 tar 送到设备 | **未执行** | **已执行**，`/var/mobile/Documents/bb/basebin-lh.tar` |
 | `jbctl update basebin` | **未执行** | **已执行**，2026-11-26 00:50:43 |
@@ -1279,9 +1366,9 @@ launchctl print pid/$APP | sed -n '/environment = {/,/}/p'
 
 十二·五由 M135 负责改写，本节不重复它的结论，也不修改它。**十二·五的正文以 M135 那版为准**，本节只记录本 mission 自己按 cdhash 复算的读数，用途是交叉核对：两份文档若在同一个文件上得出不同的 cdhash，其中至少一份算错了。
 
-**本分支上的十二·五还是更早的按文件 sha1 查表那一版，M135 的改写尚未合并进来。** 两种量不同，所以在 M135 那版落地之前，本文件里这两节会在「原版在不在表里」这一点上给出相反的答案：现在这段十二·五说原版两个都不在，本节说原版每个切片都命中。**遇到这个矛盾时以 M135 那版十二·五为准，本节不作为替代文本**；本节只是把同一批文件按 cdhash 重算一遍留档。
+**十二·五已按 M135 那版落地，本节与它不再有矛盾。** 本文件此前有一段并存窗口：十二·五还是更早的按文件 sha1 查表那一版，本节是 cdhash 口径，两者在「原版在不在表里」上给出相反的答案。这次合并把十二·五整段换成了 M135 的 cdhash 口径版本，sha1 口径那一版已删除，所以现在两节说的是同一个量、同一个结论。
 
-M135 那版十二·五发布的 cdhash 与本节下表逐条相同（`launchdhook` 的 `0e59e398…`、`a7438ed3…`、`fe83a746…`、`6e8952fb…`，`systemhook` 的 `dd3f99c4…`、`d3c4e949…`、`8d580b85…`、`bd93fa08…`），两份文档同时落地后不矛盾。
+M135 那版十二·五发布的 cdhash 与本节下表逐条相同（`launchdhook` 的 `0e59e398…`、`a7438ed3…`、`fe83a746…`、`6e8952fb…`，`systemhook` 的 `dd3f99c4…`、`d3c4e949…`、`8d580b85…`、`bd93fa08…`），两处同时在场也不矛盾。
 
 **取法**：按每个架构切片读出 `LC_CODE_SIGNATURE`（load command `0x1d`），进入它指向的 SuperBlob，走索引取槽位 `0x0`，读 CodeDirectory 偏移 **37** 处的 `hashType`，`1` 取 `SHA1`、`2` 取 `SHA256`，都截到 20 字节。表文件 `basebin.tc` 是 640 字节、版本 `1`、uuid `a3e4647f…`、28 条记录，它自己的 sha256 是 `12bdb75e6962…`。
 
