@@ -131,12 +131,81 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 | 4 | 上游在 18.x 已删除 `pre-bootstrap` 这条路径（八个 18.x tag 的 `Source/WebKit` 对该串 0 命中），收到这个名字后落到 `handleXPCEndpointMessage`，那里没有对应分支，消息被丢弃 | `XPCServiceMain.mm` | 恢复该分支并存下 `priorityBoostMessage` | 会发这条消息的 UI 进程连上时，helper 不再把它当未知消息丢弃。本工程部署的 iOS 16.1 UI 不发这条消息（`ProcessLauncherCocoa.mm:82-86` 的 `shouldLeakBoost` 在 iOS 上返回假），所以此路径在部署组合上是死代码 | 已覆盖，同一补丁 |
 | 5 | `InitializerFunction` 参数个数 16.1 为 3、18.3 为 2 | `XPCServiceEntryPoint.h` | 入口签名加默认第三参数 | helper 能走到 `initializeAuxiliaryProcess`，不因函数指针调用而崩 | 已覆盖，同一补丁 |
 | 6 | `getClientSDKAlignedBehaviors` 两版都收位图，但 16.1 发 8 字节、18.3 期望 12 字节，`RELEASE_ASSERT` 相等比较导致 helper 中止 | `XPCServiceEntryPoint.mm` | 删除 `RELEASE_ASSERT`，改为按宽度分三支：等宽时 `memcpy` 并返回真（本包部署的组合两端是同一份 framework，位序相同，这一支正确）；窄于本版时丢弃、位图保持全零、记 `RELEASE_LOG_ERROR`、返回真；宽于本版时丢弃、记另一条日志、返回假。两版位序不可按位置换算，所以 8 字节的负载不被解码 | helper 不再中止，8 字节负载走「窄」那一支取默认值；等宽的 12 字节对端（16.4、17.x、18.0–18.2）仍会被按错位序拷贝（需在 helper 内打点） | M85 已落地（`97cfd79`、`ddfaa5f`、`e657b79`、`30ae1b9` 至 `7295bbb`，其中 `e657b79` 恢复等宽拷贝） |
-| 7 | `xpc_main` 在公开 iOS SDK 上不可用 | `XPCServiceMain.mm` | 用 `xpc_connection_create(nullptr,nullptr)` 复现 `xpc_main` 的接线 | helper 能被拉起并回 `process-finished-launching` | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
+| 7 | `xpc_main` 在公开 iOS SDK 上不可用；旧写法用 `xpc_connection_create(nullptr,nullptr)` 建的是客户端连接，收不到 launchd 的握手，helper 的计数器因此冻结 | `XPCServiceMain.mm` | 用 `xpc_connection_create_mach_service(XPC_SERVICE_NAME, nullptr, 1)`（flags 位 0 即 `XPC_CONNECTION_MACH_SERVICE_LISTENER`）复现 `xpc_main` 的 listener 语义；符号用 `dlsym` 取，事件里只接受 `XPC_TYPE_CONNECTION` 并把它本身交给 `XPCServiceEventHandler` | 见本节末「iOS 分支改成 listener 之后：机制与构建后的设备判据」 | 已覆盖，`ios18-public-sdk-xpc-main.patch` |
 | 8 | helper 需要知道去哪找 18.3 的 framework | `BaseXPCService.xcconfig` | `-Wl,-dyld_env,...` 写进 `.xpc` | `otool -l` 里 `.xpc` 有 `LC_DYLD_ENVIRONMENT`；`lldb image list` 里 helper 的 `WebKit` 路径为 `/var/jb` | 已覆盖；路径已与 install 脚本对齐，设备侧未验证，见第七节 |
 | 9 | **launchd 是否为索引外的 `XPCServices` 现扫** | 无（判定项） | 不改代码 | 第四节的判据命令 | **未知，未测** |
 | 10 | `ios18-public-sdk-xpc-main.patch` 里的 `/var/jb/Library/Frameworks` 与 install 脚本的 `/var/jb/Library/WebKitOverride` 不一致 | `patches/ios18-public-sdk-xpc-main.patch`、`scripts/install-webkit-override.sh`、`scripts/check-webkit-override.sh`、`scripts/uninstall-webkit-override.sh` | 各处改成同一个字面量 `/var/jb/Library/WebKitOverride`：补丁第 16 行的 `WK_ROOTLESS_FRAMEWORKS_ROOT` 供第 22 行两条 `-dyld_env` 引用，`install-webkit-override.sh:66`、`check-webkit-override.sh:27`、`uninstall-webkit-override.sh:32` 各写一次同一字面量；两条搜索列表改为覆盖目录在前、deb 目录作后备 | 先 `grep` 四处字面量必须相等（命令与输出见 `docs/ios16-override-path-alignment.md` 第五节）；设备回网后对 UI 与 helper 各取一次 `image list`，两者 `WebKit` 必须同目录，且必须同为 `/var/jb/Library/WebKitOverride/WebKit.framework/WebKit`，这就是「第一个解析成功的候选」的等价读数。读这个 helper 必须是 launchd 拉起的那一个（就是取 `image list` 的同一个进程），不能靠直接执行 `.xpc`：直接执行绕过 `xpcproxy`，读数由启动它的 shell 是否经 systemhook 派生决定，两个方向都会错（见 `docs/ios16-override-path-alignment.md` 第六节第 3 项）。要交叉验证 helper 的进程环境列表里有没有覆盖目录，读同一个 helper 的 `environment` 段落：出现 `DYLD_FRAMEWORK_PATH => <overlay>` 说明这个列表带着覆盖目录（这是 dyld 先枚举环境列表、本判据要的那个前提）。**这句只在那个段落存在时成立。** 2026-11-26T01:20:01+0800 在本设备上，`launchctl print pid/684`（Chrome）全文没有 `environment` 这个键，而 `launchctl print pid/1103`（MobileSafari）有、四行、只有 `PATH`、`CFFIXED_USER_HOME`、`HOME`、`TMPDIR`；同一天同一个 pid 1103 的 `envp` 有 10 条。所以「整段没有这四个变量」推不出「这个列表为空」，可能是没打印，也可能打印的是域级列表而不是进程的 `envp`。要判定进程实际携带什么，用 `scripts/inspect-process-env.py --check <pid>` 读 `sysctl(KERN_PROCARGS2)`，写法与三种误读见 `../../webkit-install-runbook.md` 的「设备排查：读进程环境变量」一节。这个读数**不**能判定「`__XPC_` 转交成立」：`systemhook` 在 `launchd → xpcproxy → service` 链上直接写裸名（`dopamine-basebin/0001-systemhook-set-search-paths.patch:99-104` 同时设两种拼写），附录 A 那个 Safari 读数正是这种来源，所以「`__XPC_` 转交是否存在」仍是未验证项（见 `docs/ios16-override-path-alignment.md` 第六节第 3 项）。不要等 deb 那一行的候选出现：dyld 命中即 `stop`，后面那行不会被打印。若进程环境那条列表为空，`DYLD_PRINT_SEARCHING` 下第一行打印的会是上游 `BaseXPCService.xcconfig:70-71`（路径级数由 `:79`→`:81`→`:85`）写进去的 `@executable_path/..` 落空项（CI run `45331147658` 的 `otool -l` 里六个 `.xpc` 都有）；进程环境列表带着覆盖目录时内嵌列表不被枚举，这一行不出现。两种情形它都不算判据 | **已修**；机制、后备项的用途与未验证项见 `docs/ios16-override-path-alignment.md` |
 
 第 9 行是唯一的阻断项，其余九项都已落地或有明确改法。第 10 行不影响归零判定，但会让「是否真的跑的是全 18.3」无法从路径前缀反推。
+
+### iOS 分支改成 listener 之后：机制与构建后的设备判据
+
+第 7 行在 M166（内层提交 `882957b`，`patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +269,54 @@` hunk）改写了 iOS 分支。以下代码与注释原文取自合并后的补丁：
+
+```objc
+#if PLATFORM(MAC) || PLATFORM(MACCATALYST)
+    xpc_main(XPCServiceEventHandler);
+    return 0;
+#else
+    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does.
+    // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
+    // xpc_connection_create_listener, and the handler it wraps receives each connection launchd
+    // accepts, which is the shape XPCServiceEventHandler takes. A client connection instead
+    // receives messages addressed to its own socket and never a connection, so launchd's handshake
+    // cannot arrive. xpc_connection_create_mach_service reaches that same listener constructor
+    // when bit 0 of its flags is set, which is what this branch asks for.
+    //
+    // The entry point is absent from the SDK, so it is resolved at runtime; a missing symbol ends
+    // the process rather than falling back to a client connection that cannot work.
+    typedef xpc_connection_t (*CreateMachServiceFunction)(const char*, dispatch_queue_t, uint64_t);
+    static CreateMachServiceFunction createMachService = reinterpret_cast<CreateMachServiceFunction>(dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service"));
+    if (!createMachService) {
+        RELEASE_LOG_FAULT(IPC, "Exiting: libxpc does not export xpc_connection_create_mach_service");
+        exitProcess(EXIT_FAILURE);
+    }
+
+    const char* xpcServiceName = getenv("XPC_SERVICE_NAME");
+    if (!xpcServiceName) {
+        RELEASE_LOG_FAULT(IPC, "Exiting: XPC_SERVICE_NAME is unset, so there is no service to listen for");
+        exitProcess(EXIT_FAILURE);
+    }
+
+    // XPC_CONNECTION_MACH_SERVICE_LISTENER is bit 0 of the flags argument. The value is written out
+    // because the SDK carries neither the entry point nor its flag; libxpc tests this bit before it
+    // creates the listener.
+    static const uint64_t machServiceListenerFlag = 1;
+
+    xpc_connection_t listener = createMachService(xpcServiceName, nullptr, machServiceListenerFlag);
+    xpc_connection_set_event_handler(listener, ^(xpc_object_t event) {
+        if (xpc_get_type(event) == XPC_TYPE_CONNECTION) {
+            XPCServiceEventHandler(event);
+            return;
+        }
+        // A listener yields connections and errors, nothing else, and an error means no connection
+        // will ever arrive. Report it and end instead of idling in dispatch_main.
+        RELEASE_LOG_FAULT(IPC, "Exiting: listener received %{public}s instead of a connection", xpc_type_get_name(xpc_get_type(event)));
+        exitProcess(EXIT_FAILURE);
+    });
+    xpc_connection_resume(listener);
+    // The bootstrap message initialises through WorkQueue::main().dispatchSync, which needs the
+    // main queue to be driven, so drain it instead of running the main run loop.
+    dispatch_main();
+#endif
+```
+
+**旧写法为什么收不到 launchd 的握手。** 旧分支用 `xpc_connection_create(nullptr, nullptr)`，那建的是**客户端连接**。客户端连接的 handler 收到的每条事件是发往自己 socket 的消息字典；listener 收到的是**一条新接受的连接**（`XPC_TYPE_CONNECTION`）。所以旧代码里 `xpc_dictionary_get_remote_connection(event)` 永远拿不到 WebContent peer，`XPCServiceEventHandler` 从未在一条真实连接上装过 handler，helper 回答完什么都不做就停在 `dispatch_main()`。这正是 helper 计数器冻结的原因：`launchctl print` 的实例 job 显示 `state = running`、`runs = 1`、`initialized = 1`、`trampolined = 1`、`last exit code = (never exited)`，而 `proc_pidinfo(PROC_PIDTASKINFO)` 在 25 秒窗口内逐项不变（`cpu_user=0.002s`、`mach_msg_sent=191`、`recv=83`、`syscalls=114686` 两次采样相同），同期 Safari UI 的 `mach_msg_sent` 从 3154 涨到 3159。
+
+**listener 语义的两条依据来自 M166 的设备反汇编，标为已确证。**
+
+- `xpc_main`（`libxpc.dylib[0x00000001d3466890]`）在 `<+132>` 用一个内部函数建连接；反汇编该内部函数（`0x213a524f8`），第一条调用是 `bl 0x213a44a34`，符号为 `xpc_connection_create_listener`。取不到服务名时跳 `<+120>: brk #0x1`，错误串 `"Configuration error: Could not retrieve service name."`。
+- `xpc_connection_create_mach_service`（`libxpc.dylib[0x00000001d34597a0]`）在 `<+28>` 是 `tbnz w19, #0x0, <+84>`，flags 位 0 置位时 `<+92> bl 0x213a44a34`，即同一个 `xpc_connection_create_listener`。`XPC_CONNECTION_MACH_SERVICE_LISTENER` 就是位 0，`machServiceListenerFlag = 1` 由此而来。
+
+**以上是静态结论，M166 没有构建，也没有在设备上跑过新产物。本表第 7 行的「已覆盖」只指补丁内容，不指设备行为。** 构建后要在设备上验证的判据：
+
+1. **helper 真的收到连接。** 先 `killall -9 MobileSafari` 再 `uiopen --path /Applications/MobileSafari.app` 让它重新派生，然后对同一个 helper pid 用 `proc_pidinfo(PROC_PIDTASKINFO)` 间隔 25 秒读两次 `pti_messages_sent` 与 `pti_messages_received`（即 `mach_msg_sent` / `recv`），两者必须从冻结状态开始增长。这是本次修复唯一真正的成功判据；`state = running` 与 `runs = 1` 在故障态下也成立，不能用作判据。
+2. **页面真的渲染。** 按 `AGENTS.md` 第八节，进程活着不算成功，必须看到内容。Safari、Chrome、微信三款各测一轮：`killall -9` 后重新启动，打开一个页面，确认渲染出内容。
+3. **失败时的区分。** 若 `mach_msg_sent`/`recv` 仍不涨，看 helper 的 `.ips` 与 `launchd.log` 增量：出现 `Exiting: listener received …` 说明 listener 起来了但 launchd 没递连接（可能是 entitlement 或端点解析，见第四节）；出现 `Exiting: libxpc does not export …` 或 `XPC_SERVICE_NAME is unset` 说明 dlsym 或环境这条前置没满足；两条都没有，就说明 helper 仍停在 `dispatch_main`、根本没进这段分支。
+4. **没有崩溃。** `ls -t /var/mobile/Library/Logs/CrashReporter/*.ips | head`，确认没有 `termination.namespace = DYLD`，也没有新 `PAC_EXCEPTION`。
 
 ---
 
@@ -157,14 +226,15 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 `patches/ios16-ipc-message-number-translation.patch` 不再触碰 `XPCServiceEntryPoint.mm`：它曾经在该文件末尾插入一段 `getUIProcessSDKVersion`，两个补丁因此在一个 hunk 的插入位置上相争；现在这段被删除，翻译补丁只改 `Platform/IPC` 下的文件、`AuxiliaryProcess.cpp` 与 `project.pbxproj`，两补丁的 hunk 区间不再有任何交集。
 
-### `patches/ios18-public-sdk-xpc-main.patch`（87 行，4 个 hunk）
+### `patches/ios18-public-sdk-xpc-main.patch`（117 行，5 个 hunk）
 
 | hunk 位置 | 内容 | 对应上表 |
 | --- | --- | --- |
-| `BaseXPCService.xcconfig @@ -59,7 +59,20` | 第 16 行 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride`；第 22 行 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib` | 第 8 行 |
-| `XPCServiceMain.mm @@ -135,9 +135,9`（第 30 行） | 收到 `XPC_ERROR_CONNECTION_INVALID` 时直接 `exitProcess`，不再走 `performBlock:` | 支撑第 7 行 |
-| `XPCServiceMain.mm @@ -205,10 +205,7`（第 43 行） | 入口函数指针找不到时直接退出 | 支撑第 7 行 |
-| `XPCServiceMain.mm @@ -271,8 +268,32`（第 55 行） | 非 macOS 平台用 `xpc_connection_create(nullptr,nullptr)` + `dispatch_main()` 复现 `xpc_main` | 第 7 行 |
+| `BaseXPCService.xcconfig @@ -59,7 +59,20`（第 4 行） | 第 16 行 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride`；第 22 行 `WK_ROOTLESS_FRAMEWORKS_LDFLAGS_YES = -Wl,-dyld_env,DYLD_FRAMEWORK_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT):/var/jb/Library/Frameworks -Wl,-dyld_env,DYLD_LIBRARY_PATH=$(WK_ROOTLESS_FRAMEWORKS_ROOT)/usr/lib:/var/jb/usr/lib` | 第 8 行 |
+| `XPCServiceMain.mm @@ -31,6 +31,7`（第 30 行） | 加 `#import <dlfcn.h>`，供下面 `dlsym` 使用 | 支撑第 7 行 |
+| `XPCServiceMain.mm @@ -135,9 +136,9`（第 38 行） | 收到 `XPC_ERROR_CONNECTION_INVALID` 时直接 `exitProcess`，不再走 `performBlock:` | 支撑第 7 行 |
+| `XPCServiceMain.mm @@ -205,10 +206,7`（第 51 行） | 入口函数指针找不到时直接退出 | 支撑第 7 行 |
+| `XPCServiceMain.mm @@ -271,8 +269,54`（第 63 行） | 非 macOS 平台建 **listener** 连接（`xpc_connection_create_mach_service` + flags 位 0，符号用 `dlsym` 取），handler 只接受 `XPC_TYPE_CONNECTION` 并把它交给 `XPCServiceEventHandler`；末尾 `dispatch_main()`。原文见第五节末 | 第 7 行 |
 
 覆盖了第 7 行与第 8 行。第 8 行的路径值曾是第七节记录的不一致，现已对齐。
 

@@ -362,7 +362,7 @@ ls /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.
 - **已确证（源码）**：launchd 对 XPC 域**禁用父域回退**，并且 XPC 域的登记与查表都只落在域自身（`core.c:7155`、`core.c:6358`、`core.c:7167`、`core.c:9058-9060`）。所以只要 app 的查名发生在某个 XPC 域里，写在 `system` 域或 `user/501` 域任务里的 `MachServices` 名就对它不可见。
 - **有源码支撑（前提）**：`xpc_connection_create(name, nullptr)` 查名所用的 manager **是**该进程自己的私有 XPC 域。这一步没有直接读数，只有两条间接设备读数，见 9.1。若它其实是个很小的非 XPC 域，`core.c:9070` 的父域上溯就会生效，本节结论作废——这正是 9.9 第 2 条（决定项）要定的事。
 
-即使前提成立，`MachServices` 也还有第二道坎：plist 声明的任务不会被当成 XPC 服务启动，launchd 也不会向 helper 递送 peer（9.2、9.3）。
+即使前提成立，`MachServices` 也还有第二道坎：plist 声明的任务不会被当成 XPC 服务启动，launchd 也不会向 helper 递送连接（9.2、9.3）。
 
 本节源码引用取自两份公开源码，行号都可用 9.10 的命令复跑：
 
@@ -488,30 +488,57 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
 
 **所以私有域里的服务条目由客户端自己的 libxpc 提供。** 写在 `/var/jb/Library/LaunchDaemons` 或 `/var/jb/basebin/LaunchDaemons` 的 plist 走不到这条路。它建出的是 system 域里的普通条目，`xpc_service` 为假。
 
-### 9.3 helper 不监听 Mach 服务，只等 launchd 递 peer
+### 9.3 helper 不登记 Mach 服务名，它作为 listener 接受 launchd 递来的连接
 
-18.3 的 iOS helper 入口没有一条「自己登记成 Mach 服务、等人来连」的路径。本仓库的 18.3 构建在非 macOS 上走的是 `patches/ios18-public-sdk-xpc-main.patch` 的 `-271,8 +268,32` 那个 hunk 补出来的等价物：
+18.3 的 iOS helper 入口没有一条「自己把服务名登记成 Mach 服务、等人来连」的路径。本仓库的 18.3 构建在非 macOS 上走的是 `patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +269,54 @@` 那个 hunk。以下是从合并后的补丁原样抄出的 `#else` 分支（内层提交 `882957b`，分支 `feat/m166-inner-xpc-listener`；M166 合并前若被改写，以合并后的补丁为准）：
 
 ```objc
 #if PLATFORM(MAC) || PLATFORM(MACCATALYST)
     xpc_main(XPCServiceEventHandler);
     return 0;
 #else
-    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does:
-    xpc_connection_t taskConnection = xpc_connection_create(nullptr, nullptr);
-    xpc_connection_set_event_handler(taskConnection, ^(xpc_object_t event) {
-        if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) {
-            // ConnectionInvalid or TerminationImminent: launchd is the only way in, so exit.
-            exitProcess(EXIT_FAILURE);
+    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does.
+    // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
+    // xpc_connection_create_listener, and the handler it wraps receives each connection launchd
+    // accepts, which is the shape XPCServiceEventHandler takes. A client connection instead
+    // receives messages addressed to its own socket and never a connection, so launchd's handshake
+    // cannot arrive. xpc_connection_create_mach_service reaches that same listener constructor
+    // when bit 0 of its flags is set, which is what this branch asks for.
+    //
+    // The entry point is absent from the SDK, so it is resolved at runtime; a missing symbol ends
+    // the process rather than falling back to a client connection that cannot work.
+    typedef xpc_connection_t (*CreateMachServiceFunction)(const char*, dispatch_queue_t, uint64_t);
+    static CreateMachServiceFunction createMachService = reinterpret_cast<CreateMachServiceFunction>(dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service"));
+    if (!createMachService) {
+        RELEASE_LOG_FAULT(IPC, "Exiting: libxpc does not export xpc_connection_create_mach_service");
+        exitProcess(EXIT_FAILURE);
+    }
+
+    const char* xpcServiceName = getenv("XPC_SERVICE_NAME");
+    if (!xpcServiceName) {
+        RELEASE_LOG_FAULT(IPC, "Exiting: XPC_SERVICE_NAME is unset, so there is no service to listen for");
+        exitProcess(EXIT_FAILURE);
+    }
+
+    // XPC_CONNECTION_MACH_SERVICE_LISTENER is bit 0 of the flags argument. The value is written out
+    // because the SDK carries neither the entry point nor its flag; libxpc tests this bit before it
+    // creates the listener.
+    static const uint64_t machServiceListenerFlag = 1;
+
+    xpc_connection_t listener = createMachService(xpcServiceName, nullptr, machServiceListenerFlag);
+    xpc_connection_set_event_handler(listener, ^(xpc_object_t event) {
+        if (xpc_get_type(event) == XPC_TYPE_CONNECTION) {
+            XPCServiceEventHandler(event);
+            return;
         }
-        xpc_connection_t peer = xpc_dictionary_get_remote_connection(event);
-        if (!peer) {
-            RELEASE_LOG_FAULT(IPC, "Exiting: bootstrap message has no remote connection");
-            exitProcess(EXIT_FAILURE);
-        }
-        XPCServiceEventHandler(peer);
+        // A listener yields connections and errors, nothing else, and an error means no connection
+        // will ever arrive. Report it and end instead of idling in dispatch_main.
+        RELEASE_LOG_FAULT(IPC, "Exiting: listener received %{public}s instead of a connection", xpc_type_get_name(xpc_get_type(event)));
+        exitProcess(EXIT_FAILURE);
     });
-    xpc_connection_resume(taskConnection);
+    xpc_connection_resume(listener);
+    // The bootstrap message initialises through WorkQueue::main().dispatchSync, which needs the
+    // main queue to be driven, so drain it instead of running the main run loop.
     dispatch_main();
 #endif
 ```
@@ -523,9 +550,23 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
     return 0;
 ```
 
-补丁之所以要重写，是因为 `xpc_main` 在公开 iOS SDK 下不可用。重写出来的语义与 `xpc_main` 相同：连到 launchd 放进环境里的那个端点，把第一条入站消息当成 launchd 递来的 peer。**「launchd 是唯一进口」这个语义来自 libxpc 的 `xpc_main`，不是本仓库新造的行为**，这条结论的证据强度标为「有源码支撑」——`xpc_main` 的实现未开源。
+补丁之所以要重写，是因为 `xpc_main` 在公开 iOS SDK 下不可用。重写出来的必须与 `xpc_main` 一样**监听**，不能改成**拨号**：`xpc_main` 在这个 libxpc 上读 `XPC_SERVICE_NAME`、调 `xpc_connection_create_listener`，它的 handler 收到的是 launchd 接受的每一条连接，正是 `XPCServiceEventHandler(xpc_connection_t peer)` 要的形状。**「helper 只能由 launchd 递连接进来」这个语义来自 libxpc 的 `xpc_main`，不是本仓库新造的行为。**
 
-上面那段手写等价物在**本仓库打过补丁的树**里是 `Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm:329-340`（`:329` 是 `xpc_connection_create(nullptr, nullptr)`，`:340` 是 `XPCServiceEventHandler(peer)`）。这是补丁产物行号，由 `patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +268,32 @@` hunk 把上游的 `xpc_main(XPCServiceEventHandler)` 换成 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 分支加这段等价物；上游同一文件里 `xpc_connection_create` 出现次数为 0，没有这一段。
+**以下两条依据来自 M166 在设备上的反汇编读数，标为已确证。**
+
+- **`xpc_main` 内部调用 `xpc_connection_create_listener`。** attach 到 Safari 后 `disassemble -n xpc_main`（`libxpc.dylib[0x00000001d3466890]`）在 `<+132>` 用一个内部函数建连接、`<+136>` 把返回值存进全局；反汇编那个内部函数（`0x213a524f8`）的第一条调用是 `bl 0x213a44a34`，符号为 `xpc_connection_create_listener`。取不到服务名时跳 `<+120>: brk #0x1`，错误串 `"Configuration error: Could not retrieve service name."`。
+- **`xpc_connection_create_mach_service` 的 flags 位 0 转到同一构造函数。** `disassemble -n xpc_connection_create_mach_service`（`libxpc.dylib[0x00000001d34597a0]`）：`<+28> tbnz w19, #0x0, <+84>`，置位后 `<+92> bl 0x213a44a34`，与上一条是同一个 `xpc_connection_create_listener`。`XPC_CONNECTION_MACH_SERVICE_LISTENER` 就是位 0，所以补丁里 `machServiceListenerFlag = 1`。
+
+**旧写法为什么收不到 launchd 的握手。** 上一版补丁写的是 `xpc_connection_create(nullptr, nullptr)`，那是**客户端连接**：它的 handler 收到的是发往自己 socket 的消息字典，永远不会有 `XPC_TYPE_CONNECTION` 事件。于是 `xpc_dictionary_get_remote_connection(event)` 拿不到 peer，`XPCServiceEventHandler` 从未在一条真实连接上装过 handler，helper 回答完什么都不做就停在 `dispatch_main()`。这与设备读数一致：`launchctl print` 的实例 job 是 `state = running`、`runs = 1`、`initialized = 1`、`trampolined = 1`、`last exit code = (never exited)`，进程活着且「在等」，而它的 `proc_pidinfo(PROC_PIDTASKINFO)` 计数器在 25 秒窗口内逐项冻结（`cpu_user=0.002s`、`mach_msg_sent=191`、`recv=83`、`syscalls=114686` 两次采样相同），同期 Safari UI 进程的 `mach_msg_sent` 从 3154 涨到 3159。UI 在发消息，helper 一条都没收到——计数器冻结不是「没事干」，是建出来的对象收不到「一条新连接」这个事件。具体读数与反汇编全文见 `docs/ios16-xpc-listener-semantics.md`。
+
+**这是静态结论，尚未在设备上验证。** M166 只做了 `git apply --check -v`，没有构建产物。构建后要在设备上验证的四条判据（`mach_msg_sent`/`recv` 从冻结状态开始增长、三款浏览器各测一轮渲染、失败日志的区分、无新崩溃）写在 `docs/ios16-all-18.3-xpc-endpoint-audit.md` 第五节末的「iOS 分支改成 listener 之后：机制与构建后的设备判据」一节。
+
+整段在上游同一文件里没有对应物：上游同一文件里 `xpc_connection_create` 出现次数为 0，只有 `xpc_main` 两行。`patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +269,54 @@` hunk 把这两行换成 `#if PLATFORM(MAC) || PLATFORM(MACCATALYST)` 分支加这段代码。按补丁的新行号，`#if` 在 `+272`、`#else` 在 `+275`、`#endif` 在 `+319`。
+
+行号有两种口径，不能混着引：
+
+- **补丁文件自身的行号**：`#if` `:272`、`#else` `:275`、`#endif` `:319`。
+- **应用全套补丁后的树内行号**：工作流按文件名排序，`ios16-xpc-bootstrap-compat.patch` 先跑，它在 `XPCServiceEventHandler` 里插了约 50 行，都在这个 hunk 之前。M166 的 `git apply --check -v` 输出是「块 #4 成功应用于 319（偏移 50 行）」，即 hunk 起点落在树内 `:319`，`#else` 落在 `:325`、`#endif` 落在 `:369`。**这个树内行号是 M166 那次实测的偏移，重建时若前面的补丁变了，偏移也会变，读数以当次 `git apply --check -v` 为准。**
 
 另有一处可以反过来验证 helper 不走 Mach 服务名这条路。**分上游与本仓库树两种口径，行号不能混用：三处差一行，一处相同。**
 
@@ -538,7 +579,7 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
 - **本仓库树**：四处调用都被 `#if PLATFORM(MAC)` 排除在 iOS 编译之外（文件本身是否参与 iOS 构建是另一回事），其中只有 `DaemonUtilities.mm:40` 带 `XPC_CONNECTION_MACH_SERVICE_LISTENER`（即「登记成服务等连接」），其调用者 `WebPushDaemonMain.mm:179` 与 `PCMDaemonEntryPoint.mm:147` 也都在守卫内。
 - **上游**：这四个调用点在上游都没有 `#if PLATFORM(MAC)` 守卫。其中 `DaemonUtilities.mm:39` 服务于 webpushd（`ENABLE_WEB_PUSH_NOTIFICATIONS` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:243-245` 对 `PLATFORM(IOS)` 默认 1），`RemoteInspectorCocoa.mm:332` 属于 JavaScriptCore 的 `RemoteInspector`，连的是 webinspectord relay（`ENABLE_REMOTE_INSPECTOR` 在 `Source/WTF/wtf/PlatformEnableCocoa.h:765-767` 默认 1，文件在 `Source/JavaScriptCore/inspector/remote/SourcesCocoa.txt:30` 收录）。这两个都不是 WebKit 的 WebContent/Networking/GPU helper；另两个 `DaemonConnectionCocoa.mm:67` 与 `WebPushToolConnection.mm:80` 是客户端侧，flag 为 `0`（`docs/ios16-all-18.3-xpc-endpoint-audit.md:112`）。
 
-**所以「WebKit helper 不走 Mach 服务名」这个结论在两种口径下都成立**，只是它不能靠「iOS 上一行都不编译」这个断言来支撑——上游这四个调用点都没有平台守卫。支撑它的是：四处调用没有一处出现在 WebKit helper 的入口路径上（`XPCServiceMain.mm` 走的是本仓库树里那段 `xpc_main` 等价物或上游的 `xpc_main`，两者都只等 launchd 递 peer）。
+**所以「WebKit helper 不走 Mach 服务名」这个结论在两种口径下都成立**，只是它不能靠「iOS 上一行都不编译」这个断言来支撑——上游这四个调用点都没有平台守卫。支撑它的是：四处调用没有一处出现在 WebKit helper 的入口路径上（`XPCServiceMain.mm` 走的是本仓库树里那段 `xpc_main` 等价物或上游的 `xpc_main`，两者都是 listener，只接 launchd 递来的连接）。
 
 launchd 只在有 `waiting4attach` 记录时才走 `xpcproxy` 做端点递送，`core.c:4561-4574`：
 
@@ -566,7 +607,7 @@ if (!entitlement) {
 
 即客户端自己 attach 到已导入私有域的服务。**plist 声明的任务永远不会有 attach 记录**，所以 launchd 不会为它启用 `xpcproxy`，也不会把 peer 递给 helper。
 
-把 9.2 与这一节合起来：`MachServices` 能让名字出现在某个域里，但既不会让 launchd 把 helper 当 XPC 服务启动，也不会递送 peer。若 helper 因为别的原因被拉起来，它会收到 `ConnectionInvalid` 并按上面那个 block 调用 `exitProcess(EXIT_FAILURE)`。`exitProcess` 在非 Windows 平台就是 `exit(status)`（`Source/WTF/wtf/WTFProcess.cpp:41-63`，`#else` 分支在 `:61`），`EXIT_FAILURE` 是 1，所以退出码是 **1**。137 是 `128+9`，来自另一条路径：16.1 的 libxpc 对 `xpc_dictionary_apply(NULL, …)` 直接发 SIGKILL（`build-state.md` 第六轮「设备实测」一节那条独立小程序测到的 `Killed: 9` / `exit=137`），与这里的 `exitProcess` 不是同一回事。这与 `build-state.md` 记的「覆盖目录含二进制时 spawn 0」表现同形，但是另一个成因。
+把 9.2 与这一节合起来：`MachServices` 能让名字出现在某个域里，但既不会让 launchd 把 helper 当 XPC 服务启动，也不会递送连接。旧写法（客户端连接）下，若 helper 因为别的原因被拉起来，它会收到 `ConnectionInvalid` 并调用 `exitProcess(EXIT_FAILURE)`；新写法（listener）下对应的是「listener 收到的不是连接」那条分支，同样 `exitProcess(EXIT_FAILURE)`。**libxpc 在名字没有登记时把什么交给 listener（一条错误事件，还是什么也不送、进程停在 `dispatch_main`）没有测过**，这里不给结论。`exitProcess` 在非 Windows 平台就是 `exit(status)`（`Source/WTF/wtf/WTFProcess.cpp:41-63`，`#else` 分支在 `:61`），`EXIT_FAILURE` 是 1，所以退出码是 **1**。137 是 `128+9`，来自另一条路径：16.1 的 libxpc 对 `xpc_dictionary_apply(NULL, …)` 直接发 SIGKILL（`build-state.md` 第六轮「设备实测」一节那条独立小程序测到的 `Killed: 9` / `exit=137`），与这里的 `exitProcess` 不是同一回事。这与 `build-state.md` 记的「覆盖目录含二进制时 spawn 0」表现同形，但是另一个成因。
 
 ### 9.4 `/var/jb` 任务的发现路径
 
@@ -793,8 +834,11 @@ git show refs/tags/releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/Shared/
 ```
 
 ```sh
-# 9.3 本仓库补丁确实把这两行换成了手写等价物
-grep -n -A3 '^@@ -271,8 +268,32 @@' WebKitPlayground/patches/ios18-public-sdk-xpc-main.patch
+# 9.3 本仓库补丁确实把这两行换成了 listener 分支，且没有留客户端连接
+grep -n -A3 '^@@ -271,8 +269,54 @@' WebKitPlayground/patches/ios18-public-sdk-xpc-main.patch
+grep -c 'xpc_connection_create(nullptr' WebKitPlayground/patches/ios18-public-sdk-xpc-main.patch   # 应为 0
+grep -c 'xpc_connection_create_listener\|xpc_connection_create_mach_service' WebKitPlayground/patches/ios18-public-sdk-xpc-main.patch   # 应为 4
+grep -n 'machServiceListenerFlag = 1' WebKitPlayground/patches/ios18-public-sdk-xpc-main.patch   # 应为 1 处，值为 1
 ```
 
 `git show` 那条依赖本地已存在 `Safari-18.3.1-iOS-18.3.2` 这个 tag 的 WebKit 检出；没有的话先取一份带该 tag 的检出。`grep` 那条相对外层仓库根目录。
