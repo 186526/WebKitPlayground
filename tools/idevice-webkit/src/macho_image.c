@@ -8,6 +8,7 @@
    32-bit command number matches none of their load commands. */
 #define segment_command_64 0x19u
 #define id_dylib_command 0xdu
+#define uuid_command 0x1bu
 
 typedef struct load_command {
   u32 command;
@@ -200,5 +201,45 @@ void macho_version_text(const void *header, char *out, usize capacity) {
     }
     text_copy(out, records[index].text, capacity);
     return;
+  }
+}
+
+/* LC_UUID carries a 16-byte value at offset 8 of its command. It is printed the
+   way Apple prints it, 8-4-4-4-12 in upper case, because that is the form the
+   dyld error text uses and the report has to be comparable with a device message
+   without a conversion step: the recorded failure names
+   787DFAB1-4DE3-3568-9923-C9409791B728 for the 18.3 WebKit and
+   D309AA36-B494-3228-BE7D-44E5674ED663 for the 16.1 JavaScriptCore. */
+
+static const char hex_digits[] = "0123456789ABCDEF";
+
+void image_uuid_text(const void *header, char *out, usize capacity) {
+  out[0] = 0;
+  if (!image_is_mach_header(header)) {
+    return;
+  }
+  const macho_header *mach = (const macho_header *)header;
+  const u8 *cursor = (const u8 *)header + sizeof(macho_header);
+  for (u32 index = 0; index < mach->command_count; index++) {
+    const load_command *command = (const load_command *)cursor;
+    if (command->size == 0) {
+      return;
+    }
+    if (command->command == uuid_command && command->size >= 24) {
+      const u8 *bytes = cursor + 8;
+      usize written = 0;
+      for (usize byte = 0; byte < 16 && written + 2 < capacity; byte++) {
+        if (byte == 4 || byte == 6 || byte == 8 || byte == 10) {
+          if (written + 1 < capacity) {
+            out[written++] = '-';
+          }
+        }
+        out[written++] = hex_digits[bytes[byte] >> 4];
+        out[written++] = hex_digits[bytes[byte] & 0x0f];
+      }
+      out[written] = 0;
+      return;
+    }
+    cursor += command->size;
   }
 }

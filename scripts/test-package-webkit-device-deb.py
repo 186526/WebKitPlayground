@@ -36,6 +36,7 @@ Usage: python3 scripts/test-package-webkit-device-deb.py
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import struct
@@ -60,6 +61,11 @@ WEBKITLEGACY = "/System/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy"
 WEBKITLEGACY_PRIVATE = "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy"
 WEBKITLEGACY_PRIVATE_PREFIX = "/System/Library/PrivateFrameworks/WebKitLegacy.framework/"
 WEBGPU = "/System/Library/Frameworks/WebGPU.framework/WebGPU"
+# WebCore reaches WebGPU through PrivateFrameworks with LC_LOAD_WEAK_DYLIB, while
+# WebGPU's own install name is the Frameworks one.  The gap the WebGPU case guards
+# is this second spelling.
+WEBGPU_PRIVATE = "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU"
+WEBGPU_PRIVATE_PREFIX = "/System/Library/PrivateFrameworks/WebGPU.framework/"
 WEBRTC = WEBCORE_PREFIX + "Frameworks/libwebrtc.dylib"
 ANGLE = WEBCORE_PREFIX + "Frameworks/libANGLE-shared.dylib"
 
@@ -69,6 +75,7 @@ SYSTEM_PREFIXES = (
     "/System/Library/Frameworks/JavaScriptCore.framework/",
     "/System/Library/Frameworks/WebKitLegacy.framework/",
     "/System/Library/Frameworks/WebGPU.framework/",
+    WEBGPU_PRIVATE_PREFIX,
     WEBCORE_PREFIX,
     WEBKITLEGACY_PRIVATE_PREFIX,
 )
@@ -78,6 +85,7 @@ LIBSYSTEM = "/usr/lib/libSystem.B.dylib"
 MH_EXECUTE, MH_DYLIB = 2, 6
 MH_MAGIC_64, CPU_TYPE_ARM64 = 0xFEEDFACF, 0x0100000C
 LC_SEGMENT_64, LC_LOAD_DYLIB = 0x19, 0xC
+LC_ID_DYLIB = 0xD
 LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB = 0x80000018, 0x8000001F
 LC_CODE_SIGNATURE = 0x1D
 
@@ -187,8 +195,9 @@ def build_product(root: Path, with_top_level_overlay: bool = True, with_dependen
     (product / "WebKit.framework" / "Info.plist").write_text("<plist/>", encoding="utf-8")
     write_macho(product / "WebCore.framework" / "WebCore",
                 build_macho(
-                    ((LC_LOAD_DYLIB, JSC), (LC_LOAD_WEAK_DYLIB, ANGLE),
-                     (LC_LOAD_WEAK_DYLIB, WEBRTC), (LC_LOAD_DYLIB, WEBKITLEGACY)) if deps else ()))
+                    ((LC_LOAD_DYLIB, JSC), (LC_LOAD_WEAK_DYLIB, WEBGPU_PRIVATE),
+                     (LC_LOAD_WEAK_DYLIB, ANGLE), (LC_LOAD_WEAK_DYLIB, WEBRTC),
+                     (LC_LOAD_DYLIB, WEBKITLEGACY)) if deps else ()))
     write_macho(product / "WebKitLegacy.framework" / "WebKitLegacy",
                 build_macho(((LC_LOAD_DYLIB, JSC), (LC_LOAD_DYLIB, WEBCORE)) if deps else ()))
     write_macho(product / "JavaScriptCore.framework" / "JavaScriptCore", build_macho())
@@ -422,7 +431,7 @@ def case_shipped_layout(label: str, mode: str, prefix: str) -> None:
         if f"Verified {OVERLAY_REL} is a regular file" not in combined:
             failures.append(f"{label}: the payload assertion did not run\n{combined}")
             return
-        if "Rewrote 16 load command(s) across 7 image(s)." not in combined:
+        if "Rewrote 17 load command(s) across 7 image(s)." not in combined:
             failures.append(f"{label}: the load-path rewrite did not run as expected\n{combined}")
             return
         if "Verified 10 Mach-O image(s) carry no system framework load path." not in combined:
@@ -615,13 +624,17 @@ def case_absent_overlay() -> None:
 def write_destination_tree(root: Path, images: dict[str, bytes]) -> Path:
     """Write the files an install-table row checks for, plus the given images, under root/var/jb.
 
-    Keys are payload-relative paths.  The three framework binaries exist so the rewrite's destination
-    check passes; they carry a single libSystem command and are never the image under test.
+    Keys are payload-relative paths.  The six extra binaries are the destinations the install rows
+    named by the fixture depend on, so the rewrite's destination check passes; they carry a single
+    libSystem command and are never the image under test.
     """
     payload = root / "var" / "jb"
     for relative in ("Library/Frameworks/WebKit.framework/WebKit",
                      "Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
-                     "Library/Frameworks/WebCore.framework/WebCore"):
+                     "Library/Frameworks/WebCore.framework/WebCore",
+                     "Library/Frameworks/WebGPU.framework/WebGPU",
+                     "usr/lib/libANGLE-shared.dylib",
+                     "usr/lib/libwebrtc.dylib"):
         write_macho(payload / relative)
     for relative, data in images.items():
         write_macho(payload / relative, data)
@@ -795,6 +808,536 @@ def case_truncated_image() -> None:
     print(f"PASS {label}")
 
 
+PAYLOAD_IMAGES = (
+    ("Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+     "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore", ()),
+    ("Library/Frameworks/WebCore.framework/WebCore",
+     "/System/Library/PrivateFrameworks/WebCore.framework/WebCore",
+     ((LC_LOAD_WEAK_DYLIB, "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU"),
+      (LC_LOAD_WEAK_DYLIB,
+       "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib"),
+      (LC_LOAD_WEAK_DYLIB,
+       "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"),
+      (LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"))),
+    ("Library/Frameworks/WebKitLegacy.framework/WebKitLegacy",
+     "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy",
+     ((LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+      (LC_LOAD_DYLIB, "/System/Library/PrivateFrameworks/WebCore.framework/WebCore"))),
+    ("Library/Frameworks/WebGPU.framework/WebGPU",
+     "/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU",
+     ((LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),)),
+    ("usr/lib/libwebrtc.dylib",
+     "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib", ()),
+    ("usr/lib/libANGLE-shared.dylib",
+     "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libANGLE-shared.dylib", ()),
+    ("Library/Frameworks/WebKit.framework/WebKit",
+     "/System/Library/Frameworks/WebKit.framework/WebKit",
+     ((LC_REEXPORT_DYLIB,
+       "/System/Library/PrivateFrameworks/WebKitLegacy.framework/WebKitLegacy"),
+      (LC_LOAD_WEAK_DYLIB,
+       "/System/Library/PrivateFrameworks/WebCore.framework/Frameworks/libwebrtc.dylib"),
+      (LC_LOAD_DYLIB, "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore"),
+      (LC_LOAD_DYLIB, "/System/Library/PrivateFrameworks/WebCore.framework/WebCore"))),
+)
+
+
+def build_signed_macho(identity: str, dependencies: tuple[tuple[int, str], ...]) -> bytes:
+    """One of the seven as the installed package carries it, with a CodeDirectory over its pages.
+
+    The page hashes are real: the rewrite changes the load commands, which lie in the first hashed
+    page, so a package built from an image whose hashes were already wrong would make the rewrite's
+    own repair invisible.
+    """
+    signature_offset = IMAGE_SIZE - 0x200
+    commands = [
+        _segment_command(TEXT_OFFSET),
+        _dylib_command(LC_ID_DYLIB, identity),
+        *(_dylib_command(kind, name) for kind, name in dependencies),
+        _dylib_command(LC_LOAD_DYLIB, "/usr/lib/libSystem.B.dylib"),
+        _pad(struct.pack("<IIII", LC_CODE_SIGNATURE, 16, signature_offset, 32)),
+    ]
+    body = b"".join(commands)
+    header = struct.pack("<IiiIIIII", MH_MAGIC_64, CPU_TYPE_ARM64, 0, MH_DYLIB,
+                         len(commands), len(body), 0x00200085, 0)
+    image = bytearray(header + body + b"\0" * (IMAGE_SIZE - 32 - len(body)))
+    blob = build_code_directory(bytes(image), signature_offset)
+    image[signature_offset:signature_offset + len(blob)] = blob
+    return bytes(image)
+
+
+def build_code_directory(code: bytes, code_limit: int, page: int = 0x1000) -> bytes:
+    """A SuperBlob with one SHA-256 CodeDirectory whose page hashes describe `code`.
+
+    Only the SHA-256 slot is written: the rewrite recomputes whichever algorithms the file carries,
+    and one is enough to prove it reads the file it is about to ship.
+    """
+    hash_size = 32
+    pages = (code_limit + page - 1) // page
+    hash_offset = 44 + 2 * hash_size
+    body = bytearray(44)
+    struct.pack_into(">IIIIIIIII", body, 0, 0xFADE0C02, 0, 0x20001, 0, hash_offset,
+                     0, 2, pages, code_limit)
+    struct.pack_into(">BBBB", body, 36, hash_size, 2, 0, page.bit_length() - 1)
+    body += b"\0" * (2 * hash_size)
+    for index in range(pages):
+        body += hashlib.sha256(code[index * page:min((index + 1) * page, code_limit)]).digest()
+    struct.pack_into(">II", body, 4, len(body), 4096)
+    index = struct.pack(">II", 4096, 12 + 8)
+    return struct.pack(">III", 0xFADE0CC0, 12 + len(index) + len(body), 1) + index + bytes(body)
+
+
+def write_manifest(root: Path, paths: list[str]) -> Path:
+    """The file --expect-manifest reads: one device absolute path per line."""
+    manifest = root / "installed-manifest.txt"
+    manifest.write_text("".join(f"{path}\n" for path in paths), encoding="utf-8")
+    return manifest
+
+
+def case_payload_mode() -> None:
+    """--payload rewrites the installed tree in place and the .deb carries those bytes.
+
+    This is the mode the mission adds: the rewrite target is the directory the ellekit filter loads,
+    not a second tree.  The case checks the package the way a reader would: unpack it and read the
+    seven load-command tables back.
+    """
+    label = "--payload rewrites the installed tree and ships those bytes"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        source = root / "installed"
+        for relative, identity, dependencies in PAYLOAD_IMAGES:
+            path = source / "var/jb" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(build_signed_macho(identity, dependencies))
+        before = {relative: hashlib.sha256((source / "var/jb" / relative).read_bytes()).hexdigest()
+                  for relative, _, _ in PAYLOAD_IMAGES}
+        # The integrity check needs a list to compare against. This machine has no
+        # dpkg database for the package, so the case supplies the list explicitly,
+        # which is also the path a build host without a device takes.
+        manifest = write_manifest(root, [f"/var/jb/{relative}" for relative, _, _ in PAYLOAD_IMAGES])
+
+        output = root / "payload.deb"
+        result = subprocess.run(
+            ["zsh", str(SCRIPT), "--payload", str(source), "--rootless",
+             "--version", "0.0.0-test", "--expect-manifest", str(manifest),
+             "--output", str(output)],
+            capture_output=True, text=True, env={**os.environ, "PATH": os.environ["PATH"]},
+        )
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        if not output.exists():
+            failures.append(f"{label}: no package was written\n{combined}")
+            return
+        # The source tree is an input; a rewrite that edited it would make a second
+        # run start from a moved tree.
+        after = {relative: hashlib.sha256((source / "var/jb" / relative).read_bytes()).hexdigest()
+                 for relative, _, _ in PAYLOAD_IMAGES}
+        if before != after:
+            failures.append(f"{label}: the --payload tree was modified in place")
+            return
+        if "all seven images in the .deb are the bytes the rewrite produced" not in combined:
+            failures.append(f"{label}: the package self-check did not run\n{combined}")
+            return
+
+        unpacked = root / "unpacked"
+        subprocess.run(["dpkg-deb", "-x", str(output), str(unpacked)], check=True)
+        edges = 0
+        for relative, identity, _ in PAYLOAD_IMAGES:
+            data = (unpacked / "var/jb" / relative).read_bytes()
+            commands = load_commands_bytes(data)
+            identities = [name for kind, name in commands if kind == LC_ID_DYLIB]
+            if identities != [identity]:
+                failures.append(f"{label}: {relative} identity is {identities}, not {identity}")
+                return
+            edges += sum(1 for kind, name in commands
+                         if kind != LC_ID_DYLIB and name and name.startswith("/var/jb/"))
+            stale = [name for kind, name in commands
+                     if kind != LC_ID_DYLIB and name in {row[1] for row in PAYLOAD_IMAGES}
+                     and not name.startswith("/var/jb/")]
+            if stale:
+                failures.append(f"{label}: {relative} still names {stale}")
+                return
+        if edges != 11:
+            failures.append(f"{label}: {edges} /var/jb edge(s), expected 11")
+            return
+        if "11 /var/jb edge(s) among the seven, 11 expected" not in combined:
+            failures.append(f"{label}: the self-check did not report eleven edges\n{combined}")
+            return
+    print(f"PASS {label}")
+
+
+def case_payload_mode_wrong_root() -> None:
+    """A --payload root with none of the seven fails instead of shipping an empty package."""
+    label = "--payload fails when the tree lacks the seven"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        (root / "installed" / "var/jb").mkdir(parents=True)
+        manifest = write_manifest(root, ["/var/jb/usr/lib/libwebrtc.dylib"])
+        result = subprocess.run(
+            ["zsh", str(SCRIPT), "--payload", str(root / "installed"), "--rootless",
+             "--version", "0.0.0-test", "--expect-manifest", str(manifest),
+             "--output", str(root / "out.deb")],
+            capture_output=True, text=True,
+        )
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0 on a tree with none of the seven\n{combined}")
+            return
+        if "is not in the payload" not in combined:
+            failures.append(f"{label}: the failure does not name the missing image\n{combined}")
+            return
+        if (root / "out.deb").exists():
+            failures.append(f"{label}: a package was written anyway")
+            return
+    print(f"PASS {label}")
+
+
+def case_payload_drops_a_listed_file() -> None:
+    """A payload that lacks a file the installed package carries must not be packaged.
+
+    dpkg installs an upgrade by writing the new file list and removing every file the
+    old list names and the new one does not, so a payload built without a listed file
+    deletes that file from the device.  The shipped package lost webpushd and
+    adattributiond exactly this way, and the packager accepted it.
+    """
+    label = "--payload fails when it drops a file the installed package carries"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        source = root / "installed"
+        for relative, identity, dependencies in PAYLOAD_IMAGES:
+            path = source / "var/jb" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(build_signed_macho(identity, dependencies))
+        daemon = "Library/Frameworks/webpushd"
+        manifest = write_manifest(
+            root, [f"/var/jb/{relative}" for relative, _, _ in PAYLOAD_IMAGES]
+            + [f"/var/jb/{daemon}"])
+        output = root / "out.deb"
+        result = subprocess.run(
+            ["zsh", str(SCRIPT), "--payload", str(source), "--rootless",
+             "--version", "0.0.0-test", "--expect-manifest", str(manifest),
+             "--output", str(output)],
+            capture_output=True, text=True,
+        )
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0 on a payload missing {daemon}\n{combined}")
+            return
+        if f"/var/jb/{daemon}" not in combined:
+            failures.append(f"{label}: the failure does not name {daemon}\n{combined}")
+            return
+        if "the payload is missing 1 of the" not in combined:
+            failures.append(f"{label}: the failure does not count the missing file\n{combined}")
+            return
+        if output.exists():
+            failures.append(f"{label}: a package was written anyway")
+            return
+
+        # The same tree with the file back must pass, so the case proves the check
+        # reads the payload rather than refusing everything the manifest names.
+        (source / "var/jb" / daemon).write_bytes(b"a stand-in, this case never loads it")
+        result = subprocess.run(
+            ["zsh", str(SCRIPT), "--payload", str(source), "--rootless",
+             "--version", "0.0.0-test", "--expect-manifest", str(manifest),
+             "--output", str(output)],
+            capture_output=True, text=True,
+        )
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode} with the file back\n{combined}")
+            return
+        if "the payload carries all" not in combined:
+            failures.append(f"{label}: the check did not report a complete payload\n{combined}")
+            return
+    print(f"PASS {label}")
+
+
+def case_payload_needs_version() -> None:
+    """--payload without --version must stop: this mode cannot derive one.
+
+    The mode has no Version.xcconfig to read, so a default here once produced
+    0.0.1-<timestamp>, below the installed 620.2.4, and the install was a downgrade.
+    """
+    label = "--payload without --version fails instead of guessing one"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        source = root / "installed"
+        for relative, identity, dependencies in PAYLOAD_IMAGES:
+            path = source / "var/jb" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(build_signed_macho(identity, dependencies))
+        manifest = write_manifest(root, [f"/var/jb/{relative}" for relative, _, _ in PAYLOAD_IMAGES])
+        output = root / "out.deb"
+        result = subprocess.run(
+            ["zsh", str(SCRIPT), "--payload", str(source), "--rootless",
+             "--expect-manifest", str(manifest), "--output", str(output)],
+            capture_output=True, text=True,
+        )
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0 without --version\n{combined}")
+            return
+        if "--payload needs --version" not in combined:
+            failures.append(f"{label}: the failure does not ask for --version\n{combined}")
+            return
+        if output.exists():
+            failures.append(f"{label}: a package was written anyway")
+            return
+    print(f"PASS {label}")
+
+
+def case_payload_needs_a_manifest() -> None:
+    """--payload with no list to compare against must stop, not skip the check.
+
+    Silently skipping would ship whatever the caller passed, which is the state that
+    lost the two daemons. This machine has no dpkg entry for the package, so the
+    fallback cannot answer, and the case pins that as a refusal.
+    """
+    label = "--payload with no file list fails instead of skipping the check"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        source = root / "installed"
+        for relative, identity, dependencies in PAYLOAD_IMAGES:
+            path = source / "var/jb" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(build_signed_macho(identity, dependencies))
+        output = root / "out.deb"
+        result = subprocess.run(
+            ["zsh", str(SCRIPT), "--payload", str(source), "--rootless",
+             "--id", "com.example.no-such-package", "--version", "0.0.0-test",
+             "--output", str(output)],
+            capture_output=True, text=True,
+        )
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0 with no list to check against\n{combined}")
+            return
+        if "No file list to check the payload against" not in combined:
+            failures.append(f"{label}: the failure does not explain the missing list\n{combined}")
+            return
+        if output.exists():
+            failures.append(f"{label}: a package was written anyway")
+            return
+    print(f"PASS {label}")
+
+
+def case_payload_rootful_prefix() -> None:
+    """A rootful --payload tree has no prefix, and the shell must pass it as empty.
+
+    "${PREFIX:-/var/jb}" substitutes when the value is empty, so the rootful run used to
+    hand /var/jb to the rewriter while the tree sat at the root, and every image was
+    reported absent.  Rootful is the default mode, so this is the plain invocation.
+    """
+    label = "--payload in rootful mode passes an empty prefix, not /var/jb"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        source = root / "rootful"
+        for relative, identity, dependencies in PAYLOAD_IMAGES:
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(build_signed_macho(identity, dependencies))
+        manifest = write_manifest(root, [f"/{relative}" for relative, _, _ in PAYLOAD_IMAGES])
+        output = root / "out.deb"
+        result = subprocess.run(
+            ["zsh", str(SCRIPT), "--payload", str(source),
+             "--version", "0.0.0-test", "--expect-manifest", str(manifest),
+             "--output", str(output)],
+            capture_output=True, text=True,
+        )
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        if "is not in the payload" in combined:
+            failures.append(f"{label}: the rewriter was given a prefix the tree lacks\n{combined}")
+            return
+        if "Rootful mode: install prefix = /" not in combined:
+            failures.append(f"{label}: the run did not take the rootful branch\n{combined}")
+            return
+        if not output.exists():
+            failures.append(f"{label}: no package was written\n{combined}")
+            return
+        unpacked = root / "unpacked"
+        subprocess.run(["dpkg-deb", "-x", str(output), str(unpacked)], check=True)
+        if not (unpacked / PAYLOAD_IMAGES[0][0]).exists():
+            failures.append(f"{label}: the package did not install at the root")
+            return
+    print(f"PASS {label}")
+
+
+def package_with_manifest(root: Path, manifest_lines: list[str]):
+    """Run --payload against a complete tree with a manifest the caller controls.
+
+    The tree is complete, so nothing about the payload can be the reason to stop:
+    whatever the run does, it did because of the manifest.
+    """
+    source = root / "installed"
+    for relative, identity, dependencies in PAYLOAD_IMAGES:
+        path = source / "var/jb" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(build_signed_macho(identity, dependencies))
+    manifest = write_manifest(root, manifest_lines)
+    output = root / "out.deb"
+    result = subprocess.run(
+        ["zsh", str(SCRIPT), "--payload", str(source), "--rootless",
+         "--version", "0.0.0-test", "--expect-manifest", str(manifest),
+         "--output", str(output)],
+        capture_output=True, text=True,
+    )
+    return result, output
+
+
+def case_manifest_of_directories_only() -> None:
+    """A manifest that lists only directories compares no file and must stop.
+
+    The guard used to count listed paths, and a path is either a file or a
+    directory, so a list of nothing but directories passed it and the run printed
+    "carries all 0 file(s)" — a success line for a check that read no file. The
+    real dpkg -L does list directories alongside files, so this input is one
+    --expect-manifest hands the script as written.
+    """
+    label = "--payload fails on a manifest that lists only directories"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        directories = ["/var/jb/Library/Frameworks",
+                       "/var/jb/Library/Frameworks/WebKit.framework",
+                       "/var/jb/usr/lib",
+                       "/var"]
+        result, output = package_with_manifest(root, directories)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0 on a manifest with no file in it\n{combined}")
+            return
+        if "not one file" not in combined:
+            failures.append(f"{label}: the failure does not say no file was listed\n{combined}")
+            return
+        if "carries all" in combined:
+            failures.append(f"{label}: it still printed the success line\n{combined}")
+            return
+        if output.exists():
+            failures.append(f"{label}: a package was written anyway")
+            return
+    print(f"PASS {label}")
+
+
+def case_manifest_of_root_only() -> None:
+    """A manifest holding only the install root is the same emptiness, one level up.
+
+    dpkg -L prints the root as "/.", which is neither a file to look for nor a
+    directory worth counting. Before, the filter meant to drop it tested
+    path.rstrip("/") against ".", which "/." does not equal, so it was kept,
+    counted as a directory, and the run printed "carries all 0 file(s)".
+    """
+    label = "--payload fails on a manifest that lists only the install root"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        result, output = package_with_manifest(root, ["/."])
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0 on a manifest holding only /.\n{combined}")
+            return
+        if "not one file" not in combined:
+            failures.append(f"{label}: the failure does not say no file was listed\n{combined}")
+            return
+        if "carries all" in combined:
+            failures.append(f"{label}: it still printed the success line\n{combined}")
+            return
+        if output.exists():
+            failures.append(f"{label}: a package was written anyway")
+            return
+    print(f"PASS {label}")
+
+
+def case_manifest_root_line_is_dropped() -> None:
+    """The root line must not be counted as a directory entry.
+
+    dpkg -L always prints "/." first, so counting it made every real run report one
+    directory more than the package has. Dropping it is what makes that count mean
+    "the directories the payload lacks", which is the number a reader acts on.
+    """
+    label = "a real dpkg -L list counts its directories, not its root line"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        entries = [f"/var/jb/{relative}" for relative, _, _ in PAYLOAD_IMAGES]
+        entries.append("/var/jb/usr/lib")
+        result, output = package_with_manifest(root, ["/."] + entries)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        # One listed directory exists in the payload (/var/jb/usr/lib), so the
+        # count reads 1. Reading 2 means "/." was counted as a second one.
+        if "1 directory entry(s)" not in combined:
+            failures.append(f"{label}: the directory count is not 1\n{combined}")
+            return
+    print(f"PASS {label}")
+
+
+def case_webgpu_private_frameworks_spelling() -> None:
+    """WebCore loads WebGPU from PrivateFrameworks, and that spelling must be rewritten too.
+
+    WebGPU's own install name is /System/Library/Frameworks/WebGPU.framework/WebGPU, while
+    WebCore reaches it through the PrivateFrameworks path with LC_LOAD_WEAK_DYLIB.  The prefix
+    list held only the Frameworks spelling, so this load command was filtered out before the
+    install table was consulted and the shipped WebCore kept a system path to the very image the
+    package ships.  `verify` did not catch it because the prefix list it tests against was the
+    same incomplete one.  The fixture is WebCore with the four edges the real image has inside
+    this package; before the fix the run reported three, because the fourth never got past the
+    prefix filter.
+    """
+    label = "WebCore's PrivateFrameworks WebGPU load command is rewritten to @rpath"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        image = "Library/Frameworks/WebCore.framework/WebCore"
+        write_destination_tree(root, {image: build_macho(
+            ((LC_LOAD_WEAK_DYLIB, WEBGPU_PRIVATE),
+             (LC_LOAD_WEAK_DYLIB, ANGLE),
+             (LC_LOAD_WEAK_DYLIB, WEBRTC),
+             (LC_LOAD_DYLIB, JSC)))})
+
+        result = run_tool(tool, "rewrite", root)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{combined}")
+            return
+        if "Rewrote 4 load command(s) across 1 image(s)." not in combined:
+            failures.append(f"{label}: the private spelling was not rewritten\n{combined}")
+            return
+        names = [name for _, name in load_commands_bytes((root / "var/jb" / image).read_bytes())]
+        if WEBGPU_PRIVATE in names:
+            failures.append(f"{label}: WebCore still names {WEBGPU_PRIVATE}")
+            return
+        if "@rpath/WebGPU.framework/WebGPU" not in names:
+            failures.append(f"{label}: WebCore does not name @rpath/WebGPU.framework/WebGPU "
+                            f"(it names {names})")
+            return
+        verified = run_tool(tool, "verify", root)
+        if verified.returncode != 0 or "Error" in verified.stdout + verified.stderr:
+            failures.append(f"{label}: verify rejected the rewritten tree\n"
+                            f"{verified.stdout}{verified.stderr}")
+            return
+    print(f"PASS {label}")
+
+
+def load_commands_bytes(data: bytes) -> list[tuple[int, str | None]]:
+    """Every load command kind paired with its name, or None for a command with no lc_str."""
+    count, _ = struct.unpack_from("<II", data, 16)
+    commands: list[tuple[int, str | None]] = []
+    offset = 32
+    for _ in range(count):
+        kind, size = struct.unpack_from("<II", data, offset)
+        name = None
+        if kind in (LC_LOAD_DYLIB, LC_ID_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB):
+            name_offset, = struct.unpack_from("<I", data, offset + 8)
+            start = offset + name_offset
+            name = data[start:data.index(b"\0", start)].decode()
+        commands.append((kind, name))
+        offset += size
+    return commands
+
+
 def main() -> int:
     missing = [tool for tool in ("zsh", "dpkg-deb", "file") if shutil.which(tool) is None]
     if missing:
@@ -830,6 +1373,16 @@ exec {CP} "$@"''',
     case_corrupted_name_is_rejected()
     case_header_pad_atomicity()
     case_truncated_image()
+    case_payload_mode()
+    case_payload_mode_wrong_root()
+    case_payload_drops_a_listed_file()
+    case_payload_needs_version()
+    case_payload_needs_a_manifest()
+    case_payload_rootful_prefix()
+    case_manifest_of_directories_only()
+    case_manifest_of_root_only()
+    case_manifest_root_line_is_dropped()
+    case_webgpu_private_frameworks_spelling()
 
     if failures:
         print(f"\n{len(failures)} failure(s):", file=sys.stderr)

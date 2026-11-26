@@ -19,6 +19,7 @@
 #include "fixtures/fake_objc.c"
 #include "fixtures/fake_dyld.c"
 #include "../src/filter_match.c"
+#include "../src/load_chain.c"
 #include "../src/idevice_webkit.c"
 
 #define maximum_report_size 4096
@@ -48,6 +49,32 @@ char *library_last_error(void) {
 void *library_find(const char *path) {
   (void)path;
   return fake_framework_handle();
+}
+/* The seven-image chain runs before the version read. The fixture stands for
+   one tree, not seven files, so a load of any chain path answers the same way:
+   a handle when the fixture has a framework registered, nothing when it does
+   not. The chain's own order, flags and per-step reporting are checked in
+   tests/load_chain_test.c; what these owe the constructor is that it reports the
+   image the process holds after the chain has run. */
+
+void *library_load_with_mode(const char *path, i32 mode) {
+  (void)path;
+  (void)mode;
+  return fake_framework_load();
+}
+
+/* The image table stays empty, so every step reports no gained image and no uuid.
+   That is the reading a device gives when dyld answers a load from something it
+   already had, and it keeps this file's cases about the report rather than about
+   the chain. */
+
+u32 _dyld_image_count(void) {
+  return 0;
+}
+
+const void *_dyld_get_image_header(u32 index) {
+  (void)index;
+  return 0;
 }
 
 /* The constructor reaches the Objective-C runtime and CoreFoundation through

@@ -9,6 +9,59 @@ Two device measurements, both taken on iPad14,4 / iPadOS 16.1, decide what this
 directory does. They are written here because they are not inferable from the
 sources.
 
+## The seven 18.3 images load as a chain, not as one dlopen
+
+The tweak used to `dlopen` WebKit alone. The device answered:
+
+```
+dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001):
+  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+  Referenced from: <787DFAB1-...> .../WebKit.framework/WebKit
+  Expected in:     <D309AA36-...> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+```
+
+The entry image was 18.3; the dependency it bound was 16.1. `src/load_chain.c`
+loads all seven in the measured order (JavaScriptCore first, WebKit last), each
+by explicit `/var/jb` path with `RTLD_NOW|RTLD_GLOBAL`, and stops at the first
+failure so the report names the step rather than the last image that happened to
+be tried.
+
+The order is `build-state.md` 第八轮's measurement: with
+JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy → WebGPU →
+WebKit the duplicate-image count fell from 31 to 0 and all seven loaded; any
+other order made WebCore fail with `Symbol not found:
+__ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...`. JavaScriptCore is first
+because it exports the WTF symbols the rest bind, and WebKit is last because it
+reexports WebKitLegacy and loads JavaScriptCore.
+
+`RTLD_NOW` turns a missing symbol into a failed step instead of a fault at first
+call. `RTLD_GLOBAL` is the flag whose absence the device recorded as `0x0001`:
+without it each image is a separate scope, and WebCore's `LC_LOAD_WEAK_DYLIB`
+bindings to `libwebrtc`, `libANGLE-shared` and `WebGPU` resolve against the
+global scope, so those two must be GLOBAL for the measured order to mean
+anything.
+
+The paths are where the package installs the seven: the five frameworks under
+`/var/jb/Library/Frameworks` and the two bare dylibs under `/var/jb/usr/lib`.
+WebKit's is the only `/var/jb` path inside `WebSafeWebKitFilter.dylib`, so the
+file the filter admits the process for and the file this chain opens are one
+file. `rewrite-payload.py` rewrites those same files in place: it points the
+eleven edges among the seven at their `/var/jb` siblings and leaves every
+`LC_ID_DYLIB` claiming its `/System` name, which is what lets dyld's install-name
+dedup answer a later `/System` request with these images. Without that rewrite the
+seven bind the resident 16.1 siblings. See `docs/rewrite-payload.md`.
+
+That makes the seven a self-consistent set that binds to itself. It does not make
+an application run 18.3: an app's main binary binds
+`/System/Library/Frameworks/WebKit.framework/WebKit` at launch, before any
+injected constructor, and that path exists only in the shared cache.
+
+The report states two readings separately, because they are different questions:
+the seven UUIDs are what the chain loaded, and the three system UUIDs are what the
+application's own `/System/.../WebKit` request had already resolved. Equal sets
+mean the substitution happened; disjoint sets mean the payload works and the
+browser is still on 16.1. Do not read "seven loaded" as "the browser runs 18.3".
+
 ## The filter's lists sit in the top-level Filter dictionary
 
 `WebSafeWebKitFilter.plist` has one top-level key, `Filter`, and `Classes` and

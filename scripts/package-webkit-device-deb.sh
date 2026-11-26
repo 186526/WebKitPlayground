@@ -28,8 +28,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT_NAME="$(basename "$0")"
+REWRITER="${ROOT_DIR}/tools/idevice-webkit/rewrite-payload.py"
 SOURCE_DIR="${ROOT_DIR}/WebKit"
 PRODUCT_DIR="${SOURCE_DIR}/WebKitBuild/Debug-iphoneos"
+PAYLOAD_SOURCE=""
+EXPECT_MANIFEST=""
 OUTPUT_DEB=""
 ROOTLESS=0
 ROOTHIDE=0
@@ -73,6 +76,20 @@ Usage: ${SCRIPT_NAME} [OPTIONS]
 
 Options:
   --product <dir>         Build product directory (default: WebKit/WebKitBuild/Debug-iphoneos)
+  --payload <dir>         Package an already-installed payload tree instead of a build product.
+                          <dir> stands for the device's /, so a deb unpacked with
+                          "dpkg-deb -x pkg.deb root" passes <root>. The seven images are
+                          rewritten in place on a copy of that tree, their CodeDirectory page
+                          hashes are recomputed, and the .deb is built from the result. This
+                          mode rewrites the tree the ellekit filter loads
+                          (/var/jb/Library/Frameworks/WebKit.framework/WebKit), it does not
+                          re-sign with ldid, and it does not install anything.
+  --expect-manifest <f>   File listing one device absolute path per line, naming every file
+                          the new package is required to still carry. --payload mode compares
+                          the payload against it and stops if a listed file is absent, because
+                          dpkg deletes files an upgraded package no longer lists. Without this
+                          option --payload mode reads the list from 'dpkg -L <id>' on the device
+                          this machine can query, and stops if it cannot get one.
   --output  <deb-path>    Output .deb file path (auto-generated if omitted)
   --rootless              Target rootless jailbreak (e.g. Dopamine/palera1n rootless)
                           Install prefix becomes /var/jb; Architecture: iphoneos-arm64
@@ -81,6 +98,9 @@ Options:
   --id      <bundle-id>   Debian package identifier  (default: ${PACKAGE_ID})
   --name    <name>        Debian package display name (default: ${PACKAGE_NAME})
   --version <ver>         Debian package version      (default: auto from WebKit Version.xcconfig)
+                          Required with --payload: that mode has no Version.xcconfig to read,
+                          and a default here once produced a version lower than the installed
+                          one, which makes the install a downgrade.
   --author  <author>      Maintainer field            (default: ${PACKAGE_AUTHOR})
   -h, --help              Show this help
 
@@ -116,6 +136,8 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --product)   PRODUCT_DIR="${2:?missing value for --product}"; SOURCE_DIR="$(dirname "$(dirname "${PRODUCT_DIR}")")"; shift 2 ;;
+        --payload)   PAYLOAD_SOURCE="${2:?missing value for --payload}"; shift 2 ;;
+        --expect-manifest) EXPECT_MANIFEST="${2:?missing value for --expect-manifest}"; shift 2 ;;
         --output)    OUTPUT_DEB="${2:?missing value for --output}"; shift 2 ;;
         --rootless)  ROOTLESS=1; shift ;;
         --roothide)  ROOTHIDE=1; shift ;;
@@ -129,14 +151,43 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── validate prerequisites ───────────────────────────────────
-if [[ ! -d "${PRODUCT_DIR}" ]]; then
-    log_error "Product directory does not exist: ${PRODUCT_DIR}"
-    exit 1
-fi
-
-if ! command -v ldid >/dev/null 2>&1; then
-    log_error "ldid not found in PATH. Install it first (brew install ldid)."
-    exit 1
+if [[ -n "${PAYLOAD_SOURCE}" ]]; then
+    # The rewrote-payload mode reads an installed tree instead of a build product,
+    # so it needs neither the build product nor ldid: rewrite-payload.py repairs the
+    # existing signature's page hashes in place, and that is the whole seal on these
+    # images. ldid would replace the signature with an ad-hoc one, which is a
+    # different object from the one whose pages the rewrite hashed.
+    if [[ ! -d "${PAYLOAD_SOURCE}" ]]; then
+        log_error "Payload directory does not exist: ${PAYLOAD_SOURCE}"
+        exit 1
+    fi
+    if [[ ! -f "${REWRITER}" ]]; then
+        log_error "Rewriter not found: ${REWRITER}"
+        exit 1
+    fi
+    if [[ -n "${EXPECT_MANIFEST}" && ! -f "${EXPECT_MANIFEST}" ]]; then
+        log_error "--expect-manifest file does not exist: ${EXPECT_MANIFEST}"
+        exit 1
+    fi
+    # This mode has no Version.xcconfig to read. A default here once produced a
+    # version below the installed one, which turns the install into a downgrade, so
+    # the version has to be stated rather than guessed.
+    if [[ -z "${PACKAGE_VERSION}" ]]; then
+        log_error "--payload needs --version: this mode has no Version.xcconfig, and a"
+        log_error "guessed version installs as a downgrade of the package it replaces."
+        exit 1
+    fi
+    MODE="payload"
+else
+    if [[ ! -d "${PRODUCT_DIR}" ]]; then
+        log_error "Product directory does not exist: ${PRODUCT_DIR}"
+        exit 1
+    fi
+    if ! command -v ldid >/dev/null 2>&1; then
+        log_error "ldid not found in PATH. Install it first (brew install ldid)."
+        exit 1
+    fi
+    MODE="product"
 fi
 
 if ! command -v dpkg-deb >/dev/null 2>&1; then
@@ -215,7 +266,12 @@ fi
 TOTAL_STEPS=9
 
 # ── working directory ────────────────────────────────────────
-WORK_BASE_DIR="$(cd "$(dirname "${PRODUCT_DIR}")" && pwd)"
+if [[ "${MODE}" == "payload" ]]; then
+    # No build product is involved, so the scratch tree cannot live beside it.
+    WORK_BASE_DIR="${TMPDIR:-/tmp}"
+else
+    WORK_BASE_DIR="$(cd "$(dirname "${PRODUCT_DIR}")" && pwd)"
+fi
 WORK_DIR="$(mktemp -d "${WORK_BASE_DIR}/.webkit-deb-package.XXXXXX")"
 DEB_ROOT="${WORK_DIR}/deb-root"
 PAYLOAD_DIR="${DEB_ROOT}${INSTALL_FRAMEWORKS_DIR}"
@@ -225,6 +281,137 @@ PAYLOAD_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1
 cleanup() { rm -rf "${WORK_DIR}"; }
 trap cleanup EXIT
 
+# ══════════════════════════════════════════════════════════════
+# PAYLOAD MODE — rewrite an installed tree and pack it as it is
+# ══════════════════════════════════════════════════════════════
+# This mode exists because the payload that reaches an application is the one at
+# /var/jb/Library/Frameworks, which is also the only /var/jb path inside
+# WebSafeWebKitFilter.dylib. A tree built at a second root would be a tree nothing
+# loads, so here the seven images are rewritten where they already sit and the .deb
+# ships exactly those bytes.
+#
+# What it establishes, and nothing more: the seven name one another by /var/jb paths
+# that exist, their LC_ID_DYLIB still carries the /System name, and every
+# CodeDirectory describes the bytes in the file. Whether an application process
+# actually runs these images is a separate question this script cannot answer — an
+# application's main binary binds /System/Library/Frameworks/WebKit.framework/WebKit
+# at launch, before any injected constructor.
+#
+# Step labels. This script runs one of two pipelines, and they do not have the same
+# steps: payload mode has 7 and product mode has 9. The `# STEP n —` headings below
+# are the product pipeline's numbering and are used wherever the code is shared, so
+# a shared step keeps the number product mode gives it. That is why payload mode
+# runs [1/7]..[4/7] before the shared block, then [5/7] for what product mode calls
+# STEP 8, [6/7] for STEP 9 and [7/7] for the read-back. A payload heading is marked
+# `PAYLOAD STEP n`; anything marked plain `STEP n` means product mode's nth step,
+# and the number a run prints is always the runtime counter, not the heading.
+if [[ "${MODE}" == "payload" ]]; then
+    TOTAL_STEPS=7
+
+    # ── PAYLOAD STEP 1 — Copy the installed tree into a package root ──
+    log_step "Copying the installed payload into a package root..."
+    PAYLOAD_SOURCE_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${PAYLOAD_SOURCE}")"
+    mkdir -p "${DEB_ROOT}"
+    # The tree is copied, never edited in place: --payload may point at a tree the
+    # caller still wants, and a rewritten image is not the input a second run wants.
+    (cd "${PAYLOAD_SOURCE_REALPATH}" && tar -cf - .) | (cd "${DEB_ROOT}" && tar -xf -)
+    log_info "Copied $(du -sh "${DEB_ROOT}" | awk '{print $1}') into ${DEB_ROOT}"
+
+    # ── PAYLOAD STEP 2 — Rewrite the seven images in place ──
+    log_step "Rewriting the seven images in place..."
+    python3 "${REWRITER}" rewrite "${DEB_ROOT}" --prefix "${PREFIX-/var/jb}"
+
+    # ── PAYLOAD STEP 3 — Read the rewritten tree back ──
+    log_step "Verifying the rewritten tree..."
+    # This is the reading the mission asks for, on the bytes that will be shipped:
+    # eleven edges among the seven, seven identities unchanged, every page hash
+    # describing its own file. It is offline verification of the package contents.
+    python3 "${REWRITER}" verify "${DEB_ROOT}" --prefix "${PREFIX-/var/jb}"
+
+    # ── PAYLOAD STEP 4 — Compare the payload with the installed file list ──
+    log_step "Checking the payload against the installed package's file list..."
+    # dpkg installs an upgrade by writing the new list and deleting every file the
+    # old list has and the new one lacks. A payload built without the two WebKit
+    # daemons therefore deletes them from the device: that happened once already,
+    # with webpushd and adattributiond. This step reads the list the package must
+    # still carry and stops before the package is built if any of those files is
+    # absent.
+    #
+    # A file the payload carries that the old package does not is not an error:
+    # dpkg has no owner to conflict with, and libWebKitSwift.dylib is exactly that
+    # case, absent from the installed package and new in this one.
+    MANIFEST_FILE=""
+    if [[ -n "${EXPECT_MANIFEST}" ]]; then
+        MANIFEST_FILE="${EXPECT_MANIFEST}"
+        log_info "Expected file list read from ${MANIFEST_FILE}"
+    elif command -v dpkg >/dev/null 2>&1 && dpkg -s "${PACKAGE_ID}" >/dev/null 2>&1; then
+        MANIFEST_FILE="${WORK_DIR}/installed-manifest.txt"
+        dpkg -L "${PACKAGE_ID}" > "${MANIFEST_FILE}"
+        log_info "Expected file list read from dpkg -L ${PACKAGE_ID}"
+    else
+        log_error "No file list to check the payload against: pass --expect-manifest"
+        log_error "<file>, or run where 'dpkg -s ${PACKAGE_ID}' answers."
+        log_error "Shipping against an unknown list deletes whatever the old"
+        log_error "package listed and the payload lacks."
+        exit 1
+    fi
+    python3 - "${DEB_ROOT}" "${MANIFEST_FILE}" <<'MANIFEST_CHECK'
+import os, sys
+
+built, manifest = sys.argv[1], sys.argv[2]
+paths = []
+with open(manifest) as handle:
+    for line in handle:
+        path = line.strip()
+        # dpkg -L prints the install root itself as "/." and "//." on some
+        # versions. It is not a path anything can be missing from, so it is
+        # dropped here rather than counted as a directory entry.
+        if not path or path.startswith("#") or path.strip("/") in ("", "."):
+            continue
+        paths.append(path)
+
+# Whether a listed path is a directory is read from the payload, which is the
+# tree being checked: dpkg -L prints both kinds and does not mark which is which,
+# and an empty directory such as WebKit.framework/Frameworks has no child to give
+# it away. A path with no counterpart at all is treated as a file, so an empty
+# payload is reported as missing every entry rather than as listing no file.
+files = []
+directories = 0
+for path in paths:
+    local = os.path.join(built, path.lstrip("/"))
+    if os.path.isdir(local):
+        directories += 1
+        continue
+    files.append(path)
+missing = []
+for path in files:
+    if not os.path.lexists(os.path.join(built, path.lstrip("/"))):
+        missing.append(path)
+# The guard counts files, not listed paths. A list of nothing but directories
+# compares no file at all, and a list of nothing but "/." is the same emptiness
+# one level up: both must stop here rather than print that the payload carries
+# all of a set it never read.
+if not files:
+    print("Error: %s lists %d path(s) and not one file, so nothing was checked."
+          % (manifest, len(paths)), file=sys.stderr)
+    print("A list of directories cannot say whether the payload still carries the "
+          "files dpkg would delete.", file=sys.stderr)
+    sys.exit(1)
+if missing:
+    print("Error: the payload is missing %d of the %d file(s) the installed package carries."
+          % (len(missing), len(files)), file=sys.stderr)
+    print("dpkg deletes each of these on install, because the new file list omits them:", file=sys.stderr)
+    for path in missing:
+        print("  %s" % path, file=sys.stderr)
+    sys.exit(1)
+print("  the payload carries all %d file(s) the installed package lists (%d directory entry(s) left to dpkg)"
+      % (len(files), directories))
+MANIFEST_CHECK
+
+    PAYLOAD_MODE_DONE=1
+fi
+
+if [[ "${MODE}" != "payload" ]]; then
 # ══════════════════════════════════════════════════════════════
 # STEP 1 — Collect artifacts
 # ══════════════════════════════════════════════════════════════
@@ -483,6 +670,7 @@ FORBIDDEN_PREFIXES = (
     "/System/Library/Frameworks/JavaScriptCore.framework/",
     "/System/Library/Frameworks/WebKitLegacy.framework/",
     "/System/Library/Frameworks/WebGPU.framework/",
+    "/System/Library/PrivateFrameworks/WebGPU.framework/",
     "/System/Library/PrivateFrameworks/WebCore.framework/",
     "/System/Library/PrivateFrameworks/WebKitLegacy.framework/",
 )
@@ -508,6 +696,14 @@ INSTALL_PATHS = (
      "@rpath/WebKitLegacy.framework/WebKitLegacy",
      "Library/Frameworks/WebKitLegacy.framework/WebKitLegacy"),
     ("/System/Library/Frameworks/WebGPU.framework/WebGPU",
+     "@rpath/WebGPU.framework/WebGPU",
+     "Library/Frameworks/WebGPU.framework/WebGPU"),
+    # WebCore reaches WebGPU through PrivateFrameworks with LC_LOAD_WEAK_DYLIB,
+    # while WebGPU itself claims the Frameworks name. Both spellings are the same
+    # image in this package, so both rows point at the one file the package ships.
+    # Without this row the weak dependency was never rewritten and verify passed,
+    # because FORBIDDEN_PREFIXES did not list the PrivateFrameworks spelling either.
+    ("/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU",
      "@rpath/WebGPU.framework/WebGPU",
      "Library/Frameworks/WebGPU.framework/WebGPU"),
     ("/System/Library/PrivateFrameworks/WebCore.framework/WebCore",
@@ -937,10 +1133,13 @@ done < <(find "${DEB_ROOT}" -type f -print0)
 # stderr for a file it cannot parse.
 log_step "Verifying no Mach-O loads a system framework path..."
 python3 "${MACHO_LOAD_PATHS_TOOL}" verify "${DEB_ROOT}" "${PREFIX}"
+fi
 
 # ══════════════════════════════════════════════════════════════
 # STEP 8 — Generate DEBIAN metadata
 # ══════════════════════════════════════════════════════════════
+# Shared by both pipelines, so payload mode runs it as its 5th step and prints
+# [5/7]. The heading keeps product mode's number; see the step-label note above.
 log_step "Generating DEBIAN control files..."
 DEBIAN_DIR="${DEB_ROOT}/DEBIAN"
 mkdir -p "${DEBIAN_DIR}"
@@ -1013,6 +1212,8 @@ chmod 0755 "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/prerm"
 # ══════════════════════════════════════════════════════════════
 # STEP 9 — Build .deb
 # ══════════════════════════════════════════════════════════════
+# Shared by both pipelines, so payload mode runs it as its 6th step and prints
+# [6/7]. The heading keeps product mode's number; see the step-label note above.
 log_step "Building .deb package..."
 mkdir -p "$(dirname "${OUTPUT_DEB}")"
 
@@ -1026,6 +1227,55 @@ if [[ ! -f "${OUTPUT_DEB}" ]]; then
 fi
 
 DEB_SIZE="$(du -sh "${OUTPUT_DEB}" | awk '{print $1}')"
+
+if [[ "${MODE}" == "payload" ]]; then
+    # ── PAYLOAD STEP 7 — Read the package back and check the shipped bytes ──
+    # The rewrite ran on ${DEB_ROOT}, and dpkg-deb wrote that tree into the archive.
+    # Reading the archive back is what proves the .deb carries the rewritten images
+    # rather than the ones that went in: a packaging step that took a different
+    # source, or a copy that missed a file, fails here instead of on the device.
+    log_step "Unpacking the package and checking the rewritten bytes..."
+    VERIFY_DIR="${WORK_DIR}/verify"
+    mkdir -p "${VERIFY_DIR}"
+    dpkg-deb -x "${OUTPUT_DEB}" "${VERIFY_DIR}"
+    python3 "${REWRITER}" verify "${VERIFY_DIR}" --prefix "${PREFIX-/var/jb}"
+    # The images in the package must be byte-identical to the ones that were
+    # rewritten. A digest per image is the reading that says so.
+    python3 - "${DEB_ROOT}" "${VERIFY_DIR}" "${PREFIX-/var/jb}" <<'SELFCHECK'
+import hashlib, os, sys
+
+built, unpacked, prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+IMAGES = (
+    "Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+    "Library/Frameworks/WebCore.framework/WebCore",
+    "Library/Frameworks/WebKitLegacy.framework/WebKitLegacy",
+    "Library/Frameworks/WebGPU.framework/WebGPU",
+    "usr/lib/libwebrtc.dylib",
+    "usr/lib/libANGLE-shared.dylib",
+    "Library/Frameworks/WebKit.framework/WebKit",
+)
+def digest(path):
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+different = []
+for relative in IMAGES:
+    path = (prefix + "/" + relative).lstrip("/")
+    left, right = os.path.join(built, path), os.path.join(unpacked, path)
+    if not os.path.exists(left) or not os.path.exists(right):
+        different.append("%s: missing on one side" % relative)
+        continue
+    if digest(left) != digest(right):
+        different.append("%s: %s != %s" % (relative, digest(left)[:16], digest(right)[:16]))
+    else:
+        print("  %s: sha256 %s, identical in the package" % (relative, digest(left)[:16]))
+if different:
+    for line in different:
+        print("Error: %s" % line, file=sys.stderr)
+    sys.exit(1)
+print("  all seven images in the .deb are the bytes the rewrite produced")
+SELFCHECK
+fi
+
 log_success "Done.  Package created (${DEB_SIZE}): ${OUTPUT_DEB}"
 log_info "Install on device:  dpkg -i $(basename "${OUTPUT_DEB}")"
 log_info "Remove from device: dpkg -r ${PACKAGE_ID}"
