@@ -259,14 +259,14 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/UIProcess/RemoteLayerTree/
 | 读数 | 值 | 出处与判据 |
 | --- | --- | --- |
 | `/var/jb/basebin/gen/dyld` 字节数 | **974016** | `../../webkit-install-runbook.md:113` 的表：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」；同行 `:114` 的 `974608` 才是更新后的值 |
-| 判定 (b) 四个精确符号的计数 | **`1 0 0 1`** | 命令在 `../../webkit-install-runbook.md:866-908` 判定 (b)：逐字节数四个完整符号名的出现次数，**不用正则、也不数裸字符串**（同文件 `:864`）。**第 2、3 位才是判据**：`isOverridablePath` 与 `isAlwaysOverridablePath` 这两个完整符号名为 0 即「新 hook 没进 `gen/dyld`」，见同文件 `:882` 的「失败的样子」。打上补丁的形态是 `1 1 1 1`，两行对照表在 `:899-904` |
-| 会被合进 `gen/dyld` 的那个 hook dylib | `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` **74352** 字节，同一判据 `1 0 0 1` | 这是**原版**那份；`basebin.tar` 里打上补丁的那份是 **75952** 字节、判据 `1 1 1 1`。两个字节数与 `../../webkit-install-runbook.md:899-904` 的两行表逐字一致（`75952` =「打过补丁」，`74352` =「装机原样」） |
-| `/var/jb/basebin/systemhook.dylib` 字节数 | **233520** | `../../webkit-install-runbook.md:1257-1258` 的表：`233520` =「旧，搜索路径这一半未生效」；`:1258` 的 `234336` 才是打上补丁的那份 |
-| 同一文件里六个字符串的计数 | **`0 0 0 0 0 2`** | 命令在 `../../webkit-install-runbook.md:1235-1247`，判据在 `:1257`（旧那份四个变量名计数为 `0 0 0 0`）。末尾那个 `2` 是 `DYLD_INSERT_LIBRARIES`，原版就有 |
+| 判定 (b) 四个计数（token 过滤后） | **`1 0 0 1`** | 命令在 `../../AGENTS.md:272-283`：先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token，再按四个名字分别计数（runbook 判定 (b) 用的是精确符号名计数，不是这个正则法）。**第 2、3 位才是判据**：`isOverridablePath` 与 `isAlwaysOverridablePath` 为 0 即「新 hook 没进 `gen/dyld`」，见 `../../AGENTS.md:307`。打上补丁的形态是 `1 1 1 1`，对照表（`75952` → `1 1 1 1`、`74352` → `1 0 0 1`）在 `../../AGENTS.md:289-291` |
+| 会被合进 `gen/dyld` 的那个 hook dylib | `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` **74352** 字节，同一判据 `1 0 0 1` | 这是**原版**那份；`basebin.tar` 里打上补丁的那份是 **75952** 字节、判据 `1 1 1 1`。两个字节数与 `../../webkit-install-runbook.md:917-922` 的表逐字一致（`75952` =「打过补丁」，`74352` =「装机原样」） |
+| `/var/jb/basebin/systemhook.dylib` 字节数 | **233520** | `../../webkit-install-runbook.md:1155-1159` 的表：`233520` =「旧，搜索路径这一半未生效」；`:1158` 的 `234336` 才是打上补丁的那份 |
+| 同一文件里六个字符串的计数 | **`0 0 0 0 0 2`** | 命令在 `../../webkit-install-runbook.md:1142-1148`，判据在 `:1155-1159`（旧那份四个变量计数为 `0 0 0 0`）。末尾那个 `2` 是 `DYLD_INSERT_LIBRARIES`，原版就有 |
 
 **四个陷阱，写在这里避免下一轮重复踩。**
 
-1. **判定 (b) 的数法用精确符号名，不用正则、也不数裸子串。** `1 0 0 1` 是逐字节数四个完整 `_MACHOMERGER_HOOK_*` 符号名的出现次数得到的结果（`../../webkit-install-runbook.md:864-878`）。裸子串 `isOverridablePath` 的计数是另一回事（设备上 `7 1 1 2`），那个数在任何一份 dyld 上都不为零，不能当判据。同文件 `:895-897` 的「为什么不用裸字符串计数」一节已写明理由。
+1. **判定 (b) 的数法要用 token 过滤，不要用裸子串计数。** `1 0 0 1` 是先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token、再按四个名字分别计数得到的结果。裸子串 `isOverridablePath` 的计数是另一回事（设备上 `7 1 1 2`），那个数在任何一份 dyld 上都不为零，不能当判据。`../../webkit-install-runbook.md:882`（判定 (b) 开头「不用正则、也不数裸字符串」）已写明这一点。
 2. **「`gen/dyld` 里有几个 `_MACHOMERGER_HOOK__` 符号」不是判据。** 它有 **2** 个，分别是原带的 `dlopen_from` 与 `__fcntl` 各一个。为零的不是全部符号，而是**两个 override hook** 这两个名字——这正是判定 (b) 第 2、3 位的含义。
 3. **不要用 `MACHOMERGER` 的出现次数当判据。** `gen/dyld` 里 `MACHOMERGER` 出现 **38** 次，全部是原带两组的 trampoline/orig 符号。
 4. **不要用 mtime 推断「刚装过所以补丁在」。** `gen/` 与 `gen/dyld` 的 mtime 都是当天的 10:37（`Nov 3 01:04` 是原生安装时间），而内容仍是原版。
@@ -424,8 +424,8 @@ TMPDIR
 
 #### 5.4.5 两条原因，都在设备上直接读数
 
-1. `systemhook.dylib` **233520** 字节（原版；打过补丁那份是 234336），里面 `DYLD_FRAMEWORK_PATH` 出现 **0** 次。所以搜索路径注入没发生。判据表在 `../../webkit-install-runbook.md:1257-1258`。
-2. `/var/jb/basebin/gen/dyld` **974016** 字节，判定 (b) 读 **`1 0 0 1`**（第 2、3 位为 0）。按 runbook 自己的表（`../../webkit-install-runbook.md:113-114`），974016 =「只有 Dopamine 原带的两个 hook，basebin 层未更新」。两条独立证据支撑这个判定：**一、** 判定 (b) 本身，`1 0 0 1` 对打上补丁的 `1 1 1 1`（`../../webkit-install-runbook.md:899-904`）；**二、** 会被合进去的 `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` 是原版 **74352** 字节（`basebin.tar` 里打补丁的那份是 **75952** 字节，两个数与 `:899-904` 的表逐字一致）。
+1. `systemhook.dylib` **233520** 字节（原版；打过补丁那份是 234336），里面 `DYLD_FRAMEWORK_PATH` 出现 **0** 次。所以搜索路径注入没发生。判据表在 `../../webkit-install-runbook.md:1155-1159`。
+2. `/var/jb/basebin/gen/dyld` **974016** 字节，判定 (b) 读 **`1 0 0 1`**（第 2、3 位为 0）。按 runbook 自己的表（`../../webkit-install-runbook.md:113-114`），974016 =「只有 Dopamine 原带的两个 hook，basebin 层未更新」。两条独立证据支撑这个判定：**一、** 判定 (b) 本身，`1 0 0 1` 对打上补丁的 `1 1 1 1`（`../../webkit-install-runbook.md:917-922`）；**二、** 会被合进去的 `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` 是原版 **74352** 字节（`basebin.tar` 里打补丁的那份是 **75952** 字节，两个数与 `../../webkit-install-runbook.md:917-922` 的表逐字一致）。
 
 **这一条的数值细节要写清，否则会被误读成「`gen/dyld` 里没有 MACHOMERGER 符号」。** `gen/dyld` 里有 **2** 个 `_MACHOMERGER_HOOK__` 符号，分别是原带的 `dlopen_from` 与 `__fcntl`；为零的是**两个 override hook 那两个名字**，这正是 `1 0 0 1` 第 2、3 位的含义。另外两个数不能用：裸子串 `isOverridablePath` 的计数在任何一份 dyld 上都不为零（设备上 `7 1 1 2`）；`MACHOMERGER` 出现 **38** 次，全部是原带两组的 trampoline/orig 符号。**也不能用 mtime**：`gen/` 与 `gen/dyld` 的 mtime 都是当天 10:37，而内容仍是原版。
 
@@ -433,7 +433,7 @@ TMPDIR
 
 #### 5.4.6 这一轮的读数和旧记录的关系
 
-本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（按判定 (b) 的四个完整符号名各自 `bytes.count` 计数，不用正则，`../../webkit-install-runbook.md:866-908`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`。**这一条 2026-11-24 当时记的是 `4 2 4 2 4 2`，重装后照那个数去比会判失败**：`systemhook.dylib` 的计数有两种写法，`data.count(s.encode())` 按子串数会把 `__XPC_DYLD_FRAMEWORK_PATH` 里的裸名再算一遍，前四项因此翻倍成 `4 2 4 2`；按整条 entry 比较的真值是 `2 2 2 2`，两种写法在 `234336` 上都非零，所以当时的「通过」结论不受影响，只有发布的数字要换。判据是重跑 `../../webkit-install-runbook.md:1231` 第六阶段那条命令，读它打印的六项，期望值是 `2 2 2 2 4 2`。
+本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（按判定 (b) 的四个完整符号名各自 `bytes.count` 计数，不用正则，`../../AGENTS.md:272-283`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`。**这一条 2026-11-24 当时记的是 `4 2 4 2 4 2`，重装后照那个数去比会判失败**：`systemhook.dylib` 的计数有两种写法，`data.count(s.encode())` 按子串数会把 `__XPC_DYLD_FRAMEWORK_PATH` 里的裸名再算一遍，前四项因此翻倍成 `4 2 4 2`；按整条 entry 比较的真值是 `2 2 2 2`，两种写法在 `234336` 上都非零，所以当时的「通过」结论不受影响，只有发布的数字要换。判据是重跑 `../../webkit-install-runbook.md:1231` 第六阶段那条命令，读它打印的六项，期望值是 `2 2 2 2 4 2`。
 
 **这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。**
 

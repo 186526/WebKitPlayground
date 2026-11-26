@@ -127,7 +127,7 @@ exception: EXC_BREAKPOINT (SIGTRAP/BPT trap: 5)
 3 WebKit        WebKit::XPCServiceMain(int, char const**)
 ```
 
-`procPath` 是「launchd 从哪条路径启动了进程」的唯一硬证据（`AGENTS.md:167` 的判读表）。这一条落在 `/var/jb/Library/WebKitOverride` 下，且 `build-state.md:358` 另记同一配置下 GPU「能走到 `Successfully spawned`（21:27:48/49/54 三次）」。**这直接满足 (A) 的第一个条件**：launchd 确实为索引外目录解析并 spawn 了服务。
+`procPath` 是「launchd 从哪条路径启动了进程」的唯一硬证据（`AGENTS.md:544` 的判读表）。这一条落在 `/var/jb/Library/WebKitOverride` 下，且 `build-state.md:358` 另记同一配置下 GPU「能走到 `Successfully spawned`（21:27:48/49/54 三次）」。**这直接满足 (A) 的第一个条件**：launchd 确实为索引外目录解析并 spawn 了服务。
 
 **两批记录不能同时成立**（M63 审计 `:175`）：同一类配置，一批读到 spawn 0 与 `failed lookup` 8908 次，另一批读到三次成功 spawn 且有 `procPath`。第四轮把第三轮的表判为无效，理由是设备没有 `pkill`、测的都是旧进程（`build-state.md:442-461`）；但一个没重启的旧进程不会产生新的 `.ips`，所以那个错因解释不了第二批的崩溃报告。这一点已作为 finding 提交，至今未解。
 
@@ -141,7 +141,7 @@ exception: EXC_BREAKPOINT (SIGTRAP/BPT trap: 5)
 
 从「探针读数判 A」到「Safari、微信、Chrome 三款都用上 18.3 的 WebCore」。每一步给出前置条件、命令或文件改动、失败判据。**前一步不通过时不要进入下一步**，否则后一步的数字无法归因。
 
-设备上可用的工具限于：`open`、`uiopen`、`killall`、`sbreload`、`python3`、`launchctl`、`ps`、`plutil`，均在 `/var/jb/usr/bin/`。另有 `lldb`、`rabin2`、`r2`、`shasum`、`clang` 可用（`AGENTS.md:35` 的「设备」一节列举）。**没有** `lsof`、`vmmap`、`otool`、`strings`、`pgrep`、`pkill`、`lsappinfo`、`notifyutil`、`/usr/bin/log`（**已确证**，`AGENTS.md:35` 与 `:93`，以及 `docs/ios16-override-endpoint-probe.md` 第五节）。
+设备上可用的工具限于：`open`、`uiopen`、`killall`、`sbreload`、`python3`、`launchctl`、`ps`、`plutil`，均在 `/var/jb/usr/bin/`。另有 `lldb`、`rabin2`、`r2`、`clang` 可用（`AGENTS.md:36-37` 的「设备」一节列举）。**没有** `lsof`、`vmmap`、`otool`、`strings`、`shasum`、`pgrep`、`pkill`、`lsappinfo`、`notifyutil`、`/usr/bin/log`（**已确证**，`AGENTS.md:36-37` 与 `:132`，以及 `docs/ios16-override-endpoint-probe.md` 第五节）。`shasum` 单独再确认一次：`AGENTS.md:36` 的可用的调试工具里没有它，`:37` 把它列入「设备上**不存在**」，`../../webkit-install-runbook.md:53` 记实测报 `command not found`，所以设备上哈希只能用 `sha256sum` 或 `python3` 的 `hashlib`。
 
 本文所有 `.xpc` 与 framework 路径都在 `/var/jb/Library/` 下；`.xpc` 内的 `DYLD_FRAMEWORK_PATH` 见 `patches/ios18-public-sdk-xpc-main.patch:22`，该行的首项由同一补丁 `:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride` 给出。
 
@@ -189,7 +189,7 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 2. 直接 `exec` 浏览器只得到没有页面的 UI 进程，它不请求 WebContent，于是每种配置都会显示 0 spawn；必须带 URL 触发；
 3. 设备上没有 `pkill`、`pgrep`，脚本里写 `pkill` 会**静默失败**，于是每次测的都是同一个旧进程。
 
-**关于应用的选择**：`uiopen <url>` 打开的是系统默认浏览器，这台设备是 Chrome（`com.google.chrome.ios`），不是 Safari（`AGENTS.md:94`，**已确证**）。要测 Safari 用 `uiopen --path /Applications/MobileSafari.app`；`--bundleid` 不能覆盖默认浏览器。
+**关于应用的选择**：`uiopen <url>` 打开的是系统默认浏览器，这台设备是 Chrome（`com.google.chrome.ios`），不是 Safari（`AGENTS.md:133`，**已确证**）。要测 Safari 用 `uiopen --path /Applications/MobileSafari.app`；`--bundleid` 不能覆盖默认浏览器。
 
 **一条纪律**：基线必须与后续读数用**同一条命令、同一个应用、同一次冷启动**。M63 的 6/4 是 Safari 的，`build-state.md` 的 8 是 Chrome 的，两者不可互换（第一节 1.4）。本节固定用 Chrome，因为唯一有完整历史读数表的应用是它。
 
@@ -328,7 +328,7 @@ sudo /var/jb/usr/bin/lldb -b -o "process attach --pid $APP" -o "image list -o -f
 
 ### 第 6 步：证明页面真的渲染，并三款应用各测一轮
 
-**这是「能用」的唯一判据。** `AGENTS.md` 记录过一次「进程稳定 3 分钟、确认加载新引擎」但用户报白屏（`docs/ios16-whole-18.3-deployment-path.md` 第 6 步引用 `AGENTS.md:209`，**已确证**）。端点存在只说明 launchd 解析成功，不说明 UI 与 helper 能通信，更不说明能画出一帧。
+**这是「能用」的唯一判据。** `AGENTS.md` 记录过一次「进程稳定 3 分钟、确认加载新引擎」但用户报白屏（`docs/ios16-whole-18.3-deployment-path.md` 第 6 步引用 `AGENTS.md:586`，**已确证**）。端点存在只说明 launchd 解析成功，不说明 UI 与 helper 能通信，更不说明能画出一帧。
 
 **三款应用，各自冷启动**。拉起方式只写仓库里有实测记录的两种，不写未验证的命令：
 
@@ -343,7 +343,7 @@ sleep 3
 /var/jb/usr/bin/uiopen 'https://example.com/'
 ```
 
-**微信与 Safari 的第二轮由用户手动冷启动，不要用 `uiopen --bundleid`。** `docs/safari-injection-plan.md:888-898` 记录了三次实测：`uiopen --bundleid com.apple.mobilesafari` 退出码 0 但 5 秒后 `ps -A` 里没有进程；`launchctl asuser 501 ...` 返回 45，因为设备上没有 `/usr/libexec/launchctl`；结论是「宿主只能由用户手动冷启动」（**已确证**）。`AGENTS.md:94` 另记 `--bundleid` 不能覆盖默认浏览器，实测仍会拉起 Chrome。**所以第 6 步在无人值守时做不完整**：Safari 与微信各需要一次人工点开。
+**微信与 Safari 的第二轮由用户手动冷启动，不要用 `uiopen --bundleid`。** `docs/safari-injection-plan.md:888-898` 记录了三次实测：`uiopen --bundleid com.apple.mobilesafari` 退出码 0 但 5 秒后 `ps -A` 里没有进程；`launchctl asuser 501 ...` 返回 45，因为设备上没有 `/usr/libexec/launchctl`；结论是「宿主只能由用户手动冷启动」（**已确证**）。`AGENTS.md:133` 另记 `--bundleid` 不能覆盖默认浏览器，实测仍会拉起 Chrome。**所以第 6 步在无人值守时做不完整**：Safari 与微信各需要一次人工点开。
 
 微信的 bundle id 是 `com.tencent.xin`（`tools/idevice-webkit/WebSafeWebKitFilter.plist:15`，**已确证**）。它必须单独测：`build-state.md:240` 记录过「Safari、WeChat、Chrome 三个 app 都无法加载网站」是同一现象的三个样本，而 `:248-249` 记录过 WeChat 的 WebContent `Successfully spawned` 多次、`lldb image list` 确认加载覆盖目录的 `WebKit`，页面**仍然打不开**——**进程活着不等于页面能渲染**，这条在这台设备上已经被打过脸一次。
 
@@ -392,7 +392,7 @@ sleep 3
 
 ### 3.3 `usedImages` 不能用作镜像来源判据
 
-**这条在 (A) 路线下的具体含义。** 验证第 5 步时，不得用崩溃报告的 `usedImages` 判断 helper 加载了哪份 `WebKit`。`usedImages` 只收录**被栈帧引用到的**镜像，它回答的是「栈顶帧落在哪个镜像」，不是镜像清单（`AGENTS.md:159` 的「七、读崩溃报告」，**已确证**；M65 的实测：下标集合与 `threads[*].frames[*].imageIndex` 完全相等）。所以：
+**这条在 (A) 路线下的具体含义。** 验证第 5 步时，不得用崩溃报告的 `usedImages` 判断 helper 加载了哪份 `WebKit`。`usedImages` 只收录**被栈帧引用到的**镜像，它回答的是「栈顶帧落在哪个镜像」，不是镜像清单（`AGENTS.md:548` 的「七、读崩溃报告」，**已确证**；M65 的实测：下标集合与 `threads[*].frames[*].imageIndex` 完全相等）。所以：
 
 - `usedImages` 里**出现** `/var/jb` 的 `WebKit` → 可以说明当时有栈帧落在它上面；
 - **不出现** → 既不证明加载过，也不证明没加载过。
