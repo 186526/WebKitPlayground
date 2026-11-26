@@ -122,6 +122,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 DEFAULT_PATCH = Path(__file__).resolve().parent.parent / "patches" / "ios16-ipc-message-number-translation.patch"
+# The patch that defines the predicate the call is guarded by. Read as well as the translation patch,
+# because a call to a function nothing defines passes a check that only looks at the call.
+DEFAULT_BOOTSTRAP_PATCH = Path(__file__).resolve().parent.parent / "patches" / "ios16-xpc-bootstrap-compat.patch"
 
 # The setter the patch adds to Connection.h. Any uncommented mention of a call is a violation; the
 # declaration and the member stay, because the flag has to exist to be read.
@@ -136,6 +139,10 @@ SETTER_CALL_STATEMENT = re.compile(
 # member's name; this one is a call with no arguments, so it is matched as a token rather than
 # evaluated, and any condition containing it counts as the guard.
 PEER_CONDITION_TOKEN = "peerIsOlderGeneration"
+# The two width comparisons, matched whole so `<=` is not read as `<` and a longer `==` expression is
+# not read as the equal-width test.
+EQUAL_WIDTH = re.compile(r"\blength\s*==\s*ownLength\b")
+NARROWER_WIDTH = re.compile(r"\blength\s*<\s*ownLength\b")
 
 # A call, as opposed to the declaration whose parameter list follows the same name. The declaration
 # has a parameter; a call has an argument or no argument at all and is not preceded by a return type.
@@ -462,7 +469,57 @@ SETTER_CALL_FILE = "Source/WebKit/Shared/AuxiliaryProcess.cpp"
 # because the condition is the whole fix: the setter is correct only when it asks whether the peer is
 # older, and any other condition either drops the translation route A needs or turns it on for
 # route B. The predicate itself, and the declaration the call needs to compile, are added by
-# patches/ios16-xpc-bootstrap-compat.patch, which this script does not read.
+# patches/ios16-xpc-bootstrap-compat.patch, which `check_predicate_is_defined` reads.
+
+
+# A preprocessor conditional, which decides whether the lines beneath it exist at all. Read because a
+# call wrapped in one is a call the compiler may never see: `#if IOS_16_MESSAGE_NUMBER_TRANSLATION`
+# around the permitted block dropped it, since the macro is defined in a header
+# AuxiliaryProcess.cpp does not include, and the file then read as though it were wired.
+CONDITIONAL_OPEN = re.compile(r"^#\s*(if|ifdef|ifndef)\b(.*)$")
+CONDITIONAL_MIDDLE = re.compile(r"^#\s*(elif|else)\b")
+CONDITIONAL_CLOSE = re.compile(r"^#\s*endif\b")
+
+# The statements the call has to sit between, in this order. `createClientConnection` makes the
+# helper-to-UI connection, and `open` sends `InitializeConnection` on it immediately
+# (ConnectionCocoa.mm:186-192), so a flag set after `open` leaves the first message untranslated and
+# the handshake compares a number the peer never wrote.
+CREATES_CONNECTION = "createClientConnection"
+OPENS_CONNECTION = "->open("
+
+
+def conditional_stack_at(statements: list[tuple[str, str]], path: str) -> dict[int, tuple[str, ...]]:
+    """The preprocessor conditionals enclosing each statement of `path`, as a stack of conditions.
+
+    Only the added lines are walked, so a conditional that already exists in the file being patched is
+    not seen. That is the right boundary: the check can only judge what the patch itself writes, and a
+    wrapper the patch adds is the failure this rule is for.
+    """
+    stacks: dict[int, tuple[str, ...]] = {}
+    stack: list[str] = []
+    for index, (statement_path, statement) in enumerate(statements):
+        if statement_path != path:
+            stacks[index] = ()
+            continue
+        opened = CONDITIONAL_OPEN.match(statement)
+        if opened:
+            stacks[index] = tuple(stack)
+            stack.append(statement)
+            continue
+        if CONDITIONAL_MIDDLE.match(statement) or CONDITIONAL_CLOSE.match(statement):
+            stacks[index] = tuple(stack)
+            if CONDITIONAL_CLOSE.match(statement) and stack:
+                stack.pop()
+            continue
+        stacks[index] = tuple(stack)
+    return stacks
+
+
+def statement_index_of(statements: list[tuple[str, str]], path: str, needle: str) -> int | None:
+    for index, (statement_path, statement) in enumerate(statements):
+        if statement_path == path and needle in code_view(statement):
+            return index
+    return None
 
 
 def statement_is_permitted_setter_statement(statement: str) -> bool:
@@ -559,6 +616,104 @@ def check_setter_call(patch: str) -> list[Violation]:
                 )
             )
 
+    violations += check_call_is_not_conditional(statements, permitted)
+    violations += check_call_precedes_open(patch, permitted, statements)
+    return violations
+
+
+def check_call_is_not_conditional(
+    statements: list[tuple[str, str]], permitted: list[tuple[int, str]]
+) -> list[Violation]:
+    """Refuse a permitted call that sits inside a preprocessor conditional.
+
+    The call compiles unconditionally: the setter is declared in Connection.h and the predicate in
+    AuxiliaryProcess.h, both added by these patches without a condition. Wrapping it in `#if` can
+    therefore only subtract: `#if IOS_16_MESSAGE_NUMBER_TRANSLATION` around it dropped the whole block,
+    because that macro is defined in MessageNumberTranslation.h, which AuxiliaryProcess.cpp does not
+    include, and `#if` on an undefined identifier is 0. CI does not catch it either, since the
+    workflow passes `GCC_TREAT_WARNINGS_AS_ERRORS=NO` with `-Wno-error`, so the `-Wundef` diagnostic
+    that would name it is only a warning. The block then read as if it were wired while
+    `peerIsOlderGeneration()` was never called.
+    """
+    stacks = conditional_stack_at(statements, SETTER_CALL_FILE)
+    violations = []
+    for index, statement in permitted:
+        enclosing = stacks.get(index, ())
+        if not enclosing:
+            continue
+        violations.append(
+            Violation(
+                "the setter call in %s is inside a preprocessor conditional, so it may not compile"
+                % SETTER_CALL_FILE,
+                "the call needs no condition: the setter and peerIsOlderGeneration() are both added "
+                "unconditionally, so `#if` can only remove the call. Found it under `%s`, around %s; "
+                "an `#if` on a macro this file cannot see evaluates to 0 and drops the block, which "
+                "leaves route A untranslated while the file reads as though it were wired"
+                % ("` then `".join(enclosing), statement.strip()),
+            )
+        )
+    return violations
+
+
+def check_call_precedes_open(patch: str, permitted: list[tuple[int, str]], statements) -> list[Violation]:
+    """Refuse a permitted call that lands after `m_connection->open(`.
+
+    `open` sends `InitializeConnection` immediately (ConnectionCocoa.mm:186-192), so the flag has to be
+    set before it. After it, the first message leaves untranslated and the handshake compares a number
+    the peer never wrote, which is the failure the guard exists to prevent.
+
+    The comparison is by physical line in the patch text, because `m_connection->open(*this)` is a
+    context line: it already exists in the file, so it carries a leading space rather than a `+` and is
+    absent from the added-statement list. Reading ordering from that list alone silently compared the
+    call to nothing, which is how a call moved after `open` kept passing.
+    """
+    in_file = False
+    call_lines: list[int] = []
+    create_line = None
+    open_line = None
+    for physical, raw in enumerate(patch.splitlines(), 1):
+        header = FILE_HEADER.match(raw)
+        if header:
+            in_file = header.group(1) == SETTER_CALL_FILE
+            continue
+        if not in_file or not raw:
+            continue
+        marker, body = raw[:1], raw[1:]
+        if marker == "-":
+            continue
+        if OPENS_CONNECTION in body and open_line is None:
+            open_line = physical
+        if CREATES_CONNECTION in body and create_line is None:
+            create_line = physical
+        if marker != "+":
+            continue
+        view = strip_comment(body)
+        if not SETTER.search(view) or any(hint in view for hint in DECLARATION_HINTS):
+            continue
+        if statement_is_permitted_setter_statement(body):
+            call_lines.append(physical)
+
+    violations = []
+    for call_line in call_lines:
+        if create_line is not None and call_line < create_line:
+            violations.append(
+                Violation(
+                    "the setter call in %s runs before the connection it configures exists"
+                    % SETTER_CALL_FILE,
+                    "expected the call after `%s` and before `%s`, found it at line %d, before the "
+                    "connection is created at line %d"
+                    % (CREATES_CONNECTION, OPENS_CONNECTION, call_line, create_line),
+                )
+            )
+        if open_line is not None and call_line > open_line:
+            violations.append(
+                Violation(
+                    "the setter call in %s runs after m_connection->open(" % SETTER_CALL_FILE,
+                    "expected the call before `%s` at line %d, found it at line %d; open sends "
+                    "InitializeConnection immediately, so a flag set afterwards leaves the handshake "
+                    "untranslated" % (OPENS_CONNECTION, open_line, call_line),
+                )
+            )
     return violations
 
 
@@ -1475,7 +1630,149 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
     return violations
 
 
-def run(patch_path: Path) -> int:
+def branch_region(code: list[str], head: int) -> list[str]:
+    """The lines of the branch headed at `head`, from its `if` through its first closing brace at depth 0.
+
+    The brace count starts at the head line so a body opened and closed on the same line is one region.
+    A `return;` inside the branch ends it too: the patch's equal-width branch copies the bitmap and
+    returns, and the write that matters sits above that return.
+    """
+    region = [code[head]]
+    depth = code[head].count("{") - code[head].count("}")
+    for line in code[head + 1:]:
+        region.append(line)
+        depth += line.count("{") - line.count("}")
+        if depth <= 0 and ("}" in line or line.startswith("return")):
+            break
+    return region
+
+
+def check_predicate_is_defined(patch: str, bootstrap_patch: Path) -> list[Violation]:
+    """Require the predicate the call uses to exist, and to be written by every width branch.
+
+    The translation patch calls `peerIsOlderGeneration()` but does not define it; the bootstrap patch
+    does. Until this check existed, nothing verified the other half, so a patch calling a function with
+    no definition would pass — precisely the shape that let the compiled-out call through.
+
+    Three facts are required of the bootstrap patch, and each is a separate failure:
+
+      a `bool peerIsOlderGeneration()` definition, so the call links;
+      a comparison of the received width against this build's, so there is a branch to write from;
+      a write of the flag in every branch that comparison produces, so the answer is recorded rather
+      than left at whatever the previous branch stored.
+
+    The write is spelled `peerIsOlderGenerationFlag() = ...`. The wider case is an `else`, not its own
+    `length > ownLength` test, because the source compares equal first and narrower second; that shape
+    is what the branch walk below reads, and pinning `>` would fail a correct patch.
+    """
+    try:
+        bootstrap = bootstrap_patch.read_text(encoding="utf-8")
+    except OSError as error:
+        return [
+            Violation(
+                "the predicate's definition patch cannot be read",
+                "%s: %s; without it this check cannot tell whether peerIsOlderGeneration() exists"
+                % (bootstrap_patch, error),
+            )
+        ]
+
+    code = []
+    for raw in bootstrap.splitlines():
+        match = ADDED_LINE.match(raw)
+        if not match:
+            continue
+        line = strip_comment(match.group(1)).strip()
+        if line:
+            code.append(line)
+
+    violations = []
+    definition = re.compile(r"^bool\s+%s\s*\(\s*\)\s*(?:\{|$|return\b)" % PEER_CONDITION_TOKEN)
+    if not any(definition.match(line) for line in code):
+        violations.append(
+            Violation(
+                "the bootstrap patch does not define peerIsOlderGeneration()",
+                "%s adds no `bool peerIsOlderGeneration()`; the call in %s would not link, and with "
+                "warnings downgraded the build would say nothing about it"
+                % (bootstrap_patch.name, SETTER_CALL_FILE),
+            )
+        )
+
+    # A branch head compares the received width against this build's. `return length < ownLength;` also
+    # mentions both, so heads are taken to be the `if` lines only. The comparisons are matched whole
+    # rather than by substring, because `<` also matches `<=` and `==` also matches `== ownLength)` in
+    # a longer expression: `<` widened to `<=` would call an equal-width peer older and translate a
+    # peer whose numbering already agrees.
+    widths = [line for line in code if "ownLength" in line and line.startswith("if")]
+
+    if not any(EQUAL_WIDTH.search(line) for line in widths):
+        violations.append(
+            Violation(
+                "the bootstrap patch has no equal-width branch",
+                "expected `if (length == ownLength)`; that branch is the one that copies the bitmap "
+                "and is the only one where both sides share a layout",
+            )
+        )
+    if not any(NARROWER_WIDTH.search(line) for line in widths):
+        violations.append(
+            Violation(
+                "the bootstrap patch has no narrower-width branch",
+                "expected `if (length < ownLength)`, not `<=`; that is the branch the predicate "
+                "answers true on, and `<=` would include the equal case",
+            )
+        )
+
+    # The values are what the predicate means, so they are pinned rather than counted: the narrower
+    # branch records true and the equal and wider branches record false. A branch that wrote nothing,
+    # or wrote the opposite, changes which peer gets translated.
+    narrower = next((index for index, line in enumerate(code)
+                     if line.startswith("if") and "<" in line and "ownLength" in line), None)
+    if narrower is None:
+        writes_true = False
+    else:
+        region = branch_region(code, narrower)
+        writes_true = any(re.search(r"Flag\s*\(\s*\)\s*=\s*true", line) for line in region)
+    if not writes_true:
+        violations.append(
+            Violation(
+                "the bootstrap patch's narrower-width branch does not record the predicate as true",
+                "expected `<peerIsOlderGenerationFlag()> = true;` inside `if (length < ownLength)`; "
+                "without it an older peer reads as same-generation and route A is not translated",
+            )
+        )
+
+    for description, comparison in (("equal-width", "=="), ("wider", None)):
+        if comparison is None:
+            # The wider case is the `else` of the narrower test, so its write has to be found in that
+            # branch's alternative rather than in a head of its own.
+            continue
+        index = next((i for i, line in enumerate(code)
+                      if line.startswith("if") and comparison in line and "ownLength" in line), None)
+        if index is None:
+            continue
+        region = branch_region(code, index)
+        if not any(re.search(r"Flag\s*\(\s*\)\s*=\s*false", line) for line in region):
+            violations.append(
+                Violation(
+                    "the bootstrap patch's %s branch does not record the predicate as false" % description,
+                    "expected `peerIsOlderGenerationFlag() = false;` inside `if (length %s ownLength)`; "
+                    "without it the equal-width case keeps whatever the previous branch stored"
+                    % comparison,
+                )
+            )
+
+    false_writes = [line for line in code if re.search(r"Flag\s*\(\s*\)\s*=\s*false", line)]
+    if len(false_writes) < 2:
+        violations.append(
+            Violation(
+                "the bootstrap patch records the predicate as false fewer than twice",
+                "found %d; the equal-width and wider branches both answer false, and a branch that "
+                "stores nothing keeps the previous branch's value" % len(false_writes),
+            )
+        )
+    return violations
+
+
+def run(patch_path: Path, bootstrap_patch: Path | None = None) -> int:
     try:
         patch = patch_path.read_text(encoding="utf-8")
     except OSError as error:
@@ -1489,6 +1786,7 @@ def run(patch_path: Path) -> int:
     violations += check_rationale(patch)
     violations += check_table_anchors(patch)
     violations += check_no_stale_table_basis(patch)
+    violations += check_predicate_is_defined(patch, bootstrap_patch or DEFAULT_BOOTSTRAP_PATCH)
 
     if violations:
         for violation in violations:
@@ -1512,7 +1810,14 @@ def main(argv: list[str]) -> int:
         default=DEFAULT_PATCH,
         help="the translation patch to read (default: %(default)s)",
     )
-    return run(parser.parse_args(argv).patch)
+    parser.add_argument(
+        "--bootstrap-patch",
+        type=Path,
+        default=DEFAULT_BOOTSTRAP_PATCH,
+        help="the patch that defines peerIsOlderGeneration() (default: %(default)s)",
+    )
+    arguments = parser.parse_args(argv)
+    return run(arguments.patch, arguments.bootstrap_patch)
 
 
 if __name__ == "__main__":
