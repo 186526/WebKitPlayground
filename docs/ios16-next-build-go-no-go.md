@@ -272,7 +272,7 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/UIProcess/RemoteLayerTree/
 
 | 阻断 | 规模与依据 | 性质 |
 | --- | --- | --- |
-| 编号翻译只改消息号，不改载荷 | 共享消息名 2998 条，494 条载荷参数变了；31 条新增 reply，其中参数同时也变的有 12 至 14 条（4.3 节） | 必须逐条适配，且不是同一个形状 |
+| 编号翻译只改消息号，不改载荷 | 共享消息名 2998 条，494 条载荷参数变了；31 条新增 reply，其中参数同时也变的那一组条数在 12 上下，分组边界尚有误判（4.3 节） | 必须逐条适配，且不是同一个形状 |
 | 图层树编码器要按对端格式重写 | `CommitLayerTree` 与 `LayerProperties` 两个方向都过不去（4.4 节） | 接收方是系统二进制、不能改，桥只能架在我们这一侧 |
 | 494 条载荷变更未按方向分类 | 本文只对 31 条 reply 变更与 `CommitLayerTree` 做了方向判定 | **规模没有被任何测量界定** |
 
@@ -375,7 +375,7 @@ reasons: Symbol not found: _WTFSignpostIndirectLoggingEnabled
 | 18.3 框架安装 | 五个 framework 已装，`minos=16.1.0 sdk=18.5.0` | 成立 |
 | UI 进程加载了我们那份二进制 | 本轮 UI 进程三份 framework 全在 `/System` | **不成立**（5.4.4 节） |
 
-**所以拦住路线 B 的是 dyld 这一层，不是 launchd。** 具体形态是：重装带两个新 hook 的 basebin，让 `dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且判定 (b) 变成 `1 1 1 1`、`gen/dyld` 变成 974608、`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（不是 `4 2 4 2 4 2`；那四个数是子串计数，见 `../../webkit-install-runbook.md:1249`）；然后重测 UI 进程的 `environment` 段落与 `lldb image list`。**只有这一步通过之后，launchd 解析四个服务名那一个读数才有意义。** 它现在仍未测，因为前置条件不成立，不是因为已经测出「不解析」。
+**所以拦住路线 B 的是 dyld 这一层，不是 launchd。** 具体形态是：重装带两个新 hook 的 basebin，让 `dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且判定 (b) 变成 `1 1 1 1`、`gen/dyld` 变成 974608、`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（不是 `4 2 4 2 4 2`；那四个数是子串计数，见 `docs/dopamine-basebin-webkit-override.md:1201`）；然后重测 UI 进程的 `environment` 段落与 `lldb image list`。**只有这一步通过之后，launchd 解析四个服务名那一个读数才有意义。** 它现在仍未测，因为前置条件不成立，不是因为已经测出「不解析」。
 
 **这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。**
 
@@ -485,7 +485,7 @@ TMPDIR
 
 #### 5.4.6 这一轮的读数和旧记录的关系
 
-本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（按判定 (b) 的四个完整符号名各自 `bytes.count` 计数，不用正则，`../../AGENTS.md:272-283`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`。**这一条 2026-11-24 当时记的是 `4 2 4 2 4 2`，重装后照那个数去比会判失败**：`systemhook.dylib` 的计数有两种写法，`data.count(s.encode())` 按子串数会把 `__XPC_DYLD_FRAMEWORK_PATH` 里的裸名再算一遍，前四项因此翻倍成 `4 2 4 2`；按整条 entry 比较的真值是 `2 2 2 2`，两种写法在 `234336` 上都非零，所以当时的「通过」结论不受影响，只有发布的数字要换。判据是重跑 `../../webkit-install-runbook.md:1231` 第六阶段那条命令，读它打印的六项，期望值是 `2 2 2 2 4 2`。
+本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（按判定 (b) 的四个完整符号名各自 `bytes.count` 计数，不用正则，`../../AGENTS.md:272-283`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`。**这一条 2026-11-24 当时记的是 `4 2 4 2 4 2`，重装后照那个数去比会判失败**：`systemhook.dylib` 的计数有两种写法，`data.count(s.encode())` 按子串数会把 `__XPC_DYLD_FRAMEWORK_PATH` 里的裸名再算一遍，前四项因此翻倍成 `4 2 4 2`；按整条 entry 比较的真值是 `2 2 2 2`，两种写法在 `234336` 上都非零，所以当时的「通过」结论不受影响，只有发布的数字要换。判据是重跑 `../../webkit-install-runbook.md:1142-1148` 第六阶段那条命令，读它打印的六项，期望值是 `2 2 2 2 4 2`。
 
 **这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。**
 
@@ -500,14 +500,14 @@ TMPDIR
 | # | 动作 | 判据 | 为何是必需 |
 | --- | --- | --- | --- |
 | 1 | 确认设备可达 | `ssh mobile@192.168.2.136` 成功（11-25 本轮就是在这个地址上取的读数；`AGENTS.md` 记的当前地址正是 `.136`，接手机热点时用 `172.20.10.1`，`.135` 是历史值、现在返回 `No route to host`） | 一切测量的前提。本文原先记「两个地址都不可达」是更早一轮的状态，已不必再跑一遍 |
-| 2 | **重装带两个新 hook 的 basebin，让 dyld 层生效** | `gen/dyld` 变成 974608；判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`；`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`；`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（从前写的 `4 2 4 2 4 2` 是子串计数；字节数表在 `../../webkit-install-runbook.md:113-114`，判定 (b) 的四个精确符号计数在 `:866-908`、两行对照表在 `:899-904`，`systemhook` 的两行表在 `:1257-1258`，计数写法见同文件 `:1249`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 5.1 节「四个陷阱」 | **这一步是本轮新增的第一项。** 5.1 节第三层今天不成立，后面每一条的前提都是它成立。本条是持久性加破坏性操作：命令为 `jbctl update basebin`，会触发 `reboot3(RB2_USERREBOOT)` 且所有应用退出，须用户确认。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。回退方式是用 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑同一条命令 |
+| 2 | **重装带两个新 hook 的 basebin，让 dyld 层生效** | `gen/dyld` 变成 974608；判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`；`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`；`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（从前写的 `4 2 4 2 4 2` 是子串计数；字节数表在 `../../webkit-install-runbook.md:113-114`，判定 (b) 的四个精确符号计数在 `:880-896`、两行对照表在 `:917-922`，`systemhook` 的六项计数命令在 `:1142-1148`、两张版本对照表在 `:1155-1159`；整条 entry 与裸子串两种数法的差别见 `docs/dopamine-basebin-webkit-override.md:161` 与 `:1201`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 5.1 节「四个陷阱」 | **这一步是本轮新增的第一项。** 5.1 节第三层今天不成立，后面每一条的前提都是它成立。本条是持久性加破坏性操作：命令为 `jbctl update basebin`，会触发 `reboot3(RB2_USERREBOOT)` 且所有应用退出，须用户确认。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。回退方式是用 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑同一条命令 |
 | 3 | 重测 UI 进程是否拿到覆盖路径并加载覆盖目录的二进制 | `launchctl print pid/<PID>` 的 `environment` 段落出现 `DYLD_FRAMEWORK_PATH` 且指向 `...WebKitOverride`；`lldb image list` 里 `WebKit`、`WebCore`、`JavaScriptCore` 三份的前缀含 `WebKitOverride` | 第 3 步的读数是「dyld 层真的生效」的判据。它不成立时，端点读数对 launchd 一句话也没说 |
 | 4 | 建覆盖目录并跑 CrashReporter 差分，确认 UI 进程不再因 `DYLD` 中止 | 目标应用无新增 `termination.namespace = DYLD` 报告 | 归零读数有两种成因，不排除 dyld 中止就无法归因 |
 | 5 | 在同一次运行里取端点读数：用 5.4.1 的正确启动命令、`killall` 清干净、读 `launchctl print pid/<PID>` 的 `services = {` 段落，**按去重后的基础服务名计数** | 若基础服务名仍为 0 或显著少于 4，且 UI 进程存活、无新增 UI 崩溃报告，则判 (B)。**不要用按行 `grep -c` 的 8 当基线**，它不是常量（5.4.2 节） | 这是路线 B 这一层要判的那一项，且只有在第 2、3 步通过后才有效 |
 | 6 | 若判 (B)，测「覆盖目录里不放 `XPCServices`」与「放系统 16.1 的 `XPCServices`」两种配置 | 两次读数与第 5 步对照 | `prune_xpc_services` 现在会删掉它，而此前把它当候选来源的论证都未测 |
 | 7 | 若 (B) 成立，判定「让 UI 进程自己注册端点」的可行性 | 判据是源码：`Source/WebKit/UIProcess/` 下 `XPC_CONNECTION_MACH_SERVICE_LISTENER` 命中 0 | 代码缺失比权限更快否决；这段代码不存在，要写得新增一个子系统 |
 
-**第 5 步判 (A) 时的最小改动清单是另一组，按路线 A 的 4.1 到 4.4。前两项已经落地，落点与行号见下，所以这份清单现在只剩第 3 至 6 项未做：**
+**第 5 步判 (A) 时的最小改动清单是另一组，按路线 A 的 4.1 到 4.4。前两项已经落地，落点与行号见下，所以这份清单现在只剩第 3 至 5 项未做：**
 
 1. **（已落地）** `ios16-xpc-bootstrap-compat.patch` 不再按「键缺失」判，改成按位图宽度三分支：`patches/ios16-xpc-bootstrap-compat.patch:128` 取本构建宽度，`:132` 等宽、`:138` 更窄、`:141` 更宽。原文写的「改为长度为 8」并不准确，落地的是三分支而不是单一长度比较。
 2. **（未按此方向落地，问题已被另一种方式解决）** 本文此前要求「把翻译开关从运行期判据改为编译期常量」。M149 没这么做，改成挂在 `peerIsOlderGeneration()` 上（`patches/ios16-ipc-message-number-translation.patch:8302-8304`）。编译期常量会让路线 B 下同代连接也被重编号，第二节那条风险正是针对它的，所以这个方向不应再做。
@@ -516,7 +516,7 @@ TMPDIR
 5. 给 18.3 写一份按 16.1 形状输出的图层树编码器（`RemoteLayerTreeTransaction`、`RemoteScrollingCoordinatorTransaction`、`LayerProperties`）。
 6. 翻译表已由 M141 按发货 16.1 tag 重建（各 2911 条 `case`），所以这一项不再是待办。
 
-**因此路线 A 剩下的最小改动清单是第 3、4、5 项，全部落在载荷层**，与 4.5 节那三条阻断一一对应。第 1 项已落地但没有真机读数，这一点在 4.2 节与第九节写明。
+**因此路线 A 剩下的最小改动清单是第 3、4、5 项，全部落在载荷层。** 三条阻断由这三项承接：第 3、4 项做第一条（编号只改号不改载荷），第 5 项做第二条（图层树编码器）；第三条是「494 条未按方向分类、规模未界定」，它没有独立动作，限定的是前两项要做到什么程度，见 4.5 节。第 1 项已落地但没有真机读数，这一点在 4.2 节与第九节写明。
 
 ## 七、计数口径
 
@@ -538,6 +538,8 @@ TMPDIR
 
 18.3.1 一侧按同一方法测得 4203 条具名消息，其中 1824 条带 reply。两侧共享消息名 2998 条，4.3 节的 2473 / 494 / 31 都在这 2998 条上统计，且过滤掉了 `/glib/`、`/gtk/`、`/wpe/`、`/win/`、`/playstation/`、`/soup/`、`/Scripts/webkit/tests/` 这些不会编进 iOS 的目录。
 
+**2998 与 `docs/ios16-ipc-message-number-translation.md` 里的 2911 不是同一个量，不能互相替代。** 两者都是「两侧同名消息的条数」，但取自不同的中间产物：2998 由两棵出货树的 `*.messages.in` 按消息全名配对得到，且先滤掉了上段那批不编进 iOS 的目录；2911 由两份生成出来的 `MessageNames.h` 枚举体取交集得到，输入是各 tag 的 `generate-message-receiver.py` 对 `DerivedSources.make` 所列接收者的产出，脚本自己记的口径在同一份输出里（`gen-ipc-message-number-tables: 2911 shared, 274 only older, 1175 only newer`，生成器 `scripts/gen-ipc-message-number-tables.py` 的模块文档 `:44-47` 记 `2911 shared`，该文「取证环境」一节 `docs/ios16-ipc-message-number-translation.md:906` 是这条输出的原文）。**本文的 2998 是载荷层统计的分母，2911 是编号层映射表的规模，引用时不要把这个数换到另一层去用。** 两者差 87 条，逐条成因没有核对过，所以这里不给出解释，只标出它们属于不同层。
+
 ## 八、与 1.2 节四条阻断的对照
 
 `docs/ios16-whole-18.3-deployment-path.md` 1.2 节把四条阻断并列。按本文核对，它们与路线的关系是：
@@ -555,7 +557,7 @@ TMPDIR
 
 ## 九、未验证项
 
-1. **dyld 层在这台设备上生效**（5.1 节第三层、5.4 节）。这是路线 B 现在的第一项，`gen/dyld` 974016、hook dylib 是原版 74352、判定 (b) 是 `1 0 0 1`（第 2、3 位为 0），三项都说明它不成立。验证方式是重装带两个新 hook 的 basebin 后复跑 runbook 第五阶段判定 (a)、(b) 与第六阶段，正确读数是 hook dylib 75952 且判定 (b) 回到 `1 1 1 1`、`gen/dyld` 974608、`systemhook.dylib` 234336 且六项整条 entry 计数 `2 2 2 2 4 2`。**这里从前写的是 `4 2 4 2 4 2`，那四个数是子串计数，不是真值**：`234336` 那份里 `__XPC_DYLD_FRAMEWORK_PATH` 含裸名子串，按 `data.count(s.encode())` 数会多算一遍，整条 entry 比较得到的真值是 `2 2 2 2`，见 `../../webkit-install-runbook.md:1249` 与 `:1261`。**不要用裸子串计数当复现判据**（5.1 节「四个陷阱」）。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。
+1. **dyld 层在这台设备上生效**（5.1 节第三层、5.4 节）。这是路线 B 现在的第一项，`gen/dyld` 974016、hook dylib 是原版 74352、判定 (b) 是 `1 0 0 1`（第 2、3 位为 0），三项都说明它不成立。验证方式是重装带两个新 hook 的 basebin 后复跑 runbook 第五阶段判定 (a)、(b) 与第六阶段，正确读数是 hook dylib 75952 且判定 (b) 回到 `1 1 1 1`、`gen/dyld` 974608、`systemhook.dylib` 234336 且六项整条 entry 计数 `2 2 2 2 4 2`。**这里从前写的是 `4 2 4 2 4 2`，那四个数是子串计数，不是真值**：`234336` 那份里 `__XPC_DYLD_FRAMEWORK_PATH` 含裸名子串，按 `data.count(s.encode())` 数会多算一遍，整条 entry 比较得到的真值是 `2 2 2 2`，见 `../../webkit-install-runbook.md:1142-1148` 那条六项计数命令与 `docs/dopamine-basebin-webkit-override.md:1201` 对两种数法的对照。**不要用裸子串计数当复现判据**（5.1 节「四个陷阱」）。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。
 2. **launchd 的解析行为**（5.3 节）。仍未测，但它现在排在 dyld 层之后：dyld 没选中覆盖目录时，端点数与无覆盖目录时相同，这个读数对 launchd 一句话也没说。本文原先把它记为「唯一的未测项」，那一句已作废。
 3. **`_CodeSignature` 缺失的影响**。覆盖目录版 `WebKit.framework` 没有 `_CodeSignature`（`build-state.md:954`），从未实测排除。
 4. **`__XPC_DYLD_FRAMEWORK_PATH` 的转交行为**。系统桩没有 `LC_DYLD_ENVIRONMENT`，它加载哪份 `WebKit` 只能靠这个转交；launchd、libxpc、xpcproxy 三处都查不到实现。
