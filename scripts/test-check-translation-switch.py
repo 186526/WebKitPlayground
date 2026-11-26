@@ -173,6 +173,8 @@ diff --git a/Source/WebKit/Platform/IPC/Encoder.cpp b/Source/WebKit/Platform/IPC
 +// is number 2483, and 2483 is in this file's isKnownUnmappedIncomingNumber list.
 +// Outside the newer synchronous section 852 of the 1126 that are outside it carry a number at or
 +// below `Last`, so the peer would not reject them at all.
++// `scripts/gen-ipc-message-number-tables.py` exits 0 (rc=0) and reports four counts: 2911 shared,
++// 274 only older, 1175 only newer, and 708 unmapped incoming, 1175 on the outgoing side.
 +    case MessageName::InitializeConnection: return static_cast<MessageName>(2478);
 +    case MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged: return static_cast<MessageName>(3076);
 +    case MessageName::WebSharedWorkerServerConnection_SuspendForBackForwardCache: return static_cast<MessageName>(2444);
@@ -200,6 +202,46 @@ diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/Au
 +    initializeConnection(m_connection.get());
 +    m_connection->open(*this);
 """
+
+def with_hunk_headers(text: str, delta: int = 0) -> str:
+    """`text` with a `@@` header per `diff --git` section, declaring that section's body.
+
+    `BASE` carries no header, so every other case can edit one rule without the hunk counts entering
+    the answer. This puts the headers back for the cases that are about the counts: each declares the
+    old and new line counts its own body carries, `delta` moves the declared new-side count off the
+    true one, and a fixture that declares a count its body does not have is exactly the drift a
+    comment edit makes when it adds lines and forgets the header.
+
+    The counts are taken from the body with the rule the checker is supposed to use, so this helper
+    is only as good as that rule. It is not the authority for the prefixed-line case: the header
+    there is written by hand, because a helper that shared the checker's mistake would agree with it.
+    """
+    sections = []
+    for raw in text.split("\n"):
+        if raw.startswith("diff --git "):
+            sections.append((raw, []))
+        elif sections:
+            sections[-1][1].append(raw)
+    out = []
+    for header, body in sections:
+        while body and body[-1] == "":
+            body.pop()
+        path = header.split(" b/", 1)[-1]
+        old = sum(1 for line in body if line.startswith("-"))
+        new = sum(1 for line in body if line.startswith("+"))
+        out.append(header)
+        out.append("--- a/%s" % path)
+        out.append("+++ b/%s" % path)
+        out.append("@@ -0,%d +1,%d @@" % (old, new + delta))
+        out.extend(body)
+    return "\n".join(out) + "\n"
+
+
+# The header is written by the helper rather than read back, and the helper is an independent count:
+# it splits on `diff --git` and counts `+`/`-` prefixes, never skipping a spelling. The two readings
+# therefore disagree on this fixture — the helper calls the body 1 old and 37 new, a walk that skips
+# those spellings calls it 0 and 36 — which is what makes the case below a test rather than a
+# restatement of the same rule.
 
 # Appending a constant to BASE needs its own diff section: BASE ends inside AuxiliaryProcess.cpp,
 # so a bare `BASE + CALL` would read the two as one file and a `+` in the constant would become a
@@ -856,6 +898,18 @@ SENTENCE_NEEDLES = (
         "// `case 2479: return MessageName::InitializeConnection;`",
         "that incoming case written out",
     ),
+    (
+        "a patch that drifts the unmapped-incoming count to 707 fails",
+        "1175 only newer, and 708 unmapped",
+        "1175 only newer, and 707 unmapped",
+        "the unmapped-incoming count, stated as a count",
+    ),
+    (
+        "a patch that drops the generator's exit status fails",
+        "exits 0 (rc=0) and reports four",
+        "and reports four",
+        "the generator's exit status and the four counts it prints",
+    ),
 )
 
 # The table can be retargeted or renumbered while the prose still reads correctly, which is exactly
@@ -984,6 +1038,60 @@ CASES = (
         None,
     ),
     ("a missing patch is reported distinctly", None, 2, None),
+)
+
+# The hunk-count rule, added after a comment edit in M141 added lines to two hunks without updating
+# their `@@` headers: the patch applied to nothing, `git apply --check` reported `patch is corrupt`,
+# and no other check in this file or in the build workflow noticed, because the counts are never
+# derived by git and every other rule reads the patch's text rather than its shape.
+#
+# The first case is the control: a fixture with correct headers has to pass, or the two failures
+# below would be refused for a reason other than the count under test and this block would prove
+# nothing. The two off-by-N cases move the declared count in both directions, and they are not
+# symmetric in what `git apply` does — measured on scratch trees, an overcount stops the apply with
+# `patch is corrupt` while an undercount applies the truncated body and exits 0. Both are drift this
+# check has to report, because the undercount is the one no exit status would ever show.
+CASES += (
+    (
+        "a patch whose hunk headers match their bodies passes",
+        with_hunk_headers(BASE),
+        0,
+        None,
+    ),
+    (
+        "a hunk header that undercounts its body by one fails",
+        with_hunk_headers(BASE, delta=-1),
+        1,
+        "a hunk header disagrees with the lines it introduces",
+    ),
+    (
+        "a hunk header that overcounts its body by two fails",
+        with_hunk_headers(BASE, delta=2),
+        1,
+        "a hunk header disagrees with the lines it introduces",
+    ),
+)
+
+# A body line may itself begin with `---` or `+++`. Read as file headers, the two lines below are
+# skipped and the body counts one short on each side; counted as body lines, they are a deletion and
+# an addition and the header's `-10,2 +10,2` is right. The header is written to match the second
+# reading, so this case passes only if the walk stops at `@@` and `diff --git` instead of at every
+# line that looks like a header. Without it, a walk that skipped those spellings everywhere would
+# still pass all three cases above, because none of them puts one inside a body.
+CASES += (
+    (
+        "a body whose own lines begin with --- and +++ still counts correctly",
+        with_hunk_headers(
+            BASE.replace(
+                "+    case 2946: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;\n",
+                "+    case 2946: return MessageName::GPUConnectionToWebProcess_EnsureAudioSession;\n"
+                "--- a deleted comment whose own text begins with two dashes\n"
+                "+++ an added comment whose own text begins with two pluses\n",
+            )
+        ),
+        0,
+        None,
+    ),
 )
 
 # Negative cases for the drift that P2-1 was about: each needle used to be a bare number that also

@@ -559,7 +559,7 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 表覆盖不到的消息不会得到近似翻译，只有两条出路：发送方向不发，接收方向丢弃。两条路都按消息名判定，判定集合由生成器算出，与翻译表互补。
 
-**发送方向**：`isKnownUnmappedOutgoingName` 为真时不发，`sendMessageImpl` 返回 `Error::Unspecified`。这类消息是 18.3 独有、发货 16.1 枚举里没有对应名字的消息，共 1175 条，其中 251 条在 18.3 侧带 `#if`，只在含该枚举项的配置里编入；把 iOS 上恒为真的守卫（`PLATFORM(COCOA)`、`PLATFORM(IOS)`、`PLATFORM(IOS_FAMILY)`、`OS(DARWIN)`）剔除后，实际会编掉的是 1149 条。
+**发送方向**：`isKnownUnmappedOutgoingName` 为真时不发，`sendMessageImpl` 返回 `Error::Unspecified`。这类消息是 18.3 独有、发货 16.1 枚举里没有对应名字的消息，共 1175 条。1175 条里 924 条不带任何 `#if`，任何 iOS 配置都会编入；剩下 251 条带 `#if`，其中 26 条的守卫只由 `PLATFORM(COCOA)`、`PLATFORM(IOS)`、`PLATFORM(IOS_FAMILY)`、`OS(DARWIN)` 这类 iOS 上恒为真的项构成（17 条 `PLATFORM(COCOA)`、9 条 `PLATFORM(IOS_FAMILY)`），同样每条 iOS 配置都编入。**真正可能被某个 iOS 配置编掉的只有剩下 225 条。** 用同一口径算共享那一侧：2911 条共享名字里 673 条带守卫，其中 239 条只由同样的恒真项守卫，可被编掉的 434 条，正是「接收方向」那一段里 708 = 274 + 434 的加数。
 
 **表覆盖不到的名字不会被原样发出。** 越过判据之后，`sendMessageImpl` 执行的是 `encoder->setMessageName(translateOutgoingMessageName(name))`，而 `translateOutgoingMessageName` 的 `default` 返回 `MessageName::Invalid`。若判据与翻译表因故不一致，写进 header 的是 `Invalid`，对端按 `isValidEnum` 拒收并丢弃，不会当成某个合法编号执行。
 
@@ -867,6 +867,21 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2 (1b670a0c038d): messages=4086 #if=703 In
 ```
 
 16.1 侧 3185 个消息名，取值 0–3184，`#if` 数为 0，所以平坦下标就是编译值；`Last = WrappedAsyncMessageForTesting` 是别名，值为 3184。18.3 侧 4086 个消息名，平坦取值 0–4085，含 703 个 `#if`。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名。枚举体里还有五个非消息名条目：`FirstSynchronous`、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（4086）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。本文第 8 节的枚举计数与第 6.3 节的 18 条翻转取自这两份文件；第 6.2 节同样从这两份文件按第 6.2 节给出的规则重算，第 5 节的调用点数取自源码检索。
+
+上一条命令 `rc=0`。再用这两份 header 建表，同样 `rc=0`，stderr 原文：
+
+```
+gen-ipc-message-number-tables: 2911 shared, 274 only older, 1175 only newer, 708 unmapped incoming, 1175 unmapped outgoing
+```
+
+```sh
+python3 scripts/gen-ipc-message-number-tables.py \
+  --names-old /tmp/t4gen/regen/Names16.h \
+  --names-new /tmp/t4gen/regen/Names18.h \
+  --output /tmp/t4gen/tables_v3.h
+```
+
+四个计数就是这条输出：共享 2911、仅 16.1 有 274、仅 18.3 有 1175、入方向未映射 708（出方向未映射 1175）。
 
 `/tmp/t4gen/regen/Names16.h` 与 `scripts/gen-ipc-message-number-tables.py` 生成补丁里两张表时用的输入逐字节相同（sha256 `d3ec9d5f…`），`/tmp/t4gen/regen/Names18.h` 同理（`eaddfb01…`）。所以本文的读数与补丁里的表来自同一份数据。
 

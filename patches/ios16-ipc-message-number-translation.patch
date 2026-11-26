@@ -8026,7 +8026,7 @@ new file mode 100644
 index 0000000000000..be99a874b6c4e
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,209 @@
 +/*
 + * Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 + *
@@ -8090,6 +8090,13 @@ index 0000000000000..be99a874b6c4e
 +// this enumeration's end: the mismatch is not one of size. Of the 2911 names the
 +// two enumerations share, 5 happen to carry the same number on both sides and
 +// 2906 do not. 274 names exist only in 16.1 and 1175 only in this tree.
++//
++// Provenance, recorded here because these tables are reproducible only from
++// these exact inputs. Given one generated header per tag,
++// `scripts/gen-ipc-message-number-tables.py` exits 0 (rc=0) and reports four
++// counts: 2911 shared, 274 only older, 1175 only newer, and 708 unmapped
++// incoming (1175 on the outgoing side). A 16.1 number the tables have no case
++// for is one of those 708.
 +//
 +// That misalignment is what makes the handshake fail, and `InitializeConnection`
 +// is the case to read. `InitializeConnection` is number 3076 in this tree. The

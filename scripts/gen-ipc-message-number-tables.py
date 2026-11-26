@@ -93,19 +93,19 @@ answer `MessageName::Invalid`, and the caller *must* consult the predicates firs
   the send; on the incoming side it drops the message before any dispatch
   decision. The peer provably cannot handle a message it does not have, and
   refusing is not free for the sender, though the cost differs by section. In the
-  file's own numbering, with every guard satisfied, none of the 1175 names carries
-  an 18.3 value above the older enumeration's `Last`: the 18.3 enumeration is
-  larger, so no 18.3 message can be out of its range. 49 of them sit in the newer
-  enumeration's synchronous section, and those are the ones that cost the most.
-  The peer would decode a number it does not know and hand it to whichever 18.3
-  receiver owns that number, a different message: `sendSync`'s default infinite
-  timeout would hold the main thread, and a synchronous refusal therefore reaches
-  `didFailToSendSyncMessage`, which ends an armed WebContent process instead of
-  blocking it. The remaining 1126 asynchronous names land the same way. Because
-  every one of them carries a number at or below `Last`, the older process would
-  not reject them at all: it would accept the number as a valid older message and
-  run whichever handler owns it, a different message. That is the trade, not an
-  absence of cost.
+  file's own numbering, with every guard satisfied, 323 of the 1175 names carry an
+  18.3 value above the older enumeration's `Last`: the 49 that sit in the newer
+  enumeration's synchronous section, and 274 of the asynchronous ones. The 49 cost
+  the most, and sending one would not help. Its number is above `Last`, so the
+  older process rejects it while decoding and never replies, and `sendSync`'s
+  default infinite timeout would hold the main thread; refusing instead reaches
+  `didFailToSendSyncMessage`, which ends an armed WebContent process rather than
+  blocking it. The other 1126 names are asynchronous and split in two. 852 carry a
+  number at or below `Last`, so the older process would not reject them at all: it
+  would accept the number as a valid older message and run whichever handler owns
+  it, a different message. The remaining 274 carry a number above `Last` and are
+  rejected without a reply, which for an asynchronous sender only means the
+  message had no effect. That is the trade, not an absence of cost.
 * Anything else reaching `default` means these tables disagree with the
   enumeration they were generated from. That is a defect, and the caller should
   turn it into an invalid-message report so it surfaces during development rather
