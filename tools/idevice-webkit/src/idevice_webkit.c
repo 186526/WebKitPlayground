@@ -1,10 +1,12 @@
 #include "idevice_webkit.h"
 
 #include "bundle_lookup.h"
+#include "claim_images.h"
 #include "dylib_report.h"
 #include "dyld_lookup.h"
 #include "file_writer.h"
 #include "filter_match.h"
+#include "load_chain.h"
 #include "macho_image.h"
 #include "stage_clock.h"
 #include "textkit.h"
@@ -295,23 +297,48 @@ static bool host_is_target(host_images *images) {
   return true;
 }
 
-/* The framework is loaded before its image is read: RTLD_NOLOAD answers only
-   for an image already in the process, and a host reaches this point with the
-   framework not loaded yet, so a lookup before the load would find nothing and
-   the version would never be reported. The handle the load returns is the one
-   its class is asked for, and dladdr turns that class into the base and the
-   path the version text is read from, which is the path dyld resolved, not the
-   literal one this code loaded. */
+/* The seven are loaded in the measured order, each by its rewritten /var/jb
+   path, each with RTLD_NOW|RTLD_GLOBAL. The chain stops at its first failure and
+   the report names the step: a run whose JavaScriptCore did not load has no 18.3
+   exports for the other six to bind, so continuing would reproduce the recorded
+   symbol error under a step number that points at the wrong image.
+
+   The single framework load that used to be here is gone on purpose. It loaded
+   WebKit alone, which is the shape the device recorded failing: the entry image
+   was the 18.3 one and the dependency it bound was the 16.1 JavaScriptCore. */
 
 static void attempt_load(host_images *images) {
-  void *handle = library_load(framework_path);
-  dylib_report_set_dlopen(framework_path, handle, handle == NULL ? library_last_error() : NULL);
+  load_result chain;
+  load_chain_run(&chain);
+  dylib_report_set_chain(&chain);
+
+  /* What the application's own request resolved to, read after the chain so the
+     18.3 images are already in the process and a dedupe would show here as the
+     18.3 uuid rather than as absent. */
+  system_images resident;
+  load_chain_read_system(&resident);
+  dylib_report_set_system_images(&resident);
+
+  /* The version text describes the WebKit this tweak put in the process, so the
+     first choice is the chain's last step, which is the rewritten image. When the
+     chain did not get that far the package's own path is asked instead, and
+     RTLD_NOLOAD answers only for an image already resident: the report then says
+     what the process actually holds rather than what was intended. */
+  const char *held_path = load_chain_paths[load_chain_count - 1];
+  void *handle = library_find(held_path);
+  if (handle == NULL) {
+    held_path = framework_path;
+    handle = library_find(framework_path);
+  }
+  text_copy(images->web_kit_path, framework_path, sizeof(images->web_kit_path));
   if (web_kit_image(handle, images)) {
     char version[version_capacity];
     version[0] = 0;
     macho_version_text(images->web_kit_header, version, sizeof(version));
     dylib_report_set_image(images->web_kit_path, version);
   }
+  dylib_report_set_dlopen(held_path, handle,
+                          handle == NULL ? library_last_error() : NULL);
 }
 
 /* The path is a directory when its last component is the whole of it:
@@ -468,7 +495,7 @@ void idevice_webkit_start(void) {
     return;
   }
   usleep(stage_pause_microseconds);
-  filter_match_report(filterPath);
+  bool filterMatched = filter_match_report(filterPath);
   stage_reach(stage_filter_read);
   report_stage();
   const char *selfPath = self_image_path();
@@ -489,6 +516,31 @@ void idevice_webkit_start(void) {
   dylib_report_set_self(selfPath, true, NULL);
   stage_reach(stage_bundle_resolved);
   report_stage();
+
+  /* The seven /var/jb images are claimed here, after the filter match and the
+     host check. A process the filter named by neither branch, one that failed
+     the copy check, and one that passed it but failed the host check all return
+     above, so none of them loads an image.
+
+     A host that has not linked WebKit at load time reaches this point before
+     anything asks for WebKit, so the claim wins the dedupe by install name and
+     the host's later request for the system path answers with the /var/jb
+     image. A host that does link WebKit has the system image mapped before this
+     constructor runs, and the claim is skipped there rather than attempted:
+     claim_images_run asks claim_system_webkit_present first, and a present
+     system image means the seven loads would map an 18.3 JavaScriptCore beside
+     the 16.1 one the host is running on. claim_images.c records the measured
+     load outcomes of that shape and the dyld override patch it needs instead.
+     The skip is written to the report, so the two host shapes are still told
+     apart without guessing. */
+
+  if (filterMatched) {
+    claim_result claim;
+    claim_images_run(&claim);
+    dylib_report_set_claim(&claim);
+    report_stage();
+  }
+
   stage_reach(stage_attempted);
   attempt_load(&images);
   report_stage();

@@ -2,7 +2,7 @@
 
 本文写给拿到探针读数之后的下一次会话。它只回答一件事：**探针判 (A) 时接下来怎么做**，以及 (A) 与 (B) 在哪一步之后合流。它不重抄已有的通用部署流程，那些在 `docs/ios16-whole-18.3-deployment-path.md`（内层分支 `feat/d2-whole-18.3-deployment-path-doc`，提交 `c6382d0`，未在 `main`）；本文只在需要时指向它。
 
-**本文没有一条新的设备读数。** 设备自 2026-11-25 02:11 起离线（`192.168.2.135` 报 `No route to host`，接热点时 `172.20.10.1` 超时），全文所有设备步骤都标为**待回网后执行**。本文引用的读数全部来自仓库已有文档，逐条标注了出处与结论分支。
+**本文没有一条新的设备读数。** 写本文时设备自 2026-11-25 02:11 起离线（`192.168.2.135` 报 `No route to host`，接热点时 `172.20.10.1` 超时），全文所有设备步骤都标为**待回网后执行**。设备此后已回网并换了地址，当前是 `192.168.2.136`（2026-11-26 00:53Z 实测 `uname -r` 返回 `22.1.0`），接手机热点时是 `172.20.10.1`；`192.168.2.135` 是旧地址，现在仍报 `No route to host`。地址随网络变化，取不到时先看 `ip route` 的默认路由落在哪个网段。**换址后本文的设备步骤仍然一条都没有跑过**，所以那些「待回网后执行」的标注继续成立。本文引用的读数全部来自仓库已有文档，逐条标注了出处与结论分支。
 
 **(A) 至今是未测的判定项，不是已成立的前提。** 本文写的是「若探针判 A，则接下来做什么」。把它读成「既然 A 成立」会让整篇的错误落在第一步。既有读数在两个方向上都有，见 1.5 节。
 
@@ -13,7 +13,7 @@
 | 标签 | 判据 |
 | --- | --- |
 | **已确证** | 有源码行号（可用本文给的命令复现）或设备读数，且不依赖未验证的推断 |
-| **有源码支撑** | 能指出代码位置，但「这段代码在设备上产生什么行为」这一步没有公开源码可查（`launchd` 与 `libxpc` 未开源，见 `docs/dopamine-basebin-webkit-override.md:712`） |
+| **有源码支撑** | 能指出代码位置，但「这段代码在设备上产生什么行为」这一步没有公开源码可查（`launchd` 与 `libxpc` 未开源，见 `docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节） |
 | **假设** | 无源码、无直接读数，只有间接证据与文献推断 |
 
 一条论断的强度取它最弱的一环。多个事实合并成的推论，不因为其中某一条已确证就升级。
@@ -127,7 +127,7 @@ exception: EXC_BREAKPOINT (SIGTRAP/BPT trap: 5)
 3 WebKit        WebKit::XPCServiceMain(int, char const**)
 ```
 
-`procPath` 是「launchd 从哪条路径启动了进程」的唯一硬证据（`AGENTS.md:167` 的判读表）。这一条落在 `/var/jb/Library/WebKitOverride` 下，且 `build-state.md:358` 另记同一配置下 GPU「能走到 `Successfully spawned`（21:27:48/49/54 三次）」。**这直接满足 (A) 的第一个条件**：launchd 确实为索引外目录解析并 spawn 了服务。
+`procPath` 是「launchd 从哪条路径启动了进程」的唯一硬证据（`AGENTS.md:544` 的判读表）。这一条落在 `/var/jb/Library/WebKitOverride` 下，且 `build-state.md:358` 另记同一配置下 GPU「能走到 `Successfully spawned`（21:27:48/49/54 三次）」。**这直接满足 (A) 的第一个条件**：launchd 确实为索引外目录解析并 spawn 了服务。
 
 **两批记录不能同时成立**（M63 审计 `:175`）：同一类配置，一批读到 spawn 0 与 `failed lookup` 8908 次，另一批读到三次成功 spawn 且有 `procPath`。第四轮把第三轮的表判为无效，理由是设备没有 `pkill`、测的都是旧进程（`build-state.md:442-461`）；但一个没重启的旧进程不会产生新的 `.ips`，所以那个错因解释不了第二批的崩溃报告。这一点已作为 finding 提交，至今未解。
 
@@ -141,7 +141,7 @@ exception: EXC_BREAKPOINT (SIGTRAP/BPT trap: 5)
 
 从「探针读数判 A」到「Safari、微信、Chrome 三款都用上 18.3 的 WebCore」。每一步给出前置条件、命令或文件改动、失败判据。**前一步不通过时不要进入下一步**，否则后一步的数字无法归因。
 
-设备上可用的工具限于：`open`、`uiopen`、`killall`、`sbreload`、`python3`、`launchctl`、`ps`、`plutil`，均在 `/var/jb/usr/bin/`。另有 `lldb`、`rabin2`、`r2`、`shasum`、`clang` 可用（`AGENTS.md:35` 的「设备」一节列举）。**没有** `lsof`、`vmmap`、`otool`、`strings`、`pgrep`、`pkill`、`lsappinfo`、`notifyutil`、`/usr/bin/log`（**已确证**，`AGENTS.md:35` 与 `:93`，以及 `docs/ios16-override-endpoint-probe.md` 第五节）。
+设备上可用的工具限于：`open`、`uiopen`、`killall`、`sbreload`、`python3`、`launchctl`、`ps`、`plutil`，均在 `/var/jb/usr/bin/`。另有 `lldb`、`rabin2`、`r2`、`clang` 可用（`AGENTS.md:36-37` 的「设备」一节列举）。**没有** `lsof`、`vmmap`、`otool`、`strings`、`shasum`、`pgrep`、`pkill`、`lsappinfo`、`notifyutil`、`/usr/bin/log`（**已确证**，`AGENTS.md:36-37` 与 `:132`，以及 `docs/ios16-override-endpoint-probe.md` 第五节）。`shasum` 单独再确认一次：`AGENTS.md:36` 的可用的调试工具里没有它，`:37` 把它列入「设备上**不存在**」，`../../webkit-install-runbook.md:53` 记实测报 `command not found`，所以设备上哈希只能用 `sha256sum` 或 `python3` 的 `hashlib`。
 
 本文所有 `.xpc` 与 framework 路径都在 `/var/jb/Library/` 下；`.xpc` 内的 `DYLD_FRAMEWORK_PATH` 见 `patches/ios18-public-sdk-xpc-main.patch:22`，该行的首项由同一补丁 `:16` 的 `WK_ROOTLESS_FRAMEWORKS_ROOT = /var/jb/Library/WebKitOverride` 给出。
 
@@ -189,7 +189,7 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 2. 直接 `exec` 浏览器只得到没有页面的 UI 进程，它不请求 WebContent，于是每种配置都会显示 0 spawn；必须带 URL 触发；
 3. 设备上没有 `pkill`、`pgrep`，脚本里写 `pkill` 会**静默失败**，于是每次测的都是同一个旧进程。
 
-**关于应用的选择**：`uiopen <url>` 打开的是系统默认浏览器，这台设备是 Chrome（`com.google.chrome.ios`），不是 Safari（`AGENTS.md:94`，**已确证**）。要测 Safari 用 `uiopen --path /Applications/MobileSafari.app`；`--bundleid` 不能覆盖默认浏览器。
+**关于应用的选择**：`uiopen <url>` 打开的是系统默认浏览器，这台设备是 Chrome（`com.google.chrome.ios`），不是 Safari（`AGENTS.md:133`，**已确证**）。要测 Safari 用 `uiopen --path /Applications/MobileSafari.app`；`--bundleid` 不能覆盖默认浏览器。
 
 **一条纪律**：基线必须与后续读数用**同一条命令、同一个应用、同一次冷启动**。M63 的 6/4 是 Safari 的，`build-state.md` 的 8 是 Chrome 的，两者不可互换（第一节 1.4）。本节固定用 Chrome，因为唯一有完整历史读数表的应用是它。
 
@@ -220,7 +220,7 @@ sudo cp -a /var/jb/Library/Frameworks/WebKit.framework/XPCServices \
 /var/jb/usr/bin/plutil -p /var/jb/Library/WebKitOverride/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc/Info.plist
 ```
 
-（`plutil` 的可用性在仓库里有两份互相矛盾的记录：`docs/dopamine-basebin-webkit-override.md:726` 用 `/var/jb/usr/bin/plutil` 修改 `config.plist`，而 `docs/ios16-override-endpoint-probe.md` 第五节把 `plutil` 列入「设备没有」的清单。本 mission 的工具清单也列入 `plutil`。**这个矛盾未在设备上裁决**，因为设备离线。所以本步给一条不依赖 `plutil` 的兜底：用 `python3` 读 plist，`plistlib` 是标准库，设备上的 `python3` 一直可用。）
+（`plutil` 的可用性在仓库里有两份互相矛盾的记录：`docs/dopamine-basebin-webkit-override.md` 的「十一·八 开关与回退」一节用 `/var/jb/usr/bin/plutil` 修改 `config.plist`，而 `docs/ios16-override-endpoint-probe.md` 第五节把 `plutil` 列入「设备没有」的清单。本 mission 的工具清单也列入 `plutil`。**这个矛盾未在设备上裁决**，因为设备离线。所以本步给一条不依赖 `plutil` 的兜底：用 `python3` 读 plist，`plistlib` 是标准库，设备上的 `python3` 一直可用。）
 
 ```sh
 /var/jb/usr/bin/python3 -c 'import plistlib,sys
@@ -253,7 +253,7 @@ print(d.get("CFBundleIdentifier"))' \
 
 **改动**：只保留一个目录作为 18.3 的唯一来源，二选一。
 
-- **推荐（M69 已落地）**：`patches/ios18-public-sdk-xpc-main.patch:16` 定义唯一字面量 `/var/jb/Library/WebKitOverride`，`:22` 的两条 `-dyld_env` 以它为首项，`/var/jb/Library/Frameworks` 作后备。这让 UI 与 helper 都首先命中覆盖目录，`/var/jb/Library/Frameworks` 退回为纯粹的上游安装位置。**改后必须重建并重新打包**，因为 `LC_DYLD_ENVIRONMENT` 是链接期常量，只能重新链接才能改（`docs/dopamine-basebin-webkit-override.md:316`，**已确证**）。补丁改了但构建没重跑时，设备上的 `.xpc` 仍是旧值，见下面的失败判据。
+- **推荐（M69 已落地）**：`patches/ios18-public-sdk-xpc-main.patch:16` 定义唯一字面量 `/var/jb/Library/WebKitOverride`，`:22` 的两条 `-dyld_env` 以它为首项，`/var/jb/Library/Frameworks` 作后备。这让 UI 与 helper 都首先命中覆盖目录，`/var/jb/Library/Frameworks` 退回为纯粹的上游安装位置。**改后必须重建并重新打包**，因为 `LC_DYLD_ENVIRONMENT` 是链接期常量，只能重新链接才能改（`docs/dopamine-basebin-webkit-override.md` 第九节「风险」里「内嵌的 library 路径无条件生效，不受任何开关控制」一段，**已确证**）。补丁改了但构建没重跑时，设备上的 `.xpc` 仍是旧值，见下面的失败判据。
 - **备选**：删掉覆盖目录，让 UI 与 helper 都走 `/var/jb/Library/Frameworks`。这条路被 basebin 的设计明确排除：那个目录带 `AltList.framework` 与 `CydiaSubstrate.framework`，把它们变成每个被 spawn 进程的候选是 `dopamine-basebin/0001-systemhook-set-search-paths.patch:86-89` 注释里写明要避免的事（**已确证**）。仅在推荐方案不可行时使用。
 
 **失败判据**：
@@ -305,7 +305,7 @@ ls -t /var/mobile/Library/Logs/CrashReporter/*.ips | head -5
 
 - 条件 1 不成立（计数下降）→ 不是 (A)。若降到 2 或更低且条件 2 成立，是 (B)；若落在中间值（3 之类），判 `UNKNOWN`，重测，不要当倾向证据。
 - 条件 2 不成立 → 本次读数对 (A)/(B) **不作数**，先解决缺失符号或 ABI 问题。`DYLD` 类按第五节第 1 行处理；`PAC_EXCEPTION` 说明两端不同代，按第三节查路径。
-- 条件 3 不成立而条件 1、2 成立 → 端点存在但覆盖没进 helper。这不是 (A)，是另一类故障：`PROBE_REASON=four_services_but_every_new_helper_loaded_the_system_framework`（脚本 `:1049-1051`）。此时先回到第 3 步核 `.xpc` 的路径是否真的被采纳。
+- 条件 3 不成立而条件 1、2 成立 → 端点存在但覆盖没进 helper。这不是 (A)，是另一类故障：`PROBE_REASON=four_services_but_every_new_helper_loaded_the_system_framework`（脚本 `:1391-1393`，1722 行版）。此时先回到第 3 步核 `.xpc` 的路径是否真的被采纳。
 - 本轮完全没有新 helper → 什么都没测到。`PROBE_REASON=no_new_helper_after_launch`。它与「新 helper 全部加载系统 framework」是**不同的事实**，合并两者会让「一次没起出 helper 的启动」被读成「launchd 只认索引内路径」。
 
 ### 第 5 步：确认 UI 进程与 helper 同代（(A) 下应自动成立，但必须证明）
@@ -328,7 +328,7 @@ sudo /var/jb/usr/bin/lldb -b -o "process attach --pid $APP" -o "image list -o -f
 
 ### 第 6 步：证明页面真的渲染，并三款应用各测一轮
 
-**这是「能用」的唯一判据。** `AGENTS.md` 记录过一次「进程稳定 3 分钟、确认加载新引擎」但用户报白屏（`docs/ios16-whole-18.3-deployment-path.md` 第 6 步引用 `AGENTS.md:209`，**已确证**）。端点存在只说明 launchd 解析成功，不说明 UI 与 helper 能通信，更不说明能画出一帧。
+**这是「能用」的唯一判据。** `AGENTS.md` 记录过一次「进程稳定 3 分钟、确认加载新引擎」但用户报白屏（`docs/ios16-whole-18.3-deployment-path.md` 第 6 步引用 `AGENTS.md:586`，**已确证**）。端点存在只说明 launchd 解析成功，不说明 UI 与 helper 能通信，更不说明能画出一帧。
 
 **三款应用，各自冷启动**。拉起方式只写仓库里有实测记录的两种，不写未验证的命令：
 
@@ -343,7 +343,7 @@ sleep 3
 /var/jb/usr/bin/uiopen 'https://example.com/'
 ```
 
-**微信与 Safari 的第二轮由用户手动冷启动，不要用 `uiopen --bundleid`。** `docs/safari-injection-plan.md:888-898` 记录了三次实测：`uiopen --bundleid com.apple.mobilesafari` 退出码 0 但 5 秒后 `ps -A` 里没有进程；`launchctl asuser 501 ...` 返回 45，因为设备上没有 `/usr/libexec/launchctl`；结论是「宿主只能由用户手动冷启动」（**已确证**）。`AGENTS.md:94` 另记 `--bundleid` 不能覆盖默认浏览器，实测仍会拉起 Chrome。**所以第 6 步在无人值守时做不完整**：Safari 与微信各需要一次人工点开。
+**微信与 Safari 的第二轮由用户手动冷启动，不要用 `uiopen --bundleid`。** `docs/safari-injection-plan.md:888-898` 记录了三次实测：`uiopen --bundleid com.apple.mobilesafari` 退出码 0 但 5 秒后 `ps -A` 里没有进程；`launchctl asuser 501 ...` 返回 45，因为设备上没有 `/usr/libexec/launchctl`；结论是「宿主只能由用户手动冷启动」（**已确证**）。`AGENTS.md:133` 另记 `--bundleid` 不能覆盖默认浏览器，实测仍会拉起 Chrome。**所以第 6 步在无人值守时做不完整**：Safari 与微信各需要一次人工点开。
 
 微信的 bundle id 是 `com.tencent.xin`（`tools/idevice-webkit/WebSafeWebKitFilter.plist:15`，**已确证**）。它必须单独测：`build-state.md:240` 记录过「Safari、WeChat、Chrome 三个 app 都无法加载网站」是同一现象的三个样本，而 `:248-249` 记录过 WeChat 的 WebContent `Successfully spawned` 多次、`lldb image list` 确认加载覆盖目录的 `WebKit`，页面**仍然打不开**——**进程活着不等于页面能渲染**，这条在这台设备上已经被打过脸一次。
 
@@ -392,7 +392,7 @@ sleep 3
 
 ### 3.3 `usedImages` 不能用作镜像来源判据
 
-**这条在 (A) 路线下的具体含义。** 验证第 5 步时，不得用崩溃报告的 `usedImages` 判断 helper 加载了哪份 `WebKit`。`usedImages` 只收录**被栈帧引用到的**镜像，它回答的是「栈顶帧落在哪个镜像」，不是镜像清单（`AGENTS.md:159` 的「七、读崩溃报告」，**已确证**；M65 的实测：下标集合与 `threads[*].frames[*].imageIndex` 完全相等）。所以：
+**这条在 (A) 路线下的具体含义。** 验证第 5 步时，不得用崩溃报告的 `usedImages` 判断 helper 加载了哪份 `WebKit`。`usedImages` 只收录**被栈帧引用到的**镜像，它回答的是「栈顶帧落在哪个镜像」，不是镜像清单（`AGENTS.md:548` 的「七、读崩溃报告」，**已确证**；M65 的实测：下标集合与 `threads[*].frames[*].imageIndex` 完全相等）。所以：
 
 - `usedImages` 里**出现** `/var/jb` 的 `WebKit` → 可以说明当时有栈帧落在它上面；
 - **不出现** → 既不证明加载过，也不证明没加载过。
@@ -509,7 +509,7 @@ APP=$(/var/jb/usr/bin/ps ax | grep -F 'stable.app/Chrome' | grep -v grep | awk '
 
 **命令本身只读**；`launchctl print` 不动任何状态。但判定需要装/卸覆盖目录这一步写操作，所以判据的完整取法在第二节第 2、4 步。
 
-**为什么只能在这里测**：`launchd` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md:712`，**已确证**），「索引外目录会不会被现扫」在公开材料里没有答案。
+**为什么只能在这里测**：`launchd` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节，**已确证**），「索引外目录会不会被现扫」在公开材料里没有答案。
 
 ### 6.2 helper 实际加载了哪一份 `WebKit`
 

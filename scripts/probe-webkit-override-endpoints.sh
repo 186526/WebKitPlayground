@@ -59,14 +59,14 @@ CRASH_DIR=/var/mobile/Library/Logs/CrashReporter
 
 # Safari is launched with a URL, because a bare exec of MobileSafari produces a
 # UI process that never asks for a page, and a process that never asks for a
-# page never asks libxpc for WebContent (build-state.md:379). Each attempt is
+# page never asks libxpc for WebContent (build-state.md:450). Each attempt is
 # tried in order and the first that yields a MobileSafari pid wins; the command,
 # exit code and pid of every attempt reach the log, so the reading is always
 # traceable to the launch that produced it.
 #
 # The --path form comes first because `uiopen <url>` opens the default browser
 # on this device and that is Chrome, not Safari (AGENTS.md "设备" item 2,
-# build-state.md:377). The mission's plain `uiopen https://example.com` is kept
+# build-state.md:448). The mission's plain `uiopen https://example.com` is kept
 # as the last attempt so its result is recorded rather than assumed.
 SAFARI_LAUNCH_ATTEMPTS=(
     'uiopen --path /Applications/MobileSafari.app https://example.com'

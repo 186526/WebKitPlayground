@@ -289,6 +289,85 @@ back NULL with `invalid handle`. It also checks that `symbol_find(NULL, …)`
 answers nothing without calling `dlsym`, that a real handle is passed through
 unchanged, and that `library_find` asks for `RTLD_NOLOAD`.
 
+`claim_images_test.c` covers the sequence `test_main.c` stubs out. That file
+replaces `claim_images_run` whole, so the seven paths, their order and the gate
+would go unchecked; this binary compiles `src/claim_images.c` itself, renaming
+`dlopen`, `dlerror`, `library_find`, `posix_spawn`, the two spawn-object
+initialisers, `waitpid`, `getpid` and `usleep` to recorders before the include.
+The seven expected paths are written out again rather than read from the array
+under test, because a test that compared the array with itself would pass
+whatever it held. The cases require the order entry by entry, `libwebrtc` and
+`libANGLE-shared` both ahead of `WebCore` (0 duplicate-class warnings in this
+order, 31 with `WebCore` first), `JavaScriptCore` at index 0 and `WebKit` last,
+and every load made with `RTLD_NOW|RTLD_GLOBAL`. The failure cases require the
+loop to stop at the first image that answers nothing, the 1-based position, the
+path and the `dlerror` text to be recorded, and the images after it not to be
+tried. The marking cases require a refused `posix_spawn`, a non-zero child exit,
+a child that never exits and a `waitpid` that answers a pid other than the
+child's to be recorded as their own `mark_*` states, with the wait status and
+the errno kept in `mark_error` where they can still be read; they also require
+the states to be distinct and none of them zero, because a zero state would read
+as the success value in any report that printed it.
+
+Two cases cover the gate. With `library_find` answering a handle the run has to
+be skipped: `skipped` set, `loaded` and `failed_index` at 0, nothing dlopened
+and no `posix_spawn` attempted. With it answering NULL the run proceeds and
+`skipped` stays false. The `library_find` recorder keeps the path it was asked
+about, and the case requires
+`/System/Library/Frameworks/WebKit.framework/WebKit` — the gate is only worth
+something if it asks about the system image, since a non-NULL answer for any
+path would gate on the wrong question. Two more cases cover the initialisers
+separately: a refused `posix_spawnattr_init` spawns nothing and names that call,
+and a refused `posix_spawn_file_actions_init` destroys the attribute object
+first, leaves the file actions untouched and names its own call. The second is
+what a shared `||` expression used to hide: the first object leaked and the
+message named the wrong call.
+
+The claimed load outcome of a hard-linked host is still pinned, as the shape the
+gate keeps the sequence out of: with the gate answering NULL and `WebCore`
+failing on `_WTFSignpostIndirectLoggingEnabled`, the case requires `loaded` 3 and
+`failed_index` 4. Those numbers are what the device printed when the sequence
+did run there, and they stay useful because they are the reading that decides
+the gate: three of the seven load, the first of them `JavaScriptCore`. The
+sequence no longer reaches that shape, so the case drives the recorder rather
+than the product path. The fix for a hard-linked host is the dyld override patch
+described in `src/claim_images.c`, not a change to this sequence.
+
+`test_main.c` reads the report's claim fields out of the written document rather
+than out of the record: a stub `claim_images_run` fills a `claim_result` with
+the failure shape, the constructor writes it, and the case requires
+`claimSkipped`, `claimMarked`, `claimMarkStatus`, `claimLoaded`,
+`claimFailedIndex`, `claimFailedPath`, `claimError` and `claimMarkError` each to
+carry the stubbed value. Reading them one by one is what caught `mark_status`
+rendering as `0`: a case that only checked `claimMarked` and `claimLoaded` could
+not see the difference between a failed marking and a successful one that
+reports zero.
+
+A saturating case covers the buffer limit. Every free-form field is filled with
+`&`, which the escaper turns into five bytes each, so the document cannot fit
+and the writer stops at `document_capacity - 1`. The case takes the length from
+the file itself (`fseek`/`ftell` through `report_file_length`), not from a read
+into a buffer the test sized, because the ordinary read buffers are 4 KiB and a
+`strlen` of one of them would answer 4095 for any document at least that long —
+including one that was never truncated. The case requires the length to equal
+`document_capacity - 1` and to exceed `maximum_report_size - 1`, so raising
+`document_capacity` far enough that nothing is cut turns it red; that pair is
+what makes "truncation happened" a measured claim rather than an assertion
+about the harness. It then requires the six decision fields to be present with
+their values — the `stage` integer and the five claim state fields, all written
+immediately after the plist header and before any free-form text. That is the
+property the write order exists for, and the case fails if a free-form field
+ever goes back in front of them.
+
+The `mark_*` states each have a case that fails when the state is wrong. Five
+were covered from the start; `mark_wait_failed` was not, because the `waitpid`
+recorder answered the child's own pid on every path and so never reached the
+branch that assigns it. `spawned_pid` and `wait_answer_pid` are separate knobs
+now, and one case starts a child as 900 while `waitpid` answers 901: the case
+requires `mark_status == mark_wait_failed`, `marked == 0`, `waitpid returned` in
+`mark_error`, and that the pid waited for was the spawned one. Setting the state
+to `mark_done` turns it red.
+
 The script builds the test twice: once plainly and once with AddressSanitizer
 and UndefinedBehaviorSanitizer. The second run only counts when its log holds
 neither a sanitizer error nor a UBSan report. Everything is written under

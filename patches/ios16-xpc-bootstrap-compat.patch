@@ -1,3 +1,26 @@
+diff --git a/Source/WebKit/Shared/AuxiliaryProcess.h b/Source/WebKit/Shared/AuxiliaryProcess.h
+index e0329d9..dbf3011 100644
+--- a/Source/WebKit/Shared/AuxiliaryProcess.h
++++ b/Source/WebKit/Shared/AuxiliaryProcess.h
+@@ -213,5 +213,18 @@ struct AuxiliaryProcessInitializationParameters {
+ #endif
+ };
+ 
++// True when the UI process that launched this process sent an SDK aligned behavior bitmap narrower
++// than this build's own, which is the only run-time evidence available here that it runs an older
++// WebKit and therefore numbers its IPC messages by a different enumeration. Recorded once per
++// process by XPCServiceEntryPoint.mm, read once by AuxiliaryProcess::initialize.
++//
++// The width test separates 16.0 through 16.3, which send two words, from 16.4 onwards, which send
++// three. It does not separate generations inside either group: a 16.4 or 17.x peer reads as
++// same-generation and is not translated, while a 16.0, 16.2 or 16.3 peer reads as older and gets
++// translated with 16.1 tables that do not match its numbering. Both are blind spots of the signal,
++// not of this call. The pairings this project ships, a 16.1 UI process with this build and this
++// build with another copy of itself, sit on opposite sides of the width and are settled by it.
++bool peerIsOlderGeneration();
++
+ } // namespace WebKit
+ 
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
 index 0c1c422..6699031 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.h
@@ -19,10 +42,39 @@ index 0c1c422..6699031 100644
  
      // We don't want XPC to be in charge of whether the process should be terminated or not,
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-index b8112f7..9306d3b 100644
+index b8112f7..6d632ff 100644
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm
-@@ -90,10 +90,66 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
+@@ -36,8 +36,28 @@
+ #import <wtf/spi/darwin/SandboxSPI.h>
+ #import <wtf/text/StringToIntegerConversion.h>
+ 
++#include <atomic>
++
+ namespace WebKit {
+ 
++// The width answer getClientSDKAlignedBehaviors computed, in the form another translation unit can
++// read. A process-level static rather than a member of the initializer delegate, because the read
++// happens in AuxiliaryProcess::initialize, on the other side of the entry point boundary.
++//
++// Zero-initialised, so a process whose UI process sent no bitmap at all reads as same-generation and
++// is not translated. That is the safe direction: a connection that needed translation fails the
++// handshake visibly, while a connection that did not need it fails silently.
++static std::atomic<bool>& peerIsOlderGenerationFlag()
++{
++    static std::atomic<bool> flag;
++    return flag;
++}
++
++bool peerIsOlderGeneration()
++{
++    return peerIsOlderGenerationFlag().load(std::memory_order_relaxed);
++}
++
+ XPCServiceInitializerDelegate::~XPCServiceInitializerDelegate()
+ {
+ }
+@@ -90,10 +110,72 @@ bool XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors(SDKAlignedBehav
      auto behaviorData = xpc_dictionary_get_data(m_initializerMessage, "client-sdk-aligned-behaviors", &length);
      if (!length || !behaviorData)
          return false;
@@ -75,15 +127,21 @@ index b8112f7..9306d3b 100644
 +    // for iOS 16.0 stopped writing and reading it, so no 16.x peer has ever sent it to this helper.
 +    const size_t ownLength = behaviors.storageLengthInBytes();
 +
++    // The width answer is also the one AuxiliaryProcess::initialize needs, so it is recorded here
++    // rather than left in this function's return value, which the caller has always discarded.
 +    if (length == ownLength) {
 +        memcpy(behaviors.storage(), behaviorData, length);
++        peerIsOlderGenerationFlag() = false;
 +        return true;
 +    }
 +
-+    if (length < ownLength)
++    if (length < ownLength) {
 +        RELEASE_LOG_ERROR(IPC, "UI process sent a %zu-byte SDK aligned behavior bitmap, narrower than this build's %zu-byte layout, so it comes from an older generation; every SDK aligned behavior stays at its default", length, ownLength);
-+    else
++        peerIsOlderGenerationFlag() = true;
++    } else {
 +        RELEASE_LOG_ERROR(IPC, "UI process sent a %zu-byte SDK aligned behavior bitmap, wider than this build's %zu bytes, so it comes from a newer generation; every SDK aligned behavior stays at its default", length, ownLength);
++        peerIsOlderGenerationFlag() = false;
++    }
 +
 +    // Reported false for a peer whose payload was rejected, so a caller can tell it from one whose
 +    // payload was applied. The caller ignores the value, as it always has, and a true return does
