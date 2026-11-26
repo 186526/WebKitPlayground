@@ -1273,11 +1273,24 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 
 
 # A `@@` header states how many body lines follow it, counted separately for the old and the new
-# side. `git apply` trusts those counts: when a header promises fewer lines than its body carries it
-# stops reading the body at the stated count and reports the patch as corrupt, which is how a
-# comment edit that added lines without updating the header broke the build in M141. The counts are
-# never derived by git, so nothing else catches them, and a tree far from the patch target still
-# reports `corrupt` rather than a context mismatch, so this check runs before any hunk is matched.
+# side, and `git apply` trusts those counts rather than deriving them. Both directions were measured
+# on scratch trees, and they fail differently.
+#
+# A header that overcounts its body stops `git apply` immediately: it reads past the body into the
+# next section's lines and reports `patch is corrupt at <file>:<line>`. That is how a comment edit
+# which added lines without updating the header broke the build in M141, and why the message does not
+# name the header that is wrong.
+#
+# A header that undercounts its body is the quieter of the two. `git apply` stops reading the body at
+# the stated count, so the lines past it are never applied and the exit status is 0. On a scratch
+# tree a `+1,2` header over a four-line body applied cleanly and wrote the first two lines; a
+# `+1,2` header over a two-line body in a section followed by another section also applied with exit
+# 0. The visible symptom is a file that is missing its tail, or the following section's hunk being
+# read as body, not a diagnostic.
+#
+# Either way the counts are never derived, nothing else catches them, and a tree far from the patch
+# target still reports `corrupt` rather than a context mismatch, so this check runs before any hunk is
+# checked against the tree.
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -1294,6 +1307,11 @@ def check_hunk_counts(patch: str) -> list[Violation]:
     is a file header or patch preamble and belongs to no count, which is where `index`, `new file
     mode`, `---` and `+++` do live. A `\\ No newline at end of file` marker is not a body line and
     is counted on neither side.
+
+    Both directions are violations, and the check reports the numbers rather than predicting what
+    `git apply` will do with them. The two directions do differ there — an overcount stops the apply
+    and an undercount truncates it — but the diagnosis a reader needs is which header is wrong and
+    by how much, and that is the same either way.
     """
     lines = patch.split("\n")
     if lines and lines[-1] == "":
@@ -1339,8 +1357,10 @@ def check_hunk_counts(patch: str) -> list[Violation]:
                 Violation(
                     "a hunk header disagrees with the lines it introduces, at patch line %d"
                     % header_line,
-                    "the header declares %d old and %d new lines but its body has %d and %d, so "
-                    "git apply reads the body short and calls the whole patch corrupt: %s"
+                    "the header declares %d old and %d new lines but its body has %d and %d. "
+                    "git apply never derives these counts: one that is too large stops the apply "
+                    "with `patch is corrupt`, and one that is too small silently drops the lines "
+                    "past the stated count: %s"
                     % (declared_old, declared_new, old_count, new_count, header),
                 )
             )

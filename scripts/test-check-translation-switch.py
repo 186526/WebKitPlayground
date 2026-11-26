@@ -900,8 +900,10 @@ CASES = (
 #
 # The first case is the control: a fixture with correct headers has to pass, or the two failures
 # below would be refused for a reason other than the count under test and this block would prove
-# nothing. The two off-by-N cases move the declared count in both directions, because a header can
-# undercount its body and overcount it, and only one of the two was the M141 shape.
+# nothing. The two off-by-N cases move the declared count in both directions, and they are not
+# symmetric in what `git apply` does — measured on scratch trees, an overcount stops the apply with
+# `patch is corrupt` while an undercount applies the truncated body and exits 0. Both are drift this
+# check has to report, because the undercount is the one no exit status would ever show.
 CASES += (
     (
         "a patch whose hunk headers match their bodies passes",
