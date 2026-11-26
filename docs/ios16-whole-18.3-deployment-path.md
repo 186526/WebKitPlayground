@@ -705,14 +705,14 @@ launchctl print pid/$APP 2>/dev/null | sed -n '/services = {/,/^\t}/p' \
 | 读数 | 值 | 出处与判据 |
 | --- | --- | --- |
 | `/var/jb/basebin/gen/dyld` 字节数 | **974016** | `../../webkit-install-runbook.md:113` 的表：`974016` =「只有 Dopamine 原带的两个 hook，basebin 层未更新」；`:114` 的 `974608` 才是更新后的值 |
-| `gen/dyld` 里判定 (b) 的四个计数 | **`1 0 0 1`** | 命令在 `../../AGENTS.md:272-283`：先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token，再按四个名字分别计数（runbook 判定 (b) 用精确符号名计数，不是这个正则法）。**第 2、3 位为 0 即判据**：`isOverridablePath` 与 `isAlwaysOverridablePath` 这两个新 hook 不在。文件里并非没有 `_MACHOMERGER_HOOK__` 符号，原带的 `dlopen_from` 与 `__fcntl` 各一个仍在，见下面第 2 个陷阱 |
+| `gen/dyld` 里判定 (b) 的四个计数 | **`1 0 0 1`** | 命令在 `../../webkit-install-runbook.md:880-896` 判定 (b)：逐字节数四个完整符号名的出现次数，**不用正则、也不数裸字符串**（同文件 `:882`）。token 过滤是另一种读法，命令在 `../../AGENTS.md:272-283`，两种数法给同一组四位计数。**第 2、3 位为 0 即判据**：`isOverridablePath` 与 `isAlwaysOverridablePath` 这两个新 hook 不在。文件里并非没有 `_MACHOMERGER_HOOK__` 符号，原带的 `dlopen_from` 与 `__fcntl` 各一个仍在，见下面第 2 个陷阱 |
 | 会被合进 `gen/dyld` 的那个 hook dylib | `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` **74352** 字节，同一判据 `1 0 0 1` | 这是**原版**那份；`basebin.tar` 里打补丁的那份是 **75952** 字节、判据 `1 1 1 1`。两个字节数与 `../../webkit-install-runbook.md:917-922` 的表逐字一致（`75952` =「打过补丁」，`74352` =「装机原样」） |
 | `/var/jb/basebin/systemhook.dylib` 字节数 | **233520** | `../../webkit-install-runbook.md:1155-1159` 的表：`233520` =「旧，搜索路径这一半未生效」；`:1158` 的 `234336` 才是打上补丁的那份 |
 | 同一文件里六个字符串的计数 | **`0 0 0 0 0 2`** | 命令在 `../../webkit-install-runbook.md:1142-1148`，判据在 `:1155-1159`（旧那份四个变量计数为 `0 0 0 0`）。末尾那个 `2` 是 `DYLD_INSERT_LIBRARIES`，原版就有 |
 
 **四个陷阱，写在这里避免下一轮重复踩。**
 
-1. **判定 (b) 的数法要用 token 过滤，不要用裸子串计数。** `1 0 0 1` 是先用 `_MACHOMERGER_HOOK_[A-Za-z0-9_$]+` 过滤出 token、再按四个名字分别计数得到的结果。裸子串 `isOverridablePath` 的计数是另一回事，设备上是 `7 1 1 2`（`dlopen_from 7`、`isOverridablePath 1`、`isAlwaysOverridablePath 1`、`__fcntl 2`），那个数在任何一份 dyld 上都不为零，不能当判据。`../../webkit-install-runbook.md:882`（判定 (b) 开头「不用正则、也不数裸字符串」）已写明这一点。
+1. **判定 (b) 的数法用精确符号名，不用正则、也不数裸子串。** `1 0 0 1` 是逐字节数四个完整 `_MACHOMERGER_HOOK_*` 符号名的出现次数得到的结果（`../../webkit-install-runbook.md:880-896`）。裸子串 `isOverridablePath` 的计数是另一回事，设备上是 `7 1 1 2`（`dlopen_from 7`、`isOverridablePath 1`、`isAlwaysOverridablePath 1`、`__fcntl 2`），那个数在任何一份 dyld 上都不为零，不能当判据。`../../webkit-install-runbook.md:882`（判定 (b) 开头「不用正则、也不数裸字符串」）已写明这一点。
 2. **「`gen/dyld` 里有几个 `_MACHOMERGER_HOOK__` 符号」不是判据。** 它有 **2** 个，分别是原带的 `dlopen_from` 与 `__fcntl` 各一个。为零的不是全部符号，而是**两个 override hook** 这两个名字——这正是判定 (b) 第 2、3 位的含义。
 3. **不要用 `MACHOMERGER` 的出现次数当判据。** `gen/dyld` 里它出现 **38** 次，全部是原带的 `dlopen_from` 与 `__fcntl` 两组 hook 及其 trampoline/orig 符号。
 4. **也不要用 mtime 推断「刚装过所以补丁在」。** 今天 `gen/` 与 `gen/dyld` 的 mtime 都是当天的 10:37（`Nov 3 01:04` 是原生安装时间），而内容仍是原版。
