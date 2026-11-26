@@ -431,7 +431,7 @@ m_connection->open(*this);
 
 要同时分开这两个方向需要比宽度更细的信号：位图长度只有 8 与 12 两种取值，而同一个长度下面挂着不止一个世代。
 
-**两种形态都靠同一个判据分开，不靠编译期开关。** 路线 B 两侧都是本构建，位图等宽，`peerIsOlderGeneration()` 为假，开关保持关闭；路线 A 的 UI 是 `/System` 的 16.1，位图 8 字节，为真，开关打开。设备上的实测读数（`ios16-patched-dyld-install-and-verify.md:501-515`）就是路线 A：MobileSafari 加载 `/System`，WebContent 与 Networking 加载 `/var/jb`。
+**两种形态都靠同一个判据分开，不靠编译期开关。** 路线 B 两侧都是本构建，位图等宽，`peerIsOlderGeneration()` 为假，开关保持关闭。路线 A 的 UI 是 `/System` 的 16.1，位图 8 字节，按宽度判据为真、开关打开——**但这一侧只有前提出自源码推导，运行期取值没有测过**：设备上的实测读数（`ios16-patched-dyld-install-and-verify.md:501-515`）证明的是 MobileSafari 加载 `/System`、WebContent 与 Networking 加载 `/var/jb` 这个加载拓扑，**不是** 16.1 进程里那 8 字节宽度。宽度本身的导出方法见本文件第 8 节（ii）。
 
 因此这个判据不能按 `processType` 分支：三条 helper 到 UI 进程的连接全部跨版本，`processType` 对三者都不同，但对「要不要翻译」这个问题的答案相同。判据落在对端位图宽度上，三条连接自然一致，不需要列举进程类型。
 
