@@ -1635,32 +1635,38 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 
 
 # A `@@` header states how many body lines follow it, counted separately for the old and the new
-# side, and `git apply` trusts those counts rather than deriving them. What the apply does with a
-# wrong count was measured on scratch trees, and it depends on the direction and on the hunk's kind.
+# side, and `git apply` never derives those counts. So a wrong count is never detected by the apply
+# alone, and what actually happens depends on the direction, on the hunk's kind, and on where the
+# truncation lands. Measured on a scratch repo with git 2.55.0; the range is stated rather than one
+# outcome, because measuring a single shape of it is how this comment got it wrong twice.
 #
 # An overcount always stops the apply with `patch is corrupt at <file>:<line>`: git reads past the
-# body into the following lines and cannot parse them as a body. Measured on both a new-file hunk and
-# a modification hunk.
+# body into the following lines and cannot parse them as a body. Measured on both a new-file and a
+# modification hunk, so that one is uniform.
 #
-# An undercount does not always stop it, and this is the case the check exists for. On a new-file
-# hunk — every body line is `+`, so the truncated tail is never read as content — `git apply` stops at
-# the stated count and exits 0. Measured: a `+1,2` header over a four-line body exited 0 and wrote the
-# first two lines, both at the end of the patch and followed by another section that then applied
-# normally. The drop is silent and the exit code reports success, which is the combination that makes
-# this direction dangerous: nothing in the status or the "applied" output distinguishes it from a
-# correct patch, so the file is simply short afterwards.
+# An undercount spans every outcome including silent success, on both hunk kinds:
 #
-# On a modification hunk an undercount is caught, though not always as `corrupt`: the body after the
-# stated count is parsed as the next section's content, so it either reads as `patch is corrupt` (a
-# surplus context line) or the truncated hunk's context stops matching and the apply reports
-# `patch does not apply` (a surplus added or deleted line). It is never 0. So the silent direction is
-# new-file hunks specifically.
+# - New-file hunk: rc 0 and the file is created short. A `+1,2` header over a four-line body exited 0
+#   and wrote the first two lines, both at the end of the patch and followed by a section that then
+#   applied normally.
+# - Modification hunk, change near the top and the truncation past the last change: rc 0 and the
+#   result is correct.
+# - Modification hunk, a change past the truncation point: rc 0 and the later change is silently
+#   dropped. Measured on a seven-line body with two edits under a `-1,5 +1,5` header: rc 0, the
+#   first edit applied, the second never did.
+# - Modification hunk, surplus context line: rc 128, `patch is corrupt`.
+# - Modification hunk, surplus added line: rc 128 `patch is corrupt`, or rc 1 `patch does not apply`
+#   when another section follows.
 #
-# The change that prompted this check had one bad hunk of each kind, and they land on opposite sides
-# of that line. The modification one declared 27 lines over a 28-line body, exited non-zero, and an
-# apply in CI would have stopped there. The new-file one declared 184 lines over a 201-line body,
-# exits 0, and is the one nothing else catches. That is what earns this check its place: without it
-# the file is created short and every signal says the patch applied.
+# So the dangerous shape is not specific to one hunk kind: on both, an undercount can leave a file
+# that is missing content while the exit status and the "applied" output say it succeeded. Only the
+# overcount is uniformly loud.
+#
+# The change that prompted this check had one bad hunk of each kind, and the modification one is the
+# louder of the two. It declared 27 lines over a 28-line body and raised `patch is corrupt`, so an
+# apply in CI would have stopped there. The new-file one declared 184 lines over a 194-line body and
+# would have exited 0 with the header created short. That is what earns this check its place: it is
+# the only gate that reports the header itself rather than whatever the apply happened to do with it.
 #
 # A tree far from the patch target still reports `corrupt` rather than a context mismatch, so this
 # check runs before any hunk is checked against the tree.
@@ -1749,9 +1755,9 @@ def check_hunk_counts(patch: str) -> list[Violation]:
                     "a hunk header disagrees with the lines it introduces, at patch line %d"
                     % header_line,
                     "the header declares %d old and %d new lines but its body has %d and %d. "
-                    "git apply never derives these counts: too large stops the apply with `patch is "
-                    "corrupt`, and too small is either caught the same way or, on a new-file hunk, "
-                    "silently applied truncated with exit 0: %s"
+                    "git apply never derives these counts, so it does not report the header: too "
+                    "large stops the apply with `patch is corrupt`, and too small can apply with "
+                    "exit 0 and leave the file missing whatever fell past the count: %s"
                     % (declared_old, declared_new, old_count, new_count, header),
                 )
             )
