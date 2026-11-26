@@ -894,20 +894,19 @@ CASES = (
 )
 
 # The hunk-count rule, added after a comment edit in M141 added lines to two hunks without updating
-# their `@@` headers. One was a new-file hunk and applied silently truncated with exit 0; the other
-# modified a file and produced the `patch is corrupt` report that opened this round. No other check in
-# this file or in the build workflow noticed either, because the counts are never derived by git and
-# every other rule reads the patch's text rather than its shape.
+# their `@@` headers. One was a new-file hunk and would have applied with exit 0, leaving the file it
+# creates short; the other modified a file and produced the `patch is corrupt` report that opened this
+# round. No other check in this file or in the build workflow noticed either, because the counts are
+# never derived by git and every other rule reads the patch's text rather than its shape.
 #
 # The first case is the control: a fixture with correct headers has to pass, or the two failures
 # below would be refused for a reason other than the count under test and this block would prove
-# nothing. The two off-by-N cases move the declared count in both directions. They are not symmetric
-# in what `git apply` does — measured on scratch trees, an overcount always stops the apply with
-# `patch is corrupt`, while an undercount exits 0 only when the hunk creates a file, and is reported
-# as `corrupt` or `patch does not apply` when it modifies one. Both are drift this check has to
-# report. For a modification hunk the apply fails on its own, so this check is early warning; for a
-# new-file hunk the apply exits 0, prints every file as applied, and leaves the created file short, so
-# this check is the only report.
+# nothing. The two off-by-N cases move the declared count in both directions. An overcount always stops
+# the apply with `patch is corrupt`. An undercount is not confined to any one hunk kind or outcome: on
+# a scratch repo it applied correctly, applied with a later change silently dropped and exit 0, raised
+# `corrupt`, and reported `patch does not apply`, depending on where the truncation landed. Both
+# directions are drift this check has to report, and for the silent shapes it is the only report — the
+# apply exits 0 and prints every file as applied.
 #
 # The last pair covers the shape this function cannot parse at all. `HUNK_HEADER` reads plain unified
 # diff headers, and a `@@` line is recognised by its prefix alone, so a combined diff's `@@@` or any
