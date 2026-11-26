@@ -490,14 +490,14 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
 
 ### 9.3 helper 不登记 Mach 服务名，它作为 listener 接受 launchd 递来的连接
 
-18.3 的 iOS helper 入口没有一条「自己把服务名登记成 Mach 服务、等人来连」的路径。本仓库的 18.3 构建在非 macOS 上走的是 `patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +269,54 @@` 那个 hunk。以下是从合并后的补丁原样抄出的 `#else` 分支（内层提交 `882957b`，分支 `feat/m166-inner-xpc-listener`；M166 合并前若被改写，以合并后的补丁为准）：
+18.3 的 iOS helper 入口没有一条「自己把服务名登记成 Mach 服务、等人来连」的路径。本仓库的 18.3 构建在非 macOS 上走的是 `patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +269,54 @@` 那个 hunk。以下是从内层 `main` 上的 `patches/ios18-public-sdk-xpc-main.patch` 原样抄出的 `#else` 分支：
 
 ```objc
 #if PLATFORM(MAC) || PLATFORM(MACCATALYST)
     xpc_main(XPCServiceEventHandler);
     return 0;
 #else
-    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does.
+    // xpc_main is marked API_UNAVAILABLE(ios), so reproduce what it does.
     // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
     // xpc_connection_create_listener, and the handler it wraps receives each connection launchd
     // accepts, which is the shape XPCServiceEventHandler takes. A client connection instead
@@ -505,8 +505,8 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
     // cannot arrive. xpc_connection_create_mach_service reaches that same listener constructor
     // when bit 0 of its flags is set, which is what this branch asks for.
     //
-    // The entry point is absent from the SDK, so it is resolved at runtime; a missing symbol ends
-    // the process rather than falling back to a client connection that cannot work.
+    // The SDK declares the entry point as API_UNAVAILABLE(ios), so naming it in a call does not
+    // compile and it is resolved at runtime; a missing symbol ends the process rather than falling back.
     typedef xpc_connection_t (*CreateMachServiceFunction)(const char*, dispatch_queue_t, uint64_t);
     static CreateMachServiceFunction createMachService = reinterpret_cast<CreateMachServiceFunction>(dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service"));
     if (!createMachService) {
@@ -520,9 +520,9 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
         exitProcess(EXIT_FAILURE);
     }
 
-    // XPC_CONNECTION_MACH_SERVICE_LISTENER is bit 0 of the flags argument. The value is written out
-    // because the SDK carries neither the entry point nor its flag; libxpc tests this bit before it
-    // creates the listener.
+    // XPC_CONNECTION_MACH_SERVICE_LISTENER is bit 0 of the flags argument, defined by the SDK. The
+    // entry point above arrives as a runtime pointer, so the value is written out; libxpc tests
+    // this bit before it creates the listener.
     static const uint64_t machServiceListenerFlag = 1;
 
     xpc_connection_t listener = createMachService(xpcServiceName, nullptr, machServiceListenerFlag);
@@ -550,7 +550,9 @@ if (!(rootj && rootj->xpc_bootstrapper)) {
     return 0;
 ```
 
-补丁之所以要重写，是因为 `xpc_main` 在公开 iOS SDK 下不可用。重写出来的必须与 `xpc_main` 一样**监听**，不能改成**拨号**：`xpc_main` 在这个 libxpc 上读 `XPC_SERVICE_NAME`、调 `xpc_connection_create_listener`，它的 handler 收到的是 launchd 接受的每一条连接，正是 `XPCServiceEventHandler(xpc_connection_t peer)` 要的形状。**「helper 只能由 launchd 递连接进来」这个语义来自 libxpc 的 `xpc_main`，不是本仓库新造的行为。**
+补丁之所以要重写，是因为 `xpc_main` 在公开 iOS SDK 里有声明但标着 `API_UNAVAILABLE(ios)`，直接调用编译不过。重写出来的必须与 `xpc_main` 一样**监听**，不能改成**拨号**：`xpc_main` 在这个 libxpc 上读 `XPC_SERVICE_NAME`、调 `xpc_connection_create_listener`，它的 handler 收到的是 launchd 接受的每一条连接，正是 `XPCServiceEventHandler(xpc_connection_t peer)` 要的形状。**「helper 只能由 launchd 递连接进来」这个语义来自 libxpc 的 `xpc_main`，不是本仓库新造的行为。**
+
+**补丁注释里的说法与 SDK 实况一致，依据如下。** `xpc_connection_create_mach_service` 与 `xpc_main` 都在 SDK 里，只是标了 `API_UNAVAILABLE(ios)`：`iPhoneOS18.5.sdk/usr/include/xpc/connection.h` 里 `xpc_connection_create_mach_service` 带 `API_AVAILABLE(macos(10.7), macCatalyst(5.0))` 与 `API_UNAVAILABLE(ios)`，`XPC_CONNECTION_MACH_SERVICE_LISTENER` 在同一文件 `:104` 定义为 `(1 << 0)`；`xpc/xpc.h:2679` 对 `xpc_main` 带同样一条。`PlatformHave.h:1711` 在 SDK ≥ 170400 时对 iOS 置 `HAVE_XPC_API=1`，构建读到的是真实头文件，直接调用会撞上 annotation 而编译不过——这才是 `dlsym` 的理由。按「SDK 没有这个函数」去理解的人会以为 `dlsym` 多余，改回直接调用后编译失败。
 
 **以下两条依据来自 M166 在设备上的反汇编读数，标为已确证。**
 

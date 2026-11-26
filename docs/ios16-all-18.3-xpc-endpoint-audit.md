@@ -140,14 +140,14 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
 
 ### iOS 分支改成 listener 之后：机制与构建后的设备判据
 
-第 7 行在 M166（内层提交 `882957b`，`patches/ios18-public-sdk-xpc-main.patch` 的 `@@ -271,8 +269,54 @@` hunk）改写了 iOS 分支。以下代码与注释原文取自合并后的补丁：
+第 7 行在 M166（内层 `main` 上的 `patches/ios18-public-sdk-xpc-main.patch`，`@@ -271,8 +269,54 @@` hunk）改写了 iOS 分支。以下代码与注释原文取自该补丁：
 
 ```objc
 #if PLATFORM(MAC) || PLATFORM(MACCATALYST)
     xpc_main(XPCServiceEventHandler);
     return 0;
 #else
-    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does.
+    // xpc_main is marked API_UNAVAILABLE(ios), so reproduce what it does.
     // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
     // xpc_connection_create_listener, and the handler it wraps receives each connection launchd
     // accepts, which is the shape XPCServiceEventHandler takes. A client connection instead
@@ -155,8 +155,8 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
     // cannot arrive. xpc_connection_create_mach_service reaches that same listener constructor
     // when bit 0 of its flags is set, which is what this branch asks for.
     //
-    // The entry point is absent from the SDK, so it is resolved at runtime; a missing symbol ends
-    // the process rather than falling back to a client connection that cannot work.
+    // The SDK declares the entry point as API_UNAVAILABLE(ios), so naming it in a call does not
+    // compile and it is resolved at runtime; a missing symbol ends the process rather than falling back.
     typedef xpc_connection_t (*CreateMachServiceFunction)(const char*, dispatch_queue_t, uint64_t);
     static CreateMachServiceFunction createMachService = reinterpret_cast<CreateMachServiceFunction>(dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service"));
     if (!createMachService) {
@@ -170,9 +170,9 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
         exitProcess(EXIT_FAILURE);
     }
 
-    // XPC_CONNECTION_MACH_SERVICE_LISTENER is bit 0 of the flags argument. The value is written out
-    // because the SDK carries neither the entry point nor its flag; libxpc tests this bit before it
-    // creates the listener.
+    // XPC_CONNECTION_MACH_SERVICE_LISTENER is bit 0 of the flags argument, defined by the SDK. The
+    // entry point above arrives as a runtime pointer, so the value is written out; libxpc tests
+    // this bit before it creates the listener.
     static const uint64_t machServiceListenerFlag = 1;
 
     xpc_connection_t listener = createMachService(xpcServiceName, nullptr, machServiceListenerFlag);
@@ -192,6 +192,8 @@ WebKit 全树的命名 XPC 服务调用点如下，没有一处位于 UI 进程�
     dispatch_main();
 #endif
 ```
+
+**补丁注释里的说法与 SDK 实况一致，依据如下。** `xpc_connection_create_mach_service` 与 `xpc_main` 都在 SDK 里，只是标了 `API_UNAVAILABLE(ios)`：`iPhoneOS18.5.sdk/usr/include/xpc/connection.h` 里前者带 `API_AVAILABLE(macos(10.7), macCatalyst(5.0))` 与 `API_UNAVAILABLE(ios)`，`XPC_CONNECTION_MACH_SERVICE_LISTENER` 在同一文件 `:104` 定义为 `(1 << 0)`；`xpc/xpc.h:2679` 对 `xpc_main` 带同样一条。`PlatformHave.h:1711` 在 SDK ≥ 170400 时对 iOS 置 `HAVE_XPC_API=1`，构建读到的是真实头文件，直接调用会撞上 annotation 而编译不过——这才是 `dlsym` 的理由。按「SDK 没有」去理解的人会以为 `dlsym` 多余，改回直接调用后编译失败。
 
 **旧写法为什么收不到 launchd 的握手。** 旧分支用 `xpc_connection_create(nullptr, nullptr)`，那建的是**客户端连接**。客户端连接的 handler 收到的每条事件是发往自己 socket 的消息字典；listener 收到的是**一条新接受的连接**（`XPC_TYPE_CONNECTION`）。所以旧代码里 `xpc_dictionary_get_remote_connection(event)` 永远拿不到 WebContent peer，`XPCServiceEventHandler` 从未在一条真实连接上装过 handler，helper 回答完什么都不做就停在 `dispatch_main()`。这正是 helper 计数器冻结的原因：`launchctl print` 的实例 job 显示 `state = running`、`runs = 1`、`initialized = 1`、`trampolined = 1`、`last exit code = (never exited)`，而 `proc_pidinfo(PROC_PIDTASKINFO)` 在 25 秒窗口内逐项不变（`cpu_user=0.002s`、`mach_msg_sent=191`、`recv=83`、`syscalls=114686` 两次采样相同），同期 Safari UI 的 `mach_msg_sent` 从 3154 涨到 3159。
 
