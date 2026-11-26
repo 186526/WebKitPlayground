@@ -1277,9 +1277,9 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 # two counts as unsigned counters and decrements them line by line, so a wrong count is never
 # reported as a wrong count.
 #
-# The outcome is not decided by the hunk's kind, and not by which side runs long. What the counts
-# themselves do was measured in two shapes: a counter decremented after it reached zero wraps, and a
-# counter still positive when the body ends stays positive. Both stop the parse with
+# The outcome of a wrong count is not decided by which side runs long. What the counts themselves do
+# was measured in two shapes: a counter decremented after it reached zero wraps, and a counter still
+# positive when the body ends stays positive. Both stop the parse with
 # `corrupt patch at <patch>:<line>` and rc 128. A third shape leaves the parse cleanly: the read
 # stops at the body line that takes the second counter to zero, and every line after it is never
 # parsed — not read and rejected, never looked at. Two counters reaching zero on the same line is not
@@ -1288,16 +1288,17 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 #
 # Those three are what the rows below measure. They are not the whole of `parse_fragment`, and this
 # comment does not claim to be: besides the two counter failures it returns from an unparsable `@@`
-# header, from a last body line with no newline, from a line that begins with neither a space nor `+`
-# nor `-`, and from `if (!patch->recount && !deleted && !added) return -1;` — a hunk whose counts the
-# read satisfied but whose parsed region held no `+` or `-` line at all. Measured, on a file of
+# header, from a last body line with no newline, from a body line that begins with anything other
+# than a space, `+`, `-` or nothing at all — an empty line is a context line, which `case '\n'`
+# accepts — and from `if (!patch->recount && !deleted && !added) return -1;` — a hunk whose counts
+# the read satisfied but whose parsed region held no `+` or `-` line at all. Measured, on a file of
 # `a` / `b` / `c`: `@@ -1,2 +1,2 @@` over ` a` / ` b` / `-c` / `+C` exits 128, because the first
 # two lines take both counters to zero, the loop exits, `-c` and `+C` are never parsed, and `deleted`
 # and `added` never leave 0. The same body under `@@ -1,3 +1,3 @@` exits 0, and so does the first
 # header under `--recount`; that failure never consults a counter. One more lives a stage up, in
-# `parse_single_patch`: `new file %s depends on old contents` fires when a new-file hunk carries any
-# old-side line, so the `@@ -1,1 +1,2 @@` shape above is fatal as a new file even though it parses
-# as a modification.
+# `parse_single_patch`, and there the hunk's kind does decide: `new file %s depends on old contents`
+# fires when a new-file hunk carries any old-side line, so the `@@ -1,1 +1,2 @@` shape above is fatal
+# as a new file even though the same counts and body parse and apply as a modification.
 #
 # Everything below was measured on a scratch repo with git 2.55.0. Each row names the file it was
 # applied to, the header and the body, so it can be re-run. The body lines are written in backticks,
@@ -1321,9 +1322,10 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 #
 # So a wrong count does not have one outcome, and the rows above are the ones measured: it applies
 # correctly, applies with a later edit never parsed, reports `patch does not apply`, or stops with
-# `corrupt patch`. Which of them the counts reach follows from the counters where the body's lines
-# allow it, and from the lines the target file happens to have where they do not. Hunk kind does not
-# enter any of the four.
+# `corrupt patch`. Which of those four the counts reach follows from the counters where the body's
+# lines allow it, and from the lines the target file happens to have where they do not. Hunk kind
+# decides none of the four, but it does decide whether the patch gets that far: the new-file check in
+# `parse_single_patch` above turns a shape that applies as a modification into a fatal new-file hunk.
 #
 # Both hunks that prompted this check had a header their body outgrew, and the two did not share an
 # outcome. The new-file hunk at b70ce36 declared `@@ -0,0 +1,184 @@` over a 194-line body: its old

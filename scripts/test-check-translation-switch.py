@@ -900,16 +900,19 @@ CASES = (
 # workflow noticed either, because the counts are never derived by git and every other rule reads the
 # patch's text rather than its shape.
 #
-# What a wrong count does depends on the counters and on the body, not on the hunk's kind and not on
-# which side runs long. `parse_fragment` in git's `apply.c` decrements an unsigned counter per body
-# line and returns -1 when one wraps or when one is still positive at the end; either way the apply
-# reports `corrupt patch` and exits 128. It also returns -1 without consulting the counters at all,
-# from `if (!patch->recount && !deleted && !added)`, which a body can reach when its counts run out
-# before its first `+` or `-` line is read. Neither list is complete — the parse also fails on an
-# unreadable header, on a last line without a newline, and on a line starting with anything but a
-# space, `+` or `-` — so the cases below test the count comparison, not a claim about every way the
-# apply can fail. All of this was measured on a scratch repo with git 2.55.0;
-# `check-translation-switch.py` records the rows.
+# What a wrong count does depends on the counters and on the body, not on which side runs long.
+# `parse_fragment` in git's `apply.c` decrements an unsigned counter per body line and returns -1 when
+# one wraps or when one is still positive at the end; either way the apply reports `corrupt patch`
+# and exits 128. It also returns -1 without consulting the counters at all, from
+# `if (!patch->recount && !deleted && !added)`, which a body can reach when its counts run out before
+# its first `+` or `-` line is read. Neither list is complete — the parse also fails on an unreadable
+# header, on a last line without a newline, and on a line starting with anything other than a space,
+# `+`, `-` or nothing at all, since an empty line is a context line — so the cases below test the
+# count comparison, not a claim about every way the apply can fail. Hunk kind does not decide which of
+# those outcomes a wrong count reaches, though it can decide whether the patch is applied at all: the
+# `@@ -1,1 +1,2 @@` shape in the checker's comment is refused by `parse_single_patch` as a new-file
+# hunk for carrying an old-side line, while the same body applies as a modification. All of this was
+# measured on a scratch repo with git 2.55.0; `check-translation-switch.py` records the rows.
 #
 # The first case is the control: a fixture with correct headers has to pass, or the two failures
 # below would be refused for a reason other than the count under test and this block would prove
