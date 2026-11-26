@@ -32,6 +32,12 @@ SCRIPT = SCRIPTS / "inspect-process-env.py"
 
 def load_module():
     spec = importlib.util.spec_from_file_location("inspect_process_env", SCRIPT)
+    # A spec with no loader means the path is not a loadable source file, and
+    # spec.loader.exec_module below would fail on None with an AttributeError that
+    # names neither the script nor the reason. The generator loads its verifier the
+    # same way and guards the same two cases.
+    if spec is None or spec.loader is None:
+        raise SystemExit("cannot load %s as a module" % SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

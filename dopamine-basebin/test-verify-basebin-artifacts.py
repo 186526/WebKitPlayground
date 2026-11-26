@@ -306,6 +306,71 @@ def test_generator(root: Path) -> None:
           f"verifier rc={rc}")
 
 
+# Runs the generator with the deprecated loader method made unreachable, which is the
+# only way to exercise the runner's Python from here: the interpreters this host has
+# still inherit `load_module` from `_LoaderBasics`, so a plain run cannot tell the two
+# spellings apart. The method is deleted from whichever class in the MRO defines it,
+# because that owner has moved between releases, and the parent asserts it is really gone
+# before running anything, so a release that renames the owner cannot turn this case into
+# a silent pass.
+LOADER_WITHOUT_LOAD_MODULE = r'''#!/usr/bin/env python3
+"""Run a script with importlib.machinery.SourceFileLoader.load_module unavailable."""
+
+import importlib.machinery
+import runpy
+import sys
+
+
+def strip_load_module():
+    for klass in importlib.machinery.SourceFileLoader.__mro__:
+        if "load_module" in klass.__dict__:
+            del klass.load_module
+    return not hasattr(importlib.machinery.SourceFileLoader, "load_module")
+
+
+if not strip_load_module():
+    sys.stderr.write("harness: could not make load_module unreachable\n")
+    raise SystemExit(4)
+
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+runpy.run_path(script, run_name="__main__")
+'''
+
+
+def test_generator_without_load_module(root: Path) -> None:
+    """The generator must load its verifier without the deprecated loader method.
+
+    That method is what raised AttributeError on the macOS CI runner and took the whole
+    suite down with it, so the failure is pinned here rather than left to the runner to
+    report.  The interpreter is `sys.executable`, never a version-specific name: this
+    host and the runner need not agree on the minor.
+    """
+    sha1_cd = build_code_directory(LAUNCHDHOOK_PATCHED[0].encode(), hash_type=HASH_TYPE_SHA1)
+    base = write_staging_tree(root / "no-load-module", sha1_cd)
+    harness = root / "run_without_load_module.py"
+    harness.write_text(LOADER_WITHOUT_LOAD_MODULE, encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(harness), str(GENERATOR), str(base.parent)],
+        capture_output=True, text=True, check=False,
+    )
+    output = proc.stdout + proc.stderr
+    # Exit 4 is the harness reporting it could not remove the method, which would let
+    # the case pass without testing anything.
+    check("generator: load_module is really unreachable in the child", proc.returncode != 4,
+          output)
+    if proc.returncode == 4:
+        return
+
+    check("generator: runs without SourceFileLoader.load_module", proc.returncode == 0,
+          f"exit {proc.returncode}: {output}")
+    check("generator: no load_module AttributeError reaches stderr",
+          "load_module" not in proc.stderr, proc.stderr)
+    check("generator: writes basebin.tc without load_module", (base / "basebin.tc").is_file(),
+          output)
+
+
 def test_tar_script(root: Path, bin_dir: Path) -> None:
     good = build_tar(root / "good", healthy_dylibs(), launchdhook_strings=LAUNCHDHOOK_PATCHED)
     rc, out = run(TAR_SCRIPT, [str(good)], bin_dir)
@@ -530,6 +595,7 @@ def main() -> int:
 
         test_tar_script(root, bin_dir)
         test_generator(root)
+        test_generator_without_load_module(root)
         test_merge_script(root, bin_dir)
 
     if failures:

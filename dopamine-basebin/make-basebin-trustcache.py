@@ -39,18 +39,28 @@ Exit status: 0 on success, 1 when a member cannot be read as Mach-O.
 """
 
 import hashlib
+import importlib.util
 import os
 import struct
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from importlib.machinery import SourceFileLoader
-
-_verifier = SourceFileLoader(
-    "verify_basebin_trustcache",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify-basebin-trustcache.py"),
-).load_module()
+# The verifier is a sibling file, not an importable package member, so it is loaded by
+# path. An earlier revision used `importlib.machinery.SourceFileLoader`, whose deprecated
+# loader method the macOS runner's Python no longer provides: basebin-build.yml run
+# 45752216760 died on that AttributeError before any assertion ran, and it was the run's
+# only failure. spec_from_file_location plus exec_module is the supported shape; the
+# module is registered under its own name first because exec_module does not do that.
+_VERIFIER_MODULE = "verify_basebin_trustcache"
+_VERIFIER_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "verify-basebin-trustcache.py"
+)
+_verifier_spec = importlib.util.spec_from_file_location(_VERIFIER_MODULE, _VERIFIER_PATH)
+if _verifier_spec is None or _verifier_spec.loader is None:
+    sys.stderr.write("FAIL: cannot load %s as a module\n" % _VERIFIER_PATH)
+    raise SystemExit(1)
+_verifier = importlib.util.module_from_spec(_verifier_spec)
+sys.modules[_VERIFIER_MODULE] = _verifier
+_verifier_spec.loader.exec_module(_verifier)
 
 TRUSTCACHE_VERSION = 1
 ENTRY_FLAGS = 0
