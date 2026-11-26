@@ -27,7 +27,15 @@ diff --git a/Source/WebKit/Configurations/BaseXPCService.xcconfig b/Source/WebKi
 diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 --- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
 +++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
-@@ -135,9 +135,9 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+@@ -31,6 +31,7 @@
+ #import "XPCServiceEntryPoint.h"
+ #import "XPCUtilities.h"
+ #import <CoreFoundation/CoreFoundation.h>
++#import <dlfcn.h>
+ #import <mach/mach.h>
+ #import <pal/spi/cf/CFUtilitiesSPI.h>
+ #import <pal/spi/cocoa/LaunchServicesSPI.h>
+@@ -135,9 +136,9 @@ void XPCServiceEventHandler(xpc_connection_t peer)
                  if (event == XPC_ERROR_CONNECTION_INVALID || event == XPC_ERROR_TERMINATION_IMMINENT) {
                      RELEASE_LOG_FAULT(IPC, "Exiting: Received XPC event type: %{public}s", event == XPC_ERROR_CONNECTION_INVALID ? "XPC_ERROR_CONNECTION_INVALID" : "XPC_ERROR_TERMINATION_IMMINENT");
                      // FIXME: Handle this case more gracefully.
@@ -40,7 +48,7 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
                  }
              }
              return;
-@@ -205,10 +205,7 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+@@ -205,10 +206,7 @@ void XPCServiceEventHandler(xpc_connection_t peer)
              InitializerFunction initializerFunctionPtr = reinterpret_cast<InitializerFunction>(CFBundleGetFunctionPointerForName(webKitBundle, entryPointFunctionName));
              if (!initializerFunctionPtr) {
                  RELEASE_LOG_FAULT(IPC, "Exiting: Unable to find entry point in WebKit.framework with name: %s", [(__bridge NSString *)entryPointFunctionName UTF8String]);
@@ -52,7 +60,7 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
              }
  
              auto reply = adoptOSObject(xpc_dictionary_create_reply(event));
-@@ -271,8 +268,32 @@ int XPCServiceMain(int, const char**)
+@@ -271,8 +269,54 @@ int XPCServiceMain(int, const char**)
      setenv("__APPLEEVENTSSERVICENAME", "", 1);
  #endif
  
@@ -60,24 +68,46 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
      xpc_main(XPCServiceEventHandler);
      return 0;
 +#else
-+    // xpc_main is unavailable when building against the public iOS SDK, so reproduce what it does:
-+    // connect to the endpoint launchd put in the environment, and hand the first inbound message to
-+    // XPCServiceEventHandler as the peer connection it expects. That handler installs the peer's
-+    // event handler and resumes it, and launchd has not resumed it yet, so it is resumed once.
-+    xpc_connection_t taskConnection = xpc_connection_create(nullptr, nullptr);
-+    xpc_connection_set_event_handler(taskConnection, ^(xpc_object_t event) {
-+        if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) {
-+            // ConnectionInvalid or TerminationImminent: launchd is the only way in, so exit.
-+            exitProcess(EXIT_FAILURE);
++    // xpc_main is marked API_UNAVAILABLE(ios), so reproduce what it does.
++    // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
++    // xpc_connection_create_listener, and the handler it wraps receives each connection launchd
++    // accepts, which is the shape XPCServiceEventHandler takes. A client connection instead
++    // receives messages addressed to its own socket and never a connection, so launchd's handshake
++    // cannot arrive. xpc_connection_create_mach_service reaches that same listener constructor
++    // when bit 0 of its flags is set, which is what this branch asks for.
++    //
++    // The SDK declares the entry point as API_UNAVAILABLE(ios), so naming it in a call does not
++    // compile and it is resolved at runtime; a missing symbol ends the process rather than falling back.
++    typedef xpc_connection_t (*CreateMachServiceFunction)(const char*, dispatch_queue_t, uint64_t);
++    static CreateMachServiceFunction createMachService = reinterpret_cast<CreateMachServiceFunction>(dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service"));
++    if (!createMachService) {
++        RELEASE_LOG_FAULT(IPC, "Exiting: libxpc does not export xpc_connection_create_mach_service");
++        exitProcess(EXIT_FAILURE);
++    }
++
++    const char* xpcServiceName = getenv("XPC_SERVICE_NAME");
++    if (!xpcServiceName) {
++        RELEASE_LOG_FAULT(IPC, "Exiting: XPC_SERVICE_NAME is unset, so there is no service to listen for");
++        exitProcess(EXIT_FAILURE);
++    }
++
++    // XPC_CONNECTION_MACH_SERVICE_LISTENER is bit 0 of the flags argument, defined by the SDK. The
++    // entry point above arrives as a runtime pointer, so the value is written out; libxpc tests
++    // this bit before it creates the listener.
++    static const uint64_t machServiceListenerFlag = 1;
++
++    xpc_connection_t listener = createMachService(xpcServiceName, nullptr, machServiceListenerFlag);
++    xpc_connection_set_event_handler(listener, ^(xpc_object_t event) {
++        if (xpc_get_type(event) == XPC_TYPE_CONNECTION) {
++            XPCServiceEventHandler(event);
++            return;
 +        }
-+        xpc_connection_t peer = xpc_dictionary_get_remote_connection(event);
-+        if (!peer) {
-+            RELEASE_LOG_FAULT(IPC, "Exiting: bootstrap message has no remote connection");
-+            exitProcess(EXIT_FAILURE);
-+        }
-+        XPCServiceEventHandler(peer);
++        // A listener yields connections and errors, nothing else, and an error means no connection
++        // will ever arrive. Report it and end instead of idling in dispatch_main.
++        RELEASE_LOG_FAULT(IPC, "Exiting: listener received %{public}s instead of a connection", xpc_type_get_name(xpc_get_type(event)));
++        exitProcess(EXIT_FAILURE);
 +    });
-+    xpc_connection_resume(taskConnection);
++    xpc_connection_resume(listener);
 +    // The bootstrap message initialises through WorkQueue::main().dispatchSync, which needs the
 +    // main queue to be driven, so drain it instead of running the main run loop.
 +    dispatch_main();
