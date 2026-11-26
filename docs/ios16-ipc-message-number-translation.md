@@ -18,7 +18,7 @@
 
 `IPCUtilities.cpp` 不能作为落点：它的全部内容在 `#if ENABLE(IPC_TESTING_API)` 里，该宏在 Release 构建（`NDEBUG` 已定义、无 ASAN）为 0，文件编出来是空的，放进去的表会被整段编掉（第 4.3 节）。
 
-**D.** 唯一的跨版本 `IPC::Connection` 是 `Source/WebKit/Shared/AuxiliaryProcess.cpp:108` 创建的 `m_connection`：三个 helper（WebContent、GPU、Networking）都继承 `AuxiliaryProcess` 并共用这一行，所以这一行对三者语义一致，都是「我到 UI 进程的连接」。标志在那里判定并置位，不在 `Connection::createClientConnection` 工厂内部置真，因为该工厂有 7 个调用点，其余 6 个两端都是 18.3。判据是对端 UI 进程的 SDK 版本（bootstrap 字典的 `client-sdk-version`），不是本进程的 `processType`（第 5.3 节）。翻译落点是 `Connection::sendMessageImpl`（发方向）与 `Connection::receiveSourceEventHandler`（收方向，必须在 `:545` 的 `InitializeConnection` 比较之前）。GPU 与 Networking 之间、WebContent 与 Networking 之间的连接用同一个工厂但走别的调用点，标志保持假，字节不动。
+**D.** 唯一的跨版本 `IPC::Connection` 是 `Source/WebKit/Shared/AuxiliaryProcess.cpp:108` 创建的 `m_connection`：三个 helper（WebContent、GPU、Networking）都继承 `AuxiliaryProcess` 并共用这一行，所以这一行对三者语义一致，都是「我到 UI 进程的连接」。标志在那里判定并置位，不在 `Connection::createClientConnection` 工厂内部置真，因为该工厂有 7 个调用点，其余 6 个两端都是 18.3。判据是对端 UI 进程送来的 SDK aligned behavior 位图宽度（比本构建窄即为更早的世代），不是本进程的 `processType`，也不是只看部署目标的编译期开关（第 5.3 节）。翻译落点是 `Connection::sendMessageImpl`（发方向）与 `Connection::receiveSourceEventHandler`（收方向，必须在 `:545` 的 `InitializeConnection` 比较之前）。GPU 与 Networking 之间、WebContent 与 Networking 之间的连接用同一个工厂但走别的调用点，标志保持假，字节不动。
 
 还有一个必须先说清的前提：**编号只在 helper 到 UI 进程这一条连接上跨版本，其余连接两端同为 18.3。** 无条件翻译会把这些连接的自洽编号翻成对方不认的值，等于自己破坏自己，所以 D 不是可选优化，是正确性要求。
 
@@ -344,7 +344,7 @@ Source/WebKit/NetworkProcess/NetworkProcess.cpp:377:    AuxiliaryProcess::initia
 
 基类实现是空函数（`AuxiliaryProcess.cpp:129-131`），没有别的地方在 `:108` 之后给这条连接加标记。
 
-**三个 helper 全部跨版本，不是只有 WebContent。** 部署方式决定了这一点：`scripts/install-webkit-override.sh` 的 `prune_xpc_services`（`:235-251`）删除覆盖目录里的 `XPCServices`，于是 WebContent、GPU、Networking 三个 helper 都由系统自带的 16.1 `.xpc` 桩启动，再由 `DYLD_FRAMEWORK_PATH` 加载覆盖目录里的 18.3 framework。三个 helper 的对端都是未打补丁的 16.1 UI 进程，三条连接都需要翻译。所以判据落在 `:108` 这一行的连接上，对三条连接一视同仁，不按进程类型分支（第 5.3 节把「要不要翻译」的判据写成对端 SDK 版本，仍然与 `processType` 无关）。
+**三个 helper 全部跨版本，不是只有 WebContent。** 部署方式决定了这一点：`scripts/install-webkit-override.sh` 的 `prune_xpc_services`（`:235-251`）删除覆盖目录里的 `XPCServices`，于是 WebContent、GPU、Networking 三个 helper 都由系统自带的 16.1 `.xpc` 桩启动，再由 `DYLD_FRAMEWORK_PATH` 加载覆盖目录里的 18.3 framework。三个 helper 的对端都是未打补丁的 16.1 UI 进程，三条连接都需要翻译。所以判据落在 `:108` 这一行的连接上，对三条连接一视同仁，不按进程类型分支（第 5.3 节把「要不要翻译」的判据写成对端位图宽度，仍然与 `processType` 无关）。
 
 ### 5.2 为什么不能放在 createClientConnection 内部
 
@@ -390,8 +390,9 @@ bool m_shouldTranslateMessageNames { false };
 ```cpp
 m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
 #if IOS_16_MESSAGE_NUMBER_TRANSLATION
-    if (auto version = IPC::uiProcessSDKVersionFromBootstrap(); version && *version < DYLD_IOS_VERSION_18_0)
+    if (peerIsOlderGeneration()) {
         m_connection->setShouldTranslateMessageNames(true);
+    }
 #endif
 initializeConnection(m_connection.get());
 m_connection->open(*this);
@@ -399,16 +400,23 @@ m_connection->open(*this);
 
 放在 `open` 之前是必须的：`open` 会走 `platformOpen`，在 client 分支里立刻构造并发出 `InitializeConnection`（`ConnectionCocoa.mm:186-192`）。如果标志在 `open` 之后才置真，第一条消息就已经带着未翻译的编号出去了。
 
-**为什么用运行期版本门，而不是无条件置真。** 编译期有一个 `IOS_16_MESSAGE_NUMBER_TRANSLATION` 开关（`MessageNumberTranslation.h` 里按 `__IPHONE_OS_VERSION_MIN_REQUIRED < 180000` 定义），它决定表要不要编进产物；它不决定任何一条连接是否翻译。真正决定的是对端的版本：UI 进程在 bootstrap 字典的 `client-sdk-version` 键里写下自己的 SDK 版本（`ProcessLauncherCocoa.mm` 写入，`XPCServiceInitializerDelegate::getUIProcessSDKVersion` 读出），helper 在进程启动时读一次存进静态量（`setUIProcessSDKVersionFromBootstrap` / `uiProcessSDKVersionFromBootstrap`），随后 `:108` 之后比较。
+**判据是 SDK aligned behavior 位图的宽度，不是部署目标。** 编译期有一个 `IOS_16_MESSAGE_NUMBER_TRANSLATION` 开关（`MessageNumberTranslation.h` 里按 `__IPHONE_OS_VERSION_MIN_REQUIRED < 180000` 定义），它决定表要不要编进产物；它对每个由本项目产出的构建都等于 1，所以它不决定任何一条连接是否翻译。真正决定的是对端进程送来多宽的位图。
 
-用它可以区分两种在编译期看起来完全一样的情况：
+这条信号由 `ios16-xpc-bootstrap-compat.patch` 提供，分两半。`XPCServiceInitializerDelegate::getClientSDKAlignedBehaviors` 本来就比较 `length` 与 `behaviors.storageLengthInBytes()`，补丁在这个比较的三个分支里写进一个进程级静态量：等宽写 `false`，更窄写 `true`，更宽写 `false`。静态量由 `peerIsOlderGeneration()` 读出，声明在 `AuxiliaryProcess.h`，定义在 `XPCServiceEntryPoint.mm` 的 `namespace WebKit` 里。它在 `AuxiliaryProcess::initialize` 之前就已经写好，因为 `XPCServiceEntryPoint.h` 先调 `getClientSDKAlignedBehaviors`、再调 `initializeAuxiliaryProcess`。
 
-- 16.1 的 iOS 16 Safari 配 18.3 helper。对端版本低于 18.0，需要翻译，置真。
-- 16.1 helper 配 16.1 UI。两者编号一致，翻译只会把正确编号改错，因此不置真。
+三个分支各自的取值有依据，不是「默认值」：
 
-无条件置真在这两种情况下没有区别，因为本项目的部署形态是前者；但把「要不要翻译」绑在「本二进制能不能翻译」上会让第二种形态静默出错，也就是说，这个门的成本是一条比较，收益是让判据从「我的构建目标」变成「对端的实际版本」。对端没写版本时按不翻译处理：放行原始编号错了会在协议层立刻暴露，而改动一条本来就正确的连接会得到更难定位的静默错位。
+- 等宽：对端与本构建同一套 `SDKAlignedBehaviors` 布局，`ProcessLauncherCocoa.mm` 用同一个 BitSet 实例化写出，所以复制是对的，世代也相同。
+- 更窄：对端是更早的世代。16.0 与 16.1 是 63 个 behavior、8 字节，16.2 与 16.3 是 64 个、8 字节，本构建是 94 个、12 字节。
+- 更宽：对端是更新的世代，本构建无法按自己的布局解释它。
 
-这也解释了为什么这个判据不能按 `processType` 分支：三条 helper 到 UI 进程的连接全部跨版本，`processType` 对三者都不同，但对「要不要翻译」这个问题的答案相同。判据落在对端版本上，三条连接自然一致，不需要列举进程类型。
+静态量零初始化，所以「UI 进程没有发位图」读成 `false`，即不翻译。方向选得对：需要翻译的连接如果没翻，握手会立刻失败，是可观察的；不需要翻译的连接被翻了，失败是静默的。
+
+**盲区必须写清。** 宽度只把 16.0 到 16.3（8 字节）与 16.4 及以后（12 字节）分开。16.4、17.0、18.0 到 18.2 与本构建同为 12 字节，被判为同代，**不会翻译**。本项目不做这样的配对，所以盲区不影响已交付的两种形态，但它是一个真实的上限：一个 16.4 或 17.x 的 UI 进程配本构建，会走进「同代」分支，握手按未翻译的编号比较，与今天不装补丁的表现相同。
+
+**两种形态都靠同一个判据分开，不靠编译期开关。** 路线 B 两侧都是本构建，位图等宽，`peerIsOlderGeneration()` 为假，开关保持关闭；路线 A 的 UI 是 `/System` 的 16.1，位图 8 字节，为真，开关打开。设备上的实测读数（`ios16-patched-dyld-install-and-verify.md:501-515`）就是路线 A：MobileSafari 加载 `/System`，WebContent 与 Networking 加载 `/var/jb`。
+
+因此这个判据不能按 `processType` 分支：三条 helper 到 UI 进程的连接全部跨版本，`processType` 对三者都不同，但对「要不要翻译」这个问题的答案相同。判据落在对端位图宽度上，三条连接自然一致，不需要列举进程类型。
 
 为什么不把判据放进 `createClientConnection` 工厂：该工厂有 7 个调用点（第 5.2 节），其中 6 个两端同为 18.3。工厂内部无法知道对端是谁，置真会让那 6 条也被翻译，互相破坏。
 
@@ -735,6 +743,14 @@ patches=25 applied=23 skipped=2 fail=0
 `PATCH APPLIED BUT HAS NO EFFECT` 的检查命令 `git grep -q translateOutgoingMessageName -- Source/WebKit/Platform/IPC/Encoder.cpp` 退出 0，改动没有影响这条断言。
 
 ## 8. 未验证项
+
+**第 5.3 节的判据有三件事没有在设备上验证过。** 三条都要说明，因为它们决定这个判据在真机上是否成立。
+
+**（i）16.1 的真实 `MessageName` 编号不是从设备二进制里取出来的。** 两张表的 16.1 一侧来自 `releases/Apple/Safari-16.1-iOS-16.1` 这个 tag 自带的生成器输出（`scripts/regen-ipc-message-number-headers.py`），四个锚点 `InitializeConnection`=2478、`GPUConnectionToWebProcess_EnsureAudioSession`=2946、`WrappedAsyncMessageForTesting`=3184、`Last`=3184 是从这份生成出来的头文件读的，不是从设备上 `/System/Library/Frameworks/WebKit.framework/WebKit` 反查的。若设备上的系统 WebKit 不是 `614.2.9.0.10`，这四个数都要重算。定案方法二选一：从设备二进制反查枚举，或对运行中的 UI 进程 dump 一条已知消息头部的第 2、3 字节。
+
+**（ii）`sdkAlignedBehaviors()` 在 16.1 的 UI 进程里实际返回 8 字节这件事没有测过。** 这个宽度是判据的唯一依据，而它现在只是按 `SDKAlignedBehavior` 的枚举个数推出来的（16.0 与 16.1 是 63 个 behavior，`Bitmap<63, uint32_t>` 占 8 字节；本构建 94 个，占 12 字节）。设备上的验证方法：在 16.1 的 MobileSafari 进程里读 `SDKAlignedBehaviors::storageLengthInBytes()`，或在 helper 的日志里读 `getClientSDKAlignedBehaviors` 写下的那两条 `RELEASE_LOG_ERROR`。**在这一条被实测之前，判据在真机上是否触发是未知的**，不是「应当触发」。
+
+**（iii）宽度判据对 16.4 到 17.x 的盲区没有量化。** 16.4 是 73 个 behavior、17.0 是 79 个、18.0 是 93 个、本构建 94 个，四者都是 12 字节，宽度分不开，所以这类 UI 进程配本构建会被判为同代、不翻译。盲区的大小取决于「有多少种 UI 进程组合会落进这个区间」，而本项目只交付「16.1 UI 配本构建」与「本构建配本构建」两种，所以盲区在这两种形态里不出现。量化它需要一个 16.4 或 17.x 的设备，本轮没有。
 
 **消息编号的真实编译值没有取到。** 本文 18.3 的所有编号都是把 `MessageNames.h` 当平坦下标读出来的，而 18.3 的生成器会输出 `#if` 条件（`/tmp/t4gen/regen/Names18.h` 共 703 个 `#if`），被条件剔除的条目会让后续编号前移。举一个本机算过的例子：`InitializeConnection` 在 18.3 的平坦下标是 3076，但它被 `#if PLATFORM(COCOA)` 包住，且它之前有大量位于 `PLATFORM(MAC)`、`PLATFORM(GTK)`、`OS(LINUX)` 等 iOS 上为假的分支，iOS 编译后的真实编号小于 3076。
 

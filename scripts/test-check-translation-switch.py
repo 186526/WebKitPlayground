@@ -5,7 +5,13 @@ Each case writes its own patch fixture, so nothing here needs a checkout, Xcode 
 cases are the ways the switch can come back and the ways the check could pass by accident:
 
   the patch as committed must pass, because that is the artefact the workflow ships;
-  a re-added call must fail, because that is the regression the mission exists to prevent;
+  the single guarded call is the one the mission adds, so the check requires it rather than forbidding
+  every call: a patch with no call must fail, because route A then never translates;
+  an unguarded call must fail, and so must one under a negated or macro guard, because those turn the
+  flag on for a peer that numbers messages identically;
+  a second call must fail, because two routes to translation are more than the check can reason about;
+  a call moved out of AuxiliaryProcess.cpp must fail, because that file is the only one whose single
+  connection has the UI process on the other end;
   the same call written on the setter's declaration must pass, so the check reads calls and not
   declarations;
   a call with no argument must fail, so `setShouldTranslateMessageNames()` is not mistaken for the
@@ -183,9 +189,38 @@ diff --git a/Source/WebKit/Platform/IPC/cocoa/ConnectionCocoa.mm b/Source/WebKit
 +        auto translated = translateIncomingMessageName(decoder->messageName());
 +        decoder->setMessageName(translated);
 +    }
-+"""
+diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp
++    m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
++#if IOS_16_MESSAGE_NUMBER_TRANSLATION
++    if (peerIsOlderGeneration()) {
++        m_connection->setShouldTranslateMessageNames(true);
++    }
++#endif
++    initializeConnection(m_connection.get());
+"""
 
+# Appending a constant to BASE needs its own diff section: BASE ends inside AuxiliaryProcess.cpp,
+# so a bare `BASE + CALL` would read the two as one file and a `+` in the constant would become a
+# `++` line that no hunk describes.
+AUX_HEADER = "diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp\n"
+
+# The permitted call and its guard, as the committed patch writes them in AuxiliaryProcess.cpp.
+GUARDED_CALL = (
+    "+    if (peerIsOlderGeneration()) {\n"
+    "+        m_connection->setShouldTranslateMessageNames(true);\n"
+    "+    }\n"
+)
+# The same call with no guard, which is the regression the rule exists for: on route B the flag is
+# turned on for a peer that numbers messages identically, and the handshake never completes.
 CALL = "+    m_connection->setShouldTranslateMessageNames(true);\n"
+# A second copy of the permitted call, for the "exactly one" rule.
+CALL_SECOND = GUARDED_CALL
+# The permitted call passing false rather than true.
+CALL_FALSE = (
+    "+    if (peerIsOlderGeneration()) {\n"
+    "+        m_connection->setShouldTranslateMessageNames(false);\n"
+    "+    }\n"
+)
 CALL_NO_ARGUMENT = "+    m_connection->setShouldTranslateMessageNames();\n"
 DECLARATION = "+    void setShouldTranslateMessageNames(bool shouldTranslate);\n"
 MACRO_INITIALISER = "+    bool m_shouldTranslateMessageNames { IOS_16_MESSAGE_NUMBER_TRANSLATION };\n"
@@ -710,7 +745,18 @@ GUARD_WITH_CAST_FIRST_LINE = (
 
 # Appended rather than substituted: the committed patch carries no setter call, so there is nothing to
 # replace. This is the wrap the line-at-a-time check used to miss.
-FOLDED_CALL = "+    m_connection->setShouldTranslateMessageNames\n+        (true);\n"
+FOLDED_CALL = (
+    "+    if (peerIsOlderGeneration()) {\n"
+    "+        m_connection->setShouldTranslateMessageNames\n"
+    "+            (true);\n"
+    "+    }\n"
+)
+# The same fold with the guard taken off. A reader that looked for `setShouldTranslateMessageNames(`
+# on one line saw neither half, so this is the shape that used to walk through the rule entirely.
+FOLDED_UNGUARDED_CALL = (
+    "+    m_connection->setShouldTranslateMessageNames\n"
+    "+        (true);\n"
+)
 
 # The needles that used to be bare numbers, and the wrong value each must now fail on. Every number
 # here is also a real case label in the tables, which is why a needle that searched the whole patch
@@ -809,9 +855,56 @@ def run(patch_text: str | None) -> subprocess.CompletedProcess:
 
 CASES = (
     ("the committed patch passes", None, 0, None),
-    ("a re-added call fails", BASE + CALL, 1, "calls setShouldTranslateMessageNames"),
-    ("a call with no argument fails", BASE + CALL_NO_ARGUMENT, 1, "calls setShouldTranslateMessageNames"),
-    ("the setter's declaration passes", BASE + DECLARATION, 0, None),
+    ("the guarded call as committed passes", BASE, 0, None),
+    (
+        "a patch with no setter call at all fails",
+        BASE.replace(GUARDED_CALL, "", 1),
+        1,
+        "no longer calls setShouldTranslateMessageNames",
+    ),
+    (
+        "a call with no guard fails",
+        BASE.replace(GUARDED_CALL, CALL, 1),
+        1,
+        "is not guarded by peerIsOlderGeneration()",
+    ),
+    (
+        "a call under a negated guard fails",
+        BASE.replace("if (peerIsOlderGeneration()) {", "if (!peerIsOlderGeneration()) {", 1),
+        1,
+        "is not guarded by peerIsOlderGeneration()",
+    ),
+    (
+        "a call under the deployment macro fails",
+        BASE.replace("if (peerIsOlderGeneration()) {", "if (IOS_16_MESSAGE_NUMBER_TRANSLATION) {", 1),
+        1,
+        "is not guarded by peerIsOlderGeneration()",
+    ),
+    (
+        "a call passing false fails",
+        BASE.replace(GUARDED_CALL, CALL_FALSE, 1),
+        1,
+        "calls setShouldTranslateMessageNames with something other than true",
+    ),
+    (
+        "a second guarded call fails",
+        BASE + AUX_HEADER + CALL_SECOND,
+        1,
+        "calls setShouldTranslateMessageNames more than once",
+    ),
+    (
+        "a call moved to another file fails",
+        BASE + CALL_IN_THIRD_FILE + GUARDED_CALL,
+        1,
+        "calls setShouldTranslateMessageNames outside",
+    ),
+    (
+        "a call with no argument fails",
+        BASE + AUX_HEADER + CALL_NO_ARGUMENT,
+        1,
+        "calls setShouldTranslateMessageNames with something other than true",
+    ),
+    ("the setter's declaration passes", BASE + AUX_HEADER + DECLARATION, 0, None),
     ("a macro initialiser fails", BASE + MACRO_INITIALISER, 1, "initialiser is not the literal false"),
     (
         "a patch that drops the tag fact fails",
@@ -874,10 +967,16 @@ for description, old_text, new_text, expected_message in READ_SITE_CASES:
 
 CASES += (
     (
-        "a patch that folds the setter call across two lines still fails",
-        BASE + FOLDED_CALL,
+        "a guarded setter call folded across two lines still passes",
+        BASE.replace(GUARDED_CALL, FOLDED_CALL, 1),
+        0,
+        None,
+    ),
+    (
+        "an unguarded setter call folded across two lines still fails",
+        BASE.replace(GUARDED_CALL, FOLDED_UNGUARDED_CALL, 1),
         1,
-        "calls setShouldTranslateMessageNames",
+        "is not guarded by peerIsOlderGeneration()",
     ),
 )
 
@@ -1861,6 +1960,10 @@ def check_needles_are_unique_and_necessary() -> int:
         "+        auto translated = translateIncomingMessageName(decoder->messageName());",
         "+        decoder->setMessageName(translated);",
         "+    }",
+        "diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp",
+        "+    if (peerIsOlderGeneration()) {",
+        "+        m_connection->setShouldTranslateMessageNames(true);",
+        "+    }",
         "",
     ])
     if run(scaffold).returncode != 0:
@@ -1885,36 +1988,75 @@ def check_needles_are_unique_and_necessary() -> int:
     return 0
 
 
+def naive_verdict(patch: str) -> tuple[int, str]:
+    """An independent read of `patch` under the rule this mission added, in one pass, no helpers.
+
+    A line of code counts as a call when it names the setter and is not one of the two declaration
+    spellings. The rule then has four parts, each restated here rather than borrowed from the checker:
+    exactly one such line, in AuxiliaryProcess.cpp, passing `true`, and preceded by the predicate's
+    `if` within the same file. Anything else is a failure. Reading it from the text rather than from
+    the checker's verdict is what makes agreement evidence instead of a tautology.
+    """
+    calls = []
+    path = ""
+    previous_line, previous_path = "", ""
+    for raw in patch.splitlines():
+        header = CHECK.FILE_HEADER.match(raw)
+        if header:
+            path = header.group(1)
+            previous_line, previous_path = "", ""
+            continue
+        added = CHECK.ADDED_LINE.match(raw)
+        if not added:
+            continue
+        code = CHECK.strip_comment(added.group(1)).strip()
+        if not code:
+            continue
+        if CHECK.SETTER.search(code) and not any(hint in code for hint in CHECK.DECLARATION_HINTS):
+            guard_sits_above = (
+                previous_path == path
+                and previous_line.startswith("if (")
+                and CHECK.PEER_CONDITION_TOKEN in previous_line
+                and "!" not in previous_line.split(CHECK.PEER_CONDITION_TOKEN)[0]
+            )
+            calls.append((path, code, guard_sits_above))
+        previous_line, previous_path = code, path
+
+    if len(calls) != 1:
+        return 1, "the patch makes %d setter calls, and the rule is exactly one" % len(calls)
+    call_path, call_code, guard_sits_above = calls[0]
+    if call_path != CHECK.SETTER_CALL_FILE:
+        return 1, "the one call sits in %s rather than %s" % (call_path, CHECK.SETTER_CALL_FILE)
+    if "(true)" not in call_code.replace(" ", ""):
+        return 1, "the one call does not pass true: %s" % call_code
+    if not guard_sits_above:
+        return 1, "the one call has no line above it asking about the peer: %s" % call_code
+    return 0, "one guarded call in %s passing true" % call_path
+
+
 def main() -> int:
     failures = 0
 
     # The real patch, in the state it is committed in. This is a cross-check rather than a fixed
     # verdict: an independent, naive read of the patch decides what the answer must be, and the
-    # checker has to agree. A fixed expectation would be wrong in one of two legitimate states -
-    # before M85's rework deletes the setter call, and after - and a tautology would test nothing.
+    # checker has to agree. The rule is "exactly one call, in AuxiliaryProcess.cpp, under the peer
+    # predicate, passing true", so the committed patch is expected to pass and any other arrangement
+    # to fail; nothing here hard-codes that this branch happens to satisfy it.
     if not REAL_PATCH.exists():
         print("FAIL: the real patch is missing: %s" % REAL_PATCH)
         return 1
     real_text = REAL_PATCH.read_text(encoding="utf-8")
-    has_call = any(
-        CHECK.SETTER.search(CHECK.strip_comment(CHECK.ADDED_LINE.match(raw).group(1)))
-        and not any(hint in raw for hint in CHECK.DECLARATION_HINTS)
-        for raw in real_text.splitlines()
-        if CHECK.ADDED_LINE.match(raw)
-    )
-    expected_code = 1 if has_call else 0
+    expected_code, reason = naive_verdict(real_text)
     result = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True)
     if result.returncode != expected_code:
         failures += 1
         print("FAIL: the checker disagrees with a plain read of the committed patch")
-        print("  the patch %s a setter call, so exit %d was expected, got %d"
-              % ("contains" if has_call else "does not contain", expected_code, result.returncode))
+        print("  the patch reads as %s, so exit %d was expected, got %d"
+              % (reason, expected_code, result.returncode))
         print(result.stdout, result.stderr)
     else:
-        print("ok: the checker agrees with a plain read of the committed patch (exit %d)" % expected_code)
-        if has_call:
-            print("  note: the committed patch still carries M85's setter call; the check turns to a")
-            print("  pass once M85's rework removes it and this branch rebases onto that tip")
+        print("ok: the checker agrees with a plain read of the committed patch (exit %d: %s)"
+              % (expected_code, reason))
 
     for description, patch_text, expected_code, expected_message in CASES:
         if patch_text is None and expected_code == 0:
