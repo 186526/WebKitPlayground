@@ -102,15 +102,46 @@ What it refuses, and why each combination is a defect rather than a preference:
     parameter. `= true`, a compound `|=`, and a parenthesised `(member) =` all compile and all turn
     the flag on; each is refused, while `==` stays a comparison.
 
-The script reads the patch file, not a checkout, so it runs before the build has a tree and cannot
-be satisfied by a tree that happens to be patched differently from the deb.
+  - A permitted call inside a preprocessor conditional. The call compiles unconditionally, because
+    both declarations it needs are added without one, so a `#if` around it can only subtract. That is
+    the shape this round's P1 took: `#if IOS_16_MESSAGE_NUMBER_TRANSLATION` wrapped the call, the
+    macro is defined in MessageNumberTranslation.h, AuxiliaryProcess.cpp does not include that header,
+    and `#if` on an identifier the translation unit cannot see is 0 — so the block was deleted by the
+    preprocessor and the file read as wired while peerIsOlderGeneration() was never called. Every
+    enclosing `#if`/`#ifdef`/`#ifndef` is reported by name and with the statement it surrounds, so a
+    `#if 1`, a `#ifdef` on an unknown macro and a nested pair all fail the same way.
+
+  - A permitted call that lands after `m_connection->open(`. `open` sends `InitializeConnection`
+    immediately (ConnectionCocoa.mm:186-192), so a flag set after it leaves the first message
+    untranslated on the link the flag exists for. The order is read from physical lines in the patch,
+    not from the added-statement list, because `m_connection->open(*this)` is a context line: it is
+    already in the file, so it carries a leading space and never appears among the `+` lines.
+
+  - A predicate the call names but the bootstrap patch never defines, or one whose width branches do
+    not store an answer. `--bootstrap-patch` is read for `bool peerIsOlderGeneration()`, for the
+    `length == ownLength` and `length < ownLength` comparisons, and for the writes each branch makes:
+    `= true` on the narrower branch, `= false` on the equal one and again on the wider `else`. The
+    translation patch alone cannot settle this — it only calls the function — so a call to something
+    nothing defines used to pass, which is the other half of the same P1.
+
+The script reads the patch files, not a checkout, so it runs before the build has a tree and cannot
+be satisfied by a tree that happens to be patched differently from the deb. Two files are read: the
+translation patch, and the bootstrap patch that defines the predicate.
 
 Usage:
   scripts/check-translation-switch.py
   scripts/check-translation-switch.py --patch patches/ios16-ipc-message-number-translation.patch
+  scripts/check-translation-switch.py \\
+      --bootstrap-patch patches/ios16-xpc-bootstrap-compat.patch
 
-Exit 0 when the setter call is the single guarded one, the reads ask the member, the rationale is
-present and the table anchors hold; 1 on any violation; 2 when the patch cannot be read.
+`--bootstrap-patch` defaults to patches/ios16-xpc-bootstrap-compat.patch next to the patch under
+test, so the workflow gets the predicate check without passing it. CI relies on that default staying
+pointed at the file that defines peerIsOlderGeneration().
+
+Exit 0 when the setter call is the single guarded one, it is outside every preprocessor conditional
+and before `m_connection->open(`, its predicate is defined with all three width branches writing the
+flag, the reads ask the member, the rationale is present, the table anchors hold and every hunk header
+matches its body; 1 on any violation; 2 when either patch cannot be read.
 """
 from __future__ import annotations
 
