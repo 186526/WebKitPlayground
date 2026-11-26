@@ -158,6 +158,10 @@ REQUIRED_RATIONALE = (
     ("the three anchors read out of the tag's header", "2946, InitializeConnection 2478 and Last 3184"),
     ("the split of the 1175 one-sided names around the synchronous boundary",
      "852 of the 1126 that are outside it"),
+    ("the generator's exit status and the four counts it prints",
+     "`scripts/gen-ipc-message-number-tables.py` exits 0 (rc=0) and reports four"),
+    ("the unmapped-incoming count, stated as a count",
+     "1175 only newer, and 708 unmapped"),
 )
 
 # A mention of the setter inside a comment is documentation, not a call. The patch's added lines all
@@ -1268,6 +1272,81 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
     return violations
 
 
+# A `@@` header states how many body lines follow it, counted separately for the old and the new
+# side. `git apply` trusts those counts: when a header promises fewer lines than its body carries it
+# stops reading the body at the stated count and reports the patch as corrupt, which is how a
+# comment edit that added lines without updating the header broke the build in M141. The counts are
+# never derived by git, so nothing else catches them, and a tree far from the patch target still
+# reports `corrupt` rather than a context mismatch, so this check runs before any hunk is matched.
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def check_hunk_counts(patch: str) -> list[Violation]:
+    """Compare every `@@` header's declared counts against the body it introduces.
+
+    The walk mirrors what `git apply` does: a line starting with `+` is a new-side line, `-` an
+    old-side line, and a line starting with a space or empty a context line counted on both sides.
+
+    Where a body ends is the part worth stating, because the obvious rule is wrong. A body ends only
+    at the next `@@` header or at the next `diff --git` line, never at a `---` or `+++` line: the
+    lines a patch deletes and adds can themselves begin with those characters, so `--- x` inside a
+    body is a deleted line whose text starts with `--`, not a file header. Outside a body every line
+    is a file header or patch preamble and belongs to no count, which is where `index`, `new file
+    mode`, `---` and `+++` do live. A `\\ No newline at end of file` marker is not a body line and
+    is counted on neither side.
+    """
+    lines = patch.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    hunks = []
+    current = None
+    old_count = new_count = 0
+    header_line = 0
+    in_body = False
+
+    def close_hunk() -> None:
+        if current is not None:
+            hunks.append((header_line, current, old_count, new_count))
+
+    for index, raw in enumerate(lines, start=1):
+        if raw.startswith("diff --git "):
+            close_hunk()
+            current, in_body = None, False
+            continue
+        if raw.startswith("@@"):
+            close_hunk()
+            current, header_line, in_body = raw, index, True
+            old_count = new_count = 0
+            continue
+        if not in_body or raw.startswith("\\"):
+            continue
+        if raw.startswith("+"):
+            new_count += 1
+        elif raw.startswith("-"):
+            old_count += 1
+        elif raw.startswith(" ") or raw == "":
+            old_count += 1
+            new_count += 1
+    close_hunk()
+
+    violations = []
+    for header_line, header, old_count, new_count in hunks:
+        match = HUNK_HEADER.match(header)
+        declared_old = int(match.group(2)) if match.group(2) is not None else 1
+        declared_new = int(match.group(4)) if match.group(4) is not None else 1
+        if (old_count, new_count) != (declared_old, declared_new):
+            violations.append(
+                Violation(
+                    "a hunk header disagrees with the lines it introduces, at patch line %d"
+                    % header_line,
+                    "the header declares %d old and %d new lines but its body has %d and %d, so "
+                    "git apply reads the body short and calls the whole patch corrupt: %s"
+                    % (declared_old, declared_new, old_count, new_count, header),
+                )
+            )
+    return violations
+
+
 def run(patch_path: Path) -> int:
     try:
         patch = patch_path.read_text(encoding="utf-8")
@@ -1282,6 +1361,7 @@ def run(patch_path: Path) -> int:
     violations += check_rationale(patch)
     violations += check_table_anchors(patch)
     violations += check_no_stale_table_basis(patch)
+    violations += check_hunk_counts(patch)
 
     if violations:
         for violation in violations:
