@@ -18,7 +18,8 @@ cases are the ways the switch can come back and the ways the check could pass by
   declaration;
   a macro initialiser must fail, because Connection.h cannot see MessageNumberTranslation.h;
   deleting the wrong-16.1-tag fact must fail, because that is the defect a reader has to see;
-  a missing patch must be reported distinctly, so a read error is not read as a pass;
+  a missing patch must be reported distinctly, so a read error is not read as a pass, and the two
+  paths fail at different codes because one is a violation and the other a usage error;
   a count or tag drifted back to a wrong value must fail, so a needle cannot be a marker that also
   occurs somewhere else in the file;
   a table entry retargeted or renumbered must fail, because the prose check reads comments only and
@@ -942,21 +943,55 @@ TABLE_CASES = (
 )
 
 
-def run(patch_text: str | None, bootstrap_text: str | None = None) -> subprocess.CompletedProcess:
-    if patch_text is None:
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), "--patch", "/nonexistent/patch"],
-            capture_output=True,
-            text=True,
-        )
+class _Absent:
+    """A fixture path that is never created, so reading it fails the way a missing file does."""
+
+    def __repr__(self) -> str:
+        return "ABSENT"
+
+
+ABSENT = _Absent()
+
+# Bytes that are not UTF-8. `Path.read_text` raises `UnicodeDecodeError` on them rather than
+# `OSError`, which is a second way for a file to be unreadable and used to escape both exit codes as
+# a traceback.
+NOT_UTF8 = b"\xff\xfe\x00bad"
+
+
+def write_fixture(directory: Path, name: str, content: str | bytes) -> str:
+    """Write one fixture and return its path; `ABSENT` returns a path that is never written."""
+    path = Path(directory) / name
+    if content is ABSENT:
+        return str(path)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+    return str(path)
+
+
+def run(
+    patch_text: str | bytes | None,
+    bootstrap: str | bytes | None = None,
+) -> subprocess.CompletedProcess:
+    """Run the checker against written fixtures.
+
+    `None` as the patch means a path that does not exist, which is how the missing-patch case is
+    written; `None` as the bootstrap means no `--bootstrap-patch` at all, so the checker reads its own
+    default rather than a fixture. Strings are written as UTF-8 and bytes verbatim, so a file that is
+    not UTF-8 is expressible; `ABSENT` gives a path inside the temporary directory that nothing
+    writes, which is how a missing bootstrap patch is expressed while `--patch` stays valid.
+    """
     with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "fixture.patch"
-        path.write_text(patch_text, encoding="utf-8")
-        command = [sys.executable, str(SCRIPT), "--patch", str(path)]
-        if bootstrap_text is not None:
-            bootstrap = Path(directory) / "bootstrap.patch"
-            bootstrap.write_text(bootstrap_text, encoding="utf-8")
-            command += ["--bootstrap-patch", str(bootstrap)]
+        patch = ABSENT if patch_text is None else patch_text
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "--patch",
+            write_fixture(directory, "fixture.patch", patch),
+        ]
+        if bootstrap is not None:
+            command += ["--bootstrap-patch", write_fixture(directory, "bootstrap.patch", bootstrap)]
         return subprocess.run(command, capture_output=True, text=True)
 
 
@@ -1037,23 +1072,48 @@ CASES = (
         0,
         None,
     ),
-    ("a missing patch is reported distinctly", None, 2, None),
+    ("a missing patch is reported distinctly", None, 2, "cannot read"),
 )
 
 # The hunk-count rule, added after a comment edit in M141 added lines to two hunks without updating
-# their `@@` headers. One was a new-file hunk and would have applied with exit 0, leaving the file it
-# creates short; the other modified a file and produced the `patch is corrupt` report that opened this
-# round. No other check in this file or in the build workflow noticed either, because the counts are
-# never derived by git and every other rule reads the patch's text rather than its shape.
+# their `@@` headers. Both hunks declared fewer body lines than they carried. Applied as one patch the
+# file stopped with `patch is corrupt` at the second of them — the AuxiliaryProcess hunk, which
+# declared `@@ -106,6 +106,27 @@` over 28 lines. No other check in this file or in the build
+# workflow noticed either, because the counts are never derived by git and every other rule reads the
+# patch's text rather than its shape.
+#
+# What a wrong count does depends on the counters and on the body, not on which side runs long.
+# `parse_fragment` in git's `apply.c` decrements an unsigned counter per body line and returns -1 when
+# one wraps or when one is still positive at the end; either way the apply reports `corrupt patch`
+# and exits 128. It also returns -1 without consulting the counters at all, from
+# `if (!patch->recount && !deleted && !added)`, which a body can reach when its counts run out before
+# its first `+` or `-` line is read. Neither list is complete — the parse also fails on an unreadable
+# header, on a last line without a newline, and on a line starting with anything other than a space,
+# `+`, `-` or nothing at all, since an empty line is a context line — so the cases below test the
+# count comparison, not a claim about every way the apply can fail. Hunk kind does not decide which of
+# those outcomes a wrong count reaches, though it can decide whether the patch is applied at all: the
+# `@@ -1,1 +1,2 @@` shape in the checker's comment is refused by `parse_single_patch` as a new-file
+# hunk for carrying an old-side line, while the same body applies as a modification. All of this was
+# measured on a scratch repo with git 2.55.0; `check-translation-switch.py` records the rows.
 #
 # The first case is the control: a fixture with correct headers has to pass, or the two failures
 # below would be refused for a reason other than the count under test and this block would prove
-# nothing. The two off-by-N cases move the declared count in both directions. An overcount always stops
-# the apply with `patch is corrupt`. An undercount is not confined to any one hunk kind or outcome: on
-# a scratch repo it applied correctly, applied with a later change silently dropped and exit 0, raised
-# `corrupt`, and reported `patch does not apply`, depending on where the truncation landed. Both
-# directions are drift this check has to report, and for the silent shapes it is the only report — the
-# apply exits 0 and prints every file as applied.
+# nothing. `with_hunk_headers` gives every section the shape `@@ -0,N +1,M @@` over an all-`+` body,
+# which fixes where each of the two offset cases lands:
+#
+#   delta=-1  each section's read stops one line short and that line is never parsed — the family
+#             that applies without complaint and leaves the file short. Measured by applying the
+#             `-1` fixture to empty files of the same four paths on git 2.55.0: rc 0 and no output,
+#             with 1 line written where the body carries 2 and 35 where it carries 36.
+#   delta=+2  each section ends with its new-side count still positive — `corrupt patch`, exit 128,
+#             whichever tree it meets.
+#
+# So the pair moves the count in both directions and both are violations, but neither exercises the
+# third family, a counter decremented past zero; no fixture here has a body line that decrements a
+# side its header already took to zero. The checker does not need that distinction — it compares the
+# declared pair against the walked pair, and all three families disagree with the walk — which is why
+# it reports the header and its two numbers rather than predicting the apply's message. For the
+# silent family it is the only report: the apply exits 0 and leaves a file short without a word.
 #
 # The last pair covers the shape this function cannot parse at all. `HUNK_HEADER` reads plain unified
 # diff headers, and a `@@` line is recognised by its prefix alone, so a combined diff's `@@@` or any
@@ -1460,6 +1520,37 @@ for description, lines in GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT:
         1,
         "calls the translation outside the member's guard",
     ),)
+
+# Round 6's P2-1: how each file's read failure is reported, which the four-tuple table cannot express
+# because it passes one path and leaves the bootstrap at its default. The distinction under test is
+# the exit code: a bootstrap patch that cannot be read is a rule violation (`1`), because the rule
+# that ties the call to its definition cannot be evaluated without it, while the translation patch
+# itself is the artefact the run is about, so failing to read it is a usage error (`2`). Both files
+# can also fail to decode, which is the same kind of failure as a missing one and used to produce a
+# traceback with whichever code the interpreter picked.
+UNREADABLE_CASES = (
+    (
+        "a bootstrap patch that cannot be read is a violation",
+        BASE,
+        ABSENT,
+        1,
+        "the predicate's definition patch cannot be read",
+    ),
+    (
+        "a bootstrap patch that is not UTF-8 is a violation",
+        BASE,
+        NOT_UTF8,
+        1,
+        "the predicate's definition patch cannot be read",
+    ),
+    (
+        "a translation patch that is not UTF-8 is a usage error",
+        NOT_UTF8,
+        None,
+        2,
+        "cannot read",
+    ),
+)
 
 
 def open_boundary_section(module_doc: str) -> str | None:
@@ -2266,6 +2357,26 @@ def main() -> int:
             problems.append("expected exit %d, got %d" % (expected_code, result.returncode))
         if expected_message is not None and expected_message not in (result.stderr + result.stdout):
             problems.append("expected %r in the output" % expected_message)
+        if problems:
+            failures += 1
+            print("FAIL: %s" % description)
+            for problem in problems:
+                print("  %s" % problem)
+            print("  stdout: %s" % result.stdout.strip())
+            print("  stderr: %s" % result.stderr.strip())
+        else:
+            print("ok: %s" % description)
+
+    # The read-failure table, which needs both paths set independently and cannot go through `CASES`.
+    for description, patch_text, bootstrap, expected_code, expected_message in UNREADABLE_CASES:
+        result = run(patch_text, bootstrap)
+        problems = []
+        if result.returncode != expected_code:
+            problems.append("expected exit %d, got %d" % (expected_code, result.returncode))
+        if expected_message not in (result.stderr + result.stdout):
+            problems.append("expected %r in the output" % expected_message)
+        if "Traceback (most recent call last)" in (result.stderr + result.stdout):
+            problems.append("the read error escaped as a traceback")
         if problems:
             failures += 1
             print("FAIL: %s" % description)

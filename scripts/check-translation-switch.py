@@ -134,14 +134,20 @@ Usage:
   scripts/check-translation-switch.py \\
       --bootstrap-patch patches/ios16-xpc-bootstrap-compat.patch
 
-`--bootstrap-patch` defaults to patches/ios16-xpc-bootstrap-compat.patch next to the patch under
-test, so the workflow gets the predicate check without passing it. CI relies on that default staying
-pointed at the file that defines peerIsOlderGeneration().
+`--bootstrap-patch` defaults to patches/ios16-xpc-bootstrap-compat.patch resolved from this script's
+own location, not from wherever `--patch` points. The two paths are independent: `--patch` may name a
+translation patch outside `patches/`, and the predicate check still reads the repository's own
+bootstrap patch, so a bad copy sitting next to an outside patch is not what gets checked. CI passes
+neither path, which is why the delivered pair is the one under test; the default has to keep naming
+the file that defines peerIsOlderGeneration().
 
 Exit 0 when the setter call is the single guarded one, it is outside every preprocessor conditional
 and before `m_connection->open(`, its predicate is defined with all three width branches writing the
 flag, the reads ask the member, the rationale is present, the table anchors hold and every hunk header
-matches its body; 1 on any violation; 2 when either patch cannot be read.
+matches its body; 1 on any violation, including a bootstrap patch that cannot be read or decoded,
+because check_predicate_is_defined reports that as a violation rather than as a usage error; 2 when
+the translation patch named by `--patch` cannot be read or decoded. A file that is not UTF-8 fails
+each check the same way a missing one does: both are read errors, so neither escapes as a traceback.
 """
 from __future__ import annotations
 
@@ -1665,42 +1671,78 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
     return violations
 
 
-# A `@@` header states how many body lines follow it, counted separately for the old and the new
-# side, and `git apply` never derives those counts. So a wrong count is never detected by the apply
-# alone, and what actually happens depends on the direction, on the hunk's kind, and on where the
-# truncation lands. Measured on a scratch repo with git 2.55.0; the range is stated rather than one
-# outcome, because measuring a single shape of it is how this comment got it wrong twice.
+# A `@@` header states how many body lines follow it, one count per side, and `git apply` streams the
+# body against those counts instead of deriving them. `parse_fragment` in git's `apply.c` holds the
+# two counts as unsigned counters and decrements them line by line, so a wrong count is never
+# reported as a wrong count.
 #
-# An overcount always stops the apply with `patch is corrupt at <file>:<line>`: git reads past the
-# body into the following lines and cannot parse them as a body. Measured on both a new-file and a
-# modification hunk, so that one is uniform.
+# What the counters themselves do was measured in two shapes: a counter decremented after it reached
+# zero wraps, and a counter still positive when the body ends stays positive. Both stop the parse
+# with `corrupt patch at <patch>:<line>` and rc 128. A third shape leaves the parse cleanly: the read
+# stops at the body line that takes the second counter to zero, and every line after it is never
+# parsed — not read and rejected, never looked at. Two counters reaching zero on the same line is not
+# required for that: `@@ -1,1 +1,2 @@` over `-a` / `+A` / `+B` parses because the old counter
+# reaches zero on the first of those lines and no later line decrements it again.
 #
-# An undercount spans every outcome including silent success, on both hunk kinds:
+# Those three are what the rows below measure. They are not the whole of `parse_fragment`, and this
+# comment does not claim to be: besides the two counter failures it returns from an unparsable `@@`
+# header, from a last body line with no newline, from a body line that begins with anything other
+# than a space, `+`, `-` or nothing at all — an empty line is a context line, which `case '\n'`
+# accepts — and from `if (!patch->recount && !deleted && !added) return -1;` — a hunk whose counts
+# the read satisfied but whose parsed region held no `+` or `-` line at all. Measured, on a file of
+# `a` / `b` / `c`: `@@ -1,2 +1,2 @@` over ` a` / ` b` / `-c` / `+C` exits 128, because the first
+# two lines take both counters to zero, the loop exits, `-c` and `+C` are never parsed, and `deleted`
+# and `added` never leave 0. The same body under `@@ -1,3 +1,3 @@` exits 0, and so does the first
+# header under `--recount`; that failure never consults a counter. One more lives a stage up, in
+# `parse_single_patch`, and there the hunk's kind does decide: `new file %s depends on old contents`
+# fires when a new-file hunk carries any old-side line, so the `@@ -1,1 +1,2 @@` shape above is fatal
+# as a new file even though the same counts and body parse and apply as a modification.
 #
-# - New-file hunk: rc 0 and the file is created short. A `+1,2` header over a four-line body exited 0
-#   and wrote the first two lines, both at the end of the patch and followed by a section that then
-#   applied normally.
-# - Modification hunk, change near the top and the truncation past the last change: rc 0 and the
-#   result is correct.
-# - Modification hunk, a change past the truncation point: rc 0 and the later change is silently
-#   dropped. Measured on a seven-line body with two edits under a `-1,5 +1,5` header: rc 0, the
-#   first edit applied, the second never did.
-# - Modification hunk, surplus context line: rc 128, `patch is corrupt`.
-# - Modification hunk, surplus added line: rc 128 `patch is corrupt`, or rc 1 `patch does not apply`
-#   when another section follows.
+# Everything below was measured on a scratch repo with git 2.55.0. Each row names the file it was
+# applied to, the header and the body, so it can be re-run. The body lines are written in backticks,
+# where the leading space of a context line shows as the first character:
+
+#   file `a` `b` `c` `d` `e`
+#   @@ -1,3 +1,3 @@  ` a` `-b` `+B` ` c`                     rc 0    f.txt -> a B c d e
+#   @@ -1,3 +1,3 @@  ` a` `-b` `+B` ` c` ` d`                rc 0    the ` d` is never parsed
+#   @@ -1,3 +1,3 @@  ... ` c` ` ZZZZ-not-in-the-file`         rc 0    that line is not in the file
+#   @@ -1,3 +1,2 @@  ` a` `-b` `+B` ` c`                     rc 128  ` c` decrements a zero count
+#   @@ -1,3 +1,4 @@  ` a` `-b` `+B` ` c`                     rc 128  new count still 1 at the end
+#   @@ -1,4 +1,3 @@  ` a` `-b` `+B` ` c`                     rc 128  old count still 1 at the end
 #
-# So the dangerous shape is not specific to one hunk kind: on both, an undercount can leave a file
-# that is missing content while the exit status and the "applied" output say it succeeded. Only the
-# overcount is uniformly loud.
+# A parse that succeeds still has to land. With no trailing context line the fragment must end at the
+# end of the file, because `apply.c` sets `match_end = !state->unidiff_zero && !trailing`. Measured
+# with the body ` a` / `-b` / `+B` under `@@ -1,2 +1,2 @@`: rc 0 against a file of `a` and `b`, and
+# rc 1 `patch does not apply` against `a b c`, the same fragment that parsed cleanly a file earlier.
+# The same body under `@@ -1,3 +1,3 @@` with ` c` / ` d` after it parses as a 3-line fragment and
+# then exits 0 against `a b c d e` but 1 against `z z z`, so rc 128 tracks the counts and rc 1 tracks
+# the tree.
 #
-# The change that prompted this check had one bad hunk of each kind, and the modification one is the
-# louder of the two. It declared 27 lines over a 28-line body and raised `patch is corrupt`, so an
-# apply in CI would have stopped there. The new-file one declared 184 lines over a 194-line body and
-# would have exited 0 with the header created short. That is what earns this check its place: it is
-# the only gate that reports the header itself rather than whatever the apply happened to do with it.
+# So a wrong count does not have one outcome, and the rows above are the ones measured: it applies
+# correctly, applies with a later edit never parsed, reports `patch does not apply`, or stops with
+# `corrupt patch`. Hunk kind decides none of the four, but it does decide whether the patch gets that
+# far: the new-file check in `parse_single_patch` above turns a shape that applies as a modification
+# into a fatal new-file hunk.
 #
-# A tree far from the patch target still reports `corrupt` rather than a context mismatch, so this
-# check runs before any hunk is checked against the tree.
+# Both hunks that prompted this check had a header their body outgrew, and the two did not share an
+# outcome. The new-file hunk at b70ce36 declared `@@ -0,0 +1,184 @@` over a 194-line body: its old
+# count starts at 0 and every body line is `+`, so the read stops at line 184 and the last 10 lines
+# are never parsed; applied on its own it exits 0 and writes 184 of the 194 lines. The
+# AuxiliaryProcess hunk declared `@@ -106,6 +106,27 @@` over 28 lines, and its 28th line ` }` is
+# context: it decrements the new counter that line 27 had already taken to zero, wraps it, and exits
+# 128. Applied as one patch, the file stops at line 8297, the second hunk, so the first hunk's
+# truncated output was never reached.
+#
+# That is what earns this check its place. `git apply` reports a consequence — a corrupt patch, a
+# refused context, or nothing at all — and one of the four outcomes leaves a short file and a success
+# status. `check_hunk_counts` is the only gate that reports the header itself, with its line number
+# and both counts, so the diagnosis names the line to edit.
+#
+# That parse stage does not consult the tree. A header whose counters cannot be satisfied reports
+# `corrupt` whatever file it is pointed at: both the overcount row above and a zero-decrementing one
+# exit 128 against a file of `z` lines as well. A header whose fragment merely fails to match is the
+# case that reports `patch does not apply` instead, so this check runs before any hunk is checked
+# against the tree.
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -1719,9 +1761,10 @@ def check_hunk_counts(patch: str) -> list[Violation]:
     is counted on neither side.
 
     Both directions are violations, and the check reports the numbers rather than predicting what
-    `git apply` will do with them. What the apply does differs by direction and by hunk kind, as the
-    comment above records; the diagnosis a reader needs is which header is wrong and by how much, and
-    that is the same either way.
+    `git apply` will do with them. What it does is not settled by the counts alone — a hunk can also
+    fail for carrying no `+` or `-` line at all, or for a new-file hunk that carries an old-side line
+    — so the diagnosis a reader needs is which header is wrong and by how much, and that is the same
+    whatever the apply then does.
 
     A header this function cannot parse is a violation, not an exception. `git apply` accepts combined
     diffs and a `@@` line is only recognised as a header by its prefix, so a header the regex does not
@@ -1832,7 +1875,7 @@ def check_predicate_is_defined(patch: str, bootstrap_patch: Path) -> list[Violat
     """
     try:
         bootstrap = bootstrap_patch.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         return [
             Violation(
                 "the predicate's definition patch cannot be read",
@@ -1941,7 +1984,7 @@ def check_predicate_is_defined(patch: str, bootstrap_patch: Path) -> list[Violat
 def run(patch_path: Path, bootstrap_patch: Path | None = None) -> int:
     try:
         patch = patch_path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         print("check-translation-switch: cannot read %s: %s" % (patch_path, error), file=sys.stderr)
         return 2
 
