@@ -7,6 +7,8 @@
 > 正文有两条引用已不在读者会看到的行上。一、第 5.2 节第 3 条的 `build-state.md:336`（GPU `.xpc` 的 `procPath`）在调查所用的 `a792cca` 上正确，该段落在外层仓库 `c7ccc3c` 上移到 `:299`，经 M95 与 M97 的合并后现为 `:336`，正文已按 `:336` 改写。二、第 5.2 节第 3 条末尾引的 `docs/ios16-launchd-xpc-resolution-gap.md:237-244` 指的是该文档讨论「反证二」的那一条，它在本仓库的第 234 行；237-244 是紧随其后的「因此本文能给定论的部分」。正文其余 `build-state.md` 行号原先按 `c7ccc3c` 写成 405-414、478-491、513-533、535-548、907、937-939，现在按当前文件统一为 442-450、515-528、550-570、572-585、954、984-986。
 >
 > **2026-11-25 补记。** 本文此后按当天在设备 `192.168.2.136`（iPadOS 16.1 / Dopamine 3.0.13 rootless；这个地址正是 `AGENTS.md` 记的当前地址，`.135` 是历史值）上取到的读数做了更正：改动落在第一节的路线 B 判定、第五节全部小节（含新增的 5.4 节）、第六节的最小改动清单与第九节的未验证项。这些更正之后本文不再与调查产物逐字节相同。
+>
+> **2026-11-26 补记。** 路线 A 的判据在代码里换了两次，本文随之一并改写：第一节的判定从「三条已确证的失败」改成「只剩载荷 ABI 一条」，第四节 4.1 与 4.2 两节整段重写，4.5 节按新判据重写并列出四个未验证前提，第二节两处对开关判据的描述、第三节旧表那段、第六节最小改动清单与第九节未验证项同时对齐。载荷数字（共享消息名 2998 条、494 条参数变更、31 条新增 reply、17 + 14 的分组、12 上下）一个未动，它们仍是唯一剩下的那条阻断的依据。改动的依据是 `patches/ios16-ipc-message-number-translation.patch:8302-8304` 的 `peerIsOlderGeneration()` 守卫与 `patches/ios16-xpc-bootstrap-compat.patch:128-149` 的宽度三分支，两处的行号与复跑命令写在各节里。
 
 本文回答一个问题：**在触发下一次 4 小时 42 分的 WebKit 构建之前，哪几条必须为真，以及现在判定为 go 还是 no-go。**
 
@@ -17,11 +19,11 @@
 
 ## 一、判定
 
-**路线 A：no-go。判据是三条已确证的失败，不是工作量。**
+**路线 A：no-go。判据只剩一条，即第 3 条载荷 ABI 不兼容，它不是工作量。前两条已分别被推翻与取代，都不再构成阻断。**
 
-1. 翻译层当前一次也不生效。开关的判据键 `client-sdk-version` 在 16.0 到 18.3 的任何 iOS tag 里都没有被写过，所以 `setShouldTranslateMessageNames(true)` 永不执行。
-2. 在翻译层之前，helper 已经死在 XPC 入口。16.1 UI 发的 `client-sdk-aligned-behaviors` 是 8 字节，18.3 helper 要求 12 字节，`RELEASE_ASSERT` 在 `NDEBUG` 下展开为 `CRASH_WITH_INFO`。这是 helper 的第一条 bootstrap 消息，排在 `initializeWebProcess` 之前。
-3. 即使前两条都修好，编号翻译只改消息号，不改载荷。两版共享消息名 2998 条，其中 494 条载荷参数变了；31 条在 18.3 新增了 reply，塔把这 31 条按「参数是否同时变」分成 17 + 14。这 14 条里有 `WebPageProxy.DecidePolicyForNavigationActionAsync`：16.1 收 13 个参数，18.3 发 1 个参数加一个回复。我抽查了三条，其中两条不该在本组（见 4.3 节），所以真实条数在 12 上下。
+1. **（2026-11-26 作废）翻译层「永不执行」这个判据不成立。** 本文此前写「开关的判据键 `client-sdk-version` 在 16.0 到 18.3 的任何 iOS tag 里都没有被写过，所以 `setShouldTranslateMessageNames(true)` 永不执行」。那个键从未被写过这件事仍然成立，但它已经不决定开关：M149 把判据换成了对端位图的宽度，开关点是 `patches/ios16-ipc-message-number-translation.patch:8302-8304` 的 `if (peerIsOlderGeneration())`。旧判据把「这个键没人写」当成「开关不会执行」，而现在的开关根本不读这个键。依据与复跑命令见 4.1 节。
+2. **（2026-11-26 被取代）helper 死在 XPC 入口这条已在源码层修掉。** 本文此前写 16.1 UI 发的 8 字节位图会让 18.3 helper 的 `RELEASE_ASSERT` 在第一条 bootstrap 消息处崩。`patches/ios16-xpc-bootstrap-compat.patch:81` 删掉了那条断言，改成分三个宽度分支，见 `:132`、`:138`、`:141`。**这条修好只在源码层成立，没有任何真机读数**，未验证的两项写在第九节。
+3. **仍成立，且是唯一剩下的阻断：编号翻译只改消息号，不改载荷。** 两版共享消息名 2998 条，其中 494 条载荷参数变了；31 条在 18.3 新增了 reply，塔把这 31 条按「参数是否同时变」分成 17 + 14。这 14 条里有 `WebPageProxy.DecidePolicyForNavigationActionAsync`：16.1 收 13 个参数，18.3 发 1 个参数加一个回复。我抽查了三条，其中两条不该在本组（见 4.3 节），所以真实条数在 12 上下。**前两条的推翻与取代都不改变这一条**：它讲的是编号层与载荷层的关系，编号层通不通都一样成立。
 
 **路线 B：no-go 的判据是一条已被否证的前置条件，它不是构建能解决的。**
 
@@ -29,7 +31,7 @@ dyld 这一层今天没有生效。补丁在仓库里，构建产物里也有，
 
 **判定 (b) 要用 runbook 那个精确符号名计数，不要用裸子串计数。** 裸子串 `isOverridablePath` 的计数在任何一份 dyld 上都不为零（设备上 `7 1 1 2`），区分不了装没装；`MACHOMERGER` 出现 38 次也全是原带的 `dlopen_from` 与 `__fcntl`。这两点见 5.1 节的「四个陷阱」。
 
-**launchd 会不会从覆盖目录解析四个服务名，因此仍未测，而它现在排在第二项。** 这个读数要求运行时真的采用了覆盖目录，前置条件今天不成立，所以今天取不到它。**因此对「触发下一次构建」的判定仍然是 no-go**，理由不是构建太贵，而是构建买不到任何一个现在缺的读数：要补的是 basebin 层的重装与重测，不是新构建。路线 A 已被三条确证失败堵住，新构建只会把同样的失败再跑一遍。
+**launchd 会不会从覆盖目录解析四个服务名，因此仍未测，而它现在排在第二项。** 这个读数要求运行时真的采用了覆盖目录，前置条件今天不成立，所以今天取不到它。**因此对「触发下一次构建」的判定仍然是 no-go**，理由不是构建太贵，而是构建买不到任何一个现在缺的读数：要补的是 basebin 层的重装与重测，不是新构建。路线 A 只剩载荷 ABI 一条阻断，而那一条要靠改编码器解决，不是新构建能带来的读数。
 
 **也就是说，路线 B 的当前状态是「第一步未成立」，不是「只差一个读数」。** 把这一步写成「只差 launchd」，会让下一个会话去测一个测不出结果的配置。
 
@@ -39,83 +41,114 @@ dyld 这一层今天没有生效。补丁在仓库里，构建产物里也有，
 
 由此得到一条必须明说的结论：**编号翻译补丁不在路线 B 的关键路径上，而且应当从启用列表里拿掉。**
 
-依据是补丁自己的门。`patches/ios16-ipc-message-number-translation.patch` 把整个翻译层包在 `IOS_16_MESSAGE_NUMBER_TRANSLATION` 里，该宏由 `__IPHONE_OS_VERSION_MIN_REQUIRED < 180000` 定义，所以按 16.1 部署目标构建时它**总是编进去**。运行时是否真的翻译由 `ios16-ipc-message-number-translation.patch` 在 `XPCServiceEntryPoint.mm` 里读对端 SDK 版本决定，读不到就当对端同代、不翻译。
+依据是补丁自己的门。`patches/ios16-ipc-message-number-translation.patch` 把整个翻译层包在 `IOS_16_MESSAGE_NUMBER_TRANSLATION` 里，该宏由 `__IPHONE_OS_VERSION_MIN_REQUIRED < 180000` 定义，所以按 16.1 部署目标构建时它**总是编进去**。运行时是否真的翻译由同一个补丁在 `Source/WebKit/Shared/AuxiliaryProcess.cpp` 里按对端位图宽度决定：`patches/ios16-ipc-message-number-translation.patch:8302-8304` 的 `if (peerIsOlderGeneration())`（4.1 节）。宽度取自 `patches/ios16-xpc-bootstrap-compat.patch:132-144` 的三个分支。
 
-这个设计在路线 B 下是安全的：UI 与 helper 同为 18.3 时对端不发可识别的版本键，开关保持 false，翻译层空转。所以它不会被删，但也不承担任何职责。**判定路线 B 成功与否，不能引用翻译表。**
+这个设计在路线 B 下是安全的：UI 与 helper 同为 18.3 时两侧位图等宽，走 `:132` 那一支，标志写 `false`，翻译层空转。所以它不会被删，但也不承担任何职责。**判定路线 B 成功与否，不能引用翻译表。**
 
-一处风险要记下来：M85 计划把开关改成编译期常量置真。若该改动落地，路线 B 下 UI 与 helper 同代，常量置真会让**同代连接也被重编号**，而两侧编号本来就相等。这个改动在路线 B 定案前不应合入。
+一处风险要记下来，**它已经以另一种形式落地了**：本文此前写「M85 计划把开关改成编译期常量置真」。那个方向没有落地，落地的 M149 是把开关挂在 `peerIsOlderGeneration()` 上，这个判据对路线 B 返回 `false`，所以第二节担心的「同代连接也被重编号」不会发生。风险随之改写为下面这条：**判据的正确性依赖宽度，而宽度的两个盲区都真实存在**（4.2 节第三条）。对本项目交付的两种配对，宽度分得开；对 16.4、17.x、18.0 到 18.2 这类同为 12 字节的对端，它分不开。
 
 ## 三、本文不使用的证据
 
 - **`build-state.md` 第三轮的旧 A/B 表全部作废。** 撤回声明在 `build-state.md:442-450`：设备上没有 `pkill`，`pgrep` 也没有，脚本里的终止命令静默失败，每次测的都是同一个旧进程。任何以「放进 `WebKit.framework` 就让端点归零」为论据的推论都作废。**2026-11-25 本轮又遇到同一类缺陷的另一种形态**：设备上的 `measure_override.sh` 用 `open -b` 与 `uiopen <url>` 启动 Safari，两条都启动不了 Safari（前者返回 7，后者打开 Chrome），它的历次 `safari pid after launch: NONE` 同样作废，读数与正确写法见 5.4.1 节。
-- **翻译补丁里 2807 条映射不能作为任一方向的证据。** 该表由 `Safari-614.1.9` 生成，不是设备在跑的 16.1。`InitializeConnection` 在前者是 2444、在后者是 2478，所以设备发出的握手消息被翻成一条无关消息。M87 重生成该表。本文的全部结论都不依赖这张表，路线 A 的 no-go 判据也不依赖它：第 4.1 条只用「键从未被写过」这一个事实，与表无关。
+- **翻译补丁里 2807 条映射不能作为任一方向的证据。** 该表由 `Safari-614.1.9` 生成，不是设备在跑的 16.1。`InitializeConnection` 在前者是 2444、在后者是 2478，所以设备发出的握手消息被翻成一条无关消息。M141 已按发货 tag 重建这两张表，各 2911 条 `case`。本文的全部结论都不依赖旧表；路线 A 的 no-go 判据与表无关，它落在载荷层（4.3、4.4 节），不在编号层。
 - **16.1 的消息计数一律取出货树。** 见第七节的口径。
 
 ## 四、路线 A 为什么不能承载一页
 
-### 4.1 翻译开关恒为假（已确证，源码）
+### 4.1 翻译开关的判据是对端位图宽度（2026-11-26 重写；旧判据已作废）
 
-18.3 helper 侧读对端版本的函数读 `client-sdk-version`：
-
-```
-patches/ios16-ipc-message-number-translation.patch:8106
-auto* versionString = xpc_dictionary_get_string(m_initializerMessage, "client-sdk-version");
-if (!versionString)
-    return false;
-```
-
-`client-sdk-version` 在 `releases/Apple/Safari-16.1-iOS-16.1` 的 `Source/` 下命中 0，在 `releases/Apple/Safari-18.3.1-iOS-18.3.2` 下同样命中 0：
+**本文此前这一节写的是「翻译开关恒为假」。那一节已被 M149 推翻，作废。** 它引用的是 `patches/ios16-ipc-message-number-translation.patch:8106` 的 `uiProcessSDKVersionFromBootstrap()`，读 `client-sdk-version` 键。那个函数在本仓库已经不存在：
 
 ```sh
-cd ~/.cache/wk79/webkit
-git grep -c 'client-sdk-version' releases/Apple/Safari-16.1-iOS-16.1 -- Source    # 无输出
-git grep -c 'client-sdk-version' releases/Apple/Safari-18.3.1-iOS-18.3.2 -- Source # 无输出
+cd WebKitPlayground
+grep -c 'client-sdk-version' patches/ios16-ipc-message-number-translation.patch   # 1
+grep -c 'xpc_dictionary_get_string' patches/ios16-ipc-message-number-translation.patch  # 0
+grep -c 'getUIProcessSDKVersion' patches/ios16-ipc-message-number-translation.patch     # 0
+grep -c '^diff --git.*XPCServiceEntryPoint' patches/ios16-ipc-message-number-translation.patch  # 0
 ```
 
-16.1 实际发的是另一个键，而且是**无条件**发：
+唯一那一处命中不是代码，是注释，位置在 `:8140`：`"client-sdk-version" is written by no iOS tag and the code that read it is deleted`。`xpc_dictionary_get_string` 计数 0，说明补丁里再没有从 bootstrap 消息读字符串键的代码；`XPCServiceEntryPoint.mm` 段计数 0，说明那个读点连同所在文件一起被删掉了。
+
+**旧判据错在哪里。** 它从「`client-sdk-version` 在 16.0 到 18.3 的任何 iOS tag 里都没有被写过」推出「所以 `setShouldTranslateMessageNames(true)` 永不执行」。第一个事实成立，第二个结论不成立，因为开关当时已经不看这个键。把「某个键没人写」当成「开关不执行」，是把两个不同层次的事实接在了一起。
+
+**当前判据：对端送来的 `client-sdk-aligned-behaviors` 位图比本构建的窄，就翻译。** 开关点是 `patches/ios16-ipc-message-number-translation.patch:8302-8304`：
 
 ```
-releases/Apple/Safari-16.1-iOS-16.1:Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm:209
-xpc_dictionary_set_data(bootstrapMessage.get(), "client-sdk-aligned-behaviors", sdkBehaviors.storage(), sdkBehaviors.storageLengthInBytes());
+patches/ios16-ipc-message-number-translation.patch:8302
+    if (peerIsOlderGeneration()) {
+        m_connection->setShouldTranslateMessageNames(true);
+    }
 ```
 
-于是 `uiProcessSDKVersionFromBootstrap()` 返回 `nullopt`，判断版本的条件短路，`m_shouldTranslateMessageNames` 保持 false。发方向与收方向都不动。**这条路线上此刻没有任何一条消息被翻译过。**
+`peerIsOlderGeneration()` 读的是宽度答案，不是版本字符串。它由 `patches/ios16-xpc-bootstrap-compat.patch` 提供：
 
-### 4.2 helper 死在 XPC 入口，排在握手之前（已确证，源码）
+| 位置 | 内容 |
+| --- | --- |
+| `:20` | `bool peerIsOlderGeneration();` 声明，在 `AuxiliaryProcess.h` 的 `namespace WebKit` 里 |
+| `:69-72` | 定义，读一个进程级 `std::atomic<bool>` |
+| `:128` | `const size_t ownLength = behaviors.storageLengthInBytes();`，本构建自己的宽度 |
+| `:132-136` | 等宽分支：`memcpy` 复制，标志写 `false` |
+| `:138-140` | 更窄分支：标志写 `true`，路线 A 只有在对端确实发 8 字节时走这一支 |
+| `:141-144` | 更宽分支：标志写 `false` |
+| `:149` | `return length < ownLength;` |
 
-同一个键在两版里的长度不同，因为承载它的位图按枚举项数分配。
+`:139` 与 `:142` 是两条 `RELEASE_LOG_ERROR`，分别打出「narrower than this build's」与「wider than this build's」，真机上可以直接从 helper 日志读这一次走了哪个分支。
 
-| 项 | 16.1 出货树 | 18.3.1 出货树 |
-| --- | --- | --- |
-| `SDKAlignedBehavior` 枚举项数 | **64** | **95** |
-| 位图字数 `(n+31)/32` | 2 | 3 |
-| 字节数 | **8** | **12** |
-
-项数由命令数出：
+**检查器实测。** `scripts/check-translation-switch.py` 把「调用只有一个、位置在 `AuxiliaryProcess::initialize`、且被 `peerIsOlderGeneration()` 守着」写成可复跑的断言。在本文所依据的内层提交上跑：
 
 ```sh
-cd ~/.cache/wk79/webkit
-for T in releases/Apple/Safari-16.1-iOS-16.1 releases/Apple/Safari-18.3.1-iOS-18.3.2; do
-  git show $T:Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h \
-    | sed -n '/^enum class SDKAlignedBehavior/,/^};/p' \
-    | grep -cE '^\s+[A-Za-z][A-Za-z0-9_]*,?\s*$'
-done
-# 64 / 95
+cd WebKitPlayground
+python3 scripts/check-translation-switch.py; echo "rc=$?"
 ```
 
-断言点：
+实测输出，原文一行：
 
 ```
-releases/Apple/Safari-16.1-iOS-16.1:Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm:91
-releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceEntryPoint.mm:93
-    RELEASE_ASSERT(length == behaviors.storageLengthInBytes());
+check-translation-switch: one setter call in AuxiliaryProcess.cpp under peerIsOlderGeneration(), both reads ask the member, the flag keeps its false initialiser, the rationale is intact and the table anchors hold
+rc=0
 ```
 
-`RELEASE_ASSERT` 在 Release 下不消失。`releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WTF/wtf/Assertions.h:732-735` 的 `!ASSERT_ENABLED` 分支把它展开成 `CRASH_WITH_INFO`。所以 16.1 UI 拉起 18.3 helper 时，`8 == 12` 为假，helper 在 `getClientSDKAlignedBehaviors` 里直接崩，`initializeConnection` 与 `initializeWebProcess` 都走不到。
+**环境上的两个限定，读这个结论时必须一起读。**
+
+- 它只证明源码结构：调用唯一、位置正确、守卫在场、成员初值仍是 `false`、表锚点成立。它不证明这条连接在真机上会被翻译。
+- 「对端位图窄就翻译」在真机上是否触发，依赖两个从未测过的量：真机 16.1 UI 进程的位图宽度是不是 8 字节，以及 `peerIsOlderGeneration()` 在那个进程里是否真的返回 `true`。两项都列在第九节。
+
+因此 4.1 这一节**不再否证路线 A**。它从「已确证的失败」变成了「已实现的判据，真机未验证」。
+
+### 4.2 helper 死在 XPC 入口这条已被宽度分发取代（2026-11-26 重写；源码层已修，真机未验证）
+
+**本文此前这一节把「helper 死在 XPC 入口」写成路线 A 的第二条确证失败。这条失败在源码层已经不存在**，`patches/ios16-xpc-bootstrap-compat.patch:81` 把那条无条件断言整行删掉了：
+
+```
+patches/ios16-xpc-bootstrap-compat.patch:81
+-    RELEASE_ASSERT(length == behaviors.storageLengthInBytes());
+-    memcpy(behaviors.storage(), behaviorData, length);
+-
+-    return true;
+```
+
+取代它的是三个宽度分支，位置与 4.1 节那张表一致：`:132` 等宽、`:138` 更窄、`:141` 更宽，各自写标志并返回。旧断言要求两侧等宽，任何不等宽的对端都会让 `RELEASE_ASSERT` 在 `NDEBUG` 下展开成 `CRASH_WITH_INFO`；新代码对三种宽度都有定义好的行为，`behaviors` 参数保持零初始化，也就是「所有 SDK aligned behavior 取默认值」，不再是崩溃。
+
+**宽度差异本身仍然成立，它现在是分派的输入而不是崩溃的原因。** 两侧的位图宽度差来自 `SDKAlignedBehavior` 的项数：
+
+| 项 | 16.0 / 16.1 | 16.2 / 16.3 | 16.4 | 17.0 | 18.0 | 18.3.1（本构建） |
+| --- | --- | --- | --- | --- | --- | --- |
+| `SDKAlignedBehavior::NumberOfBehaviors` | 63 | 64 | 73 | 79 | 93 | 94 |
+| 字节数 | **8** | **8** | 12 | 12 | 12 | **12** |
+
+这六行是补丁自己注释里的读数，`patches/ios16-xpc-bootstrap-compat.patch:97-104`，口径写在 `:90-95`：计的是枚举值 `NumberOfBehaviors`，不是枚举行数，两者差一个哨兵，按行数会把 16.2 与 16.3 错算成三个字。**这六个数是生成器与编译的产物，不是设备读数**，本文没有在真机上取过其中任何一个。
+
+**这条修好只在源码层成立。** 三个必须一起读的限定：
+
+1. **没有真机读数。** `RELEASE_ASSERT` 消失这件事是从补丁文本读出来的，没有在设备上跑过一次 16.1 UI 拉起本构建 helper。
+2. **不解决 4.3。** 修好 XPC 入口之后撞上的就是载荷层，所以它单独不构成 go 的理由，这一点与本文此前的结论一致。
+3. **盲区仍在。** 宽度只把 16.0 到 16.3（8 字节）与 16.4 及以后（12 字节）分开。16.4、17.0、18.0 到 18.2 与本构建同为 12 字节，会被判为同代、**不翻译**；16.0、16.2、16.3 与 16.1 同为 8 字节，会被判为更早、**翻译**，而它们用的是 16.1 的编号表。两个方向都不在本项目交付的配对里，量化需要相应版本的真机，本轮没有。详细读数见 `docs/ios16-ipc-message-number-translation.md` 第 5.3 节与第 8 节。
+
+因此 4.2 这一节**不再否证路线 A**。它从「已确证的失败」变成了「源码层已修、真机未验证的一处兼容处理」。
 
 这条同时解释了此前被归因为「端点归零」的形态：helper 在注册任何东西之前就死了。它与 `_WTFSignpostIndirectLoggingEnabled` 缺符号是**两个不同阶段**的失败，前者在 XPC 入口，后者在 `dyld4::prepare`，两者可以并存，不能互相解释。
 
-**修它不难**，把断言改成长度分派即可（M85 的方向）。但修好之后立刻撞上 4.3，所以它单独不构成 go 的理由。
+**这条修复已经落地，只是没有真机验证。** 4.2 节写的长度分派就是 M85 那个方向，`patches/ios16-xpc-bootstrap-compat.patch:81` 删掉了断言、`:132-144` 改成三分支。所以「修它不难」这句已经过时；仍然成立的是后半句：修好之后立刻撞上 4.3，它单独不构成 go 的理由。
 
 ### 4.3 编号之外还差什么（已确证，源码；计数由塔在真树上测得）
 
@@ -160,7 +193,7 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/WebProcess/WebProcess.mess
 - **`WebPage.TouchEvent` 参数没有变。** 两侧都是 `(WebKit::WebTouchEvent event)`，16.1 在 `WebProcess/WebPage/WebPage.messages.in:152`、18.3 在 `:159`，只加了 reply。它属于「只差 reply ID」那一组。按塔自己的口径（`has_reply = reply_parameters is not None`）它确实算「新增 reply」，但不算「参数同时变」。
 - **`DrawingArea.UpdateGeometry` 不能算「3 参数变 1 参数」。** 这个名字在两侧各有两条重载，且受编译开关分割。16.1 的 `Source/WebKit/WebProcess/WebPage/DrawingArea.messages.in:33` 是 `(IntSize viewSize, bool flushSynchronously, MachSendRight fencePort)`，18.3 同为 `:34` 且签名不变、只加 `-> ()`；16.1 `:45` 的 WC 版 `(uint64_t backingStoreStateID, IntSize viewSize)` 在 18.3 改名为 `:46` 的 `UpdateGeometryWC` 并多一个 `deviceScaleFactor`。「丢掉 `MachSendRight`」与两侧实际签名都不符。
 
-因此「14 条」这个数字至少偏大 2，真实条数在 12 上下；分组边界是否还有别的误判，我抽查三条就命中两条，比例不低，**下游不应把 12 或 14 当作已定数字使用。** 结论不依赖它：4.1 与 4.2 已各自单独否证路线 A。
+因此「14 条」这个数字至少偏大 2，真实条数在 12 上下；分组边界是否还有别的误判，我抽查三条就命中两条，比例不低，**下游不应把 12 或 14 当作已定数字使用。** 本文此前在这里写「结论不依赖它：4.1 与 4.2 已各自单独否证路线 A」，**那一句已作废**：4.1 与 4.2 在 2026-11-26 都不再单独否证路线 A，前者判据换成了宽度，后者在源码层被取代。于是这一条成为路线 A 剩下的唯一阻断，而它正是本节这批数字所在的那一层。**分组精度因此比此前更重要**：此前它只是三条判据中的一条，现在没有别的判据能兜住它的误差。
 
 | 消息 | 变化 | 在两棵出货树上的核对 | 是否在一页加载的主路径上 |
 | --- | --- | --- | --- |
@@ -229,11 +262,30 @@ releases/Apple/Safari-18.3.1-iOS-18.3.2:Source/WebKit/UIProcess/RemoteLayerTree/
 
 结论：**这条不是「不可表达」，是「必须以对方格式重写编码器」。** 两个方向都过不去，但性质不同，读的人不能把两者混为一谈。
 
-### 4.5 路线 A 的判定
+### 4.5 路线 A 的判定（2026-11-26 重写）
 
-按 4.1 到 4.4，路线 A 现在一次也没有翻译过任何消息，helper 在第一条 bootstrap 消息处就死，修掉之后还有一批参数变更的消息（含导航决策与窗口几何，条数见 4.3 节的更正）以及一份要按对端格式重写的图层树编码器。494 条载荷变更没有任何审计按「谁发谁收」分过类，所以剩余适配的规模**没有被任何测量界定**。
+**路线 A 现在是 no-go，判据只剩载荷层一条。**
 
-**这是 no-go 的完整理由：已确证的三条失败加上一处未被界定的适配面。** 不是因为工作量大，而是因为「把编号翻译层补完就能渲染」这个命题已被 4.1 与 4.2 直接否证，而补完之后的剩余面没有读数支撑它可达。
+先说清这一节此前写错了什么。它写「按 4.1 到 4.4，路线 A 现在一次也没有翻译过任何消息，helper 在第一条 bootstrap 消息处就死」——**前半句已被 M149 推翻，后半句已被 `ios16-xpc-bootstrap-compat.patch` 取代**。今天的实际状态是：翻译开关有了实测的判据（4.1 节），XPC 入口的断言在源码层已换成宽度分发（4.2 节），两项都没有真机读数。4.3 与 4.4 不受影响，它们讲的是载荷层，而载荷层不因编号层与入口层的修复而改变。
+
+按 4.3 与 4.4，剩下的阻断是：
+
+| 阻断 | 规模与依据 | 性质 |
+| --- | --- | --- |
+| 编号翻译只改消息号，不改载荷 | 共享消息名 2998 条，494 条载荷参数变了；31 条新增 reply，其中参数同时也变的那一组条数在 12 上下，分组边界尚有误判（4.3 节） | 必须逐条适配，且不是同一个形状 |
+| 图层树编码器要按对端格式重写 | `CommitLayerTree` 与 `LayerProperties` 两个方向都过不去（4.4 节） | 接收方是系统二进制、不能改，桥只能架在我们这一侧 |
+| 494 条载荷变更未按方向分类 | 本文只对 31 条 reply 变更与 `CommitLayerTree` 做了方向判定 | **规模没有被任何测量界定** |
+
+**这是 no-go 的完整理由：载荷层的不兼容加上一处未被界定的适配面。** 不是因为工作量大，而是因为「把编号翻译层补完就能渲染」这个命题的否证依据换了：它此前靠 4.1 与 4.2 直接否证，现在靠的是载荷层——编号层即使全部打通，4.3 与 4.4 那两批消息仍然过不去，而补完之后的剩余面没有读数支撑它可达。
+
+**这个结论成立依赖四个未在设备上验证的前提，缺任何一条都不构成「已验证」：**
+
+1. 真机 16.1 UI 进程的 `client-sdk-aligned-behaviors` 位图宽度是 8 字节。本文的 8 字节是按 `SDKAlignedBehavior::NumberOfBehaviors` 的枚举值推出来的，没有在设备上读过。
+2. `peerIsOlderGeneration()` 在真机上对路线 A 返回 `true`。1 成立才有这一步，而 1 未测，所以这一步也未测。
+3. 宽度分发在真机上真的让 helper 活过 XPC 入口。源码层成立，没有跑过一次 16.1 UI 拉起本构建 helper。
+4. 4.3 的分组边界。本文抽查三条命中两条误判，12 与 14 都不是已定数字；而现在是唯一阻断，误差没有别的判据兜住。
+
+前三条里，第 1 条与第 2 条的验证方法写在 `docs/ios16-ipc-message-number-translation.md` 第 8 节（ii），第 3 条的判据是 helper 存活并在日志里打出 `patches/ios16-xpc-bootstrap-compat.patch:139` 或 `:142` 那两条之一；三条在本文第九节各自单列。第 4 条由 4.3 节自身承担，`docs/ios16-ipc-message-number-translation.md` 第 6.2 节对载荷层规模另有一套按接收者聚合的计数，口径与本文 4.3 节不同，两者不能互相替代。
 
 ## 五、路线 B 为什么第一步未成立
 
@@ -323,7 +375,7 @@ reasons: Symbol not found: _WTFSignpostIndirectLoggingEnabled
 | 18.3 框架安装 | 五个 framework 已装，`minos=16.1.0 sdk=18.5.0` | 成立 |
 | UI 进程加载了我们那份二进制 | 本轮 UI 进程三份 framework 全在 `/System` | **不成立**（5.4.4 节） |
 
-**所以拦住路线 B 的是 dyld 这一层，不是 launchd。** 具体形态是：重装带两个新 hook 的 basebin，让 `dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且判定 (b) 变成 `1 1 1 1`、`gen/dyld` 变成 974608、`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（不是 `4 2 4 2 4 2`；那四个数是子串计数，见 `../../webkit-install-runbook.md:1249`）；然后重测 UI 进程的 `environment` 段落与 `lldb image list`。**只有这一步通过之后，launchd 解析四个服务名那一个读数才有意义。** 它现在仍未测，因为前置条件不成立，不是因为已经测出「不解析」。
+**所以拦住路线 B 的是 dyld 这一层，不是 launchd。** 具体形态是：重装带两个新 hook 的 basebin，让 `dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且判定 (b) 变成 `1 1 1 1`、`gen/dyld` 变成 974608、`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（不是 `4 2 4 2 4 2`；那四个数是子串计数，见 `docs/dopamine-basebin-webkit-override.md:1201`）；然后重测 UI 进程的 `environment` 段落与 `lldb image list`。**只有这一步通过之后，launchd 解析四个服务名那一个读数才有意义。** 它现在仍未测，因为前置条件不成立，不是因为已经测出「不解析」。
 
 **这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。**
 
@@ -433,7 +485,7 @@ TMPDIR
 
 #### 5.4.6 这一轮的读数和旧记录的关系
 
-本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（按判定 (b) 的四个完整符号名各自 `bytes.count` 计数，不用正则，`../../AGENTS.md:272-283`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`。**这一条 2026-11-24 当时记的是 `4 2 4 2 4 2`，重装后照那个数去比会判失败**：`systemhook.dylib` 的计数有两种写法，`data.count(s.encode())` 按子串数会把 `__XPC_DYLD_FRAMEWORK_PATH` 里的裸名再算一遍，前四项因此翻倍成 `4 2 4 2`；按整条 entry 比较的真值是 `2 2 2 2`，两种写法在 `234336` 上都非零，所以当时的「通过」结论不受影响，只有发布的数字要换。判据是重跑 `../../webkit-install-runbook.md:1231` 第六阶段那条命令，读它打印的六项，期望值是 `2 2 2 2 4 2`。
+本文 5.1 节此前引的 `.tower/comms/inbox/20261125-tower-survey-xpc-endpoint-dyld-dyld-hook-1-strings.md:33` 记 `gen/dyld` 为 974608、两个 hook 计数为 `1`，按当时的状态那是成立的。**它今天作废的原因是文件变了，不是读法变了**：今天同一文件是 974016、判定 (b) 是 `1 0 0 1`。两次用的是同一个数法（按判定 (b) 的四个完整符号名各自 `bytes.count` 计数，不用正则，`../../AGENTS.md:272-283`），所以两份读数可直接对照。**重装 basebin 之后旧读数应能复现**：hook dylib 回到 75952、判定 (b) 回到 `1 1 1 1`、`gen/dyld` 回到 974608、`systemhook.dylib` 回到 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`。**这一条 2026-11-24 当时记的是 `4 2 4 2 4 2`，重装后照那个数去比会判失败**：`systemhook.dylib` 的计数有两种写法，`data.count(s.encode())` 按子串数会把 `__XPC_DYLD_FRAMEWORK_PATH` 里的裸名再算一遍，前四项因此翻倍成 `4 2 4 2`；按整条 entry 比较的真值是 `2 2 2 2`，两种写法在 `234336` 上都非零，所以当时的「通过」结论不受影响，只有发布的数字要换。判据是重跑 `../../webkit-install-runbook.md:1142-1148` 第六阶段那条命令，读它打印的六项，期望值是 `2 2 2 2 4 2`。
 
 **这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。**
 
@@ -448,23 +500,23 @@ TMPDIR
 | # | 动作 | 判据 | 为何是必需 |
 | --- | --- | --- | --- |
 | 1 | 确认设备可达 | `ssh mobile@192.168.2.136` 成功（11-25 本轮就是在这个地址上取的读数；`AGENTS.md` 记的当前地址正是 `.136`，接手机热点时用 `172.20.10.1`，`.135` 是历史值、现在返回 `No route to host`） | 一切测量的前提。本文原先记「两个地址都不可达」是更早一轮的状态，已不必再跑一遍 |
-| 2 | **重装带两个新 hook 的 basebin，让 dyld 层生效** | `gen/dyld` 变成 974608；判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`；`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`；`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（从前写的 `4 2 4 2 4 2` 是子串计数；字节数表在 `../../webkit-install-runbook.md:113-114`，判定 (b) 的四个精确符号计数在 `:866-908`、两行对照表在 `:899-904`，`systemhook` 的两行表在 `:1257-1258`，计数写法见同文件 `:1249`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 5.1 节「四个陷阱」 | **这一步是本轮新增的第一项。** 5.1 节第三层今天不成立，后面每一条的前提都是它成立。本条是持久性加破坏性操作：命令为 `jbctl update basebin`，会触发 `reboot3(RB2_USERREBOOT)` 且所有应用退出，须用户确认。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。回退方式是用 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑同一条命令 |
+| 2 | **重装带两个新 hook 的 basebin，让 dyld 层生效** | `gen/dyld` 变成 974608；判定 (b) 从 `1 0 0 1` 变成 `1 1 1 1`；`dyldhook_merge.arm64e.iOS16-17.dylib` 变成 75952 字节且同一判据变成 `1 1 1 1`；`systemhook.dylib` 变成 234336 且六项整条 entry 计数为 `2 2 2 2 4 2`（从前写的 `4 2 4 2 4 2` 是子串计数；字节数表在 `../../webkit-install-runbook.md:113-114`，判定 (b) 的四个精确符号计数在 `:880-896`、两行对照表在 `:917-922`，`systemhook` 的六项计数命令在 `:1142-1148`、两张版本对照表在 `:1155-1159`；整条 entry 与裸子串两种数法的差别见 `docs/dopamine-basebin-webkit-override.md:161` 与 `:1201`）。**不要用裸子串 `7 1 1 2` 或 `MACHOMERGER` 的出现次数当判据**，理由见 5.1 节「四个陷阱」 | **这一步是本轮新增的第一项。** 5.1 节第三层今天不成立，后面每一条的前提都是它成立。本条是持久性加破坏性操作：命令为 `jbctl update basebin`，会触发 `reboot3(RB2_USERREBOOT)` 且所有应用退出，须用户确认。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。回退方式是用 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑同一条命令 |
 | 3 | 重测 UI 进程是否拿到覆盖路径并加载覆盖目录的二进制 | `launchctl print pid/<PID>` 的 `environment` 段落出现 `DYLD_FRAMEWORK_PATH` 且指向 `...WebKitOverride`；`lldb image list` 里 `WebKit`、`WebCore`、`JavaScriptCore` 三份的前缀含 `WebKitOverride` | 第 3 步的读数是「dyld 层真的生效」的判据。它不成立时，端点读数对 launchd 一句话也没说 |
 | 4 | 建覆盖目录并跑 CrashReporter 差分，确认 UI 进程不再因 `DYLD` 中止 | 目标应用无新增 `termination.namespace = DYLD` 报告 | 归零读数有两种成因，不排除 dyld 中止就无法归因 |
 | 5 | 在同一次运行里取端点读数：用 5.4.1 的正确启动命令、`killall` 清干净、读 `launchctl print pid/<PID>` 的 `services = {` 段落，**按去重后的基础服务名计数** | 若基础服务名仍为 0 或显著少于 4，且 UI 进程存活、无新增 UI 崩溃报告，则判 (B)。**不要用按行 `grep -c` 的 8 当基线**，它不是常量（5.4.2 节） | 这是路线 B 这一层要判的那一项，且只有在第 2、3 步通过后才有效 |
 | 6 | 若判 (B)，测「覆盖目录里不放 `XPCServices`」与「放系统 16.1 的 `XPCServices`」两种配置 | 两次读数与第 5 步对照 | `prune_xpc_services` 现在会删掉它，而此前把它当候选来源的论证都未测 |
 | 7 | 若 (B) 成立，判定「让 UI 进程自己注册端点」的可行性 | 判据是源码：`Source/WebKit/UIProcess/` 下 `XPC_CONNECTION_MACH_SERVICE_LISTENER` 命中 0 | 代码缺失比权限更快否决；这段代码不存在，要写得新增一个子系统 |
 
-**第 5 步判 (A) 时的最小改动清单是另一组**，按路线 A 的 4.1 到 4.4：
+**第 5 步判 (A) 时的最小改动清单是另一组，按路线 A 的 4.1 到 4.4。前两项已经落地，落点与行号见下，所以这份清单现在只剩第 3 至 5 项未做：**
 
-1. 把 `ios16-xpc-bootstrap-compat.patch` 的 fallback 判据从「键缺失」改为「长度为 8」，让 16.1 的 8 字节数据块可达（M85 已在做）。
-2. 把翻译开关从运行期判据改为编译期常量（M85 的方向）。**注意第二节的风险：路线 B 定案前不应合入。**
+1. **（已落地）** `ios16-xpc-bootstrap-compat.patch` 不再按「键缺失」判，改成按位图宽度三分支：`patches/ios16-xpc-bootstrap-compat.patch:128` 取本构建宽度，`:132` 等宽、`:138` 更窄、`:141` 更宽。原文写的「改为长度为 8」并不准确，落地的是三分支而不是单一长度比较。
+2. **（未按此方向落地，问题已被另一种方式解决）** 本文此前要求「把翻译开关从运行期判据改为编译期常量」。M149 没这么做，改成挂在 `peerIsOlderGeneration()` 上（`patches/ios16-ipc-message-number-translation.patch:8302-8304`）。编译期常量会让路线 B 下同代连接也被重编号，第二节那条风险正是针对它的，所以这个方向不应再做。
 3. 在 `handleMessageAsync` 加一处「载荷停在参数边界时合成 `AsyncReplyID`」的适配，解决只差 reply ID 的那一整组（塔报 17 条，见 4.3 节）。
 4. 逐条处理参数变更的消息（条数见 4.3 节的更正）；`DecidePolicyForNavigationActionAsync` 要同时改编码与回复协议（18.3 已无 `DidReceivePolicyDecision` 接收者）。输入事件那一批（`DragEnded`、`GestureEvent` 一类）按第 4.3 节末的规律整体处理。
 5. 给 18.3 写一份按 16.1 形状输出的图层树编码器（`RemoteLayerTreeTransaction`、`RemoteScrollingCoordinatorTransaction`、`LayerProperties`）。
-6. 由 M87 重生成翻译表，否则连握手都翻错。
+6. 翻译表已由 M141 按发货 16.1 tag 重建（各 2911 条 `case`），所以这一项不再是待办。
 
-**第 6 项是路线 A 的前置，不是路线 B 的。** 本文对路线 A 的 no-go 判定不依赖第 6 项是否完成，因为在它之前 4.1 与 4.2 就已经各自单独否证了这条路。
+**因此路线 A 剩下的最小改动清单是第 3、4、5 项，全部落在载荷层。** 三条阻断由这三项承接：第 3、4 项做第一条（编号只改号不改载荷），第 5 项做第二条（图层树编码器）；第三条是「494 条未按方向分类、规模未界定」，它没有独立动作，限定的是前两项要做到什么程度，见 4.5 节。第 1 项已落地但没有真机读数，这一点在 4.2 节与第九节写明。
 
 ## 七、计数口径
 
@@ -486,6 +538,8 @@ TMPDIR
 
 18.3.1 一侧按同一方法测得 4203 条具名消息，其中 1824 条带 reply。两侧共享消息名 2998 条，4.3 节的 2473 / 494 / 31 都在这 2998 条上统计，且过滤掉了 `/glib/`、`/gtk/`、`/wpe/`、`/win/`、`/playstation/`、`/soup/`、`/Scripts/webkit/tests/` 这些不会编进 iOS 的目录。
 
+**2998 与 `docs/ios16-ipc-message-number-translation.md` 里的 2911 不是同一个量，不能互相替代。** 两者都是「两侧同名消息的条数」，但取自不同的中间产物：2998 由两棵出货树的 `*.messages.in` 按消息全名配对得到，且先滤掉了上段那批不编进 iOS 的目录；2911 由两份生成出来的 `MessageNames.h` 枚举体取交集得到，输入是各 tag 的 `generate-message-receiver.py` 对 `DerivedSources.make` 所列接收者的产出，脚本自己记的口径在同一份输出里（`gen-ipc-message-number-tables: 2911 shared, 274 only older, 1175 only newer`，生成器 `scripts/gen-ipc-message-number-tables.py` 的模块文档 `:44-47` 记 `2911 shared`，该文「取证环境」一节 `docs/ios16-ipc-message-number-translation.md:906` 是这条输出的原文）。**本文的 2998 是载荷层统计的分母，2911 是编号层映射表的规模，引用时不要把这个数换到另一层去用。** 两者差 87 条，逐条成因没有核对过，所以这里不给出解释，只标出它们属于不同层。
+
 ## 八、与 1.2 节四条阻断的对照
 
 `docs/ios16-whole-18.3-deployment-path.md` 1.2 节把四条阻断并列。按本文核对，它们与路线的关系是：
@@ -503,9 +557,12 @@ TMPDIR
 
 ## 九、未验证项
 
-1. **dyld 层在这台设备上生效**（5.1 节第三层、5.4 节）。这是路线 B 现在的第一项，`gen/dyld` 974016、hook dylib 是原版 74352、判定 (b) 是 `1 0 0 1`（第 2、3 位为 0），三项都说明它不成立。验证方式是重装带两个新 hook 的 basebin 后复跑 runbook 第五阶段判定 (a)、(b) 与第六阶段，正确读数是 hook dylib 75952 且判定 (b) 回到 `1 1 1 1`、`gen/dyld` 974608、`systemhook.dylib` 234336 且六项整条 entry 计数 `2 2 2 2 4 2`。**这里从前写的是 `4 2 4 2 4 2`，那四个数是子串计数，不是真值**：`234336` 那份里 `__XPC_DYLD_FRAMEWORK_PATH` 含裸名子串，按 `data.count(s.encode())` 数会多算一遍，整条 entry 比较得到的真值是 `2 2 2 2`，见 `../../webkit-install-runbook.md:1249` 与 `:1261`。**不要用裸子串计数当复现判据**（5.1 节「四个陷阱」）。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。
+1. **dyld 层在这台设备上生效**（5.1 节第三层、5.4 节）。这是路线 B 现在的第一项，`gen/dyld` 974016、hook dylib 是原版 74352、判定 (b) 是 `1 0 0 1`（第 2、3 位为 0），三项都说明它不成立。验证方式是重装带两个新 hook 的 basebin 后复跑 runbook 第五阶段判定 (a)、(b) 与第六阶段，正确读数是 hook dylib 75952 且判定 (b) 回到 `1 1 1 1`、`gen/dyld` 974608、`systemhook.dylib` 234336 且六项整条 entry 计数 `2 2 2 2 4 2`。**这里从前写的是 `4 2 4 2 4 2`，那四个数是子串计数，不是真值**：`234336` 那份里 `__XPC_DYLD_FRAMEWORK_PATH` 含裸名子串，按 `data.count(s.encode())` 数会多算一遍，整条 entry 比较得到的真值是 `2 2 2 2`，见 `../../webkit-install-runbook.md:1142-1148` 那条六项计数命令与 `docs/dopamine-basebin-webkit-override.md:1201` 对两种数法的对照。**不要用裸子串计数当复现判据**（5.1 节「四个陷阱」）。**这一步是持久性加破坏性的设备操作，必须由用户确认后再执行。** 命令是 `jbctl update basebin`，它会触发 `reboot3(RB2_USERREBOOT)`，屏幕上所有应用退出。回退方式是拿 `/var/mobile/Documents/basebin-backup-20261124.tar` 再跑一次同一条命令；`.safe_mode` 只停注入，挡不住已经替换的 `gen/dyld`。**这条命令在本设备上已经造成五次内核 panic**（`pmap_mark_page_as_ppl_page_internal: page still has mappings @pmap_data.c:1101`），并以手工重新越狱收场；`../../AGENTS.md` 的「一之二」一节已把这条路线记录为关闭，只有用户明确要求才能重开。`.safe_mode` 与 basebin 备份回滚挡不住这个 panic，它们只处理注入与文件替换。
 2. **launchd 的解析行为**（5.3 节）。仍未测，但它现在排在 dyld 层之后：dyld 没选中覆盖目录时，端点数与无覆盖目录时相同，这个读数对 launchd 一句话也没说。本文原先把它记为「唯一的未测项」，那一句已作废。
 3. **`_CodeSignature` 缺失的影响**。覆盖目录版 `WebKit.framework` 没有 `_CodeSignature`（`build-state.md:954`），从未实测排除。
 4. **`__XPC_DYLD_FRAMEWORK_PATH` 的转交行为**。系统桩没有 `LC_DYLD_ENVIRONMENT`，它加载哪份 `WebKit` 只能靠这个转交；launchd、libxpc、xpcproxy 三处都查不到实现。
-5. **494 条载荷变更没有被按方向分类**。本文只对 31 条 reply 变更与 `CommitLayerTree` 做了方向判定。
-6. **路线 A 的 `WebProcessCreationParameters` 字段缺项没有逐条核对**。两版结构体互不可读已记录在 `docs/ios16-webprocess-creation-parameters-diff.md`，但「哪些字段可以被默认值替代、哪些是承载性的」没有结论。
+5. **真机 16.1 UI 进程的位图宽度是 8 字节**（4.1、4.2、4.5 节）。这是路线 A 新判据的唯一输入，而它从未在设备上读过：8 字节这个值是按 `SDKAlignedBehavior::NumberOfBehaviors` 的枚举值推出来的，不是设备读数。验证方法二选一：在 16.1 的 MobileSafari 进程里读 `SDKAlignedBehaviors::storageLengthInBytes()`，或跑一次本构建的 helper 并从日志里读 `patches/ios16-xpc-bootstrap-compat.patch:139` 那条 `RELEASE_LOG_ERROR`，看它打的是 `narrower than this build's` 还是别的。**在这一条被实测之前，「路线 A 会翻译」不是已验证事实。**
+6. **`peerIsOlderGeneration()` 在真机上对路线 A 返回 `true`**（4.1、4.5 节）。它由第 5 条决定，第 5 条未测，所以这一条也未测。源码侧的保证只有 `scripts/check-translation-switch.py` 那一条断言（调用唯一、位置正确、守卫在场），它不涉及运行期取值。
+7. **宽度分发让 helper 真的活过 XPC 入口**（4.2、4.5 节）。`RELEASE_ASSERT` 消失是从补丁文本读出来的，没有在设备上跑过一次「16.1 UI 拉起本构建 helper」。判据是 helper 进程存活且日志里出现 `:139` 或 `:142` 那两条之一，而不是崩溃在 `getClientSDKAlignedBehaviors`。
+8. **494 条载荷变更没有被按方向分类**。本文只对 31 条 reply 变更与 `CommitLayerTree` 做了方向判定。第 5 至 7 条未测时这一条不影响「no-go」的方向，因为载荷层与编号层独立；但它是路线 A 能否推进的规模上限，仍未界定。
+9. **路线 A 的 `WebProcessCreationParameters` 字段缺项没有逐条核对**。两版结构体互不可读已记录在 `docs/ios16-webprocess-creation-parameters-diff.md`，但「哪些字段可以被默认值替代、哪些是承载性的」没有结论。
