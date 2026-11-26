@@ -80,6 +80,131 @@ and no `_dyld_`/`___dyld_` undefined name. It parses the Mach-O itself, because
 the device carries no `llvm-objdump` to run the checks `tests/run.sh` makes on
 the arm64 slice.
 
+## The seven images are claimed in a fixed order
+
+The dylib marks its own process debugged and then loads the seven `/var/jb`
+images itself, in the order `src/claim_images.c` holds:
+
+```
+/var/jb/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+/var/jb/usr/lib/libwebrtc.dylib
+/var/jb/usr/lib/libANGLE-shared.dylib
+/var/jb/Library/Frameworks/WebCore.framework/WebCore
+/var/jb/Library/Frameworks/WebKitLegacy.framework/WebKitLegacy
+/var/jb/Library/Frameworks/WebGPU.framework/WebGPU
+/var/jb/Library/Frameworks/WebKit.framework/WebKit
+```
+
+The marking is `/var/jb/basebin/jbctl proc_set_debugged <pid>`, run with
+`posix_spawn` because `system()` is not usable here and `/bin/sh` does not
+exist on the device. It needs no root and lasts only for the process's life.
+The wait for that child is polled for at most half a second, because the
+constructor runs inside the host's launch and an unbounded wait there would
+hold the application at startup.
+
+### What the sequence cannot do
+
+The sequence loads all seven only in a host that does not link WebKit at load
+time. An application that does — MobileSafari links WebKit as a load-time
+dependency — has the system 16.1 WebKit mapped while dyld prepares the main
+executable, and `__mod_init_func` entries run after that. Measured on the
+device with a host linked against a stub WebKit that no runtime search path
+reached:
+
+```
+[ctor] entered; WebKit images already present = 1
+[ctor]   already: SYSTEM
+Successfully marked proc of pid 32399 as debugged
+[ctor] JavaScriptCore LOADED
+[ctor] libwebrtc.dylib LOADED
+[ctor] libANGLE-shared.dylib LOADED
+[ctor] WebCore        FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+[ctor] WebKitLegacy   FAILED  Symbol not found: __ZN3WTF6Thread5s_keyE
+[ctor] WebGPU         FAILED  Symbol not found: __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...
+[ctor] WebKit         FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+[ctor] after claim, WebKit images = 1
+```
+
+Three load and four fail, because the system `JavaScriptCore` is what dyld has
+already bound for them. The sequence does not replace that image and no order,
+flag or timing change in a constructor can: a constructor runs after the main
+executable's dependencies exist. A loaded count of 3 with `failed_index` 4 is
+this shape rather than a broken order.
+
+That reading is what the sequence now refuses to enter. The three that load
+include JavaScriptCore, so running the sequence in a hard-linked host maps an
+18.3 `JavaScriptCore` with `RTLD_GLOBAL` beside the 16.1 one the host is already
+running on, and the four that follow fail to bind against it. The probe read
+load outcomes and a WebKit image count of 1; it did not count duplicate
+JavaScriptCore classes and it did not test whether the host survives with both
+mapped. Because it is a core library rather than a peripheral dylib, the
+sequence does not enter that state to find out.
+
+So `claim_images_run` asks `claim_system_webkit_present` first, which is
+`library_find("/System/Library/Frameworks/WebKit.framework/WebKit")` —
+`dlopen` with `RTLD_NOLOAD`, a lookup that maps nothing and answers a handle
+only when the image is resident. The `/var/jb` WebKit carries the system install
+name, so that one question answers for both: a non-NULL handle means the system
+image is already mapped and the run is skipped, recorded as `claimSkipped` with
+`loaded` 0 and `failedIndex` 0.
+
+In a host that lazily `dlopen`s WebKit the question answers NULL, the sequence
+runs, and it wins the dedupe and loads all seven — the 7/7 reading. The path
+that covers the hard-linked case is the dyld layer, not this dylib: the override
+hooks `isOverridablePath` and
+`isAlwaysOverridablePath` make dyld consult an override directory during
+dependency resolution, before any constructor runs and before the system image
+is mapped. On the device those two hooks are absent — `/var/jb/basebin/gen/dyld`
+and `/var/jb/basebin/dyldhook_merge.arm64e.iOS16-17.dylib` both score `1 0 0 1`
+on the token criterion for `dlopen_from`, `isOverridablePath`,
+`isAlwaysOverridablePath` and `__fcntl`, while the hook dylib inside
+`basebin.tar` scores `1 1 1 1`. Installing that hook is what a hard-linked host
+needs, and it is a basebin change rather than a change to this directory.
+
+### Why each position is fixed
+
+Three conditions fix the order and none is visible from the file names:
+
+- `libwebrtc` and `libANGLE-shared` must come before `WebCore`. The `/var/jb`
+  `WebCore` records both as weak dependencies whose install names point at the
+  system paths, so loading it first pulls the system copies in, and the later
+  `/var/jb` loads map a second image of each. On the device that produced 31
+  `Class WK_RTC... is implemented in both` lines; this order produces 0.
+- The order cannot be reversed once a system WebKit has loaded. Asking for
+  `/System/Library/Frameworks/WebKit.framework/WebKit` first then loading the
+  `/var/jb` copy fails with `Symbol not found:
+  _WTFSignpostIndirectLoggingEnabled`, because the 16.1 system
+  `JavaScriptCore` does not define the symbol the 18.x `WebKit` needs.
+- The dedupe works because the two identities are equal. The `/var/jb` images
+  already carry the system install names; `/var/jb`'s `WebKit` names itself
+  `/System/Library/Frameworks/WebKit.framework/WebKit`. That equality is what
+  lets a later request for the system path answer with the image already
+  loaded. A rewrite of `LC_ID_DYLIB` that gave the `/var/jb` copy its own
+  identity would map a second image and produce the failure above, which is why
+  the payload keeps the system names.
+
+The claim runs only for a process that passed the filter match, the copy check
+and the host check; a process that failed any of them returns before it loads
+anything. Inside such a process the sequence asks the gate first, so a
+hard-linked host is recorded as `claimSkipped` and loads nothing.
+
+The report carries the claim as six decision fields and three texts:
+`stage`, `claimSkipped`, `claimMarked`, `claimMarkStatus`, `claimLoaded` and
+`claimFailedIndex` are written immediately after the plist header, and
+`claimMarkError`, `claimFailedPath` and `claimError` follow the bundle and
+framework fields. `claimMarkStatus` is one of the `mark_*` states in
+`src/claim_images.h` — `1` done, `2` spawn failed, `3` wait failed, `4` child
+left running, `5` non-zero exit, `6` initialiser failed — rather than an errno
+or a wait status, because those are not comparable numbers and a negative one
+would render as the value `0`, which is what the success state used to print.
+The errno and the wait status are kept in `claimMarkError` as text, where they
+can be read without being mistaken for a state.
+
+The document buffer is smaller than the record's fields can add up to, so a
+record with every text at capacity is truncated at `document_capacity`. The
+decision fields are written first for that reason: the prefix they occupy is
+fixed and small, so no free-form text can push them out of the document.
+
 ## Commands
 
 ```

@@ -1,6 +1,7 @@
 #include "idevice_webkit.h"
 
 #include "bundle_lookup.h"
+#include "claim_images.h"
 #include "dylib_report.h"
 #include "dyld_lookup.h"
 #include "file_writer.h"
@@ -468,7 +469,7 @@ void idevice_webkit_start(void) {
     return;
   }
   usleep(stage_pause_microseconds);
-  filter_match_report(filterPath);
+  bool filterMatched = filter_match_report(filterPath);
   stage_reach(stage_filter_read);
   report_stage();
   const char *selfPath = self_image_path();
@@ -489,6 +490,31 @@ void idevice_webkit_start(void) {
   dylib_report_set_self(selfPath, true, NULL);
   stage_reach(stage_bundle_resolved);
   report_stage();
+
+  /* The seven /var/jb images are claimed here, after the filter match and the
+     host check. A process the filter named by neither branch, one that failed
+     the copy check, and one that passed it but failed the host check all return
+     above, so none of them loads an image.
+
+     A host that has not linked WebKit at load time reaches this point before
+     anything asks for WebKit, so the claim wins the dedupe by install name and
+     the host's later request for the system path answers with the /var/jb
+     image. A host that does link WebKit has the system image mapped before this
+     constructor runs, and the claim is skipped there rather than attempted:
+     claim_images_run asks claim_system_webkit_present first, and a present
+     system image means the seven loads would map an 18.3 JavaScriptCore beside
+     the 16.1 one the host is running on. claim_images.c records the measured
+     load outcomes of that shape and the dyld override patch it needs instead.
+     The skip is written to the report, so the two host shapes are still told
+     apart without guessing. */
+
+  if (filterMatched) {
+    claim_result claim;
+    claim_images_run(&claim);
+    dylib_report_set_claim(&claim);
+    report_stage();
+  }
+
   stage_reach(stage_attempted);
   attempt_load(&images);
   report_stage();

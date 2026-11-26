@@ -195,9 +195,11 @@ clang -E -P -x objective-c -nostdinc -isystem /tmp/stub -I /tmp/stub -I "$TREE" 
 设备上有两个可取的独立宿主二进制：
 
 ```sh
-scp mobile@192.168.2.135:"/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app/WeChat" /tmp/host/WeChat
-scp mobile@192.168.2.135:"/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app/Chrome" /tmp/host/Chrome
+scp mobile@192.168.2.136:"/var/containers/Bundle/Application/12696398-6584-4CF1-82EA-4CB0536D964F/WeChat.app/WeChat" /tmp/host/WeChat
+scp mobile@192.168.2.136:"/var/containers/Bundle/Application/25D51062-B818-4434-94C6-1D163B9C6C06/stable.app/Chrome" /tmp/host/Chrome
 ```
+
+上面写的是当前地址 `192.168.2.136`。设备地址随网络变化，取不到时先看 `ip route` 的默认路由落在哪个网段，接手机热点时设备是 `172.20.10.1`。下面记录的字节数与地址无关，换址后重新拉取得到的应该是同样的数字。
 
 微信 545074336 字节，Chrome 50669104 字节。两者都用 `llvm-objdump --macho --dylibs-used` 确认链接 `/System/Library/Frameworks/WebKit.framework/WebKit`（微信 `625.1.29`，Chrome `620.1.16`）。
 

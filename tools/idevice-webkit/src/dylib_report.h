@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+typedef struct claim_result claim_result;
+
 #define plist_value_capacity 2048
 
 /* How the ellekit filter of this process matched. The filter names a class and
@@ -32,6 +34,14 @@ void dylib_report_set_image(const char *imagePath, const char *version);
 void dylib_report_set_self(const char *imagePath, bool installedCopy, const char *reason);
 void dylib_report_set_match(const char *via);
 void dylib_report_set_stage(u32 stage);
+
+/* The claim of the seven /var/jb images: whether jbctl marked this process,
+   what the marking failed with, how many images loaded, and which one
+   stopped the sequence. Every field is written on the claim's own write, so a
+   process whose marking failed and an image that would not load are both
+   readable from the report. */
+
+void dylib_report_set_claim(const claim_result *claim);
 
 /* Writes the report and answers whether the file was written. */
 

@@ -40,6 +40,7 @@ PACKAGE_AUTHOR="WebKitPlayground Builder"
 PACKAGE_DESCRIPTION="Custom-built WebKit frameworks for iOS device injection."
 STEP_INDEX=0
 TOTAL_STEPS=0
+SIGNER=""
 
 # WebKit opens the Swift overlay through the bundle-relative path
 # "Frameworks/libWebKitSwift.dylib", so the file has to sit next to the
@@ -85,10 +86,28 @@ Options:
   -h, --help              Show this help
 
 Notes:
-  Requires 'ldid' in PATH for ad-hoc signing.
+  Requires 'ldid' in PATH for ad-hoc signing, or 'rcodesign' when ldid is absent.
   Requires 'dpkg-deb' in PATH (install via: "brew install dpkg").
-  Requires 'python3' in PATH: it rewrites the Mach-O load commands.
+  Requires 'python3' in PATH: it rewrites the Mach-O load commands and reads
+  the code signatures.
   Uses 'rabin2' as a second opinion when it is in PATH.
+
+  Signing is checked against the payload, not assumed.  Every image's signature
+  is read after STEP 5's rewrite and again after the signing pass, and the run
+  fails when an image would ship with no signature, with a seal that does not
+  cover its bytes, or with a seal this pass removed.  The survey has to sit
+  after the rewrite: the rewrite moves load commands inside the pages the
+  signature hashes, so a check placed before it would go green on an image the
+  rewrite then breaks.
+
+  This package is not loadable on its own.  Measured on the device 2026-11-25,
+  under `jbctl proc_set_debugged <pid>`, two conditions decided it, and the
+  signature shape was not one of them: the loading process has to be authorized,
+  and the images have to be opened in dependency order starting at
+  JavaScriptCore, because WebCore and WebKit need the WTF symbols it provides.
+  Under those conditions an Apple-signed image and a re-signed one both load;
+  with the signature stripped, neither does.  The step that authorizes the host
+  process is not part of this script.
 
   Checking a package that is already built, without a device.  Unpack it
   first ("dpkg-deb -x pkg.deb root"), then scan every image for a load
@@ -134,8 +153,22 @@ if [[ ! -d "${PRODUCT_DIR}" ]]; then
     exit 1
 fi
 
-if ! command -v ldid >/dev/null 2>&1; then
-    log_error "ldid not found in PATH. Install it first (brew install ldid)."
+# Both signers write an ad-hoc signature.  ldid is the one the macOS runner has;
+# rcodesign is what exists on a Linux host.  Neither is optional: a packaging
+# run that cannot sign has to stop, because STEP 5 is where a rewritten image
+# gets a seal that covers its new bytes.  The choice does not decide whether the
+# result loads, only whether the seal is correct; see the Notes in usage().
+if command -v ldid >/dev/null 2>&1; then
+    SIGNER="ldid"
+elif command -v rcodesign >/dev/null 2>&1; then
+    SIGNER="rcodesign"
+else
+    log_error "No Mach-O signer in PATH. Install ldid (brew install ldid) or rcodesign."
+    exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    log_error "python3 not found in PATH. The code-signature survey is written in it."
     exit 1
 fi
 
@@ -864,9 +897,51 @@ write_macho_load_path_tool
 python3 "${MACHO_LOAD_PATHS_TOOL}" rewrite "${DEB_ROOT}" "${PREFIX}"
 
 # ══════════════════════════════════════════════════════════════
-# STEP 6 — Sign Mach-O binaries with ldid
+# STEP 6 — Sign Mach-O binaries and check the seals that ship
 # ══════════════════════════════════════════════════════════════
-log_step "Signing Mach-O binaries with ldid..."
+# STEP 5 rewrites load commands, and the command area sits inside the pages the
+# signature hashes, so that rewrite invalidates the seal and this pass is what
+# gives every image a seal that covers its new bytes.  A re-sign is safe: it is
+# not what decides whether the image loads.
+#
+# The order matters and is why the survey below sits here rather than earlier:
+# it has to read the payload after STEP 5 and before the signing call, and the
+# comparison has to read it after.  A survey placed before the rewrite reports
+# the pre-rewrite signatures, then the rewrite breaks the seal, and the check
+# goes green on an image that is now broken.
+#
+# Measured on the device 2026-11-25, all under `jbctl proc_set_debugged <pid>`:
+#   installed WebGPU, Apple linker signature, alone ......... FAILED symbol error
+#   rcodesign-signed WebGPU, alone ......................... FAILED symbol error
+#   installed WebGPU, opened after JavaScriptCore .......... LOADED
+#   rcodesign-signed WebGPU, opened after JavaScriptCore ... LOADED
+#   WebGPU with LC_CODE_SIGNATURE stripped, authorized ..... FAILED
+#   WebGPU with LC_CODE_SIGNATURE stripped, unauthorized ... FAILED
+# Two conditions decide it, and the signature shape is neither: the loading
+# process must be authorized, and the images must be opened in dependency order
+# starting at JavaScriptCore, because WebCore and WebKit need WTF symbols that
+# JavaScriptCore provides.  With all seven as-installed images opened that way,
+# 7 of 7 loaded.  So "rewrite + re-sign" is necessary here but not sufficient:
+# this package is not loadable on its own, and the authorization step belongs to
+# the tweak that launches the host process, not to this script.
+#
+# Outside an authorized process admission is keyed on the cdhash, and this pass
+# changes it.  Measured then: libiosexec.1.dylib loaded from its own path and
+# from a byte-identical copy elsewhere with the same cdhash, and failed with
+# "code signature invalid" as soon as one copy was re-signed.  That is why the
+# comparison below prints the cdhashes this run produced instead of assuming the
+# old ones still describe the payload.
+#
+# What this step must not do is fail silently.  Before this change it ran `ldid
+# -S` over every image with no post-condition at all, and the shipped payload
+# carried Apple's original SHA-1 signatures, so a signing pass that did nothing
+# was indistinguishable from one that worked.  The survey brackets the pass and
+# the comparison fails on the three shapes that cannot ship: no signature, a
+# seal that does not cover the file, and a seal this pass removed.
+SIGNATURE_TOOL="${SCRIPT_DIR}/macho-code-signature.py"
+SIGNATURE_BEFORE="${WORK_DIR}/signature-before.txt"
+python3 "${SIGNATURE_TOOL}" survey "${DEB_ROOT}" > "${SIGNATURE_BEFORE}"
+log_step "Signing Mach-O binaries with ${SIGNER}..."
 
 WEBKIT_PROCESS_ENTITLEMENTS="${SOURCE_DIR}/Source/WebKit/Scripts/process-entitlements.sh"
 JSC_PROCESS_ENTITLEMENTS="${SOURCE_DIR}/Source/JavaScriptCore/Scripts/process-entitlements.sh"
@@ -914,10 +989,30 @@ sign_macho() {
         fi
     fi
 
-    if [[ -n "${entitlements_path}" && -f "${entitlements_path}" ]]; then
-        ldid "-S${entitlements_path}" "${binary}"
+    if [[ "${SIGNER}" == "ldid" ]]; then
+        if [[ -n "${entitlements_path}" && -f "${entitlements_path}" ]]; then
+            ldid "-S${entitlements_path}" "${binary}"
+        else
+            ldid -S "${binary}"
+        fi
     else
-        ldid -S "${binary}"
+        # rcodesign takes an output path rather than editing in place.  It keeps
+        # the existing code identifier and entitlements when the input already
+        # carries them, which is what the XPC services need.
+        local resigned="${ENTITLEMENTS_WORK_DIR}/resigned"
+        rm -f "${resigned}"
+        if [[ -n "${entitlements_path}" && -f "${entitlements_path}" ]]; then
+            rcodesign sign --entitlements-xml-file "${entitlements_path}" "${binary}" "${resigned}"
+        else
+            rcodesign sign "${binary}" "${resigned}"
+        fi
+        # A signer that exits 0 without writing its output has to fail here, or the
+        # comparison below reads an untouched image and reports a clean pass.
+        if [[ ! -f "${resigned}" ]]; then
+            log_error "rcodesign reported success but wrote no output for ${rel}"
+            exit 1
+        fi
+        mv -f "${resigned}" "${binary}"
     fi
 }
 
@@ -926,6 +1021,31 @@ while IFS= read -r -d '' candidate; do
         sign_macho "${candidate}"
     fi
 done < <(find "${DEB_ROOT}" -type f -print0)
+
+# This is the post-condition the step never had.  It fails on an image the
+# package would ship unsigned or with a seal that does not cover it, which is
+# how a signing pass that did nothing, or that ran after STEP 5's rewrite without
+# resealing, becomes visible.  A changed cdhash is printed rather than failed:
+# STEP 5's rewrite necessarily changes it, and under `proc_set_debugged` a
+# re-signed image loads.
+if ! signature_report="$(python3 "${SIGNATURE_TOOL}" compare --before "${SIGNATURE_BEFORE}" "${DEB_ROOT}")"; then
+    log_error "Signing did not leave every image with a seal that covers it."
+    log_error "The package would ship images the device rejects, so the run stops here."
+    exit 1
+fi
+
+# grep -c exits 1 when it counts nothing, and the whole script runs under
+# `set -e`, so the count is normalised instead of letting an empty report abort
+# the run: a pass that changed no cdhash is the case this check exists to report.
+resigned_count="$(printf '%s\n' "${signature_report}" | grep -c '^resigned' || true)"
+if [[ "${resigned_count}" -gt 0 ]]; then
+    log_info "${resigned_count} image(s) carry a new signature after STEP 5's rewrite."
+    # `path` is tied to PATH in zsh, so the loop variable must not be called that.
+    printf '%s\n' "${signature_report}" | while IFS=$'\t' read -r kind image_rel old_cdhash new_cdhash; do
+        [[ "${kind}" == "resigned" ]] || continue
+        log_note "  ${image_rel}  ${old_cdhash} -> ${new_cdhash}"
+    done
+fi
 
 # ══════════════════════════════════════════════════════════════
 # STEP 7 — Verify the shipped load paths
