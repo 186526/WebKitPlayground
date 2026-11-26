@@ -14,12 +14,9 @@ What it refuses, and why each combination is a defect rather than a preference:
     through scripts/install-webkit-override.sh, so both sides of the connection are this build and
     already number messages identically. Switching translation on renumbers messages that were
     correct. `InitializeConnection` is number 3076 in
-    this tree, and the incoming table switches over the older numbering the tables were generated
-    from, so case 3076 answers MessageName::WebPageProxy_RootViewToAccessibilityScreen - the message
-    that occupies 3076 in the Safari-614.1.9 snapshot, and a real message with no relation to the
-    handshake. Against the shipped 16.1 enumeration the same number instead names
-    MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged, which is what a peer
-    running that build would be misread as. Either way 3076 is not in isKnownUnmappedIncomingNumber,
+    this tree, and the incoming table switches over the shipped 16.1 numbering, so case 3076 answers
+    MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged - a real message with no
+    relation to the handshake. 3076 is not in isKnownUnmappedIncomingNumber,
     so the miss path that would flag the message is not taken and the rename is silent.
     ConnectionCocoa.mm's `decoder->messageName() == MessageName::InitializeConnection` then never
     fires, m_isConnected stays false, and the page renders blank instead of reporting anything.
@@ -38,9 +35,14 @@ What it refuses, and why each combination is a defect rather than a preference:
   - A table entry that disagrees with the prose. The prose check reads comments only, so a renumbered
     `case` or a mapping retargeted at another real message would otherwise pass. The tables are what
     a translated connection dispatches on, so the anchor pairs the prose names are read back out of
-    the added code and compared. Two of the seven pairs are not named in the prose at all: they are
+    the added code and compared. Three of the nine pairs are not named in the prose at all: they are
     read from the tables themselves and pinned because they are the neighbours of the pairs the prose
     does name, and a silent rename would move them instead.
+
+  - Prose that sends a reader back to the 16.0-generation snapshot as the tables' basis. The tables
+    were once rendered from Safari-614.1.9, and that basis is what translated the handshake to an
+    unrelated message. A line that names 614.1.9 is allowed only when the same line, or the line
+    after, calls it superseded, earlier or wrongly based.
 
   - A translation call that does not sit under the member. The flag is a setter call and two reads;
     guarding only the call leaves the reads, and a read is the cheapest place to make translation
@@ -113,43 +115,49 @@ MEMBER = re.compile(r"\bbool\s+m_shouldTranslateMessageNames\s*\{([^}]*)\}")
 #
 # Every needle must occur exactly once in the patch's added comment prose. A needle that is a bare
 # number or a bare tag name occurs several times in this file, so altering or deleting the sentence
-# it came from would leave other occurrences matching and the check would pass: `3076` alone appears
-# six times, `Safari-614.1.9` twice, and the releases tag three times. Each needle therefore carries
-# the words that make it unique, and `test-check-translation-switch.py` asserts the uniqueness as an
-# invariant rather than leaving it to be re-checked by eye.
+# it came from would leave other occurrences matching and the check would pass: `2478` alone appears
+# both as a prose anchor and as a table case label, and the releases tag appears three times. Each
+# needle therefore carries the words that make it unique, and `test-check-translation-switch.py`
+# asserts the uniqueness as an invariant rather than leaving it to be re-checked by eye.
 #
 # The needles are matched against the added comment prose only, never against code. Several of the
-# numbers below are also real case labels in the tables (`case 3135:`, `return 946`), so a search
+# numbers below are also real case labels in the tables (`case 2478:`, `return 3086`), so a search
 # over the whole patch would match them whatever the prose said.
 #
-# Every 16.1 mention in the patch is qualified, because the tables are NOT built on shipped 16.1:
-# they come from the 614.1.9 snapshot, which is the iOS 16.0 generation. The entries below pin both
-# bases and the counts for both, so an edit cannot quietly drop one and leave the patch claiming a
-# basis it does not have.
+# Both sides of the comparison come from shipped tags: the older side is
+# releases/Apple/Safari-16.1-iOS-16.1, which is the build on the device, and the newer side is
+# releases/Apple/Safari-18.3.1-iOS-18.3.2. The entries below pin the identity of the older tag, its
+# size, the six counts the comparison produces and the four anchors the tables were rendered with.
+# The older tag is the whole point of the table: an earlier table was rendered from a 16.0-generation
+# snapshot and translated the handshake to an unrelated message, so a needle naming the tag is what
+# keeps that regression from coming back unnoticed.
 REQUIRED_RATIONALE = (
     ("InitializeConnection is 3076 in this tree", "`InitializeConnection` is number 3076 in this tree"),
-    ("the 614.1.9 number for InitializeConnection", "2444 and Last 3139"),
-    ("the message 3076 silently becomes, per the 614.1.9 basis",
-     "case 3076 with MessageName::WebPageProxy_RootViewToAccessibilityScreen"),
-    ("the message 3076 would become against shipped 16.1",
-     "names MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
+    ("the shipped 16.1 number for InitializeConnection and the incoming case that reads it",
+     "puts it at 2478, and 2478 is the entry the incoming table needs"),
+    ("that incoming case written out", "`case 2478: return MessageName::InitializeConnection;`"),
+    ("the message 3076 is read as against the shipped 16.1 enumeration",
+     "is MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
     ("the handshake comparison that then never fires",
-     "decoder->messageName() == MessageName::InitializeConnection"),
-    ("the same-name count of the index comparison", "5 land on a message"),
-    ("the different-message count against shipped 16.1", "3180 land on a different message"),
-    ("the beyond-range count against shipped 16.1", "and 901 fall off"),
-    ("the net growth over the 614.1.9 snapshot", "946 more entries"),
-    ("the different-message and beyond-range counts against the 614.1.9 basis",
-     "5, 3135 and 946. Both readings"),
-    ("the tree's own size", "4086 numbers"),
+     "`decoder->messageName() == MessageName::InitializeConnection`"),
+    ("the same-number count of the index comparison",
+     "5 happen to carry the same number on both sides"),
+    ("the different-number count", "and 2906 do not"),
+    ("the count of 16.1 numbers past this enumeration's end", "no 16.1 number falls off this enumeration's end"),
+    ("the entry-count difference, written as a subtraction", "4086 - 3185 = 901 entries were inserted"),
+    ("the two one-sided counts", "274 names exist only in 16.1 and 1175 only in this tree"),
+    ("the tree's own size", "This tree has 4086 numbers"),
     ("the shipped 16.1 enumeration's size and tag",
-     "shipped 16.1 enumeration (releases/Apple/Safari-16.1-iOS-16.1, 3185 numbers)"),
-    ("the tag the tables were generated from", "built on tag Safari-614.1.9"),
-    ("the statement that the tables are a 16.0-generation snapshot", "16.0-generation snapshot"),
-    ("the first anchor that tag produces", "firstSynchronousOldMessageNumber 2899"),
-    ("the tag the device actually runs", "device runs releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10)"),
-    ("the anchors the device's build produces", "2946, 2478 and 3184"),
-    ("the gap at Last between the two enumerations", "45 at Last"),
+     "shipped 16.1 enumeration (releases/Apple/Safari-16.1-iOS-16.1) has 3185"),
+    ("the tag the tables were generated from", "generated from that shipped 16.1 tag"),
+    ("one unmapped incoming message, by number", "`Terminate` is number 2483"),
+    ("the first anchor the older tag produces",
+     "Read from the 16.1 header's own messageIsSync comparison rather than counted here"),
+    ("the tag's own version, which identifies the build on the device",
+     "releases/Apple/Safari-16.1-iOS-16.1 (614.2.9.0.10), the same build the system"),
+    ("the three anchors read out of the tag's header", "2946, InitializeConnection 2478 and Last 3184"),
+    ("the split of the 1175 one-sided names around the synchronous boundary",
+     "852 of the 1126 that are outside it"),
 )
 
 # A mention of the setter inside a comment is documentation, not a call. The patch's added lines all
@@ -1141,33 +1149,36 @@ INCOMING = re.compile(r"case\s+(\d+)\s*:\s*return\s+MessageName::(\w+);")
 # (description, direction, key, expected). `key` is a message name for the outgoing table and a
 # number for the incoming one.
 #
-# Five of these seven pairs are named in the patch's prose, so a change to either side is a change to
+# Three of these nine pairs are named in the patch's prose, so a change to either side is a change to
 # a claim a reader relies on:
 #
-#   `InitializeConnection` is number 3076 in this tree, and the older numbering it is translated to
-#   is 614.1.9, where it is 2444. The incoming table reads case 3076 as
-#   WebPageProxy_RootViewToAccessibilityScreen, the message that occupies 3076 in 614.1.9, which is
-#   why the handshake comparison stops matching.
+#   `InitializeConnection` is number 3076 in this tree, and the shipped 16.1 numbering translates it
+#   to 2478. The incoming table reads case 3076 as
+#   RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged, the shipped 16.1 message that occupies
+#   3076, which is why the handshake comparison stops matching.
 #
-# The other two pairs are not in the prose at all: `3024` and `WrappedAsyncMessageForTesting` and
-# `GPUConnectionToWebProcess_EnsureAudioSession` each occur zero times there (`3139` and `2899` do
-# occur, but as "Last 3139" and "firstSynchronousOldMessageNumber 2899", not as these pairs). Those
-# pairs are pinned because they are what the tables actually hold next to the named ones, and a
-# silent rename shifts them even when the prose still reads correctly. They are the stronger half of
-# the check, so they are kept and the reason states where they come from.
+# Three pairs are not in the prose at all: `2444`, `3184`'s incoming case and `2946`. They are pinned
+# because they are what the tables hold next to the named ones, and a silent rename shifts them even
+# when the prose still reads correctly. `2444` is the number that made the earlier, wrongly based
+# table translate `InitializeConnection` to `WebSharedWorkerServerConnection_SuspendForBackForwardCache`;
+# pinning it records that 2444 now belongs to that message and to nothing else.
 TABLE_ANCHORS = (
-    ("InitializeConnection translates to its 614.1.9 number", "outgoing", "InitializeConnection", 2444),
-    ("3076 declares WebPageProxy_RootViewToAccessibilityScreen, not the handshake", "incoming", 3076,
-     "WebPageProxy_RootViewToAccessibilityScreen"),
+    ("InitializeConnection translates to its shipped 16.1 number", "outgoing", "InitializeConnection", 2478),
+    ("the incoming table reads 2478 back as InitializeConnection", "incoming", 2478,
+     "InitializeConnection"),
+    ("3076 declares RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged, not the handshake",
+     "incoming", 3076, "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
     ("that message's own outgoing number is 3076", "outgoing",
-     "WebPageProxy_RootViewToAccessibilityScreen", 3076),
-    ("RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged translates to 3024", "outgoing",
-     "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged", 3024),
-    ("case 3024 reads back as RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged", "incoming",
-     3024, "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged"),
-    ("the outgoing table's largest number is 614.1.9's Last of 3139", "outgoing",
-     "WrappedAsyncMessageForTesting", 3139),
-    ("the incoming table's first synchronous number is the anchor node", "incoming", 2899,
+     "RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged", 3076),
+    ("the message that owns the number the handshake used to be translated to", "incoming", 2444,
+     "WebSharedWorkerServerConnection_SuspendForBackForwardCache"),
+    ("that message's own outgoing number is 2444", "outgoing",
+     "WebSharedWorkerServerConnection_SuspendForBackForwardCache", 2444),
+    ("the outgoing table's largest number is the tag's Last of 3184", "outgoing",
+     "WrappedAsyncMessageForTesting", 3184),
+    ("the incoming table's largest case is that same message", "incoming", 3184,
+     "WrappedAsyncMessageForTesting"),
+    ("the incoming table's first synchronous number is the anchor node", "incoming", 2946,
      "GPUConnectionToWebProcess_EnsureAudioSession"),
 )
 
@@ -1224,15 +1235,16 @@ def check_table_anchors(patch: str) -> list[Violation]:
     return violations
 
 
-# A bare "16.1" next to the word "table" is the claim this check exists to prevent: the tables come
-# from the 614.1.9 snapshot, which is the iOS 16.0 generation, so calling them 16.1 would tell a
-# reader they cover the build on the device when they do not. A mention is qualified when the same
-# line, or the line after, names the tag, the snapshot, or the fact that it is not 16.1.
-UNQUALIFIED = re.compile(r"\btables?\b", re.IGNORECASE)
-QUALIFIERS = ("Safari-614.1.9", "614.1.9", "16.0-generation", "snapshot", "not 16.1", "NOT built on")
+# The opposite claim from the one this check used to make. The tables were once rendered from the
+# Safari-614.1.9 snapshot, which is the iOS 16.0 generation, and that basis is what translated
+# `InitializeConnection` to an unrelated message. They now come from the shipped 16.1 tag, so prose
+# that sends a reader back to the snapshot describes a table this file no longer carries. A mention
+# is allowed when the same line, or the line after, calls it superseded, earlier or wrongly based.
+STALE_BASIS = re.compile(r"614\.1\.9|16\.0-generation", re.IGNORECASE)
+SUPERSEDED = ("earlier", "superseded", "wrongly", "used to", "no longer", "regression")
 
 
-def check_no_unqualified_table_claim(patch: str) -> list[Violation]:
+def check_no_stale_table_basis(patch: str) -> list[Violation]:
     lines = patch.splitlines()
     violations = []
     for index, raw in enumerate(lines):
@@ -1240,17 +1252,17 @@ def check_no_unqualified_table_claim(patch: str) -> list[Violation]:
         if not match:
             continue
         text = match.group(1)
-        if "16.1" not in text or not UNQUALIFIED.search(text):
+        if not STALE_BASIS.search(text):
             continue
-        window = " ".join(lines[index:index + 2])
-        if any(qualifier in window for qualifier in QUALIFIERS):
+        window = " ".join(lines[index:index + 2]).lower()
+        if any(marker in window for marker in SUPERSEDED):
             continue
         violations.append(
             Violation(
-                "the patch calls the translation tables 16.1 without saying which 16.1",
-                "the tables are built on the 614.1.9 snapshot, which is the iOS 16.0 generation, "
-                "and the device runs releases/Apple/Safari-16.1-iOS-16.1; a bare 16.1 reads as the "
-                "latter, which these tables do not cover: %s" % text.strip(),
+                "the patch describes the tables as coming from the 16.0-generation snapshot",
+                "the tables carry the shipped 16.1 numbering from "
+                "releases/Apple/Safari-16.1-iOS-16.1; naming 614.1.9 as their basis is the defect "
+                "this whole check exists to keep out: %s" % text.strip(),
             )
         )
     return violations
@@ -1269,7 +1281,7 @@ def run(patch_path: Path) -> int:
     violations += check_member_initialiser(patch)
     violations += check_rationale(patch)
     violations += check_table_anchors(patch)
-    violations += check_no_unqualified_table_claim(patch)
+    violations += check_no_stale_table_basis(patch)
 
     if violations:
         for violation in violations:

@@ -2,7 +2,9 @@
 
 本文回答五个问题：18.3 的 `Encoder.cpp` 在 Xcode iOS device 构建里由哪一步编译进产物；新增一个翻译源文件要改哪些构建清单；把函数塞进既有文件能否完全不动构建系统；这条跨版本连接在 18.3 源码里的唯一创建点、以及如何只让它生效；以及新增函数曾落在 `XPCServiceEntryPoint.mm` 的哪个位置才不会与另一张补丁争同一个锚点。
 
-所有源码行号取自 18.3.1 tag `releases/Apple/Safari-18.3.1-iOS-18.3.2`（提交 `1b670a0c038dd7c909cca0c46346670f43c6334d`）。取证方式是用 `git` 对该 tag 做 `--filter=blob:none` 的稀疏克隆，再 `git show HEAD:<path>` 逐文件读出；正文里的行号可以用同一条 `git show HEAD:<path> | cat -n` 复核。16.1 的编号取自 tag `Safari-614.1.9`。
+所有源码行号取自 18.3.1 tag `releases/Apple/Safari-18.3.1-iOS-18.3.2`（提交 `1b670a0c038dd7c909cca0c46346670f43c6334d`）。取证方式是用 `git` 对该 tag 做 `--filter=blob:none` 的稀疏克隆，再 `git show HEAD:<path>` 逐文件读出；正文里的行号可以用同一条 `git show HEAD:<path> | cat -n` 复核。16.1 的编号取自发货 tag `releases/Apple/Safari-16.1-iOS-16.1`（提交 `d81f16c5eeec5b5a36c426b984dc9e780b0dafb9`，版本 `614.2.9.0.10`），也就是设备上系统 `WebKit.framework` 的那个构建。
+
+早期版本的本文以 `Safari-614.1.9`（iOS 16.0 代快照）为 16.1 的基准。那份基准让翻译表把 `InitializeConnection` 翻成 `WebSharedWorkerServerConnection_SuspendForBackForwardCache`，本文第 5、6、8 节与两张翻译表现在全部按发货 16.1 重算，取数命令见各节与「取证环境」。
 
 第 7 节记录的锚点冲突已经随 `getUIProcessSDKVersion` 的移除而消失：翻译补丁现在不含 `XPCServiceEntryPoint.mm` 段。其余各节仍是设计依据。
 
@@ -309,7 +311,7 @@ basename includes from another dir, NOT registered: 3
 #endif
 ```
 
-CI 走 `xcodebuild -configuration Release`，`NDEBUG` 已定义、`ASAN_ENABLED` 为 0，所以 `ENABLE_IPC_TESTING_API` 为 0，`IPCUtilities.cpp` 编出来是空的。把 2807 条 `case` 放进去会被整段编掉，链接期找不到定义。另外它现有的三个函数（`isTestingIPC`、`startTestingIPC`、`stopTestingIPC`）都只为 IPC 测试服务，文件名里的 utilties 覆盖的是测试辅助，不是通用 IPC 工具。
+CI 走 `xcodebuild -configuration Release`，`NDEBUG` 已定义、`ASAN_ENABLED` 为 0，所以 `ENABLE_IPC_TESTING_API` 为 0，`IPCUtilities.cpp` 编出来是空的。把 2911 条 `case` 放进去会被整段编掉，链接期找不到定义。另外它现有的三个函数（`isTestingIPC`、`startTestingIPC`、`stopTestingIPC`）都只为 IPC 测试服务，文件名里的 utilties 覆盖的是测试辅助，不是通用 IPC 工具。
 
 第 4.3 节曾经把「职责划分」当作反对把函数放 `Encoder.cpp` 的理由，这个理由被否决：职责划分的收益不足以抵消「把函数放进一个 Release 构建下会被编掉的翻译单元」这一确定失败。
 
@@ -532,15 +534,15 @@ void setMessageName(MessageName name) { m_messageName = name; }
 
 表覆盖不到的消息不会得到近似翻译，只有两条出路：发送方向不发，接收方向丢弃。两条路都按消息名判定，判定集合由生成器算出，与翻译表互补。
 
-**发送方向**：`isKnownUnmappedOutgoingName` 为真时不发，`sendMessageImpl` 返回 `Error::Unspecified`。这类消息是 18.3 独有、16.1 枚举里没有对应名字的消息，共 1279 条，其中 245 条在 18.3 侧带 `#if`，只在含该枚举项的配置里编入。
+**发送方向**：`isKnownUnmappedOutgoingName` 为真时不发，`sendMessageImpl` 返回 `Error::Unspecified`。这类消息是 18.3 独有、发货 16.1 枚举里没有对应名字的消息，共 1175 条，其中 251 条在 18.3 侧带 `#if`，只在含该枚举项的配置里编入；把 iOS 上恒为真的守卫（`PLATFORM(COCOA)`、`PLATFORM(IOS)`、`PLATFORM(IOS_FAMILY)`、`OS(DARWIN)`）剔除后，实际会编掉的是 1149 条。
 
 **表覆盖不到的名字不会被原样发出。** 越过判据之后，`sendMessageImpl` 执行的是 `encoder->setMessageName(translateOutgoingMessageName(name))`，而 `translateOutgoingMessageName` 的 `default` 返回 `MessageName::Invalid`。若判据与翻译表因故不一致，写进 header 的是 `Invalid`，对端按 `isValidEnum` 拒收并丢弃，不会当成某个合法编号执行。
 
 **被拒的同步消息会结束本进程，不是静默丢弃。** 异步路径上返回值只落在日志里。同步路径上是另一条链：`sendSyncMessage` 拿到非 `NoError` 就调 `didFailToSendSyncMessage(error)`（补丁里 `sendSyncMessage` 那个 hunk），而 `WebProcess.cpp:395-397` 在 `#if !PLATFORM(GTK) && !PLATFORM(WPE) && !ENABLE(IPC_TESTING_API)` 下调过 `connection->setShouldExitOnSyncMessageSendFailure(true)`，`Connection::didFailToSendSyncMessage`（`Connection.cpp:1321-1327`）在该标志为真时执行 `exitProcess(0)`。Release 的 iOS 构建 `ENABLE(IPC_TESTING_API)` 为 0，所以这个标志为真，WebContent 在发出这条消息时直接退出。
 
-不跳过也没有出路。判据里落在同步区的那些名字，18.3 编号全部大于 16.1 的 `Last`（3139）。§7 说明过平坦下标不是 iOS 编译值，而这些名字集中在枚举最尾部，与 3139 的差距远大于 §7 估算的前移量，所以前移不改变结论。16.1 UI 进程的 `isValidEnum<MessageName>` 在解码阶段就会拒收超出 `Last` 的编号，`sendSync` 的回调永远不到，而 `sendSync` 的默认超时是 `Timeout::infinity()`，主线程就此永久阻塞。**把永久挂起换成快速退出是取舍**：退出是本补丁引入的变化，「这条消息在 16.1 上不可用」则是补丁前后都成立的事实。
+不跳过也没有出路。判据里落在同步区的那些名字共 49 条，18.3 编号全部大于发货 16.1 的 `Last`（3184）。§7 说明过平坦下标不是 iOS 编译值，而这些名字集中在枚举最尾部，与 3184 的差距远大于 §7 估算的前移量，所以前移不改变结论。16.1 UI 进程的 `isValidEnum<MessageName>` 在解码阶段就会拒收超出 `Last` 的编号，`sendSync` 的回调永远不到，而 `sendSync` 的默认超时是 `Timeout::infinity()`，主线程就此永久阻塞。**把永久挂起换成快速退出是取舍**：退出是本补丁引入的变化，「这条消息在 16.1 上不可用」则是补丁前后都成立的事实。
 
-判据的其余部分落在异步区，共 1222 条，后果按编号再分两类。906 条的 18.3 编号不超过 3139，发出去不会被拒收，而被 16.1 当成同号的合法消息执行到别的 handler 上，正是 §5.8 开头「不被原样发出」要避免的情形；另外 316 条编号仍大于 3139，16.1 在解码阶段按 `isValidEnum` 拒收并丢弃，异步发送方本来就不等回复，所以只是这条消息没有生效。
+判据的其余部分落在异步区，共 1126 条，后果按编号再分两类。852 条的 18.3 编号不超过 3184，发出去不会被拒收，而被 16.1 当成同号的合法消息执行到别的 handler 上，正是 §5.8 开头「不被原样发出」要避免的情形；另外 274 条编号仍大于 3184，16.1 在解码阶段按 `isValidEnum` 拒收并丢弃，异步发送方本来就不等回复，所以只是这条消息没有生效。
 
 这几条常规路径因此不可用，补丁前表现为页面主线程卡死，补丁后表现为 WebContent 进程退出：
 
@@ -551,11 +553,11 @@ void setMessageName(MessageName name) { m_messageName = name; }
 | `WebProcessProxy_WaitForSharedPreferencesForWebProcessToSync` | 偏好变更后等待同步 |
 | `WebProcessProxy_WrapCryptoKey`、`UnwrapCryptoKey` | WebCrypto 导入与导出密钥 |
 
-表中五条消息都不带 `#if`，任何 iOS 配置都会编入判据，且在 16.1 的枚举里都不存在。它们都属于上面「编号大于 3139」的那一组。下界这样取：`PLATFORM(IOS_FAMILY)`、`PLATFORM(COCOA)` 这类在 iOS 上恒为真的守卫保留，`PLATFORM(MAC)`、`PLATFORM(GTK)`、`PLATFORM(WPE)`、`PLATFORM(VISION)`、`PLATFORM(MACCATALYST)`、`OS(LINUX)` 这类在 iOS 上恒为假的守卫剔除，`ENABLE`、`USE`、`HAVE` 一律当作取值未定，要求守卫在它们取任何值时都成立才保留。留下的条目在任何 iOS 配置下都会编入，按这个规则编译器给五条中最小的 `WebPageProxy_BackForwardListContainsItem` 的赋值是 3371；把全部 703 个 `#if` 当作满足时，最小的那条是 3992。两种读数都大于 3139，任何实际配置的取值只会落在两者之间。具体编号由编译器按实际配置赋值，本机没有真实 iOS 构建产物，故不在此列出（§7）。
+表中五条消息都不带 `#if`，任何 iOS 配置都会编入判据，且在发货 16.1 的枚举里都不存在。它们都属于上面「编号大于 3184」的那一组。下界这样取：`PLATFORM(IOS_FAMILY)`、`PLATFORM(COCOA)` 这类在 iOS 上恒为真的守卫保留，`PLATFORM(MAC)`、`PLATFORM(GTK)`、`PLATFORM(WPE)`、`PLATFORM(VISION)`、`PLATFORM(MACCATALYST)`、`OS(LINUX)` 这类在 iOS 上恒为假的守卫剔除，`ENABLE`、`USE`、`HAVE` 一律当作取值未定，要求守卫在它们取任何值时都成立才保留。留下的条目在任何 iOS 配置下都会编入，按这个规则编译器给五条中最小的 `WebProcessProxy_UnwrapCryptoKey` 的下界是 3424；把全部 703 个 `#if` 当作满足时，它的平坦下标是 4081，而五条中最小的 `WebPageProxy_BackForwardListContainsItem` 是 3992。两种读数都大于 3184，任何实际配置的取值只会落在两者之间。具体编号由编译器按实际配置赋值，本机没有真实 iOS 构建产物，故不在此列出（§7）。
 
-**接收方向**：16.1 发来、本构建映射不到的消息共 747 条，是 16.1 独有的 333 条加上 18.3 侧带条件的 414 条共享消息。丢弃前先按 16.1 的同步边界（`firstSynchronousOldMessageNumber`，2899）分类：异步消息只记日志；同步消息回一个空 `SyncMessageReply`，让对端不必等满超时。
+**接收方向**：16.1 发来、本构建映射不到的消息共 708 条，是发货 16.1 独有的 274 条加上 18.3 侧带条件的 434 条共享消息。丢弃前先按 16.1 的同步边界（`firstSynchronousOldMessageNumber`，2946）分类：异步消息只记日志；同步消息回一个空 `SyncMessageReply`，让对端不必等满超时。
 
-**空回复不是中性答复。** 16.1 的 `WebPageProxy::sendSync` 调用点普遍写成先置默认值、再用 `!!sendSync(...)` 判断是否拿到回复。以 `WebPage_TouchEventSync`（16.1 编号 3100，18.3 已无此消息）为例，16.1 `WebPageProxy.cpp:3233-3239` 是：
+**空回复不是中性答复。** 16.1 的 `WebPageProxy::sendSync` 调用点普遍写成先置默认值、再用 `!!sendSync(...)` 判断是否拿到回复。以 `WebPage_TouchEventSync`（发货 16.1 编号 3146，18.3 已无此消息）为例，16.1 `WebPageProxy.cpp:3233-3239` 是：
 
 ```cpp
 bool handled = false;
@@ -566,7 +568,7 @@ if (!replyReceived)
 
 空回复让 `sendSync` 本身成功返回，但 `*replyDecoder >> replyArguments` 解不出 `bool` 而返回空，`!!sendSync` 因此为假，`handled` 被置为真。于是 16.1 UI 进程把每一次触摸都当作已被页面消费，不再走默认动作，表现为该页面点击无反应。超时路径同样置真，所以这是丢弃设计本身的后果，不是回空包引入的偏差。
 
-被丢弃的同步消息中 2899 是最小的一条、3137 是最大的一条，共 50 条。这 50 条分两类：31 条是 16.1 独有、18.3 已删除的消息（`RemoteGraphicsContextGL_*`、`RemoteRenderingBackend_*`、`StorageManagerSet_*` 等），19 条是两棵树同名、但本配置把 18.3 枚举项编译掉的共享消息。第二类的回包落在对端真实存在的调用点上，`WebPage_TouchEventSync`（3100）、`WebPage_GetPositionInformation`（3094）、`WebPasteboardProxy_GetPasteboardTypes`（3113）都属于这一类，对端解到默认值后的后果取决于各自的调用点写法；第一类在本构建里连接收者都没有，空回复只是让对端不再等待。基线 `Encoder.cpp` 的注释与本节给出这些后果，供部署时判断哪些功能不可用。
+被丢弃的同步消息中 2946 是最小的一条、3182 是最大的一条，共 42 条。这 42 条分两类：22 条是发货 16.1 独有、18.3 已删除的消息（接收者包括 `RemoteGraphicsContextGL`、`RemoteRenderingBackend`、`RemoteMediaPlayerProxy`、`WebPage` 等），20 条是两棵树同名、但本配置把 18.3 枚举项编译掉的共享消息。第二类的回包落在对端真实存在的调用点上，`WebPage_TouchEventSync`（3146）、`WebPasteboardProxy_GetPasteboardTypes`（3159）都属于这一类，对端解到默认值后的后果取决于各自的调用点写法；第一类在本构建里连接收者都没有，空回复只是让对端不再等待。基线 `Encoder.cpp` 的注释与本节给出这些后果，供部署时判断哪些功能不可用。
 
 ## 6. 转换层与载荷层的关系
 
@@ -582,15 +584,15 @@ if (!replyReceived)
 
 编号层只解决消息路由：它决定一条消息落到哪个 `MessageReceiver`。载荷层是另一件事，决定这条消息的参数能不能按对端的布局解出来。两版的参数签名差距是成规模的，不是个别例外。
 
-按 receiver 聚合全树比对 16.1 与 18.3 的消息，结果是：仅 16.1 有 285 条、仅 18.3 有 924 条。也就是说，即便编号翻译让每一条消息都落到正确的接收者，两版各自独有的大批消息在对面没有接收者，参数布局更无从对上。
+按 receiver 聚合全树比对发货 16.1 与 18.3 的消息，结果是：仅 16.1 有 237 条、仅 18.3 有 844 条。也就是说，即便编号翻译让每一条消息都落到正确的接收者，两版各自独有的大批消息在对面没有接收者，参数布局更无从对上。
 
 按接收者拆开看几个主要通道：
 
 | 接收者 | 16.1 消息数 | 18.3 消息数 | 共同 | 仅 16.1 | 仅 18.3 |
 | --- | --- | --- | --- | --- | --- |
-| `WebPage` | 402 | 492 | 370 | 32 | 122 |
-| `WebPageProxy` | 343 | 358 | 307 | 36 | 51 |
-| `DrawingArea` | 11 | 13 | 8 | 3 | 5 |
+| `WebPage` | 407 | 492 | 383 | 24 | 109 |
+| `WebPageProxy` | 347 | 358 | 313 | 34 | 45 |
+| `DrawingArea` | 12 | 13 | 8 | 4 | 5 |
 | `DrawingAreaProxy` | 8 | 6 | 6 | 2 | 0 |
 | `EventDispatcher` | 7 | 6 | 5 | 2 | 1 |
 
@@ -610,21 +612,20 @@ def recv(p):
     for x in names(p):
         if '_' in x: r, m = x.split('_', 1); d.setdefault(r, set()).add(m)
     return {r: {m for m in v if not (m.endswith('Reply') and m[:-5] in v)} for r, v in d.items()}
-a, b = recv('/tmp/Names16_correct.h'), recv('/tmp/Names18_correct.h')
+a, b = recv('/tmp/t4gen/regen/Names16.h'), recv('/tmp/t4gen/regen/Names18.h')
 for r in ('WebPage','WebPageProxy','DrawingArea','DrawingAreaProxy','EventDispatcher'):
     x, y = a.get(r,set()), b.get(r,set()); c = len(x & y)
     print(r, len(x), len(y), c, len(x)-c, len(y)-c)
 A = {r + '_' + m for r, v in a.items() for m in v}
 B = {r + '_' + m for r, v in b.items() for m in v}
 print('全树', len(A - B), len(B - A))
-PY
 ```
 
-这条规则用 Apple 自带的 `Source/WebKit/Scripts/webkit/parser.py` 解析 `DerivedSources.make` 列出的全部 211 个 `.messages.in` 逐项校验过：每个接收者解析出的声明集与按上表规则从枚举头文件得到的集合完全相等（211 个接收者全匹配，无一例外）。每行都满足「共同 + 仅 16.1 = 16.1 消息数」与「共同 + 仅 18.3 = 18.3 消息数」。
+这条规则用 Apple 自带的 `Source/WebKit/Scripts/webkit/parser.py` 解析 `DerivedSources.make` 列出的全部 `.messages.in` 逐项校验过：18.3 侧是 `MESSAGE_RECEIVERS` 的 211 项，16.1 侧是同一变量的 181 项，每个接收者解析出的声明集与按上表规则从枚举头文件得到的集合完全相等，无一例外。每行都满足「共同 + 仅 16.1 = 16.1 消息数」与「共同 + 仅 18.3 = 18.3 消息数」。
 
 参数签名的实质变化条数未列入本表：按不同口径（是否比较返回值、是否比较属性、是否把编译条件差异计入）会得到不同结果，本文未取得一组可复现的单一口径值。
 
-`WebPage` 与 `WebPageProxy` 是主文档通道，两条合计仅 16.1 有 68 条、仅 18.3 有 173 条。这两条通道上的消息几乎覆盖页面加载与渲染的全部往返，载荷层不解决它们，页面就没有内容。
+`WebPage` 与 `WebPageProxy` 是主文档通道，两条合计仅 16.1 有 58 条、仅 18.3 有 154 条。这两条通道上的消息几乎覆盖页面加载与渲染的全部往返，载荷层不解决它们，页面就没有内容。
 
 两个具体的形态差异，说明这类差距不是「字段加减」可以吸收的：
 
@@ -637,10 +638,10 @@ PY
 
 编号对齐保证了「消息被送到正确的接收者」，但 16.1 的接收者会按 16.1 的序列化格式读参数。两版之间的参数类型不兼容处会导致解码失败、字段错位或值被误读。这些属于载荷层，本文不处理，但要指出一个已经量化的点：
 
-**同步/异步分区位置在两版不同，并且有 19 条同名消息的性质在两版之间翻转。** 16.1 的判定是 `return name >= MessageName::GPUConnectionToWebProcess_EnsureAudioSession;`（`Names16_correct.h:3369-3372`），阈值 2899；18.3 用 `FirstSynchronous`（`Names18_correct.h:5785-5788`），阈值 3838（该文件的平坦下标；iOS 编译值小于此，见第 8 节）。把两张表对齐后逐条比较：
+**同步/异步分区位置在两版不同，并且有 18 条同名消息的性质在两版之间翻转。** 16.1 的判定是 `return name >= MessageName::GPUConnectionToWebProcess_EnsureAudioSession;`（`/tmp/t4gen/regen/Names16.h:3410-3413`），阈值 2946；18.3 用 `FirstSynchronous`（`/tmp/t4gen/regen/Names18.h:5409`），阈值 3838（该文件的平坦下标；iOS 编译值小于此，见第 8 节）。把两张表对齐后逐条比较：
 
 ```
-flips 19
+flips 18
   RemoteAudioDestinationManager_CreateAudioDestination     18async->16sync
   RemoteBuffer_MapAsync                                    18async->16sync
   RemoteDevice_CreateComputePipelineAsync                  18async->16sync
@@ -657,14 +658,15 @@ flips 19
   RemoteGraphicsContextGL_CreateTransformFeedback          18async->16sync
   RemoteGraphicsContextGL_CreateVertexArray                18async->16sync
   RemoteQueue_OnSubmittedWorkDone                          18async->16sync
-  RemoteRenderingBackend_MarkSurfacesVolatile              18async->16sync
   RemoteShaderModule_CompilationInfo                       18async->16sync
   WebPageProxy_ShowPDFContextMenu                          18async->16sync  g18=ENABLE(PDF_PLUGIN) && PLATFORM(MAC)
 ```
 
-这 19 条在 18.3 是异步消息，翻成 16.1 编号后落在 16.1 的同步区，16.1 会把它们当同步消息处理（`Connection::dispatchMessage` 在 `Connection.cpp:1448-1451` 按 `message->isSyncMessage()` 分流到 `dispatchSyncMessage`，后者 `:1239` 起，第一步就解 `SyncRequestID`），而消息体里没有这个字段，解码失败。前 18 条的接收者是 `Remote*`（GPU 与 Networking 侧），最后一条 `WebPageProxy_ShowPDFContextMenu` 在 18.3 里被 `ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 包住（`Names18_correct.h` 该条目上方），iOS 构建不包含它，因此实际只有 18 条在 iOS 上成立。
+这 18 条在 18.3 是异步消息，翻成 16.1 编号后落在 16.1 的同步区，16.1 会把它们当同步消息处理（`Connection::dispatchMessage` 在 `Connection.cpp:1448-1451` 按 `message->isSyncMessage()` 分流到 `dispatchSyncMessage`，后者 `:1239` 起，第一步就解 `SyncRequestID`），而消息体里没有这个字段，解码失败。前 17 条的接收者是 `Remote*`（GPU 与 Networking 侧），最后一条 `WebPageProxy_ShowPDFContextMenu` 在 18.3 里被 `ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 包住（`/tmp/t4gen/regen/Names18.h` 该条目上方），iOS 构建不包含它，因此实际只有 17 条在 iOS 上成立。
 
-这个结果是编号层单独无法解决的：即使编号对齐，这 18 条消息仍会因为同步性质误判而被判非法并发回 `didReceiveInvalidMessage`。处理方式是载荷层的一部分（在编号表里为这类消息单独标注同步性质，或干脆不翻译这几条并在发送侧降级），本文不展开。
+早期版本的本文把 `RemoteRenderingBackend_MarkSurfacesVolatile` 也算作翻转的一条，共 19 条。按发货 16.1 重算，这条在 16.1 的编号是 1132，在 16.1 的异步区（小于 2946），所以它两侧都是异步，不出现在上表里。
+
+这个结果是编号层单独无法解决的：即使编号对齐，这 18 条消息仍会因为同步性质误判而被判非法并发回 `didReceiveInvalidMessage`（iOS 上编入的是 17 条）。处理方式是载荷层的一部分（在编号表里为这类消息单独标注同步性质，或干脆不翻译这几条并在发送侧降级），本文不展开。
 
 ### 6.4 范围内不需要转换的那一类
 
@@ -734,17 +736,17 @@ patches=25 applied=23 skipped=2 fail=0
 
 ## 8. 未验证项
 
-**消息编号的真实编译值没有取到。** 本文 18.3 的所有编号都是把 `MessageNames.h` 当平坦下标读出来的，而 18.3 的生成器会输出 `#if` 条件（`Names18_correct.h` 共 703 个 `#if`），被条件剔除的条目会让后续编号前移。举一个本机算过的例子：`InitializeConnection` 在 18.3 的平坦下标是 3076，但它被 `#if PLATFORM(COCOA)` 包住（`Names18_correct.h:4405-4407`），且它之前有大量位于 `PLATFORM(MAC)`、`PLATFORM(GTK)`、`OS(LINUX)` 等 iOS 上为假的分支，iOS 编译后的真实编号小于 3076。
+**消息编号的真实编译值没有取到。** 本文 18.3 的所有编号都是把 `MessageNames.h` 当平坦下标读出来的，而 18.3 的生成器会输出 `#if` 条件（`/tmp/t4gen/regen/Names18.h` 共 703 个 `#if`），被条件剔除的条目会让后续编号前移。举一个本机算过的例子：`InitializeConnection` 在 18.3 的平坦下标是 3076，但它被 `#if PLATFORM(COCOA)` 包住，且它之前有大量位于 `PLATFORM(MAC)`、`PLATFORM(GTK)`、`OS(LINUX)` 等 iOS 上为假的分支，iOS 编译后的真实编号小于 3076。
 
-按本机一份近似求值（未知宏按真/假两种极端各算一遍）得到的区间是：总条目 3416–3972，`InitializeConnection` 2555–2988。这个区间只用来说明「平坦下标不等于编译值」，不是可用编号。
+按本机一份近似求值（未知宏按真/假两种极端各算一遍）得到的区间是：总条目 3432–4091，`InitializeConnection` 2558–3076。
 
-把已知在 iOS 上为假的守卫（`OS(LINUX)`、`PLATFORM(MAC)`、`PLATFORM(GTK)`、`PLATFORM(WPE)`、`OS(WINDOWS)`、`USE(LIBWPE)`、`ENABLE(PDF_PLUGIN) && PLATFORM(MAC)`）一律当作剔除、其余未知宏当作保留，重算得到：具名条目 4023 个，`InitializeConnection` 3026，`GPUConnectionToWebProcess_EnsureAudioSession` 3780。这三个数同样不是可用编号（未知宏按「保留」处理会高估条目数），但它们说明 3076 这个平坦下标在 iOS 上至少前移 50 位，也说明第 8 节下文那条「5 条同号」的白名单在真实构建里就失效了 2 条。这些数字一并留作实现阶段的交叉校验参考。
+把已知在 iOS 上为假的守卫（`OS(LINUX)`、`PLATFORM(MAC)`、`PLATFORM(GTK)`、`PLATFORM(WPE)`、`OS(WINDOWS)`、`USE(LIBWPE)`、`ENABLE(PDF_PLUGIN) && PLATFORM(MAC)`）一律当作剔除、其余未知宏当作保留，重算得到：具名条目 4023 个，`InitializeConnection` 3026，`GPUConnectionToWebProcess_EnsureAudioSession` 3780。这三个数同样不是可用编号（未知宏按「保留」处理会高估条目数），但它们说明 3076 这个平坦下标在 iOS 上至少前移 50 位，也说明下文那条「5 条同号」的白名单在真实构建里就失效了 2 条。这些数字一并留作实现阶段的交叉校验参考。
 
-因此实现必须遵守一条：18.3 侧一律用 `MessageName::` 符号常量，由编译器赋值，不写任何字面量。表里 18.3 一侧的值应当是符号，16.1 一侧是真实数字（16.1 的生成器不输出 `#if`，`Names16_correct.h` 里 `#if` 数为 0，平坦下标就是编译值）。
+因此实现必须遵守一条：18.3 侧一律用 `MessageName::` 符号常量，由编译器赋值，不写任何字面量。表里 18.3 一侧的值应当是符号，16.1 一侧是真实数字（16.1 的生成器不输出 `#if`，`/tmp/t4gen/regen/Names16.h` 里 `#if` 数为 0，平坦下标就是编译值）。
 
 要拿到 18.3 在 iOS 上的确切编号，只有两条路：读真实构建产物里的 `MessageNames.h`，或用设备上已安装的 18.3 framework 反查。现有工作流的 `Upload diagnostics` 只上传 `diagnostics/` 目录，不含 `MessageName` 枚举，所以当前构建拿不到这份数据。
 
-**同号条目不能省，但「同号」要先按 iOS 编译值校正。** 用两份枚举的平坦下标算，同名消息 2807 条，其中下标相同的仅 5 条：
+**同号条目不能省，但「同号」要先按 iOS 编译值校正。** 用两份枚举的平坦下标算，同名消息 2911 条，其中下标相同的仅 5 条：
 
 ```
 AudioSessionRoutingArbitratorProxy_BeginRoutingArbitrationWithCategory   0
@@ -754,13 +756,13 @@ AuxiliaryProcess_DidReceiveMemoryPressureEvent                           3
 AuxiliaryProcess_MainThreadPing                                          4
 ```
 
-这 5 条里只有前 3 条的同号在 iOS 上成立。第 4 条 `AuxiliaryProcess_DidReceiveMemoryPressureEvent` 在 18.3 被 `#if OS(LINUX)` 包住（`Names18_correct.h:254-256`），iOS 构建把它剔除，于是它之后的条目整体前移一位：`AuxiliaryProcess_MainThreadPing` 在 16.1 是 4，在 iOS 上的 18.3 编译值是 3；`AuxiliaryProcess_DidReceiveMemoryPressureEvent` 本身在 iOS 上根本不存在。这与第 5 节「18.3 平坦下标不等于编译值」是同一个问题的具体实例，也正是不能把上表当成「同号可跳过」白名单的原因。
+这 5 条里只有前 3 条的同号在 iOS 上成立。第 4 条 `AuxiliaryProcess_DidReceiveMemoryPressureEvent` 在 18.3 被 `#if OS(LINUX)` 包住（`/tmp/t4gen/regen/Names18.h:254-256`），iOS 构建把它剔除，于是它之后的条目整体前移一位：`AuxiliaryProcess_MainThreadPing` 在 16.1 是 4，在 iOS 上的 18.3 编译值是 3；`AuxiliaryProcess_DidReceiveMemoryPressureEvent` 本身在 iOS 上根本不存在。这与第 5 节「18.3 平坦下标不等于编译值」是同一个问题的具体实例，也正是不能把上表当成「同号可跳过」白名单的原因。
 
 **表项一条都不能省。** 表按 `MessageName::` 符号生成，不按数字生成。省掉所谓同号条目会让翻译逻辑里出现「同号免翻译」的特例分支；而上面这 5 条里已有 2 条在 iOS 上不再同号（一条被剔除、一条前移一位），说明这类特例随时会和真实编译值脱节。表项全部保留，翻译结果与原值相同即可，特例一个也不要写。
 
-**枚举必须由 `DerivedSources.make` 的 `MESSAGE_RECEIVERS` 生成。** 用 `Source/WebKit/**/*.messages.in` 通配会把 `Scripts/webkit/tests/` 下的测试接收者与几个未参与 iOS 构建的接收者算进去。本机先前的通配结果是 16.1 多 3 个文件、18.3 多 4 个文件，把 `InitializeConnection` 推后 4 位（2448 对 2444）。改动枚举生成方式后，全部数字都要重算。
+**枚举必须由 `DerivedSources.make` 的 `MESSAGE_RECEIVERS` 生成。** 用 `Source/WebKit/**/*.messages.in` 通配会把 `Scripts/webkit/tests/` 下的测试接收者与几个未参与 iOS 构建的接收者算进去。`scripts/regen-ipc-message-number-headers.py` 读的就是这个变量：18.3 tag 得 211 项、发货 16.1 tag 得 181 项。改动枚举生成方式后，全部数字都要重算。
 
-**两张表的规模与性质（用修正后的枚举）。** 18.3→16.1 与 16.1→18.3 各 2807 行；两侧键唯一、值唯一；往返映射零不匹配；键各自升序，但值**不单调**：18.3→16.1 有 10 处逆序（例如 `{738,2921}` 之后是 `{739,588}`），16.1→18.3 有 6 处。所以查找必须按 key 排序后二分，不能按下标推测，也不能假设「编号大致同增」。
+**两张表的规模与性质（用修正后的枚举）。** 18.3→16.1 与 16.1→18.3 各 2911 行，即两版共有的名字数；两侧键唯一、值唯一；键各自升序，但值**不单调**：18.3→16.1 有 9 处逆序（例如 18.3 的 738 映射到 16.1 的 2972，紧随的 739 映射到 596），16.1→18.3 有 6 处。所以查找必须按 key 排序后二分，不能按下标推测，也不能假设「编号大致同增」。补丁里两张表的 `case` 数各为 2911，可以用 `grep -c` 复核。
 
 **聚合脚本本机未端到端执行。** 本机没有 ruby（第 2.3 节），聚合结果由脚本源码与 `UnifiedSources-output.xcfilelist` 交叉验证推出，没有实跑。第 3.1 节的「5 包、余量 5 个文件」是把 `SourceFile#<=>` 与 `BundleManager#addFile` 的分包规则重写成 python 后仿真得到的，同样没有实跑。
 
@@ -768,9 +770,9 @@ AuxiliaryProcess_MainThreadPing                                          4
 
 **字节偏移未实测。** 第 5.6 节的偏移表由 `alignof` 与 `grow` 补齐规则推导。核对方法：在设备上让 helper 发一条已知消息，把消息体前 16 字节 dump 出来，确认第 0 字节是 flags、第 1 字节为 0、第 2–3 字节等于翻译后的消息号、第 8–15 字节是 `destinationID`。
 
-**19 条同步性质翻转里 `WebPageProxy_ShowPDFContextMenu` 在 iOS 上不成立这一判断**依据是它的 `#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 守卫（第 6.3 节），没有在真实 iOS 构建上核对这份枚举被剔除后的确切编号。
+**18 条同步性质翻转里 `WebPageProxy_ShowPDFContextMenu` 在 iOS 上不成立这一判断**依据是它的 `#if ENABLE(PDF_PLUGIN) && PLATFORM(MAC)` 守卫（第 6.3 节），没有在真实 iOS 构建上核对这份枚举被剔除后的确切编号。
 
-**第 6.2 节的计数本轮由本文按第 6.2 节给出的规则从两份枚举头文件重算，并用 Apple 自带的 `parser.py` 解析全部 211 个 `.messages.in` 逐项校验过（211 个接收者全匹配）。** 早先版本取自 M64 的 survey；上一轮的 `574` 与 `37` 分别更正为 `572` 与 `40`，本轮的重新计算取代了这两个数字所在的段落：「实质签名变化」一列因无法统一口径已从表格移除，全树合计改为仅 16.1 有 285 条、仅 18.3 有 924 条。
+**第 6.2 节的计数本轮由本文按第 6.2 节给出的规则从两份枚举头文件重算，并用 Apple 自带的 `parser.py` 解析 `MESSAGE_RECEIVERS` 列出的 18.3 侧 211 个、16.1 侧 181 个 `.messages.in` 逐项校验过，两边都是逐个接收者全匹配。** 早先版本取自 M64 的 survey；本轮按发货 16.1 重算，全树合计改为仅 16.1 有 237 条、仅 18.3 有 844 条，`WebPage` 与 `WebPageProxy` 两行以及第 6.3 节的翻转列表同时更新。
 
 ## 取证环境
 
@@ -809,6 +811,24 @@ phase('8DC2EF560486A6940098B216 /* Frameworks */ = {')# WebKit Frameworks
 
 头文件登记统计用同一份 pbxproj 加 `git show HEAD:<path>` 读每个被编译源文件的 `#include "X.h"`，按「同目录是否存在」「是否出现在 `PBXFileReference`」分类，结果见第 3.2 节。
 
-16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成结果为 `/tmp/Names16_correct.h`（3140 个消息名，取值 0–3139）与 `/tmp/Names18_correct.h`（4086 个消息名，取值 0–4085，含 703 个 `#if`）。18.3 的最大编号是 `WrappedAsyncMessageForTesting` 的 4085。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名，因此 0–4085 连续无空洞。枚举体里还有五个非消息名条目：`FirstSynchronous`（占 3838）、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（值 4086，与 `Count` 相等，`:5746`）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。`Count = 4086` 与「最大编号 4085」互为印证：`Count` 是计数而非末项，比末项大 1。本文第 8 节的枚举计数与第 6.3 节的 19 条翻转取自这两份文件；第 6.2 节同样从这两份文件按第 6.2 节给出的规则重算，第 5 节的调用点数取自源码检索。
+16.1 与 18.3 的枚举由各 tag 自带的 `Source/WebKit/Scripts/webkit/` 生成器生成，输入是 `DerivedSources.make` 的 `MESSAGE_RECEIVERS`，不是通配。生成脚本是 `scripts/regen-ipc-message-number-headers.py`，一条命令重跑两份：
 
-**口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3140 个消息名」「2807 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3141 条、4087 条（18.3 侧把 `Last` 计入）、同名 2808 条。两套口径的差值恰好是这一个别名，`only16`/`only18` 与其余结论完全一致。tower 早先给的 3141 / 4087 / 2808 就是含别名的口径，本文统一用排除别名的口径，因为映射表里不会给别名单独建项。
+```sh
+python3 scripts/regen-ipc-message-number-headers.py \
+  --repo /tmp/t4gen/repo183 \
+  --names-old-out /tmp/t4gen/regen/Names16.h \
+  --names-new-out /tmp/t4gen/regen/Names18.h
+```
+
+本机实跑的 stderr 原文：
+
+```
+releases/Apple/Safari-16.1-iOS-16.1 (d81f16c5eeec): messages=3185 #if=0 InitializeConnection=2478 GPUConnectionToWebProcess_EnsureAudioSession=2946 WrappedAsyncMessageForTesting=3184 sha256=d3ec9d5fabf4752a9c1e22386e1b5665b68a3377e90a7ae37a531a76dfd9d459
+releases/Apple/Safari-18.3.1-iOS-18.3.2 (1b670a0c038d): messages=4086 #if=703 InitializeConnection=3076 GPUConnectionToWebProcess_EnsureAudioSession=3838 WrappedAsyncMessageForTesting=4085 sha256=eaddfb0105671bec03d2d75b1056c6c70203ca1ce706a60eeb8b61acf6ac986c
+```
+
+16.1 侧 3185 个消息名，取值 0–3184，`#if` 数为 0，所以平坦下标就是编译值；`Last = WrappedAsyncMessageForTesting` 是别名，值为 3184。18.3 侧 4086 个消息名，平坦取值 0–4085，含 703 个 `#if`。`FirstSynchronous`（3838）是第一条同步消息 `GPUConnectionToWebProcess_EnsureAudioSession` 的别名。枚举体里还有五个非消息名条目：`FirstSynchronous`、`LastAsynchronous = FirstSynchronous - 1`（3837）、`Count = 4086`、`Invalid = Count`（4086）、`Last = Count - 1`（4085）。4086 个消息名加这五个条目正好是枚举体的 4091 个条目。本文第 8 节的枚举计数与第 6.3 节的 18 条翻转取自这两份文件；第 6.2 节同样从这两份文件按第 6.2 节给出的规则重算，第 5 节的调用点数取自源码检索。
+
+`/tmp/t4gen/regen/Names16.h` 与 `scripts/gen-ipc-message-number-tables.py` 生成补丁里两张表时用的输入逐字节相同（sha256 `d3ec9d5f…`），`/tmp/t4gen/regen/Names18.h` 同理（`eaddfb01…`）。所以本文的读数与补丁里的表来自同一份数据。
+
+**口径说明，避免与另一套统计对不上。** 16.1 的枚举体里有一个 `Last = WrappedAsyncMessageForTesting` 别名条目，它不是新消息，只是给最后一个消息名起别名。本文的「3185 个消息名」「2911 条同名消息」都**排除**这个别名。若把它也算作一条，同一份文件会得到 3186 条、4092 条（18.3 侧把 `Last`、`Count`、`Invalid`、`LastAsynchronous`、`FirstSynchronous` 五个都计入）、同名 2912 条。两套口径的差值恰好是别名本身，`only16`/`only18` 与其余结论完全一致。本文统一用排除别名的口径，因为映射表里不会给别名单独建项。

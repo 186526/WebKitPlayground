@@ -16,11 +16,11 @@ The iOS 16.1 generator (`generate_message_names_header` in that tree's
 `'\\n    , '.join(str(e) for e in message_enumerators)` and emits no
 preprocessor conditionals at all: its `get_message_enumerators` never consults
 `message.condition()`. Every message exists in every configuration, so counting
-positions in the file gives the value the compiler assigns, and that value is
-the same whether the file is compiled for iOS 16.1, iOS 18, or macOS - measured
-by compiling the enumeration body under each of those macro sets, all three
-reporting `Last == 3139`. Those positions are safe to write as integer
-literals.
+positions in the file gives the value the compiler assigns, and that value does
+not depend on the configuration the file is compiled in. Measured on the
+shipped 16.1 header: zero `#if` blocks, and `Last` reads 3184. Those positions
+are safe to write as integer literals, and `scripts/regen-ipc-message-number-headers.py`
+asserts the zero before a header it produced is used.
 
 The 18.3 generator groups enumerators with
 `itertools.groupby(..., lambda e: (e.condition(), e.synchronous()))` and wraps
@@ -37,13 +37,21 @@ conditionals are in force. The 16.1 side is an integer literal, which is
 correct precisely because that generator emits no conditionals.
 
 For scale, and stated in the only caliber this script can read off the two
-files: the 16.1 enumeration has 3140 messages, largest 3139, with the
-synchronous section starting at 2899. The 18.3 enumeration has 4086 messages,
+files: the 16.1 enumeration has 3185 messages, largest 3184, with the
+synchronous section starting at 2946. The 18.3 enumeration has 4086 messages,
 largest 4085, `Count` at 4086, and `FirstSynchronous` at 3838. Those figures
 are the values the compiler assigns when every guard is satisfied, not the
 values of any single build: a build removes the entries its configuration
-excludes and every later value shifts down. 2807 messages are shared, 333
-exist only in 16.1, and 1279 only in 18.3.
+excludes and every later value shifts down. 2911 messages are shared, 274
+exist only in 16.1, and 1175 only in 18.3. Of the 2911 shared names, 5 happen
+to carry the same number on both sides and 2906 do not.
+
+Both inputs are build products, so `scripts/regen-ipc-message-number-headers.py`
+produces them from the two tags and this script reads what it writes. The tags
+are `releases/Apple/Safari-16.1-iOS-16.1` (`d81f16c5`) and
+`releases/Apple/Safari-18.3.1-iOS-18.3.2` (`1b670a0c`); each header comes from
+that tag's own `generate-message-receiver.py` over the receivers its
+`DerivedSources.make` lists.
 
 A build-caliber count is deliberately absent, because reading one requires
 evaluating 703 `#if` conditions against a real toolchain, and a number measured
@@ -58,13 +66,15 @@ Three consequences follow, and the script enforces all three:
   same `#if`. Reusing the guard verbatim makes the case exist exactly when the
   enumerator it names exists, so a configuration that drops a message drops its
   case too instead of failing to compile.
-* Both directions switch over the same 2807 shared names, so the two functions
+* Both directions switch over the same 2911 shared names, so the two functions
   are mutual inverses on that set. The script checks the round trip rather than
   relying on the construction.
 * Every emitted 16.1 literal is asserted to be no larger than the 18.3
   enumeration's `Last`. A 16.1 number above that would be rejected by
   `isValidEnum`, so the check guards an invariant that the data satisfies today
-  but that a future enumeration could break silently.
+  but that a future enumeration could break silently. With shipped 16.1 and
+  this 18.3 tree the invariant holds with room to spare: the largest 16.1
+  number is 3184 and the 18.3 `Last` is 4085, so no 16.1 number is above it.
 
 The two functions never answer unmapped input with the input itself, and never
 with `MessageName::Invalid` on the outgoing side. Returning the input looks safe
@@ -77,35 +87,41 @@ synchronous message under a name the peer never sent. Both directions therefore
 answer `MessageName::Invalid`, and the caller *must* consult the predicates first:
 
 * `isKnownUnmappedOutgoingName` / `isKnownUnmappedIncomingNumber` answer true for
-  names and numbers that exist in one tree and cannot exist in the other: the 333
-  messages only 16.1 has, the 1279 only 18.3 has, and the shared messages whose
+  names and numbers that exist in one tree and cannot exist in the other: the 274
+  messages only 16.1 has, the 1175 only 18.3 has, and the shared messages whose
   18.3 enumerator a build may compile out. On the outgoing side the caller skips
   the send; on the incoming side it drops the message before any dispatch
   decision. The peer provably cannot handle a message it does not have, and
   refusing is not free for the sender, though the cost differs by section. In the
-  file's own numbering, with every guard satisfied, 373 of those names carry an
-  18.3 value above the older enumeration's `Last` (3139), and the 57 of them that
-  sit in the newer enumeration's synchronous section are all in that group: the
-  peer would reject them while decoding, `sendSync`'s default infinite timeout
-  would hold the main thread, and a synchronous refusal therefore reaches
+  file's own numbering, with every guard satisfied, none of the 1175 names carries
+  an 18.3 value above the older enumeration's `Last`: the 18.3 enumeration is
+  larger, so no 18.3 message can be out of its range. 49 of them sit in the newer
+  enumeration's synchronous section, and those are the ones that cost the most.
+  The peer would decode a number it does not know and hand it to whichever 18.3
+  receiver owns that number, a different message: `sendSync`'s default infinite
+  timeout would hold the main thread, and a synchronous refusal therefore reaches
   `didFailToSendSyncMessage`, which ends an armed WebContent process instead of
-  blocking it. The remaining 906 carry a value at or below `Last`, so the older
-  process would not reject them at all: it would accept the number as a valid
-  older message and run whichever handler owns it, a different message. That is
-  the trade, not an absence of cost.
+  blocking it. The remaining 1126 asynchronous names land the same way. Because
+  every one of them carries a number at or below `Last`, the older process would
+  not reject them at all: it would accept the number as a valid older message and
+  run whichever handler owns it, a different message. That is the trade, not an
+  absence of cost.
 * Anything else reaching `default` means these tables disagree with the
   enumeration they were generated from. That is a defect, and the caller should
   turn it into an invalid-message report so it surfaces during development rather
   than being silently absorbed.
 
 `firstSynchronousOldMessageNumber` is the older tree's own synchronous boundary,
-read from its `messageIsSync` comparison rather than counted here. The number is
-needed because a dropped message still carries the older tree's number, which is
-below the newer tree's own `FirstSynchronous`; testing against the newer boundary
-would classify every dropped message as asynchronous and skip the reply the older
-sender is waiting for. A caller uses it to send that sender an empty reply, so
-the split between dropped-sync and dropped-async is the residual risk this layer
-cannot remove: the sender decodes a default value instead of no reply at all.
+read from its `messageIsSync` comparison rather than counted here: the shipped
+16.1 header spells it as a comparison against
+`GPUConnectionToWebProcess_EnsureAudioSession`, which is number 2946. The number
+is needed because a dropped message still carries the older tree's number, which
+is below the newer tree's own `FirstSynchronous` at 3838; testing against the
+newer boundary would classify every dropped message as asynchronous and skip the
+reply the older sender is waiting for. A caller uses it to send that sender an
+empty reply, so the split between dropped-sync and dropped-async is the residual
+risk this layer cannot remove: the sender decodes a default value instead of no
+reply at all.
 
 The output is complete function bodies rather than arrays: a `switch` lets each
 `case` carry its own `#if`, and the compiler folds the whole thing into a jump
@@ -116,8 +132,13 @@ parsed, when either side repeats a name, when a 16.1 number is reused, when a
 guarded case would be emitted without its `#if`, when a 16.1 literal exceeds
 the 18.3 `Last`, or when a shared message does not survive the round trip.
 
+Both inputs have to be given. There is no default path for either: the headers
+are build products of specific tags, and a default would let a run silently read
+a header left over from a different tag, which is exactly the defect that put a
+16.0-generation snapshot in this file's tables in the first place.
+
 Usage:
-    gen-ipc-message-number-tables.py [--names-old PATH] [--names-new PATH]
+    gen-ipc-message-number-tables.py --names-old PATH --names-new PATH
                                      [--output PATH]
 """
 
@@ -147,7 +168,7 @@ ENUM_BODY_PATTERN = re.compile(
 # Conditions that hold for every iOS build this translation layer ships in. A
 # case guarded by one of these needs no `#if` of its own: the enumerator it
 # names is always present. Keeping the guard would still compile, but it would
-# wrap 229 of the 643 guarded messages for no reason.
+# wrap 265 of the 924 guarded messages for no reason.
 GUARDS_ALWAYS_TRUE_ON_IOS = frozenset({
     'PLATFORM(COCOA)',
     'PLATFORM(IOS)',
@@ -208,6 +229,7 @@ class Table:
     old_only: tuple[Entry, ...]
     new_only: tuple[Entry, ...]
     first_synchronous_old: int
+    old_last: int
     new_last: int
     old_count: int
     new_count: int
@@ -376,6 +398,10 @@ def build_table(
             raise TableError('%s has no resolvable Count or Last' % new_path)
         new_last = last_entry.value
 
+    old_last_entry = next((entry for entry in old_entries if entry.name == 'Last'), None)
+    if old_last_entry is None or old_last_entry.value < 0:
+        raise TableError('%s has no resolvable Last' % old_path)
+
     guard_blocks = count_guard_blocks(new_path)
 
     return Table(
@@ -392,6 +418,7 @@ def build_table(
                                                   key=lambda name: new_messages[name].value)
         ),
         first_synchronous_old=first_synchronous_old,
+        old_last=old_last_entry.value,
         new_last=new_last,
         old_count=len(old_messages),
         new_count=len(new_messages),
@@ -743,7 +770,8 @@ def render_incoming(table: Table) -> str:
         '    default:',
         '        // Same reasoning as the outgoing direction. A 16.1 number this build',
         '        // does not map is either a message only 16.1 has or a shared message',
-        '        // this configuration compiles out, and 3139 - the largest 16.1 number -',
+        '        // this configuration compiles out, and %d - the largest 16.1 number -'
+        % table.old_last,
         '        // is below 18.3 Last, so returning it unchanged would deliver it to',
         '        // whichever 18.3 receiver owns that number instead of failing.',
         '        return MessageName::Invalid;',
@@ -785,15 +813,21 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         '--names-old',
-        default='/tmp/Names16_correct.h',
+        required=True,
         type=Path,
-        help='MessageNames.h of the older tree (default: %(default)s)',
+        help=(
+            'MessageNames.h of the older tree; produce it with '
+            'scripts/regen-ipc-message-number-headers.py rather than keeping a copy'
+        ),
     )
     parser.add_argument(
         '--names-new',
-        default='/tmp/Names18_correct.h',
+        required=True,
         type=Path,
-        help='MessageNames.h of the newer tree (default: %(default)s)',
+        help=(
+            'MessageNames.h of the newer tree; produce it with '
+            'scripts/regen-ipc-message-number-headers.py rather than keeping a copy'
+        ),
     )
     parser.add_argument(
         '--output',
