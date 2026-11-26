@@ -134,14 +134,20 @@ Usage:
   scripts/check-translation-switch.py \\
       --bootstrap-patch patches/ios16-xpc-bootstrap-compat.patch
 
-`--bootstrap-patch` defaults to patches/ios16-xpc-bootstrap-compat.patch next to the patch under
-test, so the workflow gets the predicate check without passing it. CI relies on that default staying
-pointed at the file that defines peerIsOlderGeneration().
+`--bootstrap-patch` defaults to patches/ios16-xpc-bootstrap-compat.patch resolved from this script's
+own location, not from wherever `--patch` points. The two paths are independent: `--patch` may name a
+translation patch outside `patches/`, and the predicate check still reads the repository's own
+bootstrap patch, so a bad copy sitting next to an outside patch is not what gets checked. CI passes
+neither path, which is why the delivered pair is the one under test; the default has to keep naming
+the file that defines peerIsOlderGeneration().
 
 Exit 0 when the setter call is the single guarded one, it is outside every preprocessor conditional
 and before `m_connection->open(`, its predicate is defined with all three width branches writing the
 flag, the reads ask the member, the rationale is present, the table anchors hold and every hunk header
-matches its body; 1 on any violation; 2 when either patch cannot be read.
+matches its body; 1 on any violation, including a bootstrap patch that cannot be read or decoded,
+because check_predicate_is_defined reports that as a violation rather than as a usage error; 2 when
+the translation patch named by `--patch` cannot be read or decoded. A file that is not UTF-8 fails
+each check the same way a missing one does: both are read errors, so neither escapes as a traceback.
 """
 from __future__ import annotations
 
@@ -1869,7 +1875,7 @@ def check_predicate_is_defined(patch: str, bootstrap_patch: Path) -> list[Violat
     """
     try:
         bootstrap = bootstrap_patch.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         return [
             Violation(
                 "the predicate's definition patch cannot be read",
@@ -1978,7 +1984,7 @@ def check_predicate_is_defined(patch: str, bootstrap_patch: Path) -> list[Violat
 def run(patch_path: Path, bootstrap_patch: Path | None = None) -> int:
     try:
         patch = patch_path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         print("check-translation-switch: cannot read %s: %s" % (patch_path, error), file=sys.stderr)
         return 2
 

@@ -18,7 +18,8 @@ cases are the ways the switch can come back and the ways the check could pass by
   declaration;
   a macro initialiser must fail, because Connection.h cannot see MessageNumberTranslation.h;
   deleting the wrong-16.1-tag fact must fail, because that is the defect a reader has to see;
-  a missing patch must be reported distinctly, so a read error is not read as a pass;
+  a missing patch must be reported distinctly, so a read error is not read as a pass, and the two
+  paths fail at different codes because one is a violation and the other a usage error;
   a count or tag drifted back to a wrong value must fail, so a needle cannot be a marker that also
   occurs somewhere else in the file;
   a table entry retargeted or renumbered must fail, because the prose check reads comments only and
@@ -942,21 +943,55 @@ TABLE_CASES = (
 )
 
 
-def run(patch_text: str | None, bootstrap_text: str | None = None) -> subprocess.CompletedProcess:
-    if patch_text is None:
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), "--patch", "/nonexistent/patch"],
-            capture_output=True,
-            text=True,
-        )
+class _Absent:
+    """A fixture path that is never created, so reading it fails the way a missing file does."""
+
+    def __repr__(self) -> str:
+        return "ABSENT"
+
+
+ABSENT = _Absent()
+
+# Bytes that are not UTF-8. `Path.read_text` raises `UnicodeDecodeError` on them rather than
+# `OSError`, which is a second way for a file to be unreadable and used to escape both exit codes as
+# a traceback.
+NOT_UTF8 = b"\xff\xfe\x00bad"
+
+
+def write_fixture(directory: Path, name: str, content: str | bytes) -> str:
+    """Write one fixture and return its path; `ABSENT` returns a path that is never written."""
+    path = Path(directory) / name
+    if content is ABSENT:
+        return str(path)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+    return str(path)
+
+
+def run(
+    patch_text: str | bytes | None,
+    bootstrap: str | bytes | None = None,
+) -> subprocess.CompletedProcess:
+    """Run the checker against written fixtures.
+
+    `None` as the patch means a path that does not exist, which is how the missing-patch case is
+    written; `None` as the bootstrap means no `--bootstrap-patch` at all, so the checker reads its own
+    default rather than a fixture. Strings are written as UTF-8 and bytes verbatim, so a file that is
+    not UTF-8 is expressible; `ABSENT` gives a path inside the temporary directory that nothing
+    writes, which is how a missing bootstrap patch is expressed while `--patch` stays valid.
+    """
     with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "fixture.patch"
-        path.write_text(patch_text, encoding="utf-8")
-        command = [sys.executable, str(SCRIPT), "--patch", str(path)]
-        if bootstrap_text is not None:
-            bootstrap = Path(directory) / "bootstrap.patch"
-            bootstrap.write_text(bootstrap_text, encoding="utf-8")
-            command += ["--bootstrap-patch", str(bootstrap)]
+        patch = ABSENT if patch_text is None else patch_text
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "--patch",
+            write_fixture(directory, "fixture.patch", patch),
+        ]
+        if bootstrap is not None:
+            command += ["--bootstrap-patch", write_fixture(directory, "bootstrap.patch", bootstrap)]
         return subprocess.run(command, capture_output=True, text=True)
 
 
@@ -1037,7 +1072,7 @@ CASES = (
         0,
         None,
     ),
-    ("a missing patch is reported distinctly", None, 2, None),
+    ("a missing patch is reported distinctly", None, 2, "cannot read"),
 )
 
 # The hunk-count rule, added after a comment edit in M141 added lines to two hunks without updating
@@ -1485,6 +1520,37 @@ for description, lines in GUARD_CLOSED_THEN_CALL_IN_ONE_STATEMENT:
         1,
         "calls the translation outside the member's guard",
     ),)
+
+# Round 6's P2-1: how each file's read failure is reported, which the four-tuple table cannot express
+# because it passes one path and leaves the bootstrap at its default. The distinction under test is
+# the exit code: a bootstrap patch that cannot be read is a rule violation (`1`), because the rule
+# that ties the call to its definition cannot be evaluated without it, while the translation patch
+# itself is the artefact the run is about, so failing to read it is a usage error (`2`). Both files
+# can also fail to decode, which is the same kind of failure as a missing one and used to produce a
+# traceback with whichever code the interpreter picked.
+UNREADABLE_CASES = (
+    (
+        "a bootstrap patch that cannot be read is a violation",
+        BASE,
+        ABSENT,
+        1,
+        "the predicate's definition patch cannot be read",
+    ),
+    (
+        "a bootstrap patch that is not UTF-8 is a violation",
+        BASE,
+        NOT_UTF8,
+        1,
+        "the predicate's definition patch cannot be read",
+    ),
+    (
+        "a translation patch that is not UTF-8 is a usage error",
+        NOT_UTF8,
+        None,
+        2,
+        "cannot read",
+    ),
+)
 
 
 def open_boundary_section(module_doc: str) -> str | None:
@@ -2291,6 +2357,26 @@ def main() -> int:
             problems.append("expected exit %d, got %d" % (expected_code, result.returncode))
         if expected_message is not None and expected_message not in (result.stderr + result.stdout):
             problems.append("expected %r in the output" % expected_message)
+        if problems:
+            failures += 1
+            print("FAIL: %s" % description)
+            for problem in problems:
+                print("  %s" % problem)
+            print("  stdout: %s" % result.stdout.strip())
+            print("  stderr: %s" % result.stderr.strip())
+        else:
+            print("ok: %s" % description)
+
+    # The read-failure table, which needs both paths set independently and cannot go through `CASES`.
+    for description, patch_text, bootstrap, expected_code, expected_message in UNREADABLE_CASES:
+        result = run(patch_text, bootstrap)
+        problems = []
+        if result.returncode != expected_code:
+            problems.append("expected exit %d, got %d" % (expected_code, result.returncode))
+        if expected_message not in (result.stderr + result.stdout):
+            problems.append("expected %r in the output" % expected_message)
+        if "Traceback (most recent call last)" in (result.stderr + result.stdout):
+            problems.append("the read error escaped as a traceback")
         if problems:
             failures += 1
             print("FAIL: %s" % description)
