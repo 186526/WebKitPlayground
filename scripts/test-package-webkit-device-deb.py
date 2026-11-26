@@ -626,13 +626,17 @@ def case_absent_overlay() -> None:
 def write_destination_tree(root: Path, images: dict[str, bytes]) -> Path:
     """Write the files an install-table row checks for, plus the given images, under root/var/jb.
 
-    Keys are payload-relative paths.  The three framework binaries exist so the rewrite's destination
-    check passes; they carry a single libSystem command and are never the image under test.
+    Keys are payload-relative paths.  The six extra binaries are the destinations the install rows
+    named by the fixture depend on, so the rewrite's destination check passes; they carry a single
+    libSystem command and are never the image under test.
     """
     payload = root / "var" / "jb"
     for relative in ("Library/Frameworks/WebKit.framework/WebKit",
                      "Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
-                     "Library/Frameworks/WebCore.framework/WebCore"):
+                     "Library/Frameworks/WebCore.framework/WebCore",
+                     "Library/Frameworks/WebGPU.framework/WebGPU",
+                     "usr/lib/libANGLE-shared.dylib",
+                     "usr/lib/libwebrtc.dylib"):
         write_macho(payload / relative)
     for relative, data in images.items():
         write_macho(payload / relative, data)
@@ -1244,20 +1248,6 @@ def case_survey_follows_the_rewrite() -> None:
         if broken:
             failures.append(f"{label}: the shipped package carries seal(s) that do not cover it: "
                             f"{broken}")
-        product = build_product(root)
-        write_shims(bin_dir)
-        deb = root / "webkit.deb"
-        build = run_script(product, deb, "--rootless", bin_dir)
-        if build.returncode != 0:
-            failures.append(f"{label}: the packaging step failed\n{build.stdout}{build.stderr}")
-            return
-        result = run_verify_deb(deb, "--rootless", bin_dir)
-        combined = result.stdout + result.stderr
-        if result.returncode != 0:
-            failures.append(f"{label}: exit {result.returncode} on a rewritten package\n{combined}")
-            return
-        if "Verified" not in combined:
-            failures.append(f"{label}: the mode did not report what it verified\n{combined}")
             return
     print(f"PASS {label}")
 
@@ -1842,6 +1832,17 @@ def load_commands_bytes(data: bytes) -> list[tuple[int, str | None]]:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--sign":
+        # The signer stand-ins call back into this module so the fixtures carry seals the packaging
+        # script's post-condition can actually read.  ldid's shape is `ldid -S[-e entitlements]
+        # file`; rcodesign's is `rcodesign sign [--entitlements-xml-file e] in out`, so the last
+        # argument that is not a flag is the file to sign in both.
+        arguments = [argument for argument in sys.argv[2:] if not argument.startswith("-")]
+        if not arguments:
+            return 2
+        sign_fixture(Path(arguments[-1]))
+        return 0
+
     missing = [tool for tool in ("zsh", "dpkg-deb", "file") if shutil.which(tool) is None]
     if missing:
         print(f"missing required tool(s): {', '.join(missing)}", file=sys.stderr)

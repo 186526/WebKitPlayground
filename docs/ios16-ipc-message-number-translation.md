@@ -418,7 +418,7 @@ m_connection->open(*this);
 
 第二个是假阳性，同样要写清：16.0、16.2 与 16.3 也是 8 字节，被判为更早的世代，**会被翻译**，而它们用的是 16.1 的编号表。用 `scripts/regen-ipc-message-number-headers.py` 对这三个 tag 各生成一份头文件后读到，`InitializeConnection` 在 16.0 是 2472、在 16.2 与 16.3 是 2485，而表里写的是 2478：三条连接都会把 `InitializeConnection` 翻成别的消息或翻错号。这不是「更安全的方向」，只是另一种错，只是这三个版本也不在本项目的交付配对里。
 
-三份头文件的读数，供复核：
+三份头文件的读数，供复核。这些数字来自 tag 自带的生成器，不是设备读数；复跑命令与 stdout 原文见第 8 节 (iii)。
 
 | tag | 生成条目 | `#if` | `InitializeConnection` | `GPUConnectionToWebProcess_EnsureAudioSession` |
 | --- | --- | --- | --- | --- |
@@ -767,13 +767,45 @@ patches=25 applied=23 skipped=2 fail=0
 
 **（ii）`sdkAlignedBehaviors()` 在 16.1 的 UI 进程里实际返回 8 字节这件事没有测过。** 这个宽度是判据的唯一依据，而它现在只是按 `SDKAlignedBehavior` 的枚举个数推出来的：`Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.h` 里 `enum class SDKAlignedBehavior` 到 `};` 之间的枚举行，16.0 与 16.1 是 63 行，16.2 与 16.3 是 64 行，`Bitmap<63, uint32_t>` 与 `Bitmap<64, uint32_t>` 都占 8 字节；本构建 94 个，占 12 字节。设备上的验证方法：在 16.1 的 MobileSafari 进程里读 `SDKAlignedBehaviors::storageLengthInBytes()`，或在 helper 的日志里读 `getClientSDKAlignedBehaviors` 写下的那两条 `RELEASE_LOG_ERROR`。**在这一条被实测之前，判据在真机上是否触发是未知的**，不是「应当触发」。
 
-**（iii）宽度判据两侧的盲区都没有量化。** 宽度只把 8 字节与 12 字节分成两组，每个组里挂着多个世代，所以误判有两个方向。
+**（iii）宽度判据两侧的盲区都没有在真机上量过。** 宽度只把 8 字节与 12 字节分成两组，每个组里挂着多个世代，所以误判有两个方向。
 
 假阴性一侧：16.4 是 73 个 behavior、17.0 是 79 个、18.0 到 18.2 也都是 12 字节，与本构建（94 个）等宽，被判为同代、**不翻译**。一个 16.4 或 17.x 的 UI 进程配本构建，握手按未翻译的编号比较，与今天不装补丁的表现相同。
 
 假阳性一侧：16.0、16.2 与 16.3 只有 8 字节，被判为更早的世代、**会被翻译**，而它们用的是 16.1 的编号表。用 `scripts/regen-ipc-message-number-headers.py` 对三个 tag 各生成一份头文件后读到，`InitializeConnection` 在 16.0 是 2472、在 16.2 与 16.3 是 2485，表里写的是 16.1 的 2478，三条连接都会翻成别的消息或翻错号。这个方向不比另一个安全，只是错法不同。
 
-两个方向都不在本项目的交付配对里：本项目只交付「16.1 UI 配本构建」与「本构建配本构建」两种形态，前者 8 字节对 12 字节、后者等宽，都落在判据能分开的位置。**但这只说明两种交付形态不落入盲区，不说明盲区不存在**，也不构成「宽度判据等价于世代判据」的理由。量化任一方向都需要相应版本的真机，本轮没有。
+这三个数字是 tag 生成器给出的读数，不是设备读数。复跑方式与输出（本机执行，`--repo` 指向一个带这些 tag 的检出；`/tmp/w78/tree` 没有 tag，用 `/home/real186/.cache/wk79/webkit`）：
+
+```sh
+cd WebKitPlayground
+for tag in Safari-16-iOS-16.0 Safari-16.2-iOS-16.2 Safari-16.3-iOS-16.3; do
+  python3 scripts/regen-ipc-message-number-headers.py \
+    --repo /home/real186/.cache/wk79/webkit \
+    --old-tag releases/Apple/$tag \
+    --names-old-out /tmp/regen/$tag.h \
+    --names-new-out /tmp/regen/$tag.new.h
+done
+```
+
+三条都 `rc=0`。脚本每次调用打印两行：第一行是该 `--old-tag` 的读数，第二行是同一次调用里顺带重新生成的 18.3 头文件。三次调用的 18.3 行逐字节相同，所以下面只列一次。原文（四行的顺序被重排成按 tag 排列）：
+
+```
+releases/Apple/Safari-16-iOS-16.0 (6b20039da9fd): messages=3174 #if=0 InitializeConnection=2472 GPUConnectionToWebProcess_EnsureAudioSession=2936 WrappedAsyncMessageForTesting=3173 sha256=05c8b53432fae1f7b3ddea1c8fda60d047419d803a7e2a537d910c406036726c
+releases/Apple/Safari-16.2-iOS-16.2 (01b2449ae5fb): messages=3192 #if=0 InitializeConnection=2485 GPUConnectionToWebProcess_EnsureAudioSession=2953 WrappedAsyncMessageForTesting=3191 sha256=d43604236dbeec171ebb53636d35c71a92356c8743120ab637246443f099918a
+releases/Apple/Safari-16.3-iOS-16.3 (eeeece8c1198): messages=3193 #if=0 InitializeConnection=2485 GPUConnectionToWebProcess_EnsureAudioSession=2953 WrappedAsyncMessageForTesting=3192 sha256=9c821a872136a4780b366f34fecb5e2a28f99c21707a08156282563142673c01
+releases/Apple/Safari-18.3.1-iOS-18.3.2 (1b670a0c038d): messages=4086 #if=703 InitializeConnection=3076 GPUConnectionToWebProcess_EnsureAudioSession=3838 WrappedAsyncMessageForTesting=4085 sha256=eaddfb0105671bec03d2d75b1056c6c70203ca1ce706a60eeb8b61acf6ac986c
+```
+
+`InitializeConnection` 是 2472 与 2485，`GPUConnectionToWebProcess_EnsureAudioSession` 是 2936 与 2953，与上表逐位一致。三个 tag 的 `^{commit}` 分别是 `6b20039da9fd`、`01b2449ae5fb`、`eeeece8c1198`，所以这不是同一棵树换了名字。
+
+16.4 走同一条命令，`rc=1`，stdout 零字节，stderr 原文：
+
+```
+regen-ipc-message-number-headers: releases/Apple/Safari-16.4-iOS-16.4: the generated header has 655 #if blocks, expected 0; the tables read one side by declaration order, which only holds while this count is 0
+```
+
+这一条是「生成器拒绝」，不是「没有试过」：生成器把 16.4 的头文件写出来了，自己数出 655 个 `#if` 后按断言拒绝，所以 `InitializeConnection` 在 16.4 里的位置没有被读成一个数字。16.4 落在 12 字节那一侧，本来就不翻译，这个编号对判据没有用。
+
+两个方向都不在本项目的交付配对里：本项目只交付「16.1 UI 配本构建」与「本构建配本构建」两种形态，前者 8 字节对 12 字节、后者等宽，都落在判据能分开的位置。**但这只说明两种交付形态不落入盲区，不说明盲区不存在**，也不构成「宽度判据等价于世代判据」的理由。没有量化的是**每个方向上有多少种真实的 UI 组合会落进去**，以及 16.0、16.2、16.3 的 UI 进程配本构建时实际怎么错——这需要在相应版本的真机上跑，本轮只有 tag 头文件里的编号，没有设备。
 
 **消息编号的真实编译值没有取到。** 本文 18.3 的所有编号都是把 `MessageNames.h` 当平坦下标读出来的，而 18.3 的生成器会输出 `#if` 条件（`/tmp/t4gen/regen/Names18.h` 共 703 个 `#if`），被条件剔除的条目会让后续编号前移。举一个本机算过的例子：`InitializeConnection` 在 18.3 的平坦下标是 3076，但它被 `#if PLATFORM(COCOA)` 包住，且它之前有大量位于 `PLATFORM(MAC)`、`PLATFORM(GTK)`、`OS(LINUX)` 等 iOS 上为假的分支，iOS 编译后的真实编号小于 3076。
 

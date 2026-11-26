@@ -328,329 +328,6 @@ PAYLOAD_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1
 cleanup() { rm -rf "${WORK_DIR}"; }
 trap cleanup EXIT
 
-# ══════════════════════════════════════════════════════════════
-# PAYLOAD MODE — rewrite an installed tree and pack it as it is
-# ══════════════════════════════════════════════════════════════
-# This mode exists because the payload that reaches an application is the one at
-# /var/jb/Library/Frameworks, which is also the only /var/jb path inside
-# WebSafeWebKitFilter.dylib. A tree built at a second root would be a tree nothing
-# loads, so here the seven images are rewritten where they already sit and the .deb
-# ships exactly those bytes.
-#
-# What it establishes, and nothing more: the seven name one another by /var/jb paths
-# that exist, their LC_ID_DYLIB still carries the /System name, and every
-# CodeDirectory describes the bytes in the file. Whether an application process
-# actually runs these images is a separate question this script cannot answer — an
-# application's main binary binds /System/Library/Frameworks/WebKit.framework/WebKit
-# at launch, before any injected constructor.
-#
-# Step labels. This script runs one of two pipelines, and they do not have the same
-# steps: payload mode has 7 and product mode has 9. The `# STEP n —` headings below
-# are the product pipeline's numbering and are used wherever the code is shared, so
-# a shared step keeps the number product mode gives it. That is why payload mode
-# runs [1/7]..[4/7] before the shared block, then [5/7] for what product mode calls
-# STEP 8, [6/7] for STEP 9 and [7/7] for the read-back. A payload heading is marked
-# `PAYLOAD STEP n`; anything marked plain `STEP n` means product mode's nth step,
-# and the number a run prints is always the runtime counter, not the heading.
-if [[ "${MODE}" == "payload" ]]; then
-    TOTAL_STEPS=7
-
-    # ── PAYLOAD STEP 1 — Copy the installed tree into a package root ──
-    log_step "Copying the installed payload into a package root..."
-    PAYLOAD_SOURCE_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${PAYLOAD_SOURCE}")"
-    mkdir -p "${DEB_ROOT}"
-    # The tree is copied, never edited in place: --payload may point at a tree the
-    # caller still wants, and a rewritten image is not the input a second run wants.
-    (cd "${PAYLOAD_SOURCE_REALPATH}" && tar -cf - .) | (cd "${DEB_ROOT}" && tar -xf -)
-    log_info "Copied $(du -sh "${DEB_ROOT}" | awk '{print $1}') into ${DEB_ROOT}"
-
-    # ── PAYLOAD STEP 2 — Rewrite the seven images in place ──
-    log_step "Rewriting the seven images in place..."
-    python3 "${REWRITER}" rewrite "${DEB_ROOT}" --prefix "${PREFIX-/var/jb}"
-
-    # ── PAYLOAD STEP 3 — Read the rewritten tree back ──
-    log_step "Verifying the rewritten tree..."
-    # This is the reading the mission asks for, on the bytes that will be shipped:
-    # eleven edges among the seven, seven identities unchanged, every page hash
-    # describing its own file. It is offline verification of the package contents.
-    python3 "${REWRITER}" verify "${DEB_ROOT}" --prefix "${PREFIX-/var/jb}"
-
-    # ── PAYLOAD STEP 4 — Compare the payload with the installed file list ──
-    log_step "Checking the payload against the installed package's file list..."
-    # dpkg installs an upgrade by writing the new list and deleting every file the
-    # old list has and the new one lacks. A payload built without the two WebKit
-    # daemons therefore deletes them from the device: that happened once already,
-    # with webpushd and adattributiond. This step reads the list the package must
-    # still carry and stops before the package is built if any of those files is
-    # absent.
-    #
-    # A file the payload carries that the old package does not is not an error:
-    # dpkg has no owner to conflict with, and libWebKitSwift.dylib is exactly that
-    # case, absent from the installed package and new in this one.
-    MANIFEST_FILE=""
-    if [[ -n "${EXPECT_MANIFEST}" ]]; then
-        MANIFEST_FILE="${EXPECT_MANIFEST}"
-        log_info "Expected file list read from ${MANIFEST_FILE}"
-    elif command -v dpkg >/dev/null 2>&1 && dpkg -s "${PACKAGE_ID}" >/dev/null 2>&1; then
-        MANIFEST_FILE="${WORK_DIR}/installed-manifest.txt"
-        dpkg -L "${PACKAGE_ID}" > "${MANIFEST_FILE}"
-        log_info "Expected file list read from dpkg -L ${PACKAGE_ID}"
-    else
-        log_error "No file list to check the payload against: pass --expect-manifest"
-        log_error "<file>, or run where 'dpkg -s ${PACKAGE_ID}' answers."
-        log_error "Shipping against an unknown list deletes whatever the old"
-        log_error "package listed and the payload lacks."
-        exit 1
-    fi
-    python3 - "${DEB_ROOT}" "${MANIFEST_FILE}" <<'MANIFEST_CHECK'
-import os, sys
-
-built, manifest = sys.argv[1], sys.argv[2]
-paths = []
-with open(manifest) as handle:
-    for line in handle:
-        path = line.strip()
-        # dpkg -L prints the install root itself as "/." and "//." on some
-        # versions. It is not a path anything can be missing from, so it is
-        # dropped here rather than counted as a directory entry.
-        if not path or path.startswith("#") or path.strip("/") in ("", "."):
-            continue
-        paths.append(path)
-
-# Whether a listed path is a directory is read from the payload, which is the
-# tree being checked: dpkg -L prints both kinds and does not mark which is which,
-# and an empty directory such as WebKit.framework/Frameworks has no child to give
-# it away. A path with no counterpart at all is treated as a file, so an empty
-# payload is reported as missing every entry rather than as listing no file.
-files = []
-directories = 0
-for path in paths:
-    local = os.path.join(built, path.lstrip("/"))
-    if os.path.isdir(local):
-        directories += 1
-        continue
-    files.append(path)
-missing = []
-for path in files:
-    if not os.path.lexists(os.path.join(built, path.lstrip("/"))):
-        missing.append(path)
-# The guard counts files, not listed paths. A list of nothing but directories
-# compares no file at all, and a list of nothing but "/." is the same emptiness
-# one level up: both must stop here rather than print that the payload carries
-# all of a set it never read.
-if not files:
-    print("Error: %s lists %d path(s) and not one file, so nothing was checked."
-          % (manifest, len(paths)), file=sys.stderr)
-    print("A list of directories cannot say whether the payload still carries the "
-          "files dpkg would delete.", file=sys.stderr)
-    sys.exit(1)
-if missing:
-    print("Error: the payload is missing %d of the %d file(s) the installed package carries."
-          % (len(missing), len(files)), file=sys.stderr)
-    print("dpkg deletes each of these on install, because the new file list omits them:", file=sys.stderr)
-    for path in missing:
-        print("  %s" % path, file=sys.stderr)
-    sys.exit(1)
-print("  the payload carries all %d file(s) the installed package lists (%d directory entry(s) left to dpkg)"
-      % (len(files), directories))
-MANIFEST_CHECK
-
-    PAYLOAD_MODE_DONE=1
-fi
-
-if [[ "${MODE}" != "payload" ]]; then
-# ══════════════════════════════════════════════════════════════
-# STEP 1 — Collect artifacts
-# ══════════════════════════════════════════════════════════════
-log_step "Collecting required/recommended/on-demand artifacts..."
-mkdir -p "${PAYLOAD_DIR}" "${USRLIB_DIR}"
-
-typeset -a required_items=(
-    "WebKit.framework"
-    "WebCore.framework"
-    "WebKitLegacy.framework"
-    "JavaScriptCore.framework"
-    "libwebrtc.dylib"
-)
-
-typeset -a recommended_items=(
-    "libANGLE-shared.dylib"
-    "WebGPU.framework"
-    "com.apple.WebKit.WebContent.xpc"
-    "com.apple.WebKit.Networking.xpc"
-    "com.apple.WebKit.GPU.xpc"
-    "com.apple.WebKit.WebContent.CaptivePortal.xpc"
-    "com.apple.WebKit.WebContent.Crashy.xpc"
-    "com.apple.WebKit.WebContent.Development.xpc"
-)
-
-typeset -a ondemand_items=(
-    "webpushd"
-    "adattributiond"
-    "com.apple.WebKit.WebAuthn.xpc"
-)
-
-copy_item_if_exists() {
-    local item="$1" dst_dir="$2"
-    local src="${PRODUCT_DIR}/${item}"
-    local dst="${dst_dir}/${item}"
-    if [[ -e "${src}" ]]; then
-        ditto "${src}" "${dst}"
-        return 0
-    fi
-    return 1
-}
-
-item_is_already_covered_in_framework() {
-    local item="$1"
-    [[ -e "${PAYLOAD_DIR}/WebKit.framework/XPCServices/${item}" ]] && return 0
-    [[ -e "${PAYLOAD_DIR}/WebKit.framework/Daemons/${item}" ]]    && return 0
-    return 1
-}
-
-for item in "${required_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        log_error "Missing required artifact: ${item}"
-        exit 1
-    fi
-done
-
-# The build product keeps the real overlay at top level and puts a symlink to it
-# at WebKit.framework/Frameworks/libWebKitSwift.dylib.  Copying WebKit.framework
-# alone therefore carries a link whose target never enters the payload, and the
-# symlink pass below would delete it.  Copy the real file over that link instead.
-install_swift_overlay() {
-    local source="${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}"
-    local destination="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
-    [[ -e "${source}" ]] || return 1
-    mkdir -p "$(dirname "${destination}")"
-    rm -f "${destination}"
-    cp -fL "${source}" "${destination}"
-    log_info "Placed Swift overlay at ${SWIFT_OVERLAY_REL}"
-}
-
-install_swift_overlay || log_note "Swift overlay not in the product: ${SWIFT_OVERLAY_NAME}"
-
-# A symlink satisfies -e but not the check below: dyld opens the path at runtime and a relative
-# link in the payload has no sibling file to reach.  This runs before STEP 2 so the build stops
-# on the real defect rather than on the deletion STEP 2 would make of it.
-verify_swift_overlay() {
-    local payload="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
-    [[ -e "${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}" ]] || return 0
-    if [[ -L "${payload}" ]]; then
-        log_error "Payload has ${SWIFT_OVERLAY_REL} as a symlink; WebKit needs a regular file there."
-        return 1
-    fi
-    if [[ ! -f "${payload}" ]]; then
-        log_error "Payload is missing ${SWIFT_OVERLAY_REL}: the product has ${SWIFT_OVERLAY_NAME} but the package does not ship it."
-        return 1
-    fi
-    log_info "Verified ${SWIFT_OVERLAY_REL} is a regular file in the payload."
-}
-
-verify_swift_overlay || exit 1
-
-for item in "${recommended_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
-        log_warn "recommended artifact not found: ${item}"
-    fi
-done
-
-for item in "${ondemand_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
-        log_note "on-demand artifact not found: ${item}"
-    fi
-done
-
-# ══════════════════════════════════════════════════════════════
-# STEP 2 — Resolve external/broken symlinks
-# ══════════════════════════════════════════════════════════════
-log_step "Resolving external/broken symlinks inside payload..."
-while IFS= read -r -d '' link_path; do
-    target_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${link_path}")"
-    if [[ ! -e "${target_path}" ]]; then
-        log_warn "removing broken symlink: ${link_path} -> ${target_path}"
-        rm "${link_path}"
-        continue
-    fi
-    case "${target_path}" in
-        "${PAYLOAD_REALPATH}"/*) continue ;;
-    esac
-    rm "${link_path}"
-    ditto "${target_path}" "${link_path}"
-done < <(find "${PAYLOAD_DIR}" -type l -print0)
-
-# ══════════════════════════════════════════════════════════════
-# STEP 3 — Prune non-runtime files
-# ══════════════════════════════════════════════════════════════
-log_step "Pruning non-runtime files..."
-rm -rf "${PAYLOAD_DIR}/DerivedSources"
-find "${PAYLOAD_DIR}" -type d \( -name Headers -o -name PrivateHeaders \) -prune -exec rm -rf {} +
-find "${PAYLOAD_DIR}" -type f -name '*.tbd' -delete
-
-# Move top-level .xpc bundles into WebKit.framework/XPCServices.
-XPC_FALLBACK_DIR="${PAYLOAD_DIR}/WebKit.framework/XPCServices"
-mkdir -p "${XPC_FALLBACK_DIR}"
-while IFS= read -r -d '' top_level_xpc; do
-    xpc_name="$(basename "${top_level_xpc}")"
-    dst="${XPC_FALLBACK_DIR}/${xpc_name}"
-    if [[ -L "${dst}" ]]; then
-        rm -f "${dst}"; mv "${top_level_xpc}" "${dst}"; continue
-    fi
-    if [[ -e "${dst}" ]]; then
-        rm -rf "${top_level_xpc}"; continue
-    fi
-    mv "${top_level_xpc}" "${dst}"
-done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type d -name '*.xpc' -print0)
-
-# ══════════════════════════════════════════════════════════════
-# STEP 4 — Move dylibs to usr/lib
-# ══════════════════════════════════════════════════════════════
-log_step "Moving dylibs to ${INSTALL_USRLIB_DIR}..."
-while IFS= read -r -d '' dylib; do
-    base="$(basename "${dylib}")"
-    if [[ "${base}" == "${SWIFT_OVERLAY_NAME}" ]]; then
-        # The bundle-relative copy is the one WebKit loads.  A top-level copy
-        # would only add a second file the loader never reads.
-        log_note "Keeping ${base} inside WebKit.framework only; dropping the top-level copy."
-        rm -f "${dylib}"
-        continue
-    fi
-    cp -f "${dylib}" "${USRLIB_DIR}/${base}"
-    rm -f "${dylib}"
-done < <(find "${PAYLOAD_DIR}" -mindepth 1 -maxdepth 1 -type f -name '*.dylib' -print0)
-
-# ══════════════════════════════════════════════════════════════
-# STEP 5 — Rewrite framework load paths to @rpath
-# ══════════════════════════════════════════════════════════════
-# Runs after STEP 4 so every destination in the install table already exists,
-# and before STEP 6 so the existing ldid pass re-signs the rewritten images.
-# Editing a load command invalidates the existing LC_CODE_SIGNATURE: the
-# command area of the shipped WebKit spans 8.8 KB, inside the code pages the
-# signature hashes, so a rewrite that is not followed by a re-sign ships a
-# broken seal.  Re-signing is ldid's job here rather than a hand-recomputed
-# LC_CODE_SIGNATURE because ldid is already required and already runs over
-# every Mach-O in this payload, and because the XPC services need their
-# entitlements on the new seal.
-#
-# llvm-install-name-tool is not used: it rejects every image in this payload
-# with "unsupported load command", and it has no way to leave a command it does
-# not know alone.  Measured on the shipped payload, the rejected command is
-# 0x1e (LC_SEGMENT_SPLIT_INFO) in WebKit.framework/WebKit and 0x27
-# (LC_DYLD_ENVIRONMENT) in the XPC helpers.  LC_LAZY_LOAD_DYLIB is 0x20 and
-# appears zero times in this payload, so it is not what stops that tool.  The
-# rewrite is a small Mach-O reader below instead, which needs no tool beyond the
-# python3 this script already requires.
-log_step "Rewriting framework load paths to @rpath..."
-
 MACHO_LOAD_PATHS_TOOL="${WORK_DIR}/macho-load-paths.py"
 
 write_macho_load_path_tool() {
@@ -748,8 +425,6 @@ INSTALL_PATHS = (
     # WebCore reaches WebGPU through PrivateFrameworks with LC_LOAD_WEAK_DYLIB,
     # while WebGPU itself claims the Frameworks name. Both spellings are the same
     # image in this package, so both rows point at the one file the package ships.
-    # Without this row the weak dependency was never rewritten and verify passed,
-    # because FORBIDDEN_PREFIXES did not list the PrivateFrameworks spelling either.
     ("/System/Library/PrivateFrameworks/WebGPU.framework/WebGPU",
      "@rpath/WebGPU.framework/WebGPU",
      "Library/Frameworks/WebGPU.framework/WebGPU"),
@@ -1102,6 +777,137 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv))
 MACHO_LOAD_PATHS_PYTHON
 }
+write_macho_load_path_tool
+
+# ══════════════════════════════════════════════════════════════
+# PAYLOAD MODE — rewrite an installed tree and pack it as it is
+# ══════════════════════════════════════════════════════════════
+# This mode exists because the payload that reaches an application is the one at
+# /var/jb/Library/Frameworks, which is also the only /var/jb path inside
+# WebSafeWebKitFilter.dylib. A tree built at a second root would be a tree nothing
+# loads, so here the seven images are rewritten where they already sit and the .deb
+# ships exactly those bytes.
+#
+# What it establishes, and nothing more: the seven name one another by /var/jb paths
+# that exist, their LC_ID_DYLIB still carries the /System name, and every
+# CodeDirectory describes the bytes in the file. Whether an application process
+# actually runs these images is a separate question this script cannot answer — an
+# application's main binary binds /System/Library/Frameworks/WebKit.framework/WebKit
+# at launch, before any injected constructor.
+#
+# Step labels. This script runs one of two pipelines, and they do not have the same
+# steps: payload mode has 7 and product mode has 9. The `# STEP n —` headings below
+# are the product pipeline's numbering and are used wherever the code is shared, so
+# a shared step keeps the number product mode gives it. That is why payload mode
+# runs [1/7]..[4/7] before the shared block, then [5/7] for what product mode calls
+# STEP 8, [6/7] for STEP 9 and [7/7] for the read-back. A payload heading is marked
+# `PAYLOAD STEP n`; anything marked plain `STEP n` means product mode's nth step,
+# and the number a run prints is always the runtime counter, not the heading.
+if [[ "${MODE}" == "payload" ]]; then
+    TOTAL_STEPS=7
+
+    # ── PAYLOAD STEP 1 — Copy the installed tree into a package root ──
+    log_step "Copying the installed payload into a package root..."
+    PAYLOAD_SOURCE_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${PAYLOAD_SOURCE}")"
+    mkdir -p "${DEB_ROOT}"
+    # The tree is copied, never edited in place: --payload may point at a tree the
+    # caller still wants, and a rewritten image is not the input a second run wants.
+    (cd "${PAYLOAD_SOURCE_REALPATH}" && tar -cf - .) | (cd "${DEB_ROOT}" && tar -xf -)
+    log_info "Copied $(du -sh "${DEB_ROOT}" | awk '{print $1}') into ${DEB_ROOT}"
+
+    # ── PAYLOAD STEP 2 — Rewrite the seven images in place ──
+    log_step "Rewriting the seven images in place..."
+    python3 "${REWRITER}" rewrite "${DEB_ROOT}" --prefix "${PREFIX-/var/jb}"
+
+    # ── PAYLOAD STEP 3 — Read the rewritten tree back ──
+    log_step "Verifying the rewritten tree..."
+    # This is the reading the mission asks for, on the bytes that will be shipped:
+    # eleven edges among the seven, seven identities unchanged, every page hash
+    # describing its own file. It is offline verification of the package contents.
+    python3 "${REWRITER}" verify "${DEB_ROOT}" --prefix "${PREFIX-/var/jb}"
+
+    # ── PAYLOAD STEP 4 — Compare the payload with the installed file list ──
+    log_step "Checking the payload against the installed package's file list..."
+    # dpkg installs an upgrade by writing the new list and deleting every file the
+    # old list has and the new one lacks. A payload built without the two WebKit
+    # daemons therefore deletes them from the device: that happened once already,
+    # with webpushd and adattributiond. This step reads the list the package must
+    # still carry and stops before the package is built if any of those files is
+    # absent.
+    #
+    # A file the payload carries that the old package does not is not an error:
+    # dpkg has no owner to conflict with, and libWebKitSwift.dylib is exactly that
+    # case, absent from the installed package and new in this one.
+    MANIFEST_FILE=""
+    if [[ -n "${EXPECT_MANIFEST}" ]]; then
+        MANIFEST_FILE="${EXPECT_MANIFEST}"
+        log_info "Expected file list read from ${MANIFEST_FILE}"
+    elif command -v dpkg >/dev/null 2>&1 && dpkg -s "${PACKAGE_ID}" >/dev/null 2>&1; then
+        MANIFEST_FILE="${WORK_DIR}/installed-manifest.txt"
+        dpkg -L "${PACKAGE_ID}" > "${MANIFEST_FILE}"
+        log_info "Expected file list read from dpkg -L ${PACKAGE_ID}"
+    else
+        log_error "No file list to check the payload against: pass --expect-manifest"
+        log_error "<file>, or run where 'dpkg -s ${PACKAGE_ID}' answers."
+        log_error "Shipping against an unknown list deletes whatever the old"
+        log_error "package listed and the payload lacks."
+        exit 1
+    fi
+    python3 - "${DEB_ROOT}" "${MANIFEST_FILE}" <<'MANIFEST_CHECK'
+import os, sys
+
+built, manifest = sys.argv[1], sys.argv[2]
+paths = []
+with open(manifest) as handle:
+    for line in handle:
+        path = line.strip()
+        # dpkg -L prints the install root itself as "/." and "//." on some
+        # versions. It is not a path anything can be missing from, so it is
+        # dropped here rather than counted as a directory entry.
+        if not path or path.startswith("#") or path.strip("/") in ("", "."):
+            continue
+        paths.append(path)
+
+# Whether a listed path is a directory is read from the payload, which is the
+# tree being checked: dpkg -L prints both kinds and does not mark which is which,
+# and an empty directory such as WebKit.framework/Frameworks has no child to give
+# it away. A path with no counterpart at all is treated as a file, so an empty
+# payload is reported as missing every entry rather than as listing no file.
+files = []
+directories = 0
+for path in paths:
+    local = os.path.join(built, path.lstrip("/"))
+    if os.path.isdir(local):
+        directories += 1
+        continue
+    files.append(path)
+missing = []
+for path in files:
+    if not os.path.lexists(os.path.join(built, path.lstrip("/"))):
+        missing.append(path)
+# The guard counts files, not listed paths. A list of nothing but directories
+# compares no file at all, and a list of nothing but "/." is the same emptiness
+# one level up: both must stop here rather than print that the payload carries
+# all of a set it never read.
+if not files:
+    print("Error: %s lists %d path(s) and not one file, so nothing was checked."
+          % (manifest, len(paths)), file=sys.stderr)
+    print("A list of directories cannot say whether the payload still carries the "
+          "files dpkg would delete.", file=sys.stderr)
+    sys.exit(1)
+if missing:
+    print("Error: the payload is missing %d of the %d file(s) the installed package carries."
+          % (len(missing), len(files)), file=sys.stderr)
+    print("dpkg deletes each of these on install, because the new file list omits them:", file=sys.stderr)
+    for path in missing:
+        print("  %s" % path, file=sys.stderr)
+    sys.exit(1)
+print("  the payload carries all %d file(s) the installed package lists (%d directory entry(s) left to dpkg)"
+      % (len(files), directories))
+MANIFEST_CHECK
+
+    PAYLOAD_MODE_DONE=1
+fi
 
 # ══════════════════════════════════════════════════════════════
 # --verify-deb — Run STEP 7's reader over a built package
@@ -1154,7 +960,7 @@ if [[ -n "${VERIFY_DEB}" ]]; then
     exit 0
 fi
 
-# ══════════════════════════════════════════════════════════════
+if [[ "${MODE}" != "payload" ]]; then
 # STEP 1 — Collect artifacts
 # ══════════════════════════════════════════════════════════════
 log_step "Collecting required/recommended/on-demand artifacts..."
