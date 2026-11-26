@@ -729,27 +729,36 @@ jobs:
           rm -f "$resolvable_headers" "$unresolved_includes"
           echo "every include the applied patches add resolves under WebKit/Source"
 
-      - name: Refuse a tree whose translation switch is on
+      - name: Check that the translation switch sits on one guarded connection and nowhere else
         if: inputs.apply_patch == 'true'
         run: |
           set -euo pipefail
-          # patches/ios16-ipc-message-number-translation.patch compiles two translation tables in
-          # and leaves IPC::Connection::m_shouldTranslateMessageNames at its `{ false }` initialiser.
-          # This deployment loads one WebKit build through scripts/install-webkit-override.sh, so
-          # both sides of the connection already number messages identically; a call to
-          # setShouldTranslateMessageNames(true) makes the tables rewrite numbers that agree, the
-          # InitializeConnection handshake stops matching, and the page renders blank. The patch
-          # applies cleanly with that call in it, and no compiler diagnostic follows from it, so the
-          # switch has to be checked as a contract against the patch file.
+          # patches/ios16-ipc-message-number-translation.patch compiles two translation tables in and
+          # turns IPC::Connection::m_shouldTranslateMessageNames on for exactly one connection: the
+          # helper-to-UI one built in AuxiliaryProcess::initialize, under peerIsOlderGeneration().
+          # The contract checked here has four parts. There is exactly one setter call, it is in
+          # Source/WebKit/Shared/AuxiliaryProcess.cpp, it sits under that predicate and outside every
+          # preprocessor conditional, and it comes before m_connection->open() so the first message
+          # already carries a translated number. Both read sites ask the member, and the member keeps
+          # its `{ false }` initialiser so every other connection stays untranslated.
           #
-          # The checker also asserts the patch still records why the switch stays off - the
-          # measured counts against both the shipped 16.1 enumeration and the 614.1.9 snapshot the
-          # tables were generated from - because the comment is the only place those numbers live.
-          # Its own cases run here too, so a checker that has stopped detecting a re-added call
+          # The reason is that the two topologies need opposite answers. When both sides load this
+          # build through scripts/install-webkit-override.sh they number messages identically, and
+          # translation would renumber messages that agree - InitializeConnection stops matching and
+          # the page renders blank. When only the helpers load it, the UI process runs the shipped
+          # 16.1 build and numbers messages differently, and leaving translation off breaks the same
+          # handshake from the other side. The earlier version of this step argued only the first
+          # case. Its default topology had both sides falling back to 16.1, so a flag that was always
+          # false happened to be right there, by coincidence rather than by the reasoning.
+          #
+          # The checker also asserts the patch still records why the switch exists where it does: the
+          # measured counts against the shipped 16.1 enumeration, which is the tables' basis, and the
+          # width test that tells the two topologies apart. Its own cases run here too, so a checker
+          # that has stopped noticing a second call, an unguarded one, or a call inside a conditional
           # fails this step instead of passing it.
           python3 scripts/check-translation-switch.py || {
-            echo "::error::the applied translation patch turns message number translation on, or has"
-            echo "::error::lost the rationale that keeps it off. See the reason above."
+            echo "::error::the applied translation patch does not put the switch on exactly one guarded"
+            echo "::error::connection, or has lost the rationale for where it belongs. See above."
             exit 1
           }
           python3 scripts/test-check-translation-switch.py

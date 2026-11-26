@@ -1935,7 +1935,8 @@ def run(patch_path: Path, bootstrap_patch: Path | None = None) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="Require the iOS 16 message number translation to stay switched off."
+        description="Require the iOS 16 message number translation to be switched on in exactly one "
+                    "guarded place, and to stay off everywhere else."
     )
     parser.add_argument(
         "--patch",
