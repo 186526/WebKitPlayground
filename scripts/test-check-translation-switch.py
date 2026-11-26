@@ -1041,19 +1041,44 @@ CASES = (
 )
 
 # The hunk-count rule, added after a comment edit in M141 added lines to two hunks without updating
-# their `@@` headers. One was a new-file hunk and would have applied with exit 0, leaving the file it
-# creates short; the other modified a file and produced the `patch is corrupt` report that opened this
-# round. No other check in this file or in the build workflow noticed either, because the counts are
-# never derived by git and every other rule reads the patch's text rather than its shape.
+# their `@@` headers. Both hunks declared fewer body lines than they carried. Applied as one patch the
+# file stopped with `patch is corrupt` at the second of them — the AuxiliaryProcess hunk, which
+# declared `@@ -106,6 +106,27 @@` over 28 lines. No other check in this file or in the build
+# workflow noticed either, because the counts are never derived by git and every other rule reads the
+# patch's text rather than its shape.
+#
+# What a wrong count does depends on the counters and on the body, not on which side runs long.
+# `parse_fragment` in git's `apply.c` decrements an unsigned counter per body line and returns -1 when
+# one wraps or when one is still positive at the end; either way the apply reports `corrupt patch`
+# and exits 128. It also returns -1 without consulting the counters at all, from
+# `if (!patch->recount && !deleted && !added)`, which a body can reach when its counts run out before
+# its first `+` or `-` line is read. Neither list is complete — the parse also fails on an unreadable
+# header, on a last line without a newline, and on a line starting with anything other than a space,
+# `+`, `-` or nothing at all, since an empty line is a context line — so the cases below test the
+# count comparison, not a claim about every way the apply can fail. Hunk kind does not decide which of
+# those outcomes a wrong count reaches, though it can decide whether the patch is applied at all: the
+# `@@ -1,1 +1,2 @@` shape in the checker's comment is refused by `parse_single_patch` as a new-file
+# hunk for carrying an old-side line, while the same body applies as a modification. All of this was
+# measured on a scratch repo with git 2.55.0; `check-translation-switch.py` records the rows.
 #
 # The first case is the control: a fixture with correct headers has to pass, or the two failures
 # below would be refused for a reason other than the count under test and this block would prove
-# nothing. The two off-by-N cases move the declared count in both directions. An overcount always stops
-# the apply with `patch is corrupt`. An undercount is not confined to any one hunk kind or outcome: on
-# a scratch repo it applied correctly, applied with a later change silently dropped and exit 0, raised
-# `corrupt`, and reported `patch does not apply`, depending on where the truncation landed. Both
-# directions are drift this check has to report, and for the silent shapes it is the only report — the
-# apply exits 0 and prints every file as applied.
+# nothing. `with_hunk_headers` gives every section the shape `@@ -0,N +1,M @@` over an all-`+` body,
+# which fixes where each of the two offset cases lands:
+#
+#   delta=-1  each section's read stops one line short and that line is never parsed — the family
+#             that applies without complaint and leaves the file short. Measured by applying the
+#             `-1` fixture to empty files of the same four paths on git 2.55.0: rc 0 and no output,
+#             with 1 line written where the body carries 2 and 35 where it carries 36.
+#   delta=+2  each section ends with its new-side count still positive — `corrupt patch`, exit 128,
+#             whichever tree it meets.
+#
+# So the pair moves the count in both directions and both are violations, but neither exercises the
+# third family, a counter decremented past zero; no fixture here has a body line that decrements a
+# side its header already took to zero. The checker does not need that distinction — it compares the
+# declared pair against the walked pair, and all three families disagree with the walk — which is why
+# it reports the header and its two numbers rather than predicting the apply's message. For the
+# silent family it is the only report: the apply exits 0 and leaves a file short without a word.
 #
 # The last pair covers the shape this function cannot parse at all. `HUNK_HEADER` reads plain unified
 # diff headers, and a `@@` line is recognised by its prefix alone, so a combined diff's `@@@` or any
