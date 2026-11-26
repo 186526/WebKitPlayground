@@ -1,25 +1,48 @@
 #!/usr/bin/env python3
-"""Require the iOS 16 message number translation to stay switched off in a same-generation build.
+"""Require the iOS 16 message number translation to be switched on in exactly one guarded place.
 
-patches/ios16-ipc-message-number-translation.patch adds two things: the translation tables, and a
-switch that decides whether a connection uses them. IPC::Connection::m_shouldTranslateMessageNames
-defaults to false in Connection.h, and the patch must leave it that way. The tables are compiled in
-and inert. This script fails when that stops being true.
+patches/ios16-ipc-message-number-translation.patch adds three things: the translation tables, a
+switch member that decides whether a connection uses them, and one call that sets it. The call sits
+in AuxiliaryProcess::initialize, between creating the connection and opening it, guarded by
+peerIsOlderGeneration(), which patches/ios16-xpc-bootstrap-compat.patch defines from the width of the
+SDK aligned behavior bitmap the UI process sent. This script fails when the call moves, is duplicated,
+loses its guard, or when the member is written any other way.
+
+Two topologies need opposite answers, and that is why the guard exists rather than a blanket on or
+off:
+
+  route B, both sides this build: the UI process loads our own WebKit.framework through
+    scripts/install-webkit-override.sh, so both sides number messages identically and the flag must
+    stay false. Switching translation on here renumbers messages that were correct.
+    `InitializeConnection` is number 3076 in this tree, and the incoming table switches over the
+    shipped 16.1 numbering, so case 3076 answers
+    MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged - a real message with no
+    relation to the handshake. 3076 is not in isKnownUnmappedIncomingNumber, so the miss path that
+    would flag the message is not taken and the rename is silent. ConnectionCocoa.mm's
+    `decoder->messageName() == MessageName::InitializeConnection` then never fires, m_isConnected
+    stays false, and the page renders blank instead of reporting anything.
+
+  route A, mixed generations: the UI process keeps the system framework, which is the shipped 16.1
+    build, and only the helpers load this one, so the two sides number messages differently and the
+    flag must be true. Measured on the device: MobileSafari loading /System against WebContent and
+    Networking loading /var/jb. A 16.1 UI process sends an eight-byte SDK aligned behavior bitmap
+    where this build's is twelve, so peerIsOlderGeneration() answers true there and false on route B,
+    which is the whole reason the call is guarded by it rather than by the deployment target.
+
+  Neither answer can come from IOS_16_MESSAGE_NUMBER_TRANSLATION: it keys on
+  __IPHONE_OS_VERSION_MIN_REQUIRED, which is below 180000 for every build this project makes, so it
+  is constant 1 and says how the binary was built, not what its peer runs.
 
 What it refuses, and why each combination is a defect rather than a preference:
 
-  - Any call to setShouldTranslateMessageNames(true) in the patched tree, including a call split
-    across lines. The check reads whole statements, not lines, so folding the call after the opening
-    parenthesis does not hide it. The UI process on this deployment loads our own WebKit.framework
-    through scripts/install-webkit-override.sh, so both sides of the connection are this build and
-    already number messages identically. Switching translation on renumbers messages that were
-    correct. `InitializeConnection` is number 3076 in
-    this tree, and the incoming table switches over the shipped 16.1 numbering, so case 3076 answers
-    MessageName::RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged - a real message with no
-    relation to the handshake. 3076 is not in isKnownUnmappedIncomingNumber,
-    so the miss path that would flag the message is not taken and the rename is silent.
-    ConnectionCocoa.mm's `decoder->messageName() == MessageName::InitializeConnection` then never
-    fires, m_isConnected stays false, and the page renders blank instead of reporting anything.
+  - A call to setShouldTranslateMessageNames anywhere other than the one permitted site, and more
+    than one call there. The permitted site is a statement in
+    Source/WebKit/Shared/AuxiliaryProcess.cpp that calls the setter and sits under an `if` on
+    peerIsOlderGeneration(). A call split across lines is still one statement and is still counted,
+    so folding it after the opening parenthesis does not hide it. A call in any other file, a second
+    call, or the same call with its guard removed is a defect: without the guard the flag is turned
+    on for route B, which is the failure the first paragraph describes; anywhere else it turns on a
+    connection whose peer was never asked.
 
   - A member initialiser other than `{ false }` in Connection.h. IPC::Connection::Connection does
     not include MessageNumberTranslation.h, so an initialiser written as a macro name would be an
@@ -44,9 +67,9 @@ What it refuses, and why each combination is a defect rather than a preference:
     unrelated message. A line that names 614.1.9 is allowed only when the same line, or the line
     after, calls it superseded, earlier or wrongly based.
 
-  - A translation call that does not sit under the member. The flag is a setter call and two reads;
-    guarding only the call leaves the reads, and a read is the cheapest place to make translation
-    unconditional. Every added statement that calls `translateOutgoingMessageName` or
+  - A translation call that does not sit under the member. The switch is a setter call and two
+    reads; guarding only the call leaves the reads, and a read is the cheapest place to make
+    translation unconditional. Every added statement that calls `translateOutgoingMessageName` or
     `translateIncomingMessageName` must sit under an `if` whose condition cannot hold while the switch
     is off. A bare `{` runs the block always, and `IOS_16_MESSAGE_NUMBER_TRANSLATION` is 1 in this
     build because the deployment target is 16.1, so substituting the macro is the same as a bare brace
@@ -86,8 +109,8 @@ Usage:
   scripts/check-translation-switch.py
   scripts/check-translation-switch.py --patch patches/ios16-ipc-message-number-translation.patch
 
-Exit 0 when the switch is absent, the reads ask the member, the rationale is present and the table
-anchors hold; 1 on any violation; 2 when the patch cannot be read.
+Exit 0 when the setter call is the single guarded one, the reads ask the member, the rationale is
+present and the table anchors hold; 1 on any violation; 2 when the patch cannot be read.
 """
 from __future__ import annotations
 
@@ -103,6 +126,17 @@ DEFAULT_PATCH = Path(__file__).resolve().parent.parent / "patches" / "ios16-ipc-
 # The setter the patch adds to Connection.h. Any uncommented mention of a call is a violation; the
 # declaration and the member stay, because the flag has to exist to be read.
 SETTER = re.compile(r"\bsetShouldTranslateMessageNames\s*\(")
+# A whole statement that sets the flag: an object, the call, and one argument. The object is not
+# pinned to `m_connection`, because `m_connection.get()->...` and a named local are the same call
+# and the file is already restricted to the one helper connection.
+SETTER_CALL_STATEMENT = re.compile(
+    r"^(?P<object>[A-Za-z_][A-Za-z_0-9]*(?:\s*(?:->|\.|\s)\s*[A-Za-z_][A-Za-z_0-9]*)*)\s*"
+    r"->\s*setShouldTranslateMessageNames\s*\(\s*(?P<argument>[^()]*?)\s*\)$")
+# The predicate, as a condition the guard reader has to see. The evaluator below is written for the
+# member's name; this one is a call with no arguments, so it is matched as a token rather than
+# evaluated, and any condition containing it counts as the guard.
+PEER_CONDITION_TOKEN = "peerIsOlderGeneration"
+
 # A call, as opposed to the declaration whose parameter list follows the same name. The declaration
 # has a parameter; a call has an argument or no argument at all and is not preceded by a return type.
 DECLARATION_HINTS = ("void setShouldTranslateMessageNames", "bool setShouldTranslateMessageNames")
@@ -423,22 +457,112 @@ def added_code_statements(patch: str) -> list[tuple[str, str]]:
     return statements
 
 
-def check_no_setter_call(patch: str) -> list[Violation]:
+# The one file the setter call may live in. It is the file whose single createClientConnection call
+# produces the helper-to-UI connection, so it is the only place where "the peer across this
+# connection" is the UI process the SDK aligned behavior bitmap described.
+SETTER_CALL_FILE = "Source/WebKit/Shared/AuxiliaryProcess.cpp"
+
+# The predicate the call has to sit under. Pinned as a name rather than accepted as "any condition"
+# because the condition is the whole fix: the setter is correct only when it asks whether the peer is
+# older, and any other condition either drops the translation route A needs or turns it on for
+# route B. The predicate itself, and the declaration the call needs to compile, are added by
+# patches/ios16-xpc-bootstrap-compat.patch, which this script does not read.
+
+
+def statement_is_permitted_setter_statement(statement: str) -> bool:
+    """True when the statement is `m_connection->setShouldTranslateMessageNames(true);` and no other.
+
+    Both halves matter. The call has to set the flag on: `setShouldTranslateMessageNames(false)` is
+    harmless but is also not the translation route A needs, and accepting it would let a patch pass
+    while translating nothing. The argument is therefore read, and a call whose argument is anything
+    other than `true` is reported.
+    """
+    stripped = code_view(statement).strip().rstrip(";").strip()
+    found = SETTER_CALL_STATEMENT.match(stripped)
+    return bool(found) and found.group("argument").strip() == "true"
+
+
+def check_setter_call(patch: str) -> list[Violation]:
+    """Allow exactly one setter call, in AuxiliaryProcess.cpp, under the peer-generation predicate.
+
+    Every other occurrence is a violation, and so is a permitted file with no call at all. The rule
+    used to be "no call anywhere", because both sides of the connection ran this build; it is now
+    "one call, guarded", because route A has a 16.1 UI process on the other end and the guard is what
+    tells the two topologies apart at run time.
+
+    A statement is joined across lines before it is read, so a call folded after the opening
+    parenthesis is the same one statement. Two calls in one file are two violations of the "exactly
+    one" rule, which is why the count is compared at the end rather than only per statement.
+    """
+    statements = added_code_statements(patch)
+    blocks = enclosing_blocks(statements)
     violations = []
-    for path, statement in added_code_statements(patch):
+    permitted = []
+
+    for index, (path, statement) in enumerate(statements):
         view = code_view(statement)
         if not SETTER.search(view):
             continue
         if any(hint in view for hint in DECLARATION_HINTS):
             continue
+        if path != SETTER_CALL_FILE:
+            violations.append(
+                Violation(
+                    "the patch calls setShouldTranslateMessageNames outside %s" % SETTER_CALL_FILE,
+                    "only the helper-to-UI connection may translate, and only that file creates it; "
+                    "a call here would ask some other connection's peer and turn translation on "
+                    "where both sides already agree: %s: %s" % (path, statement),
+                )
+            )
+            continue
+        if not statement_is_permitted_setter_statement(statement):
+            violations.append(
+                Violation(
+                    "the patch calls setShouldTranslateMessageNames with something other than true",
+                    "the permitted call has to turn translation on; a call that passes false is a "
+                    "no-op that would let a patch pass this check while translating nothing: "
+                    "%s: %s" % (path, statement),
+                )
+            )
+            continue
+        permitted.append((index, statement))
+
+    if not permitted:
         violations.append(
             Violation(
-                "the patch calls setShouldTranslateMessageNames",
-                "this deployment runs one WebKit build on both sides of the connection, so turning "
-                "translation on renumbers messages that already agree and the InitializeConnection "
-                "handshake never completes: %s: %s" % (path, statement),
+                "the patch no longer calls setShouldTranslateMessageNames",
+                "expected one call in %s under peerIsOlderGeneration(); without it route A, where "
+                "a 16.1 UI process talks to this build, never translates and the handshake fails"
+                % SETTER_CALL_FILE,
             )
         )
+        return violations
+
+    if len(permitted) > 1:
+        violations.append(
+            Violation(
+                "the patch calls setShouldTranslateMessageNames more than once",
+                "expected exactly one call in %s, found %d; a second call is a second route to "
+                "translation that this check cannot reason about"
+                % (SETTER_CALL_FILE, len(permitted)),
+            )
+        )
+
+    for index, statement in permitted:
+        if not guarded_by_peer_predicate(blocks[index], statements, index):
+            chain = blocks[index]
+            found = "no enclosing block" if not chain else "the blocks `%s`" % "` < `".join(chain)
+            violations.append(
+                Violation(
+                    "the setter call in %s is not guarded by peerIsOlderGeneration()"
+                    % SETTER_CALL_FILE,
+                    "expected `if (peerIsOlderGeneration())` around %s, found %s; unguarded, the flag "
+                    "is on for route B as well, where both sides run this build and the tables "
+                    "renumber messages that already agree, including InitializeConnection"
+                    % (statement.strip(), found),
+                )
+            )
+
     return violations
 
 
@@ -454,7 +578,7 @@ READ_SITES = (
 )
 
 # The member may be written from one place only: the setter's own body, from its parameter. Any other
-# assignment reaches the same state without a call, which is the path check_no_setter_call cannot see.
+# assignment reaches the same state without a call, which is the path check_setter_call cannot see.
 #
 # The left side allows any number of parentheses: `((m_shouldTranslateMessageNames)) = true` compiles
 # and turns the flag on exactly as the single-parenthesis form does. The operator is a plain or
@@ -865,9 +989,91 @@ def condition_implies_member(statement: str) -> bool:
     return evaluate_disjunction(tokens) is False
 
 
+def condition_asks_peer_generation(statement: str) -> bool:
+    """True when the `if` condition calls peerIsOlderGeneration() positively.
+
+    Read as a token rather than evaluated, because the evaluator below answers a different question:
+    whether the *member* is false, which is how a read site is validated. The predicate is a call
+    with no arguments, so `if (peerIsOlderGeneration())` and `if (UNLIKELY(peerIsOlderGeneration()))`
+    both have to pass, while `if (!peerIsOlderGeneration())` has to fail: a negated predicate turns
+    translation on for exactly the peers that do not need it.
+
+    The shape test is shared with the member guard, so a condition written with its body on the same
+    line, or one whose body belongs to another branch, is refused here too.
+    """
+    parts = if_parts(statement)
+    if parts is None:
+        return False
+    condition, remainder = parts
+    if remainder not in ("", "{"):
+        return False
+    unwrapped = strip_boolean_wrappers(condition)
+    if unwrapped is None:
+        return False
+    tokens = tokenise_condition(THIS_PREFIX.sub("", unwrapped))
+    if tokens is None:
+        return False
+    return condition_tokens_ask_peer_generation(tokens)
+
+
+def condition_tokens_ask_peer_generation(tokens: list[str]) -> bool:
+    """The predicate appears as a factor, with no `!` in front of the group that contains it."""
+    if not tokens:
+        return False
+    if tokens[0] == "!":
+        return False
+    if encloses_whole(tokens):
+        return condition_tokens_ask_peer_generation(tokens[1:-1])
+    for part in split_top_level(tokens, "&&"):
+        if tokens_are_peer_predicate_call(part):
+            return True
+        if part and part[0] == "(" and encloses_whole(part) and condition_tokens_ask_peer_generation(part[1:-1]):
+            return True
+    return False
+
+
+def tokens_are_peer_predicate_call(tokens: list[str]) -> bool:
+    """`peerIsOlderGeneration()` as a token run, with or without a wrapping pair of parentheses.
+
+    `strip_boolean_wrappers` turns `UNLIKELY(peerIsOlderGeneration())` into
+    `(peerIsOlderGeneration())`, so the wrapped spelling arrives as five tokens and the bare one as
+    three. Both are the predicate; `!peerIsOlderGeneration()` is refused before this is asked,
+    because the `!` is checked at the head of the factor.
+    """
+    if tokens == [PEER_CONDITION_TOKEN, "(", ")"]:
+        return True
+    if len(tokens) == 5 and tokens[0] == "(" and tokens[3] == ")" and tokens[4] == ")":
+        return tokens[1] == PEER_CONDITION_TOKEN and tokens[2] == "("
+    if len(tokens) == 5 and tokens[0] == "(" and tokens[-1] == ")":
+        return tokens[1:-1] == [PEER_CONDITION_TOKEN, "(", ")"]
+    return False
+
+
 def chain_has_guard(chain: list[str]) -> bool:
     """True when any block in the chain is an `if` whose condition implies the member."""
     return any(condition_implies_member(block) for block in chain)
+
+
+def chain_has_peer_guard(chain: list[str]) -> bool:
+    """True when any block in the chain is an `if` on peerIsOlderGeneration()."""
+    return any(condition_asks_peer_generation(block) for block in chain)
+
+
+def guarded_by_peer_predicate(chain: list[str], statements: list[tuple[str, str]], index: int) -> bool:
+    """True when the peer-generation predicate covers the statement at `index`.
+
+    The chain covers a call inside a braced guard. A braceless guard on its own line is not part of
+    any chain, and that is the shape the patch writes, so the statement just before it is checked
+    too.
+    """
+    if chain_has_peer_guard(chain):
+        return True
+    if index == 0:
+        return False
+    previous_path, previous = statements[index - 1][0], statements[index - 1][1]
+    if previous_path != statements[index][0]:
+        return False
+    return condition_asks_peer_generation(previous)
 
 
 def chain_has_setter(chain: list[str]) -> bool:
@@ -1059,8 +1265,9 @@ def check_read_sites(patch: str) -> list[Violation]:
                 Violation(
                     "%s is guarded by something other than the member" % description,
                     "expected an `if` on `m_shouldTranslateMessageNames` around %s in %s, found %s; "
-                    "IOS_16_MESSAGE_NUMBER_TRANSLATION is 1 in this build because the deployment "
-                    "target is 16.1, so a macro condition here is a bare brace with a reassuring name"
+                    "IOS_16_MESSAGE_NUMBER_TRANSLATION is 1 in every build this project makes "
+                    "because the deployment target is 16.1, so a macro condition here is a bare "
+                    "brace with a reassuring name; the guard has to name the member"
                     % (call, path, found),
                 )
             )
@@ -1375,7 +1582,7 @@ def run(patch_path: Path) -> int:
         return 2
 
     violations = []
-    violations += check_no_setter_call(patch)
+    violations += check_setter_call(patch)
     violations += check_read_sites(patch)
     violations += check_member_initialiser(patch)
     violations += check_rationale(patch)
@@ -1389,9 +1596,9 @@ def run(patch_path: Path) -> int:
             print("  %s" % violation.detail, file=sys.stderr)
         return 1
 
-    print("check-translation-switch: no call to setShouldTranslateMessageNames, both reads ask the "
-          "member, the flag keeps its false initialiser, the rationale is intact and the table "
-          "anchors hold")
+    print("check-translation-switch: one setter call in AuxiliaryProcess.cpp under "
+          "peerIsOlderGeneration(), both reads ask the member, the flag keeps its false initialiser, "
+          "the rationale is intact and the table anchors hold")
     return 0
 
 

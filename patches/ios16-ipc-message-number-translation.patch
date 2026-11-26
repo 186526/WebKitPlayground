@@ -8026,7 +8026,7 @@ new file mode 100644
 index 0000000000000..be99a874b6c4e
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,209 @@
 +/*
 + * Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 + *
@@ -8071,13 +8071,16 @@ index 0000000000000..be99a874b6c4e
 +//
 +// This gate decides only whether the tables are compiled in. It does not decide
 +// whether a connection uses them: that is IPC::Connection::m_shouldTranslateMessageNames,
-+// a member that stays at its `{ false }` initialiser. No code in this tree calls
-+// setShouldTranslateMessageNames, so on every connection the flag is false and
-+// the tables below are compiled but unreachable.
++// a member that stays at its `{ false }` initialiser until something calls
++// setShouldTranslateMessageNames. Exactly one place does, in
++// AuxiliaryProcess::initialize, and only when the UI process that launched this
++// helper sent a narrower SDK aligned behavior bitmap than this build's own.
 +//
 +// The gate and the flag answer different questions and only the second may be
 +// acted on. The gate asks what this binary was built to support. The flag asks
-+// what the peer across a live connection actually speaks.
++// what the peer across a live connection actually speaks. Every connection keeps
++// the flag false except that one, because the other six call
++// createClientConnection from code that never reaches that call.
 +//
 +// The deployment target cannot stand in for the peer question. Measured by
 +// numbering every message in this tree and in an older enumeration and comparing
@@ -8130,19 +8133,21 @@ index 0000000000000..be99a874b6c4e
 +//     sides run this build and number messages identically. The flag must be
 +//     false.
 +//
-+// This artefact is route B, and the reason it is decided here rather than
-+// detected is that no build setting can tell the two apart. The workflow passes
++// This artefact is route B, and the reason its build settings do not decide it
++// is that no build setting can tell the two apart. The workflow passes
 +// IPHONEOS_DEPLOYMENT_TARGET 16.1 either way (build-webkit.yml:29,
 +// WK_BUILD_DEPLOYMENT_TARGET), which makes this gate 1 in both routes: it says
-+// this binary can talk to a 16.1 peer, not that it will. No run-time signal can
-+// decide it either. "client-sdk-version" is written by no iOS tag and the code
-+// that read it is deleted. The "client-sdk-aligned-behaviors" bitmap does arrive
++// this binary can talk to a 16.1 peer, not that it will. "client-sdk-version" is
++// written by no iOS tag and the code that read it is deleted, so the one run-time
++// signal is the width of the "client-sdk-aligned-behaviors" bitmap. It arrives
 +// before AuxiliaryProcess::initialize runs - XPCServiceEntryPoint.h calls
 +// getClientSDKAlignedBehaviors and then initializeAuxiliaryProcess - and its
 +// width does separate 16.0-16.3 (8 bytes) from 16.4 and later (12 bytes), but
-+// 16.4 through 17.x are also 12 bytes, the same as this build, so width does not
-+// name a generation; and getClientSDKAlignedBehaviors rejects a foreign payload
-+// without keeping its value, so nothing reaches the caller.
++// 16.4 through 17.x are also 12 bytes, the same as this build, so width cannot
++// name a generation. It can name the one direction that matters: a payload
++// narrower than this build's came from an older generation, and that is what
++// peerIsOlderGeneration records. A 16.4 or 17.x UI process paired with this
++// helper reads as same-generation by that test, so it is not translated.
 +//
 +// A route-A build is where these tables start being used, and they are the tables
 +// such a build needs: the older side of both is generated from
@@ -8160,20 +8165,23 @@ index 0000000000000..be99a874b6c4e
 +// input path and script-checked anchors would otherwise still name the old ones.
 +//
 +// scripts/check-translation-switch.py enforces the part a compiler cannot see:
-+// that no call to setShouldTranslateMessageNames exists in the shipped tree, and
-+// that this file still records why. The workflow runs it after the patch is
-+// applied, so a re-added call fails the build instead of waiting for someone to
-+// run the script by hand. Regenerating the tables for a real route A has to
-+// update that script too.
++// that the one call to setShouldTranslateMessageNames sits in
++// AuxiliaryProcess::initialize behind the peer-generation predicate and nowhere
++// else, that any other assignment to the member comes from the setter, and that
++// this file still records why. The workflow runs it after the patch is applied,
++// so a second call, an unguarded one, or a direct member write fails the build
++// instead of waiting for someone to run the script by hand. Regenerating the
++// tables for a real route A has to update that script too.
 +#if PLATFORM(IOS) && defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED < 180000
 +#define IOS_16_MESSAGE_NUMBER_TRANSLATION 1
 +#else
 +#define IOS_16_MESSAGE_NUMBER_TRANSLATION 0
 +#endif
 +
-+// The tables are for the route that can meet an older peer, and this build is
-+// not that route: they are compiled in so the generated code keeps being checked
-+// against the tree, and left unreachable because nothing sets the flag.
++// The tables are for the route that can meet an older peer. They are compiled in
++// so the generated code keeps being checked against the tree, and the one call
++// above is what reaches them, on the connection whose peer announced an older
++// generation.
 +#if IOS_16_MESSAGE_NUMBER_TRANSLATION
 +
 +namespace IPC {
@@ -8272,36 +8280,32 @@ diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/Au
 index 30487740bbe50..ebf65fdbb37b3 100644
 --- a/Source/WebKit/Shared/AuxiliaryProcess.cpp
 +++ b/Source/WebKit/Shared/AuxiliaryProcess.cpp
-@@ -106,6 +106,28 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
+@@ -106,6 +106,24 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
      WebPageProxyIdentifier::enableGenerationProtection();
  
      m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
 +
-+    // Nothing here calls setShouldTranslateMessageNames, so every Connection keeps the `{ false }`
-+    // its member initialises with.
++    // Only a peer that announced an older generation numbers its messages differently, and the width
++    // of the SDK aligned behavior bitmap it sent is the one run-time signal that separates that case.
++    // XPCServiceEntryPoint.mm records it before this function runs, so the answer is already in place.
 +    //
-+    // The tables are still compiled in: IOS_16_MESSAGE_NUMBER_TRANSLATION keys on the deployment
-+    // target, which is 16.1. That macro describes how this framework was built, not what is on the
-+    // other end of the connection. Under this build's deployment the UI process loads this same
-+    // framework through the override, so both sides run this same enumeration and number a message
-+    // identically.
++    // This is not the deployment target speaking. IOS_16_MESSAGE_NUMBER_TRANSLATION keys on the
++    // deployment target, which is 16.1 for every build this project makes, so it is constant here and
++    // decides nothing about a peer.
 +    //
-+    // Turning it on would not be a no-op. The two enumerations share 2911 names, and 2906 of them
-+    // sit at a different position, so an incoming number is looked up as a different message. The
-+    // handshake goes first: this build's InitializeConnection is at position 3076 of the generated
-+    // enumeration, and the table's case for 3076 returns
-+    // RemoteMediaPlayerProxy_VideoFrameForCurrentTimeIfChanged,
-+    // so the `messageName() == MessageName::InitializeConnection` test in ConnectionCocoa.mm stops
-+    // matching and the connection never establishes.
-+    //
-+    // This is also why the setter may not be turned on merely because the deployment target is 16.1:
-+    // the target is a property of the build, while what decides whether two peers agree is which
-+    // enumeration each of them runs. A build genuinely paired with an older UI process is a
-+    // different case, and there the call belongs: once, on this connection.
++    // The blind spot belongs to the width test: 16.0 through 16.3 send 8 bytes and 16.4 onwards send
++    // 12, so a 16.4 or 17.x UI process paired with this build reads as same-generation and is not
++    // translated. This project builds no such pairing, and separating those releases would need a
++    // signal narrower than the width.
++#if IOS_16_MESSAGE_NUMBER_TRANSLATION
++    if (peerIsOlderGeneration()) {
++        m_connection->setShouldTranslateMessageNames(true);
++    }
++#endif
      initializeConnection(m_connection.get());
      m_connection->open(*this);
  }
-diff --git a/Source/WebKit/WebKit.xcodeproj/project.pbxproj b/Source/WebKit/WebKit.xcodeproj/project.pbxproj
+diff --git a/Source/WebKit/WebKit.xcodeproj/project.pbxproj b/Source/WebKit/WebKit.xcodeproj/project.pbxproj b/Source/WebKit/WebKit.xcodeproj/project.pbxproj
 index e0202a335c3ca..9da7258988448 100644
 --- a/Source/WebKit/WebKit.xcodeproj/project.pbxproj
 +++ b/Source/WebKit/WebKit.xcodeproj/project.pbxproj
