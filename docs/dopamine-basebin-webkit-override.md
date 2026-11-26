@@ -927,7 +927,33 @@ diff <(git show "$T:docs/dopamine-basebin-webkit-override.md" | awk '/^### 十�
      <(git show "HEAD:docs/dopamine-basebin-webkit-override.md" | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f')   # 无输出
 ```
 
-合并结果里这一节没有冲突标记。九个共同祖先对这一节的分布如下：`621a832` 的十二·五 与 union 侧那 `46` 行逐字相同，`34e6eac` 是 `15` 行的旧标题版，`4da8260` 的第十二章是 launchdhook 那一章，它的十二·五 是「对已经正常的 helper 进程没有影响」，其余六份没有这一节。合成祖先（stage 1）的十二·五 是 `52` 行，这个长度不等于上面任何一份，说明它不是其中某一份的直接拷贝。基准多于一个时合成祖先由这几个基准递归合出，所以这里能写的是上面两条实测读数，不追加「为什么保住了本侧」的推断。`46` 行那份离开本侧 `100` 行版本的距离是 56 增 2 删，所以解冲突时保住本侧这一节就是保住 M135 之后的全部修订。
+合并结果里这一节没有冲突标记。九个共同祖先对这一节的分布如下：`621a832` 的十二·五 与 union 侧那 `46` 行逐字相同，`34e6eac` 是 `15` 行的旧标题版，`4da8260` 的第十二章是 launchdhook 那一章，它的十二·五 是「对已经正常的 helper 进程没有影响」，其余六份没有这一节。
+
+**合成祖先（stage 1）里有两个 `## 十二` 章，把两份十二·五 一起数会得到 52 行，这个数不能拿来判断它像哪一侧。** 那个文件带着两套章节编号：`:834` 是 basebin 那一章，`:1234` 是 launchdhook 那一章，两章各有一个 `### 十二·五`。这一对提交的四份文件里只有合成祖先带两个 `## 十二` 章，共同祖先 `34e6eac`、union 与 `HEAD` 各自都只有一章，所以别的读数不会翻倍。本章上一节那条 awk 只看 `^### 十二·五` 与 `^### 十二·六`，遇到第二个同名小节会重新进入区间，于是把两节加起来：basebin 的 `:1014-1059` 是 `46` 行，launchdhook 的 `:1290-1295` 是 `6` 行，合计 `52`。按章限定的读数如下，命令把当前 `## ` 标题记在变量里，只输出标题含「装进 basebin tar」的那一章的小节：
+
+```sh
+S1=$(git merge-tree --write-tree feat/m139-inner-union HEAD \
+     | awk -F'\t' '$2=="docs/dopamine-basebin-webkit-override.md"{split($1,a," "); if (a[3]==1) print a[2]}')
+git cat-file -p "$S1" | awk '/^### 十二·五/{f=1} /^### 十二·六/{f=0} f' | wc -l                                   # 52，两个十二·五 之和
+git cat-file -p "$S1" | awk '/^## /{ch=$0} ch ~ /装进 basebin tar/ && /^### 十二·五/{f=1} /^### 十二·六/{f=0} f' | wc -l   # 46，basebin 那一章
+git cat-file -p "$S1" | awk '/^## /{ch=$0} ch ~ /送进 app 进程/ && /^### 十二·五/{f=1} /^### 十二·六/{f=0} f' | wc -l      # 6，launchdhook 那一章
+```
+
+**限定的那 46 行与 union 侧那 46 行逐字相同**（`sha256sum` 两边都是 `484b9057e05d93a381130e700379fd312d4cb053a6966c2aba1b08ff1bf8368a`），所以对这一节而言，合成祖先的那一份就是 union 的那一份。把这三份按「本侧 / 合成祖先 / union」的顺序单独做一次三方合并，基线那一份与 union 同一份，union 一侧因此没有改动，本侧的改写整段落地、不产生冲突，结果就是本侧那 `100` 行。下面的命令复核这一点（无输出、退出 0）：
+
+```sh
+W=$(mktemp -d)
+S1=$(git merge-tree --write-tree feat/m139-inner-union HEAD \
+     | awk -F'\t' '$2=="docs/dopamine-basebin-webkit-override.md"{split($1,a," "); if (a[3]==1) print a[2]}')
+sec() { awk '/^## /{ch=$0} ch ~ /装进 basebin tar/ && /^### 十二·五/{f=1} /^### 十二·六/{f=0} f'; }
+git cat-file -p "$S1" | sec > "$W/base.md"
+git show "feat/m139-inner-union:docs/dopamine-basebin-webkit-override.md" | sec > "$W/union.md"
+git show "HEAD:docs/dopamine-basebin-webkit-override.md" | sec > "$W/mine.md"
+git merge-file -p "$W/mine.md" "$W/base.md" "$W/union.md" | diff - "$W/mine.md"   # 无输出
+rm -rf "$W"
+```
+
+`46` 行那份离开本侧 `100` 行版本的距离是 56 增 2 删，所以解冲突时保住本侧这一节就是保住 M135 之后的全部修订。
 
 ### 十二·一 这份 tar 是怎么来的，逐字节核对了什么
 
