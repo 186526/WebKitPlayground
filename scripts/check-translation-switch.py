@@ -1671,6 +1671,173 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
     return violations
 
 
+# A `@@` header states how many body lines follow it, one count per side, and `git apply` streams the
+# body against those counts instead of deriving them. `parse_fragment` in git's `apply.c` holds the
+# two counts as unsigned counters and decrements them line by line, so a wrong count is never
+# reported as a wrong count.
+#
+# What the counters themselves do was measured in two shapes: a counter decremented after it reached
+# zero wraps, and a counter still positive when the body ends stays positive. Both stop the parse
+# with `corrupt patch at <patch>:<line>` and rc 128. A third shape leaves the parse cleanly: the read
+# stops at the body line that takes the second counter to zero, and every line after it is never
+# parsed — not read and rejected, never looked at. Two counters reaching zero on the same line is not
+# required for that: `@@ -1,1 +1,2 @@` over `-a` / `+A` / `+B` parses because the old counter
+# reaches zero on the first of those lines and no later line decrements it again.
+#
+# Those three are what the rows below measure. They are not the whole of `parse_fragment`, and this
+# comment does not claim to be: besides the two counter failures it returns from an unparsable `@@`
+# header, from a last body line with no newline, from a body line that begins with anything other
+# than a space, `+`, `-` or nothing at all — an empty line is a context line, which `case '\n'`
+# accepts — and from `if (!patch->recount && !deleted && !added) return -1;` — a hunk whose counts
+# the read satisfied but whose parsed region held no `+` or `-` line at all. Measured, on a file of
+# `a` / `b` / `c`: `@@ -1,2 +1,2 @@` over ` a` / ` b` / `-c` / `+C` exits 128, because the first
+# two lines take both counters to zero, the loop exits, `-c` and `+C` are never parsed, and `deleted`
+# and `added` never leave 0. The same body under `@@ -1,3 +1,3 @@` exits 0, and so does the first
+# header under `--recount`; that failure never consults a counter. One more lives a stage up, in
+# `parse_single_patch`, and there the hunk's kind does decide: `new file %s depends on old contents`
+# fires when a new-file hunk carries any old-side line, so the `@@ -1,1 +1,2 @@` shape above is fatal
+# as a new file even though the same counts and body parse and apply as a modification.
+#
+# Everything below was measured on a scratch repo with git 2.55.0. Each row names the file it was
+# applied to, the header and the body, so it can be re-run. The body lines are written in backticks,
+# where the leading space of a context line shows as the first character:
+
+#   file `a` `b` `c` `d` `e`
+#   @@ -1,3 +1,3 @@  ` a` `-b` `+B` ` c`                     rc 0    f.txt -> a B c d e
+#   @@ -1,3 +1,3 @@  ` a` `-b` `+B` ` c` ` d`                rc 0    the ` d` is never parsed
+#   @@ -1,3 +1,3 @@  ... ` c` ` ZZZZ-not-in-the-file`         rc 0    that line is not in the file
+#   @@ -1,3 +1,2 @@  ` a` `-b` `+B` ` c`                     rc 128  ` c` decrements a zero count
+#   @@ -1,3 +1,4 @@  ` a` `-b` `+B` ` c`                     rc 128  new count still 1 at the end
+#   @@ -1,4 +1,3 @@  ` a` `-b` `+B` ` c`                     rc 128  old count still 1 at the end
+#
+# A parse that succeeds still has to land. With no trailing context line the fragment must end at the
+# end of the file, because `apply.c` sets `match_end = !state->unidiff_zero && !trailing`. Measured
+# with the body ` a` / `-b` / `+B` under `@@ -1,2 +1,2 @@`: rc 0 against a file of `a` and `b`, and
+# rc 1 `patch does not apply` against `a b c`, the same fragment that parsed cleanly a file earlier.
+# The same body under `@@ -1,3 +1,3 @@` with ` c` / ` d` after it parses as a 3-line fragment and
+# then exits 0 against `a b c d e` but 1 against `z z z`, so rc 128 tracks the counts and rc 1 tracks
+# the tree.
+#
+# So a wrong count does not have one outcome, and the rows above are the ones measured: it applies
+# correctly, applies with a later edit never parsed, reports `patch does not apply`, or stops with
+# `corrupt patch`. Hunk kind decides none of the four, but it does decide whether the patch gets that
+# far: the new-file check in `parse_single_patch` above turns a shape that applies as a modification
+# into a fatal new-file hunk.
+#
+# Both hunks that prompted this check had a header their body outgrew, and the two did not share an
+# outcome. The new-file hunk at b70ce36 declared `@@ -0,0 +1,184 @@` over a 194-line body: its old
+# count starts at 0 and every body line is `+`, so the read stops at line 184 and the last 10 lines
+# are never parsed; applied on its own it exits 0 and writes 184 of the 194 lines. The
+# AuxiliaryProcess hunk declared `@@ -106,6 +106,27 @@` over 28 lines, and its 28th line ` }` is
+# context: it decrements the new counter that line 27 had already taken to zero, wraps it, and exits
+# 128. Applied as one patch, the file stops at line 8297, the second hunk, so the first hunk's
+# truncated output was never reached.
+#
+# That is what earns this check its place. `git apply` reports a consequence — a corrupt patch, a
+# refused context, or nothing at all — and one of the four outcomes leaves a short file and a success
+# status. `check_hunk_counts` is the only gate that reports the header itself, with its line number
+# and both counts, so the diagnosis names the line to edit.
+#
+# That parse stage does not consult the tree. A header whose counters cannot be satisfied reports
+# `corrupt` whatever file it is pointed at: both the overcount row above and a zero-decrementing one
+# exit 128 against a file of `z` lines as well. A header whose fragment merely fails to match is the
+# case that reports `patch does not apply` instead, so this check runs before any hunk is checked
+# against the tree.
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def check_hunk_counts(patch: str) -> list[Violation]:
+    """Compare every `@@` header's declared counts against the body it introduces.
+
+    The walk mirrors what `git apply` does: a line starting with `+` is a new-side line, `-` an
+    old-side line, and a line starting with a space or empty a context line counted on both sides.
+
+    Where a body ends is the part worth stating, because the obvious rule is wrong. A body ends only
+    at the next `@@` header or at the next `diff --git` line, never at a `---` or `+++` line: the
+    lines a patch deletes and adds can themselves begin with those characters, so `--- x` inside a
+    body is a deleted line whose text starts with `--`, not a file header. Outside a body every line
+    is a file header or patch preamble and belongs to no count, which is where `index`, `new file
+    mode`, `---` and `+++` do live. A `\\ No newline at end of file` marker is not a body line and
+    is counted on neither side.
+
+    Both directions are violations, and the check reports the numbers rather than predicting what
+    `git apply` will do with them. What it does is not settled by the counts alone — a hunk can also
+    fail for carrying no `+` or `-` line at all, or for a new-file hunk that carries an old-side line
+    — so the diagnosis a reader needs is which header is wrong and by how much, and that is the same
+    whatever the apply then does.
+
+    A header this function cannot parse is a violation, not an exception. `git apply` accepts combined
+    diffs and a `@@` line is only recognised as a header by its prefix, so a header the regex does not
+    match is reachable from any patch this file is pointed at. Every other unmatched shape here is
+    reported rather than guessed at, and a traceback would replace the diagnosis this function exists
+    to produce, so an unmatched header is reported with its line and text and its counts are not
+    compared.
+    """
+    lines = patch.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    hunks = []
+    current = None
+    old_count = new_count = 0
+    header_line = 0
+    in_body = False
+
+    def close_hunk() -> None:
+        if current is not None:
+            hunks.append((header_line, current, old_count, new_count))
+
+    for index, raw in enumerate(lines, start=1):
+        if raw.startswith("diff --git "):
+            close_hunk()
+            current, in_body = None, False
+            continue
+        if raw.startswith("@@"):
+            close_hunk()
+            current, header_line, in_body = raw, index, True
+            old_count = new_count = 0
+            continue
+        if not in_body or raw.startswith("\\"):
+            continue
+        if raw.startswith("+"):
+            new_count += 1
+        elif raw.startswith("-"):
+            old_count += 1
+        elif raw.startswith(" ") or raw == "":
+            old_count += 1
+            new_count += 1
+    close_hunk()
+
+    violations = []
+    for header_line, header, old_count, new_count in hunks:
+        match = HUNK_HEADER.match(header)
+        if match is None:
+            violations.append(
+                Violation(
+                    "a hunk header is not one this check can read, at patch line %d" % header_line,
+                    "the header is %r, which does not carry the `@@ -old,count +new,count @@` "
+                    "counts every other hunk in this file does. A combined diff writes `@@@` and "
+                    "this patch format is a plain unified diff, so the counts cannot be compared "
+                    "and the hunk is reported rather than skipped" % (header,),
+                )
+            )
+            continue
+        declared_old = int(match.group(2)) if match.group(2) is not None else 1
+        declared_new = int(match.group(4)) if match.group(4) is not None else 1
+        if (old_count, new_count) != (declared_old, declared_new):
+            violations.append(
+                Violation(
+                    "a hunk header disagrees with the lines it introduces, at patch line %d"
+                    % header_line,
+                    "the header declares %d old and %d new lines but its body has %d and %d. "
+                    "git apply never derives these counts, so it does not report the header: too "
+                    "large stops the apply with `patch is corrupt`, and too small can apply with "
+                    "exit 0 and leave the file missing whatever fell past the count: %s"
+                    % (declared_old, declared_new, old_count, new_count, header),
+                )
+            )
+    return violations
+
+
 def branch_region(code: list[str], head: int) -> list[str]:
     """The lines of the branch headed at `head`, from its `if` through its first closing brace at depth 0.
 
@@ -1814,102 +1981,6 @@ def check_predicate_is_defined(patch: str, bootstrap_patch: Path) -> list[Violat
 
 
 
-# A `@@` header states how many body lines follow it, counted separately for the old and the new
-# side, and `git apply` trusts those counts rather than deriving them. Both directions were measured
-# on scratch trees, and they fail differently.
-#
-# A header that overcounts its body stops `git apply` immediately: it reads past the body into the
-# next section's lines and reports `patch is corrupt at <file>:<line>`. That is how a comment edit
-# which added lines without updating the header broke the build in M141, and why the message does not
-# name the header that is wrong.
-#
-# A header that undercounts its body is the quieter of the two. `git apply` stops reading the body at
-# the stated count, so the lines past it are never applied and the exit status is 0. On a scratch
-# tree a `+1,2` header over a four-line body applied cleanly and wrote the first two lines; a
-# `+1,2` header over a two-line body in a section followed by another section also applied with exit
-# 0. The visible symptom is a file that is missing its tail, or the following section's hunk being
-# read as body, not a diagnostic.
-#
-# Either way the counts are never derived, nothing else catches them, and a tree far from the patch
-# target still reports `corrupt` rather than a context mismatch, so this check runs before any hunk is
-# checked against the tree.
-HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-
-
-def check_hunk_counts(patch: str) -> list[Violation]:
-    """Compare every `@@` header's declared counts against the body it introduces.
-
-    The walk mirrors what `git apply` does: a line starting with `+` is a new-side line, `-` an
-    old-side line, and a line starting with a space or empty a context line counted on both sides.
-
-    Where a body ends is the part worth stating, because the obvious rule is wrong. A body ends only
-    at the next `@@` header or at the next `diff --git` line, never at a `---` or `+++` line: the
-    lines a patch deletes and adds can themselves begin with those characters, so `--- x` inside a
-    body is a deleted line whose text starts with `--`, not a file header. Outside a body every line
-    is a file header or patch preamble and belongs to no count, which is where `index`, `new file
-    mode`, `---` and `+++` do live. A `\\ No newline at end of file` marker is not a body line and
-    is counted on neither side.
-
-    Both directions are violations, and the check reports the numbers rather than predicting what
-    `git apply` will do with them. The two directions do differ there — an overcount stops the apply
-    and an undercount truncates it — but the diagnosis a reader needs is which header is wrong and
-    by how much, and that is the same either way.
-    """
-    lines = patch.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    hunks = []
-    current = None
-    old_count = new_count = 0
-    header_line = 0
-    in_body = False
-
-    def close_hunk() -> None:
-        if current is not None:
-            hunks.append((header_line, current, old_count, new_count))
-
-    for index, raw in enumerate(lines, start=1):
-        if raw.startswith("diff --git "):
-            close_hunk()
-            current, in_body = None, False
-            continue
-        if raw.startswith("@@"):
-            close_hunk()
-            current, header_line, in_body = raw, index, True
-            old_count = new_count = 0
-            continue
-        if not in_body or raw.startswith("\\"):
-            continue
-        if raw.startswith("+"):
-            new_count += 1
-        elif raw.startswith("-"):
-            old_count += 1
-        elif raw.startswith(" ") or raw == "":
-            old_count += 1
-            new_count += 1
-    close_hunk()
-
-    violations = []
-    for header_line, header, old_count, new_count in hunks:
-        match = HUNK_HEADER.match(header)
-        declared_old = int(match.group(2)) if match.group(2) is not None else 1
-        declared_new = int(match.group(4)) if match.group(4) is not None else 1
-        if (old_count, new_count) != (declared_old, declared_new):
-            violations.append(
-                Violation(
-                    "a hunk header disagrees with the lines it introduces, at patch line %d"
-                    % header_line,
-                    "the header declares %d old and %d new lines but its body has %d and %d. "
-                    "git apply never derives these counts: one that is too large stops the apply "
-                    "with `patch is corrupt`, and one that is too small silently drops the lines "
-                    "past the stated count: %s"
-                    % (declared_old, declared_new, old_count, new_count, header),
-                )
-            )
-    return violations
-
-
-
 def run(patch_path: Path, bootstrap_patch: Path | None = None) -> int:
     try:
         patch = patch_path.read_text(encoding="utf-8")
@@ -1924,8 +1995,8 @@ def run(patch_path: Path, bootstrap_patch: Path | None = None) -> int:
     violations += check_rationale(patch)
     violations += check_table_anchors(patch)
     violations += check_no_stale_table_basis(patch)
-    violations += check_predicate_is_defined(patch, bootstrap_patch or DEFAULT_BOOTSTRAP_PATCH)
     violations += check_hunk_counts(patch)
+    violations += check_predicate_is_defined(patch, bootstrap_patch or DEFAULT_BOOTSTRAP_PATCH)
 
     if violations:
         for violation in violations:

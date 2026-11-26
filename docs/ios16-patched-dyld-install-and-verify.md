@@ -8,7 +8,6 @@
 2. **dyld 这一层曾在 2026-11-25 23:51–23:53 装好并验证通过，但它只让 helper 换到 18.3，没让 app 的 UI 进程换；该状态在 2026-11-26 01:03 那次手动重新越狱时被清除。** 那次装上的是两份补丁（`dyldhook_merge` 75952 / 四计数 `1 1 1 1`，`systemhook` 234336 含四个变量），`gen/dyld` 由 974016 变成 974608；`dyld.orig` 仍是 2022-10-19 那份 926240 字节。装上后 4.2 节出现 `found: dylib-from-disk-to-override-cache`（8 次命中），4.3 节直接跑 18.3 的 `WebContent` 得到五个镜像全部来自 `/var/jb`；`uiopen` 真实拉起 Safari 时，launchd 起的 `WebContent`/`Networking` 同样加载 `/var/jb`。装 hook 之前的同一组测试全部是 `found: dylib-from-cache` 或没有候选行，两侧都留了读数。**2026-11-26 01:03 重新越狱之后设备回到 974016 / `1 0 0 1`，所以本节所有「已装上」的描述只对 2026-11-25 23:53 装上到 2026-11-26 01:03 重新越狱这段窗口成立。** 五次 panic 的时刻与 `panicString` 原文见第五节开头；触发它们的是 00:50:43 那次 `bb/basebin-lh.tar` 的安装，与本节描述的 23:53 那次不是同一份 tar，两者差别见第五节「触发那五次 panic 的 tar 与本节第 3 步用的是两份不同的 tar」那一段。
 3. **同一时刻 `MobileSafari`、`Chrome`、`SpringBoard` 三个 UI 进程仍加载 `/System` 的 16.1。** 它们的 envp 里都没有裸名的 `DYLD_FRAMEWORK_PATH`/`DYLD_LIBRARY_PATH`，dyld 只认这一种写法，所以它们留在共享缓存那份。`__XPC_` 前缀那一对**不是恒定存在的**：`MobileSafari` 在 23:5x 有过 1 条，而 1103 与 2941 两个实例、`SpringBoard` 399 在 2026-11-26 01:5x 复测时都是 0 条。两种形状共同的一点是裸名都不在。于是设备处于跨代形态：UI 是 16.1、helper 是 18.3。这与 `docs/ios16-whole-18.3-deployment-path.md:49` 的硬约束一致——那一节要求 UI 与每个 helper 同代，同文件 `:82` 写明不同代的后果是「渲染循环卡死而非进程死亡」。本次没有取得「页面是否真的渲染」的读数（设备上没有截图工具，也没有用户的界面观察），所以只能记到「进程结构与那条失败形态一致」为止。
 4. **挡住 18.3 的是三处彼此独立的缺口，不是一处。** dyld 缺两个 override hook（2026-11-25 装补丁前设备 `1 0 0 1`，974016 字节；装补丁后变 `1 1 1 1` / 974608；2026-11-26 01:03 重新越狱后又回到 `1 0 0 1` / 974016）；`systemhook` 是原版、不写那四个搜索路径变量（原版 233520 字节里 `DYLD_FRAMEWORK_PATH` 出现 0 次；`basebin.tar` 里那份 234336，裸名 `DYLD_FRAMEWORK_PATH` 与 `DYLD_LIBRARY_PATH` 各 4 次，因 `__XPC_` 前缀那两个名字各含一次裸名，换算成去重后的变量名是两个裸名加两个 `__XPC_` 前缀名）；两处给的目录还不是 18.3 所在的那个（`systemhook` 与安装脚本指 `/var/jb/Library/WebKitOverride`，18.3 实际在 `/var/jb/Library/Frameworks` 与 `/var/jb/usr/lib`）。三处补上之后 4.2 与 4.3 两层对 helper 都通过。三者的依赖是有序的——hook 是前提，变量是通道，链接是让通道末端有文件（4.4 节）。**2026-11-26 01:03 重新越狱后设备上三处缺口全部回到原状**：`gen/dyld` 974016 `1 0 0 1`、`systemhook` 233520 裸串 0 次、`launchdhook` 312848 裸串 0 次。
-
 5. **安装需要 root，并且要一次用户空间重启。** 本次没有执行任何需要 root 的写操作；设备上的那次安装发生在 23:51–23:53，不是本次执行的。命令整理成清单，见第六节。
 
 本文的结论分三档标注，与 `docs/ios16-launchd-xpc-resolution-gap.md` 的约定一致：**已确证**（附设备读数原文）、**有源码支撑**（能指出代码位置，但没有设备行为读数）、**假设**（无直接读数）。一条论断的强度取它最弱的一环。
@@ -66,7 +65,7 @@
 gen/dyld 字节数 = MachOMerger 产物字节数 + 2 + 该产物重签名后的 CodeDirectory 与 CMS 总长
 ```
 
-这条模型能解释两个曾经看起来矛盾的读数：`docs/ios16-next-build-go-no-go.md:274` 记下那份 974608 读数（两个 hook 计数为 1）已被后来的 974016 / `1 0 0 1` 取代，而 974608 正是 949006 + 2 + 25600，即由 `basebin.tar` 里那份 75952 字节的 hook 合成；11-25 白天的设备上是 **974016** 字节（948414 + 2 + 25600），即由 74352 字节的原版 hook 合成；11-25 23:53 装上补丁之后又回到 **974608**，这次是由 75952 那份合成。外层 `AGENTS.md:224` 与本文相反，它写「948414 比 974016 小，这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的」——前半句对，后半句错，差的那 25602 字节全部是重签名产物，不是 hook 尺寸差。同目录的 `docs/dopamine-basebin-webkit-override.md:87` 记的是对的（它把 974016 归给设备上那份 74352 的 hook）。这同时给出一个离线判据：**只看 `gen/dyld` 的字节数就能说出它是哪份 hook 合成的**，不需要重启去试。
+这条模型能解释两个曾经看起来矛盾的读数：`docs/ios16-next-build-go-no-go.md:274` 记下那份 974608 读数（两个 hook 计数为 1）已被后来的 974016 / `1 0 0 1` 取代，而 974608 正是 949006 + 2 + 25600，即由 `basebin.tar` 里那份 75952 字节的 hook 合成；11-25 白天的设备上是 **974016** 字节（948414 + 2 + 25600），即由 74352 字节的原版 hook 合成；11-25 23:53 装上补丁之后又回到 **974608**，这次是由 75952 那份合成。外层 `AGENTS.md:336` 现已改正这一条（M145 之前它在 `:249`），改正前的旧文与本文相反，它写「948414 比 974016 小，这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的」——前半句对，后半句错，差的那 25602 字节全部是重签名产物，不是 hook 尺寸差。同目录的 `docs/dopamine-basebin-webkit-override.md:87` 记的是对的（它把 974016 归给设备上那份 74352 的 hook）。这同时给出一个离线判据：**只看 `gen/dyld` 的字节数就能说出它是哪份 hook 合成的**，不需要重启去试。
 
 ### 1.2 谁触发它，替换它要重启什么
 
@@ -114,7 +113,7 @@ launchdhook.dylib      gen/dyld=0
 | --- | --- | --- |
 | 装补丁之前（2026-11-25 早于 23:51） | `same=25 diff=2` | 只有 `LaunchDaemons/com.opa334.Dopamine.{startup,idownloadd}.plist`（`update.m:57-77` 的 `@JBROOT@` 替换） |
 | 补丁态（2026-11-26 00:34 复测） | `same=23 diff=4` | 上面两个 plist，加 `dyldhook_merge.arm64e.iOS16-17.dylib` 与 `systemhook.dylib` |
-| **还原之后（2026-11-26 01:49 复测，即当前）** | **`same=25 diff=2`** | **只剩那两个 plist，与装补丁之前逐位相同** |
+| **还原之后（2026-11-26 01:49 复测当时）** | **`same=25 diff=2`** | **只剩那两个 plist，与装补丁之前逐位相同** |
 
 补丁态下 `gen/dyld`（974608，`6920d1dd`，mtime 2026-11-25 23:53）、`dyldhook_merge.arm64e.iOS16-17.dylib`（75952，`9fb3b9c0`）、`systemhook.dylib`（234336，`d7045cd4`）都与出厂 tar 不同；出厂 tar 里那两个成员是未打补丁的 74352 `1e90c5a3` 与 233520 `6f16c545`。所以补丁态下差异恰好等于这两份补丁库。**01:03 重新越狱之后差异归零**，`dyldhook_merge` 与 `systemhook` 都回到出厂那份。那一组读数整体只能由一次完整重新越狱解释：`/var/jb/basebin` 被整份删掉重解，才有差异归零。出厂 `basebin.tar` 的 31 个成员里既没有 `gen/` 也没有 `.fakelib/`，而这两个目录的 mtime 都是 `2026-11-26 01:03:43`，所以它们由 `basebin_generate` 在那次重新越狱里重建、不来自解包。这一组读数不判定那次重建走的是哪条分支：两条分支下 `dyld.orig` 都会保持 2022-10-19 那份 926240 字节 `7eb2e72f`，理由是 `carbonCopy` 会把 `NSFileModificationDate` 写回目标（`carboncopy.m:14`、`:84`），而 `basebin_gen.m:146` 的源是 `.fakelib` 挂载之前的系统原版 dyld。第五节第 1 步给了同样的判断与它影响到的备份做法。第五节回退要恢复的目标状态就是现在这个状态。
 
@@ -177,7 +176,7 @@ dyld                             974608  6920d1ddecc00d6a  [1, 1, 1, 1]
 dyldhook_merge.arm64e.iOS16-17.dylib   75952  9fb3b9c0e2ae128b  [1, 1, 1, 1]
 ```
 
-**2026-11-26 01:49 复测（重新越狱之后，即当前）又回到第一组：**
+**2026-11-26 01:49 复测（重新越狱之后）又回到第一组：**
 
 ```
 dyld                             974016  486620f0c5ce26e6  [1, 0, 0, 1]
@@ -268,7 +267,7 @@ WEBKIT_IMAGES=1
 
 ### 3.3 可行性剩下的一处，源码与离线产物支持
 
-装上 hook 之后，`Loader.cpp:558` 的 `originalPathIsOverridableInDyldCache` 变成真，`:565` 不再短路，`:623` 去 `stat()` 磁盘副本；缓存里已序列化的 PrebuiltLoader 走 `PrebuiltLoader::invalidateInIsolation`（`:630-655`）的另一条判定，由 `isAlwaysOverridablePath` 放行。这两处判定函数在本机 `gen/dyld` 里都是本地符号，四个调用点全是 `bl` 直调（`docs/dopamine-basebin-webkit-override.md:89-107`，读的设备 `gen/dyld.orig`，本次读到同一份 `dyld.orig` 的 `sha256 7eb2e72f…`）。
+装上 hook 之后，`Loader.cpp:558` 的 `originalPathIsOverridableInDyldCache` 变成真，`:565` 不再短路，`:623` 去 `stat()` 磁盘副本；缓存里已序列化的 PrebuiltLoader 走 `PrebuiltLoader::invalidateInIsolation`（`:630-655`）的另一条判定，由 `isAlwaysOverridablePath` 放行。这两处判定函数在本机 `gen/dyld` 里都是本地符号，四个调用点全是 `bl` 直调（`docs/dopamine-basebin-webkit-override.md` 第二节的「目标函数确实存在，且被直接调用」一小节，读的设备 `gen/dyld.orig`，本次读到同一份 `dyld.orig` 的 `sha256 7eb2e72f…`）。
 
 补丁本身在 `dopamine-basebin/0001-dyldhook-allow-framework-override.patch`，两个函数都是裸 `return true`。CI 在 `.github/workflows/basebin-build.yml:216-241` 对构建出的 hook 跑 `verify-dyldhook-merge.sh`，`:331` 断言 mangled 名字，`:344` 跑 `verify-merged-dyld.sh`。设备上 `basebin.tar` 里那份 hook 的 `dyldhook_merge.arm64e.iOS16-17.dylib` 是 75952 字节、判定 `1 1 1 1`，即已经带上两个新 hook。
 
@@ -660,8 +659,7 @@ EOS
 7fd379340780e245c86fd0afe15ee55173bbb22d8a623bd60e2e34aa644afbc6   6144000  /var/mobile/Documents/basebin.tar
 ```
 
-**2026-11-26 01:49 复测（重新越狱之后，即当前）在这组路径上回到与「装补丁之前」逐位相同的读数**：
-
+**2026-11-26 01:49 复测（重新越狱之后）在这组路径上回到与「装补丁之前」逐位相同的读数**：
 
 ```
 486620f0c5ce26e6…    974016  /var/jb/basebin/gen/dyld            （mtime 2026-11-26 01:03）
@@ -717,7 +715,7 @@ fi
 ls -la "$OVR" "$OVR/usr"
 ```
 
-**不要照旧写法直接重跑。** 若 `usr` 已经是目录，`ln -s /var/jb/usr "$OVR/usr"` 不会失败，它会在目录里造出 `usr/usr -> /var/jb/usr`，退出码 0，无法从退出码看出来。本次在设备上核对过 `$OVR/usr/usr` 不存在，即当前没有这个残留；上面那段先探测再创建，重跑不会产生它。
+**不要照旧写法直接重跑。** 若 `usr` 已经是目录，`ln -s /var/jb/usr "$OVR/usr"` 不会失败，它会在目录里造出 `usr/usr -> /var/jb/usr`，退出码 0，无法从退出码看出来。2026-11-26 在设备上核对过 `$OVR/usr/usr` 不存在，读到那一刻没有这个残留；上面那段先探测再创建，重跑不会产生它。
 
 五个 framework 都要链接，因为 18.3 这五份镜像互相以绝对路径名依赖，dyld 对这类名字只按叶子名去 `DYLD_FRAMEWORK_PATH` 里找。本次逐份解析出的内部依赖：
 
@@ -988,4 +986,4 @@ dyld[36445]:   found: dylib-from-disk-to-override-cache: "…/procursus/Library/
 
 **`launchctl print` 的 `environment` 段不能当 envp 用。** 本次在同一个 pid（33349）上对照过两种读法，`launchctl print` 只显示四项，而 `ps -E` 与 `sysctl KERN_PROCARGS2` 都显示 21 项、其中含 `DYLD_INSERT_LIBRARIES`，`lldb image list` 也确认 `systemhook.dylib` 已映射进该进程。这条修正影响三份文档的读法：本文 4.3 节已改；`docs/ios16-whole-18.3-deployment-path.md:154/:192/:193` 与 `docs/ios16-all-18.3-xpc-endpoint-audit.md:209` 里「`environment` 段落含 `DYLD_FRAMEWORK_PATH`」这类记载不是否认能成立的证据，因为反向（段落为空）不代表进程里没有。它们要重取一次 `ps -E` 才能定案。
 
-**一处没有改的既有记录。** 外层 `AGENTS.md:224` 写「用设备上那份 hook dylib 合并得到 948414 字节，比 `gen/dyld` 的 974016 小。这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的，设备上的 hook 已被换回 74352 的原版」。前半句对，结论错：974016 减去 2 字节填充与 25600 的签名正好是 948414，差额全部来自重签名，所以 974016 那份 `gen/dyld` 是用 **74352 原版**合成的；974608 才是 75952 那份的结果。`dyldhook_merge` 本身是否被换回过，判据只能是第二节的四位计数，不是尺寸差。**这句在分支 tip 上仍是错的，本文只指出它，没有改它**：`AGENTS.md` 不在本 mission 的改动范围内，本文 1.1 节的字节模型与 `:69` 那段是它与事实的差异记录。
+**一处已由 `AGENTS.md` 自己改掉的既有记录。** 外层 `AGENTS.md` 曾在 `:249` 写「用设备上那份 hook dylib 合并得到 948414 字节，比 `gen/dyld` 的 974016 小。这个尺寸差说明 `gen/dyld` 是用 75952 那份补丁版 hook 合并出来的，设备上的 hook 已被换回 74352 的原版」；M145 之后该文件在 `:336` 直接把这一句判为「把方向写反了」并给出两行对照表。前半句对，结论错：974016 减去 2 字节填充与 25600 的签名正好是 948414，差额全部来自重签名，所以 974016 那份 `gen/dyld` 是用 **74352 原版**合成的；974608 才是 75952 那份的结果。`dyldhook_merge` 本身是否被换回过，判据只能是第二节的四位计数，不是尺寸差。

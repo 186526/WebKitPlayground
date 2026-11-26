@@ -20,7 +20,22 @@ jobs:
   build:
     name: Fetch, patch, build
     runs-on: macos-15
-    timeout-minutes: 350
+    # 360 is GitHub's hard ceiling for a job on a GitHub-hosted runner; a larger
+    # value is capped there silently, so this asks for the most available and no
+    # more. The last successful run, 45608543728, took 342m31s, so this leaves
+    # 17m29s instead of the 7m29s that 350 left.
+    #
+    # The packaging tail grew with the load-path assertion: that step verifies the
+    # built package, unpacks it, copies the build product's WebKit over one image,
+    # rebuilds a control .deb and verifies that. Measured on a warm local disk it
+    # is about 34 s (verify 9 s, unpack 1 s, rebuild 15 s, verify 9 s); a macOS
+    # runner's slower disk puts it at a couple of minutes, well inside the
+    # seventeen this value adds.
+    #
+    # A larger number is not the general fix. If the job outgrows 360 minutes no
+    # timeout value can save it, and the packaging tail has to move into its own
+    # job that reuses the build artifact rather than rebuilding.
+    timeout-minutes: 360
     env:
       # Single source of truth for the shipped minos: the Build step passes this as
       # IPHONEOS_DEPLOYMENT_TARGET, and the additions-SDK step derives the directory name
@@ -1265,6 +1280,50 @@ jobs:
             --rootless \
             --output "$PWD/packages/webkit-rootless.deb"
           ls -lh packages/
+
+      - name: Assert the packaged images carry the @rpath load chain
+        if: success()
+        run: |
+          set -euo pipefail
+          # STEP 7 of the packaging script reads its staging tree, before dpkg-deb
+          # writes the archive, so nothing in that run inspects the bytes inside the
+          # finished .deb. This step unpacks the package and runs that same reader
+          # over it, so a payload still naming /System/Library/Frameworks/WebKit
+          # fails this run instead of being uploaded.
+          DEB="$PWD/packages/webkit-rootless.deb"
+          zsh scripts/package-webkit-device-deb.sh --verify-deb "$DEB" --rootless
+
+          # The check is also held to its negative result, because a verifier that
+          # cannot reject an unrewritten payload is what let an all-system-path deb
+          # reach a device once already. The control is the build product's own
+          # binary, which is the file STEP 5 rewrites: putting it back into the
+          # unpacked tree reproduces exactly the payload a skipped STEP 5 leaves,
+          # with no hand-written Mach-O bytes.
+          #
+          # Everything the control needs lives outside packages/, because Upload deb
+          # globs packages/*.deb and would otherwise publish this deliberately broken
+          # package under the same artifact name as the real one.
+          CONTROL="$RUNNER_TEMP/load-path-control"
+          rm -rf "$CONTROL" && mkdir -p "$CONTROL"
+          NEG="$CONTROL/root"
+          mkdir -p "$NEG"
+          dpkg-deb -x "$DEB" "$NEG"
+          PRODUCT="$PWD/WebKit/WebKitBuild/Release-iphoneos"
+          cp -f "$PRODUCT/WebKit.framework/WebKit" \
+                "$NEG/var/jb/Library/Frameworks/WebKit.framework/WebKit"
+          mkdir -p "$NEG/DEBIAN"
+          dpkg-deb -e "$DEB" "$NEG/DEBIAN"
+          NEG_DEB="$CONTROL/negative.deb"
+          dpkg-deb --build --root-owner-group "$NEG" "$NEG_DEB" >/dev/null
+          if zsh scripts/package-webkit-device-deb.sh \
+               --verify-deb "$NEG_DEB" --rootless >/dev/null 2>&1; then
+            echo "The load-path check accepted a payload whose WebKit names the system framework."
+            echo "Such a check cannot gate this build: it would pass an unrewritten package."
+            exit 1
+          fi
+          echo "Load-path check rejected the unrewritten control package, as it must."
+          # The artifact that gets uploaded must be exactly the one this step checked.
+          ls -l packages/*.deb
 
       - name: Assert the packaged XPC services carry the identifiers iOS asks for
         if: success()

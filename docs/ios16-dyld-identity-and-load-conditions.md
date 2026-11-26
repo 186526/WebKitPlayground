@@ -317,17 +317,25 @@ dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW | RTLD_GLO
 塔用一个**链接时依赖 `WebKit`** 的宿主复测了同一套 constructor，读数原文：
 
 ```
-WebKit images already present = 1
-already: SYSTEM
-Symbol not found: __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyENSt3__14spanIKDsLm18446744073709551615EEE
+[ctor] entered; WebKit images already present = 1
+[ctor]   already: SYSTEM
+Successfully marked proc of pid 32399 as debugged
+[ctor] JavaScriptCore LOADED
+[ctor] libwebrtc.dylib LOADED
+[ctor] libANGLE-shared.dylib LOADED
+[ctor] WebCore        FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+[ctor] WebKitLegacy   FAILED  Symbol not found: __ZN3WTF6Thread5s_keyE
+[ctor] WebGPU         FAILED  Symbol not found: __ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...
+[ctor] WebKit         FAILED  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+[ctor] after claim, WebKit images = 1
 ```
 
-（`WebCore`、`WebKitLegacy`、`WebGPU`、`WebKit` 四个都因这条符号失败，调整 `JavaScriptCore` 与两条 dylib 以外的顺序无法补救。）
+（`JavaScriptCore` 与两条 dylib 三步都成功，其后四步各自失败；四步报的是三条符号——`WebCore` 与 `WebKit` 同缺 `_WTFSignpostIndirectLoggingEnabled`，`WebKitLegacy` 缺 `WTF::Thread::s_key`，`WebGPU` 缺 `StringImpl` 那条；调整 `JavaScriptCore` 与两条 dylib 以外的顺序无法补救。）
 
-三行读数说明：
+读数说明：
 
 - **constructor 进入时 `WebKit` 已经在场，而且是系统那份。** `__mod_init_func` 在 dyld 映射完主可执行文件的全部依赖之后才运行，所以链接了 `WebKit` 的宿主里，constructor 永远晚于 `WebKit` 的映射。
-- **`Symbol not found` 是同一条依赖顺序失败，不是签名失败。** 与 2.2 的单独加载失败同一个符号：`WebCore` 拿不到 `JavaScriptCore` 提供的 `WTF` 符号。区别在于这一次 `JavaScriptCore` 也没能替换成自建那份。
+- **前三步成功，后四步各自失败，四步报的是三条符号。** `WebCore` 与 `WebKit` 报同一条 `_WTFSignpostIndirectLoggingEnabled`，`WebKitLegacy` 报 `WTF::Thread::s_key`，`WebGPU` 报 `StringImpl` 那条（2.2 引的同一条）。在本轮那份 18.3 载荷上实测：`llvm-nm -gU` 在链条的七个镜像上逐个数，这三条符号只由自建 `JavaScriptCore` 导出（在它那里分别读到 `S`、`D`、`T`），其余六个镜像都是 0——四个 framework 镜像（`WebCore` 14138 个导出、`WebKitLegacy` 525、`WebGPU` 236、`WebKit` 2178）与两条 dylib（`libwebrtc` 409、`libANGLE-shared` 955）无一例外。而这四个失败镜像各自以未定义导入引用自己那条，所以四步失败不是签名失败，而是它们绑定到的不是自建那份 `JavaScriptCore`。区别在于这一次自建 `JavaScriptCore` 的 `dlopen` 拿回的是已在场的 handle，没有替换掉系统那份：判重按 install name 进行，先在场的那份赢，见 4.3。`after claim, WebKit images = 1` 说明整个过程没有多出第二份 `WebKit`。
 - 因此 6.1 的成立条件要写全：**constructor 先行只在「宿主不链接 `WebKit`、而由 constructor 自己第一个 `dlopen` 它」时有效。** 真实 app 的形态（主可执行文件链接 `WebKit`）不满足这个条件。
 
 所以这一项的准确说法是：**constructor 机制只在不链接 `WebKit` 的宿主上被证明；真实 `WebContent` 的形态下它被证明无效（6.3），沙盒与 JIT entitlement 继承则是连读数都还没有。** 下一步不该再试 constructor，应当回到「在 dyld 绑定之前让覆盖目录生效」这条路（`DYLD_FRAMEWORK_PATH` 注入），它与 constructor 无关。
@@ -414,6 +422,10 @@ int main(void) {
 ```
 
 两块顺序不能换：授权必须在第一次 `dlopen` 之前完成，否则第一个镜像就以 `code signature invalid` 失败；`JavaScriptCore` 必须在 `WebCore` 之前，否则得到 2.2 那条 `Symbol not found`。
+
+**这一份探针的 `dlopen` 只传了 `RTLD_NOW`，没有 `RTLD_GLOBAL`。** 因此本节与 8.2 的全部读数——`summary 7/7`、顺序对照、重复计数 31 与 0——都是每个镜像各自进一个私有作用域时取的，它们证明的是**顺序**（`JavaScriptCore` 必须第一个、两条 dylib 必须早于 `WebCore`），不证明 `RTLD_GLOBAL` 为必要。全文其余出现 `RTLD_NOW|RTLD_GLOBAL` 的地方（第 178 行的反方向宿主、第 516 行同一段的复述、8.5 节建议的对照实验）都不是这条链现在使用的加载模式。
+
+判别这两件事的对照实验还没有跑过，写法见 8.5。
 
 ### 8.2 无重复的那一组顺序
 
@@ -511,6 +523,21 @@ for (uint32_t i = 0; i < after; i++) {
 
 反方向那一组（宿主先要 `/System`）把这段放进一个 constructor 里，`main` 只留一句 `dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_NOW|RTLD_GLOBAL)`。**这条路只在宿主不链接 `WebKit` 时成立**，6.3 记录了一个链接 `WebKit` 的宿主上 constructor 失败的反例。
 
+### 8.5 `RTLD_GLOBAL` 的对照实验（尚未跑）
+
+第八节到 8.4 的全部读数都是在 `dlopen(path, RTLD_NOW)` 下取的，因此它们把「顺序」与「作用域」两个变量里的前一个隔离了出来，后一个完全没有动过。要判断 `RTLD_GLOBAL` 在链里到底起不起作用，只有一条读数能回答：同一份探针、同一份 `kImages`、同一个进程形态，只把每次调用的第二个参数在 `RTLD_NOW` 与 `RTLD_NOW|RTLD_GLOBAL` 之间切换，各跑一次，比较下面四项。
+
+| 读数 | 取法 | 两组的差说明什么 |
+| --- | --- | --- |
+| 加载个数 | 末行 `summary n/7` | 有差说明 GLOBAL 影响的是能否加载，不只是可见性 |
+| 重复计数 | 合并 stderr 后 `grep -c 'is implemented in both'` | 有差说明 GLOBAL 改变了哪些镜像被映射 |
+| 镜像增量 | 每个 `dlopen` 前后各读一次 `_dyld_image_count`，逐镜像打印 | 有差说明同一条路径在两种模式下映射的镜像数不同 |
+| 符号可达性 | 七步跑完后 `dlsym(RTLD_DEFAULT, "…")` 查一个只由 18.3 `JavaScriptCore` 导出的名字，例如 `_WTFSignpostIndirectLoggingEnabled` | 这是两个变量里唯一直接关于作用域的一条：`RTLD_NOW` 单独跑时应为空，加 GLOBAL 后应非空 |
+
+逐镜像的镜像增量是判读关键：如果两组七步的增量完全相同（都是 `1 1 1 1 1 1 1`）、重复计数都是 0，那就说明在这条链上 GLOBAL 不改变映射，只改变 `dlsym(RTLD_DEFAULT, …)` 能不能看见——也就是代码里的理由（「更宽的摆放」）成立，而「顺序依赖 GLOBAL」不成立。反过来，如果 LOCAL 组的增量出现 0 或重复计数非 0，就说明 GLOBAL 确实是必要条件，届时 `src/load_chain.h` 那段要按读数改写。
+
+探针改动只有两行：`kImages` 之外加一个 `static int kMode = RTLD_NOW;`，把循环里的 `dlopen(kImages[i], RTLD_NOW)` 换成 `dlopen(kImages[i], kMode)`；跑两次，第二次用 `-DGLOBAL_MODE` 之类的开关或直接把常量改成 `RTLD_NOW | RTLD_GLOBAL`。不要在同一进程里先跑 LOCAL 再跑 GLOBAL：第二次的七步会全部命中已映射的镜像，增量恒为 0，得不到任何信息。
+
 ---
 
 ## 九、仍未验证
@@ -520,6 +547,7 @@ for (uint32_t i = 0; i < after; i++) {
 - **`WebGPU` 剥掉签名 + 以 `JavaScriptCore` 起头的顺序**：本轮记 FAILED，更早一份对照表记未测。两者不冲突，但这一格按「待复核」处理，不要当成两份独立读数。
 - **真实 `WebContent` 的注入机制**：6.2 第 1 点与 6.3。constructor 在链接 `WebKit` 的宿主上已被证明无效，所以这不是「注入时机未取到读数」，而是这条路线在真实形态上不适用；剩下未验证的是「在 dyld 绑定之前让覆盖目录生效」那条路能否走通。第十节那张读数表把这一项拆成两层：override hook 不在场时（当前是这一层，2026-11-26 01:07 读作 `1 0 0 1`）覆盖一定不会生效，问题在 dyld；hook 在场时（同日 ~00:41 读作 `1 1 1 1`）dyld 侧不缺这一环，问题转到 `DYLD_FRAMEWORK_PATH` 有没有写进 app 进程的环境；第二层没有可用入口，见第十节末尾那段。
 - **真实 `WebContent` 的沙盒与 JIT entitlement 继承**：6.2 第 2 点。`AuxiliaryProcessIOS.mm:45-48` 的 `RELEASE_ASSERT_NOT_REACHED()` 在自建镜像映射时是否触发，没有读数。宏名与行号已在本机 18.3 源码树核对（`/tmp/wkpre18.3.1`）。
+- **`RTLD_GLOBAL` 在链里起不起作用**：第八节到 8.4 的读数全部在 `RTLD_NOW` 下取得，没有一组带 `RTLD_GLOBAL`，所以「顺序是对的」有读数、「GLOBAL 是必要的」没有读数，两者不能互相替代。对照实验的取数方式见 8.5，尚未跑。
 - **重复告警的条数口径**：33 与 31 两个读数并存，判据取「是不是 0」。
 - 本文所有设备读数都没有做「同一时刻对齐」的交叉取证。第三节的签名形态对照与第二节的顺序对照各自是独立运行，运行时间戳没有与镜像清单对齐；把镜像清单和 `_dyld_image_count` 收进同一次运行，是下一次复测应当补的一步。
 

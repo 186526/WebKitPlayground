@@ -9,6 +9,119 @@ Two device measurements, both taken on iPad14,4 / iPadOS 16.1, decide what this
 directory does. They are written here because they are not inferable from the
 sources.
 
+## The seven 18.3 images load as a chain, not as one dlopen
+
+The tweak used to `dlopen` WebKit alone. The device answered:
+
+```
+dlopen(/var/jb/Library/Frameworks/WebKit.framework/WebKit, 0x0001):
+  Symbol not found: _WTFSignpostIndirectLoggingEnabled
+  Referenced from: <787DFAB1-...> .../WebKit.framework/WebKit
+  Expected in:     <D309AA36-...> /System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore
+```
+
+The entry image was 18.3; the dependency it bound was 16.1. `src/load_chain.c`
+loads all seven in the measured order (JavaScriptCore first, WebKit last), each
+by explicit `/var/jb` path with `RTLD_NOW|RTLD_GLOBAL`, and stops at the first
+failure so the report names the step rather than the last image that happened to
+be tried.
+
+The order is `build-state.md` 第八轮's measurement: with
+JavaScriptCore → libwebrtc → libANGLE-shared → WebCore → WebKitLegacy → WebGPU →
+WebKit the duplicate-image count fell from 31 to 0 and all seven loaded. What the
+readings do and do not support matters here. `WebCore` ahead of `JavaScriptCore`
+fails with `Symbol not found:
+__ZN3WTF10StringImpl28createWithoutCopyingNonEmptyE...`, recorded when `WebCore`
+is loaded alone (doc 2.2), because that symbol comes from `JavaScriptCore`.
+`WebCore` ahead of the two dylibs but still after `JavaScriptCore` is a different
+case: it loaded 7/7 and only raised duplicate-class warnings (doc 2.3), which the
+5.2 table shows as the same 7/7 with a count of 31 instead of 0. So the constraint
+these readings establish is that `WebCore` cannot precede `JavaScriptCore`; the
+reorder against the two dylibs is what the count measures, and the one such
+sequence that was run loaded all seven. JavaScriptCore is first because the four
+framework images bind WTF symbols to it and nothing else in the chain exports them;
+the two dylibs bind none at all. And WebKit is last because it reexports WebKitLegacy
+and loads JavaScriptCore.
+
+Doc 6.3 answers a different question. There the chain ran in this same order with
+`JavaScriptCore` first, and `JavaScriptCore`, `libwebrtc` and `libANGLE-shared` all
+loaded; the four remaining steps then failed, on three distinct `WTF` symbols: `WebCore` and
+`WebKit` both on `_WTFSignpostIndirectLoggingEnabled`, `WebKitLegacy` on
+`WTF::Thread::s_key`, and `WebGPU` on the `StringImpl` symbol quoted above. All three
+are exported by the self-built `JavaScriptCore` alone (`llvm-nm -gU` counts all seven
+images in the chain and finds them as `S`/`D`/`T` definitions there and in none of the
+other six — the four framework images export 14138, 525, 236 and 2178 symbols, and
+`libwebrtc` and `libANGLE-shared` export 409 and 955), and each of the
+four failing images refers to its own one as an undefined import. The cause is
+the identity rule in doc 4.3: a host that links `WebKit` already has the system copy
+resident, and it keeps the identity, so the `dlopen` of the self-built
+`JavaScriptCore` returned the resident handle instead of replacing it. That is a
+statement about which copy owns the identity, not about where `WebCore` sits in the
+chain.
+
+WebCore is why the two dylibs sit where they do. Its load commands carry
+`LC_LOAD_WEAK_DYLIB` on three of the seven — `libwebrtc`, `libANGLE-shared` and
+`WebGPU`. The other nine weak commands in that image name system libraries
+(`BrowserEngineCore`, `libxslt.1`, `libAccessibility` and six `libswift*`), so the
+three are the whole of the set this chain relates to. A weak import does not block
+the load. In the payload as shipped the three strings are `/System` paths, so a
+WebCore loaded first bound the resident 16.1 copies rather than the `/var/jb`
+ones, and the later `/var/jb` load of a dylib that had already been bound this way
+mapped a second copy. Two of the three were then reordered and the third was not:
+`libwebrtc` and `libANGLE-shared` are steps 2 and 3 against WebCore's step 4, and
+moving them ahead is what took the duplicate count to 0, while `WebGPU` is step 6,
+after WebCore, so no run has varied it. Both of the reordered two belong in the
+experiment because both are weak imports WebCore would otherwise bind to the
+system copies; the count is what only one of them can report. The 31 belongs to
+`libwebrtc` alone — it is `Class WK_RTC... is implemented in both` warnings, and
+`libwebrtc` carries 466 `WK_RTC` strings, so two copies of it in one process must
+produce them. `WebGPU` carries no `WK_RTC` name, so it cannot contribute to that
+count. `libANGLE-shared` defines no classes at all (it has `__objc_classname` and
+`__objc_classrefs` but no `__objc_classlist`), so two copies of it would raise no
+warning and this count cannot decide whether it ever had a second one. Doc 4.3's
+rule bears on that question — identity is decided by install name and the resident
+copy wins, and the `/var/jb` copy shares its install name with the shared-cache
+one — but its row for that case is marked not directly measured. So the 31 proves
+a second copy for `libwebrtc`, and for neither of the other two either way. In the
+rewritten tree all three strings are `/var/jb/.../siblings`, so the System string
+is gone and no weak import of the three can name the system image — which is why
+the rewrite, not the ordering alone, is what makes the weak set safe.
+
+`RTLD_NOW` turns a missing symbol into a failed step instead of a fault at first
+call, and every step asks for it.
+
+About `RTLD_GLOBAL`: the order measurement above is not evidence for it. The
+probe that produced those counts calls `dlopen(kImages[i], RTLD_NOW)` — see
+`docs/ios16-dyld-identity-and-load-conditions.md` 8.1 — with no `RTLD_GLOBAL`, so
+the 31 → 0 reading was taken with every image in its own scope, and no device run
+has compared the two modes. The flag is kept because it is the permissive
+placement: it cannot hide a sibling behind a private scope, and this dylib's own
+class and function lookups go through the global table
+(`symbol_find_global`). Whatever `RTLD_GLOBAL` is worth is unmeasured, and the
+chain's own edges do not need it: each of the seven names its siblings by
+absolute `/var/jb` path.
+
+The paths are where the package installs the seven: the five frameworks under
+`/var/jb/Library/Frameworks` and the two bare dylibs under `/var/jb/usr/lib`.
+WebKit's is the only `/var/jb` path inside `WebSafeWebKitFilter.dylib`, so the
+file the filter admits the process for and the file this chain opens are one
+file. `rewrite-payload.py` rewrites those same files in place: it points the
+eleven edges among the seven at their `/var/jb` siblings and leaves every
+`LC_ID_DYLIB` claiming its `/System` name, which is what lets dyld's install-name
+dedup answer a later `/System` request with these images. Without that rewrite the
+seven bind the resident 16.1 siblings. See `docs/rewrite-payload.md`.
+
+That makes the seven a self-consistent set that binds to itself. It does not make
+an application run 18.3: an app's main binary binds
+`/System/Library/Frameworks/WebKit.framework/WebKit` at launch, before any
+injected constructor, and that path exists only in the shared cache.
+
+The report states two readings separately, because they are different questions:
+the seven UUIDs are what the chain loaded, and the three system UUIDs are what the
+application's own `/System/.../WebKit` request had already resolved. Equal sets
+mean the substitution happened; disjoint sets mean the payload works and the
+browser is still on 16.1. Do not read "seven loaded" as "the browser runs 18.3".
+
 ## The filter's lists sit in the top-level Filter dictionary
 
 `WebSafeWebKitFilter.plist` has one top-level key, `Filter`, and `Classes` and

@@ -79,9 +79,27 @@ do
 done
 
 # basebin.tc is what makes the dylibs loadable on the device; jbctl refuses a
-# tar without it.
+# tar without it.  Shipping the file is not enough: update.m:32-39 uploads it as
+# the basebin trustcache and nothing recomputes it from the members it just
+# copied, so a stock tc paired with a replaced member describes binaries that
+# are no longer in the tar and leaves the shipped ones uncovered.  Keep the
+# stock tc in such a tar and this assertion is the one that catches it.  The
+# file must match the shipped slices exactly in both directions: an entry no
+# slice produces is a cdhash the kernel never computes, which a covers-only
+# check would let through.
 if [ -f "$work/basebin/basebin.tc" ]; then
 	pass "tar ships basebin/basebin.tc"
+	if [ -f "$HERE/verify-basebin-trustcache.py" ]; then
+		if python3 "$HERE/verify-basebin-trustcache.py" "$work" > "$work/verify-trustcache.txt" 2>&1; then
+			pass "basebin.tc holds exactly the cdhashes of the Mach-O members the tar ships"
+			sed -n 's/^/    /p' "$work/verify-trustcache.txt"
+		else
+			fail "basebin.tc and the members this tar ships disagree; jbctl would upload the wrong trustcache"
+			sed -n 's/^/    /p' "$work/verify-trustcache.txt"
+		fi
+	else
+		fail "cannot find $HERE/verify-basebin-trustcache.py to check basebin.tc coverage"
+	fi
 else
 	fail "tar is missing basebin/basebin.tc"
 fi
@@ -90,6 +108,32 @@ if [ -f "$work/basebin/systemhook.dylib" ]; then
 	pass "tar ships basebin/systemhook.dylib"
 else
 	fail "tar is missing basebin/systemhook.dylib"
+fi
+
+# launchdhook is the other binary built from systemhook/src/common/common.c: its
+# Makefile lists ../systemhook/src/common/*.[cSm] as a dependency, and
+# spawn_hook.c:197 installs the posix_spawn interposer that runs inside launchd,
+# the process that performs an app's final exec.  A stock launchdhook writes only
+# DYLD_INSERT_LIBRARIES, so an app launched through launchd inherits the __XPC_
+# spellings from launchd's environ but never the plain name dyld reads, and its
+# WebKit comes from the shared cache.  That is the state this device was in, so a
+# tar that ships the stock binary has to fail here rather than on the device.
+if [ -f "$work/basebin/launchdhook.dylib" ]; then
+	pass "tar ships basebin/launchdhook.dylib"
+	if [ -f "$HERE/verify-systemhook-search-paths.py" ]; then
+		if python3 "$HERE/verify-systemhook-search-paths.py" --kind launchdhook \
+			"$work/basebin/launchdhook.dylib" > "$work/verify-launchdhook.txt" 2>&1; then
+			pass "launchdhook.dylib carries the four search-path names"
+			sed -n 's/^/    /p' "$work/verify-launchdhook.txt"
+		else
+			fail "launchdhook.dylib does not set the search paths dyld reads; this tar would leave app processes on the shared-cache WebKit"
+			sed -n 's/^/    /p' "$work/verify-launchdhook.txt"
+		fi
+	else
+		fail "cannot find $HERE/verify-systemhook-search-paths.py to check launchdhook.dylib"
+	fi
+else
+	fail "tar is missing basebin/launchdhook.dylib"
 fi
 
 # The hooks themselves, read from the shipped bytes.  verify-dyldhook-merge.sh
