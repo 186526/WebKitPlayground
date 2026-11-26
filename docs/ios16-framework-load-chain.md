@@ -160,9 +160,19 @@ dyld 在启动时就解析它，早于任何注入的构造函数。这条路径
 
 | 执行的改写 | 读数 |
 | --- | --- |
-| 只跑 STEP 5（`@rpath`） | `verify` 退出 0 |
-| 只跑 `rewrite-payload.py`（`/var/jb`） | `verify` 退出 0，但 16 个镜像里仍有 9 个命名 `/System` |
-| 先跑 STEP 5 再跑 `rewrite-payload.py` | `rewrite` 退出 1，原文 `WebCore: 3 page(s) whose hash disagreed are not the 0 page(s) the rewrite changed`；随后 `verify` 退出 1 |
+| 只跑 STEP 5（`@rpath`） | 11 条边全部是 `@rpath`；STEP 5 自带的 `MACHO_LOAD_PATHS_TOOL verify` 退出 0，`rewrite-payload.py verify` 退出 1 |
+| 只跑 `rewrite-payload.py`（`/var/jb`） | `rewrite-payload.py verify` 退出 0，但 16 个镜像里仍有 9 个命名 `/System` |
+| 先跑 STEP 5 再跑 `rewrite-payload.py` | `rewrite` 退出 1，原文 `WebCore: 3 page(s) whose hash disagreed are not the 0 page(s) the rewrite changed`；随后 `rewrite-payload.py verify` 退出 1 |
+
+第一行两个验证器读数相反是有原因的，不是矛盾。STEP 5 自带的
+`MACHO_LOAD_PATHS_TOOL verify`（`scripts/package-webkit-device-deb.sh:1135`，源码在
+`:609` 起的 `write_macho_load_path_tool`）问的是「还有没有镜像命名系统框架路径」，只跑
+STEP 5 的树答「没有」，所以退出 0。`rewrite-payload.py verify` 问的是另一组判据：
+七者之间的 11 条边是否都指向 `/var/jb`、七条 `LC_ID_DYLIB` 是否等于记录的身份。
+只跑 STEP 5 的树上这两项都不成立（11 条边是 `@rpath` 而不是 `/var/jb`，`/var/jb`
+边 0 条；WebCore、WebKitLegacy、WebGPU、WebKit 四个镜像的页哈希也因 STEP 5 追加
+`LC_RPATH` 而与签名失配），所以它退出 1。两个工具
+验的是不同的东西，读哪一行就用那一行自己的验证器，不要跨行借读数。
 
 第三行是可以逐字核对的一条：`rewrite` 停手时打印的是
 `WebCore: 3 page(s) whose hash disagreed are not the 0 page(s) the rewrite changed`。
@@ -185,8 +195,29 @@ dyld 在启动时就解析它，早于任何注入的构造函数。这条路径
 共改动 758 字节；7 条 `LC_ID_DYLIB` 一条未变；回读产出 deb 得到 11 条 `/var/jb`
 边、7 条 `/System` 身份、14 个 CodeDirectory 页哈希 0 处失配、`codeLimit` 与
 `dataoff` 相等 14 处；`webpushd` 与 `adattributiond` 在包内且与输入树逐位相同
-（`6a78cf9a…`、`363db001…`）；七个镜像与上一版 deb 逐位相同。这些读数只覆盖
-「包里的字节是什么」，不覆盖「装到设备上之后应用用哪一份」。
+（`6a78cf9a…`、`363db001…`）。这些读数只覆盖「包里的字节是什么」，不覆盖「装到
+设备上之后应用用哪一份」。
+
+与既有 deb 的对比只在一个前提下有意义：那个 deb 出自同一份上游 WebKit。本机找到
+的八个旧 deb（`m138-merged-payload.deb`、`rv136/outStep.deb`、`rv136/outReal.deb`、
+`rev7.deb`、`revpos.deb`、`revpos2.deb`、`dot.deb`、`dironly.deb`）**七个镜像里有
+六个逐位相同**：JavaScriptCore `b5263ee19ac9`、WebCore `dffbb11184a4`、WebKitLegacy
+`ededc86230b3`、WebGPU `c16262a96161`、libwebrtc `3f39c0804d4e`、libANGLE
+`22dcecf62165`。唯一不同的是 WebKit：本次 `fc80ced1ad95`（50797136 字节，12247 页，
+`__TEXT` 16662528）对旧 deb 的 `441574598730`（50758784 字节，12237 页，`__TEXT`
+16629760）。
+
+差异来自上游 WebKit 是两份不同的构建，不是改写差异。旧 deb 那份的 `LC_UUID` 是
+`787DFAB1-4DE3-3568-9923C9409791B728`，即设备上装着的 `620.2.4` 构建；把
+`installed-620.2.4-20261124100630.tar` 用同一个重写器跑一遍，得到的正是
+`441574598730` / 50758784 字节 / 同一个 UUID。本次的输入是 `45608543728` 的 CI 产物，
+`LC_UUID` 是 `DDC9E813-356C-3803-A72386A72F11DB56`。两份上游 WebKit 相差 38352
+字节，而重写作用在 WebKit 这个镜像上只改 338 字节（整批七者共 758 字节），所以
+镜像尺寸差不可能由改写产生。
+
+也不能拿「同一棵树跑两遍」来证明这条：重写是确定性的，两遍必然七个全同，那样得到
+的 7/7 是同义反复。能说明问题的是上面这个对照——同一份重写器作用在两份上游构建上，
+六个镜像同、一个镜像不同，差异与上游构建的差异一一对应。
 
 ## 这些改写证明什么，不证明什么
 
