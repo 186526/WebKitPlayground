@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -922,6 +923,66 @@ def case_signer_that_does_nothing() -> None:
     images, so a signer that leaves them alone has to stop the run.
     """
     label = "a signer that leaves images unsigned fails the run"
+def run_verify_deb(deb: Path, mode: str, bin_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run the script's --verify-deb mode over an already built package.
+
+    It takes neither a build product nor a signer, so the PATH it gets holds none of the packaging
+    stand-ins: the mode has to work on a machine that only has dpkg-deb and python3, which is what
+    the workflow step relies on.
+    """
+    environment = dict(os.environ)
+    environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+    command = ["zsh", str(SCRIPT), "--verify-deb", str(deb)]
+    if mode:
+        command.append(mode)
+    return subprocess.run(command, capture_output=True, text=True, env=environment)
+
+
+def skip_without_dpkg_deb(label: str) -> bool:
+    """Report a skip instead of a failure where dpkg-deb is not installed.
+
+    The mode cannot be exercised without it, and an absence on the host says nothing about the
+    code.  main() also refuses to run any case without dpkg-deb, so this guard only matters when
+    one of these cases is driven on its own.
+    """
+    if shutil.which("dpkg-deb") is not None:
+        return False
+    print(f"SKIP {label} (dpkg-deb not installed)")
+    return True
+
+
+def make_deb(root: Path, images: dict[str, bytes], prefix: str = "var/jb") -> Path:
+    """Write a package holding the given images under the install prefix.
+
+    The control files are written directly rather than copied out of a real package: dpkg-deb only
+    needs a DEBIAN/control to build, and the cases care about the payload, not the metadata.
+    """
+    staging = root / "staging"
+    for relative, data in images.items():
+        destination = staging / prefix / relative if prefix else staging / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+    (staging / "DEBIAN").mkdir(parents=True, exist_ok=True)
+    (staging / "DEBIAN" / "control").write_text(
+        "Package: com.example.verify\nVersion: 1.0\nArchitecture: iphoneos-arm64\n"
+        "Maintainer: t <t@example>\nDescription: fixture\n",
+        encoding="utf-8",
+    )
+    deb = root / "fixture.deb"
+    subprocess.run(["dpkg-deb", "--build", "--root-owner-group", str(staging), str(deb)],
+                   check=True, capture_output=True)
+    return deb
+
+
+def case_verify_deb_rejects_unrewritten() -> None:
+    """--verify-deb must reject a package whose images still name the system frameworks.
+
+    This is the state a skipped STEP 5 leaves, and the check exists so that package cannot be
+    uploaded.  A mode that passed here would be a log line, not a gate.
+    """
+    label = "--verify-deb rejects a package whose images still name system frameworks"
+    if skip_without_dpkg_deb(label):
+        return
     with tempfile.TemporaryDirectory() as work:
         root = Path(work)
         bin_dir = root / "bin"
@@ -941,6 +1002,18 @@ def case_signer_that_does_nothing() -> None:
             return
         if deb.exists():
             failures.append(f"{label}: a package was written despite the failed check")
+        deb = make_deb(root, {
+            "Library/Frameworks/WebKit.framework/WebKit":
+                build_macho(((LC_LOAD_DYLIB, JSC), (LC_LOAD_DYLIB, WEBCORE)), filetype=MH_EXECUTE),
+            "Library/Frameworks/WebCore.framework/WebCore": build_macho(((LC_LOAD_DYLIB, JSC),)),
+        })
+        result = run_verify_deb(deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0, an unrewritten package must be rejected\n{combined}")
+            return
+        if JSC not in combined:
+            failures.append(f"{label}: the error does not name the offending system path\n{combined}")
             return
     print(f"PASS {label}")
 
@@ -948,6 +1021,11 @@ def case_signer_that_does_nothing() -> None:
 def case_resign_is_recorded() -> None:
     """The run must list the cdhashes it changed, because the device admits by cdhash."""
     label = "a re-signing pass lists the cdhashes it changed"
+def case_verify_deb_accepts_rewritten() -> None:
+    """--verify-deb must accept a package STEP 5 left consistent, or the gate blocks every build."""
+    label = "--verify-deb accepts a package whose images resolve inside it"
+    if skip_without_dpkg_deb(label):
+        return
     with tempfile.TemporaryDirectory() as work:
         root = Path(work)
         bin_dir = root / "bin"
@@ -1166,6 +1244,20 @@ def case_survey_follows_the_rewrite() -> None:
         if broken:
             failures.append(f"{label}: the shipped package carries seal(s) that do not cover it: "
                             f"{broken}")
+        product = build_product(root)
+        write_shims(bin_dir)
+        deb = root / "webkit.deb"
+        build = run_script(product, deb, "--rootless", bin_dir)
+        if build.returncode != 0:
+            failures.append(f"{label}: the packaging step failed\n{build.stdout}{build.stderr}")
+            return
+        result = run_verify_deb(deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode} on a rewritten package\n{combined}")
+            return
+        if "Verified" not in combined:
+            failures.append(f"{label}: the mode did not report what it verified\n{combined}")
             return
     print(f"PASS {label}")
 
@@ -1602,6 +1694,32 @@ def case_manifest_of_directories_only() -> None:
             return
         if output.exists():
             failures.append(f"{label}: a package was written anyway")
+def case_verify_deb_prefix_guard() -> None:
+    """A wrong --rootless must fail closed rather than scan an empty tree and pass.
+
+    The mode reads the prefix out of the archive.  Without that, --rootless against a rootful
+    package would look under var/jb, find no images, and either report a vacuous success or a
+    confusing zero-image error instead of saying the flag is wrong.
+    """
+    label = "--verify-deb refuses a flag that disagrees with the package's prefix"
+    if skip_without_dpkg_deb(label):
+        return
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        # A rootful package: images at the archive root, no var/jb.
+        deb = make_deb(root, {
+            "Library/Frameworks/WebKit.framework/WebKit":
+                build_macho(((LC_LOAD_DYLIB, LIBSYSTEM),), filetype=MH_EXECUTE),
+        }, prefix="")
+        result = run_verify_deb(deb, "--rootless", bin_dir)
+        combined = result.stdout + result.stderr
+        if result.returncode == 0:
+            failures.append(f"{label}: exit 0, a wrong prefix must fail\n{combined}")
+            return
+        if "prefix" not in combined:
+            failures.append(f"{label}: the error does not explain the prefix mismatch\n{combined}")
             return
     print(f"PASS {label}")
 
@@ -1776,6 +1894,9 @@ exec {CP} "$@"''',
     case_stale_seal_is_rejected()
     case_survey_follows_the_rewrite()
     case_step_banners_are_ordered()
+    case_verify_deb_rejects_unrewritten()
+    case_verify_deb_accepts_rewritten()
+    case_verify_deb_prefix_guard()
 
     if failures:
         print(f"\n{len(failures)} failure(s):", file=sys.stderr)
