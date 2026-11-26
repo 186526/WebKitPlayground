@@ -141,3 +141,62 @@ dyld 在启动时就解析它，早于任何注入的构造函数。这条路径
 `LC_ID_DYLIB`，然后重算两个 CodeDirectory 的页哈希。`verify` 断言的就是本文
 「部署判据」的三条，外加「11 条边」这个数目，所以只写了一半的树不会以更小的成功
 通过。测试在 `tools/idevice-webkit/tests/rewrite_payload_test.py`。
+
+## 两处改写各自改变什么
+
+这个仓库里有两种改写，改的是同一个 load command 表的同一个字段，所以要先分清。
+
+第一种是 `scripts/package-webkit-device-deb.sh:585` 起的 STEP 5，把构建产物的
+框架加载路径改成 `@rpath/<Name>.framework/<Name>`，并往每个镜像的 header pad
+追加两条 `LC_RPATH`。它服务的是构建产物：一份按 `/System/...` 绝对路径链接出来
+的 WebKit，装到 `/var/jb` 之后仍然按绝对路径去共享缓存取依赖。
+
+第二种是 `tools/idevice-webkit/rewrite-payload.py`，把这七个镜像之间的 11 条边
+改成 `/var/jb/...` 绝对路径，不碰 `LC_ID_DYLIB`，只重算页哈希。它服务的是已经
+装在设备上的那棵树。
+
+两者各自成立，合起来不成立。在真实 CI 产物（`gh run download 45608543728`，16
+个 Mach-O 镜像）上量了三种组合：
+
+| 执行的改写 | 读数 |
+| --- | --- |
+| 只跑 STEP 5（`@rpath`） | `verify` 退出 0 |
+| 只跑 `rewrite-payload.py`（`/var/jb`） | `verify` 退出 0，但 16 个镜像里仍有 9 个命名 `/System` |
+| 先跑 STEP 5 再跑 `rewrite-payload.py` | `rewrite` 退出 1，原文 `WebCore: 3 page(s) whose hash disagreed are not the 0 page(s) the rewrite changed`；随后 `verify` 退出 1 |
+
+第三行是可以逐字核对的一条：`rewrite` 停手时打印的是
+`WebCore: 3 page(s) whose hash disagreed are not the 0 page(s) the rewrite changed`。
+这句话里的两个数字分别对应 `tools/idevice-webkit/rewrite-payload.py:543-547` 的
+`found` 与 `touched`：它读到的失配页有 3 个，而本次改写动到的页是 0 个，两者不等
+就抛 `PayloadError`。也就是说，串联时交给重写器的树本来就已经带着 3 个页哈希失配，
+重写器一个都没碰过它们；它不接受这种输入，因为第 545 行这个判断正是它只修补自己
+造成的失配、不替别人重写签名的依据。这条判断为什么必要，写在
+`tools/idevice-webkit/docs/rewrite-payload.md` 的「为什么用绝对路径而不是 @rpath」
+一节：`@rpath` 改写必须往七个镜像的 header pad 追加 `LC_RPATH`，而载荷里
+`LC_RPATH` 出现 0 次，追加之后的页内容与签名不再对应。结论是**两处改写互斥，
+不能串联**，串联的产物不能被这条判据验收。
+
+因此本仓库的分工是：product 模式的唯一改写是 STEP 5；`rewrite-payload.py` 是
+设备侧的工具，只由 `--payload` 模式调用（`scripts/package-webkit-device-deb.sh:322`
+与 `:329`），而 `--payload` 模式对已经装好的树不再跑 STEP 5。`--payload` 这个
+模式分发本身是需要的：已经装在设备上的树只有它能打包。
+
+`--payload` 模式跑在真实 CI 产物上的一次读数为：11 条边全部改写为 `/var/jb` 路径，
+共改动 758 字节；7 条 `LC_ID_DYLIB` 一条未变；回读产出 deb 得到 11 条 `/var/jb`
+边、7 条 `/System` 身份、14 个 CodeDirectory 页哈希 0 处失配、`codeLimit` 与
+`dataoff` 相等 14 处；`webpushd` 与 `adattributiond` 在包内且与输入树逐位相同
+（`6a78cf9a…`、`363db001…`）；七个镜像与上一版 deb 逐位相同。这些读数只覆盖
+「包里的字节是什么」，不覆盖「装到设备上之后应用用哪一份」。
+
+## 这些改写证明什么，不证明什么
+
+改写让七个镜像互相用 `/var/jb` 路径绑定，并且各自的签名描述自己的字节。这是
+「七个文件互相绑定、签名自洽」。
+
+改写不决定一个应用进程启动时拿到哪一份 WebKit。Safari、Chrome、微信的主二进制
+带的是 `LC_LOAD_DYLIB /System/Library/Frameworks/WebKit.framework/WebKit`，
+dyld 在启动时先解析它，从共享缓存取到 16.1 那份，早于任何注入的构造函数。要让
+应用进程换到 `/var/jb` 这份，靠的是另一套机制：`launchdhook` 把搜索路径写进进程
+环境，配合打过 `isOverridablePath` 补丁的 dyld 放行覆盖目录。那套机制当前在设备
+上没有生效（`/var/jb/basebin/gen/dyld` 的 hook token 判读是 `1 0 0 1`，即两个
+override hook 不在）。本文的判据与这两处改写都不触及那条链路。
