@@ -144,7 +144,7 @@ M64 的审计（`.tower/comms/inbox/20261125-survey-protocol-divergence-tower-su
 **`prune_xpc_services` 的理由依赖一处未验证的行为。** `install-webkit-override.sh` 的 `prune_xpc_services()` 会删掉覆盖目录里的 `XPCServices`，脚本头部的注释说明了理由：留着会让 launchd 去启动复制件而不是系统桩，而系统桩是「四条指令的尾调用」，`DYLD_FRAMEWORK_PATH` 已经把 `WKXPCServiceMain` 指向被覆盖的 `WebKit`。这条理由依赖三件事，逐条核对过：
 
 1. `xpcproxy` 会把环境变量转交给 `.xpc` 进程——**未验证**。`__XPC_` 前缀的转交位置在 `/usr/libexec/xpcproxy` 的字符串表、`/sbin/launchd`、共享缓存三处都查不到，`xpcproxy` 与 `libxpc` 的源码不在 `apple-oss-distributions`（`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节）；
-2. 转交的是 `__XPC_` 前缀版本、不是裸名——**这是按 Lessica 分支的既有实现推断的**，不是本机验证过的结论（同文件 `:714`）；
+2. 转交的是 `__XPC_` 前缀版本、不是裸名——**这是按 Lessica 分支的既有实现推断的**，不是本机验证过的结论（`docs/dopamine-basebin-webkit-override.md` 的「十一·七 四个变量各服务哪条路径，以及为什么还要保留构建期那一对」一节里「所以『`xpcproxy` 只透传 `__XPC_` 版本』这句话是按 Lessica 分支的既有实现推断的」一段）；
 3. 有谁设了 `__XPC_` 前缀版本——**补丁里有，设备上没生效**。`dopamine-basebin/0001-systemhook-set-search-paths.patch:100-103` 的 `searchPathVariables` 四个变量都在：`DYLD_FRAMEWORK_PATH`、`__XPC_DYLD_FRAMEWORK_PATH`、`DYLD_LIBRARY_PATH`、`__XPC_DYLD_LIBRARY_PATH`。补丁自己的注释（`:139`）写着「Both spellings are set: where an XPC service's `__XPC_` copy is forwarded from is not verified」。**但这条答的是补丁的形态，不是设备的形态**：2026-11-25 实测设备上 `/var/jb/basebin/systemhook.dylib` 是 233520 字节的原版，里面 `DYLD_FRAMEWORK_PATH` 出现 0 次（读数与判据见附录 B 的 B.1）。打上补丁的那份是 234336 字节。
 
 因此这一节的三条前置条件今天只有第二条未定、第三条不成立。**「前置条件齐备，缺的只有一个转交行为」这句话在本轮不成立**：连「有谁设了变量」这一条都没落地。转交行为仍未测，但它现在排在重装 basebin 之后（附录 B 的 B.9）。

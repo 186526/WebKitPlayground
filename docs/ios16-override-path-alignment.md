@@ -222,4 +222,4 @@ grep -o '^OVERRIDE_ROOT=[^ ]*' scripts/uninstall-webkit-override.sh | sed 's/.*=
 
 `docs/dopamine-basebin-webkit-override.md` 第十一节记录 basebin 一侧的四个变量，本节改的是 `.xpc` 一侧与覆盖目录脚本。两侧指向同一个目录这件事，改动前只有 basebin 一侧成立。
 
-该文档 `:342` 与 `:411` 描述 `.xpc` 内嵌那两条为「给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`」，这是改动前的读数，保留作为当时的实测记录；改动后的二进制约需重新构建才能产生新的读数，尚未取得。
+`docs/dopamine-basebin-webkit-override.md` 的「上线后怎么确认 hook 真的在起作用」一节里「在 `.xpc` 上看候选行时要先分清来源」一段、以及「十、证据来源」的表格行「五个 WebKit `.xpc` 的 `LC_DYLD_ENVIRONMENT` 各 4 条」，两处都描述 `.xpc` 内嵌那两条为「给出 `/var/jb/Library/Frameworks/...` 与 `/var/jb/usr/lib/...`」，这是改动前的读数，保留作为当时的实测记录；改动后的二进制约需重新构建才能产生新的读数，尚未取得。
