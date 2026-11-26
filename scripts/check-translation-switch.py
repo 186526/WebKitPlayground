@@ -199,6 +199,10 @@ REQUIRED_RATIONALE = (
     ("the three anchors read out of the tag's header", "2946, InitializeConnection 2478 and Last 3184"),
     ("the split of the 1175 one-sided names around the synchronous boundary",
      "852 of the 1126 that are outside it"),
+    ("the generator's exit status and the four counts it prints",
+     "`scripts/gen-ipc-message-number-tables.py` exits 0 (rc=0) and reports four"),
+    ("the unmapped-incoming count, stated as a count",
+     "1175 only newer, and 708 unmapped"),
 )
 
 # A mention of the setter inside a comment is documentation, not a call. The patch's added lines all
