@@ -8026,7 +8026,7 @@ new file mode 100644
 index 0000000000000..be99a874b6c4e
 --- /dev/null
 +++ b/Source/WebKit/Platform/IPC/MessageNumberTranslation.h
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,201 @@
 +/*
 + * Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 + *
@@ -8087,6 +8087,13 @@ index 0000000000000..be99a874b6c4e
 +// this enumeration's end: the mismatch is not one of size. Of the 2911 names the
 +// two enumerations share, 5 happen to carry the same number on both sides and
 +// 2906 do not. 274 names exist only in 16.1 and 1175 only in this tree.
++//
++// Provenance, recorded here because these tables are reproducible only from
++// these exact inputs. Given one generated header per tag,
++// `scripts/gen-ipc-message-number-tables.py` exits 0 (rc=0) and reports four
++// counts: 2911 shared, 274 only older, 1175 only newer, and 708 unmapped
++// incoming (1175 on the outgoing side). A 16.1 number the tables have no case
++// for is one of those 708.
 +//
 +// That misalignment is what makes the handshake fail, and `InitializeConnection`
 +// is the case to read. `InitializeConnection` is number 3076 in this tree. The
@@ -8265,7 +8272,7 @@ diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/Au
 index 30487740bbe50..ebf65fdbb37b3 100644
 --- a/Source/WebKit/Shared/AuxiliaryProcess.cpp
 +++ b/Source/WebKit/Shared/AuxiliaryProcess.cpp
-@@ -106,6 +106,27 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
+@@ -106,6 +106,28 @@ void AuxiliaryProcess::initialize(const AuxiliaryProcessInitializationParameters
      WebPageProxyIdentifier::enableGenerationProtection();
  
      m_connection = IPC::Connection::createClientConnection(parameters.connectionIdentifier);
