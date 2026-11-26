@@ -988,16 +988,25 @@ CASES = (
 )
 
 # The hunk-count rule, added after a comment edit in M141 added lines to two hunks without updating
-# their `@@` headers: the patch applied to nothing, `git apply --check` reported `patch is corrupt`,
-# and no other check in this file or in the build workflow noticed, because the counts are never
-# derived by git and every other rule reads the patch's text rather than its shape.
+# their `@@` headers. One was a new-file hunk and applied silently truncated with exit 0; the other
+# modified a file and produced the `patch is corrupt` report that opened this round. No other check in
+# this file or in the build workflow noticed either, because the counts are never derived by git and
+# every other rule reads the patch's text rather than its shape.
 #
 # The first case is the control: a fixture with correct headers has to pass, or the two failures
 # below would be refused for a reason other than the count under test and this block would prove
-# nothing. The two off-by-N cases move the declared count in both directions, and they are not
-# symmetric in what `git apply` does — measured on scratch trees, an overcount stops the apply with
-# `patch is corrupt` while an undercount applies the truncated body and exits 0. Both are drift this
-# check has to report, because the undercount is the one no exit status would ever show.
+# nothing. The two off-by-N cases move the declared count in both directions. They are not symmetric
+# in what `git apply` does — measured on scratch trees, an overcount always stops the apply with
+# `patch is corrupt`, while an undercount exits 0 only when the hunk creates a file, and is reported
+# as `corrupt` or `patch does not apply` when it modifies one. Both are drift this check has to
+# report. For a modification hunk the apply fails on its own, so this check is early warning; for a
+# new-file hunk the apply exits 0, prints every file as applied, and leaves the created file short, so
+# this check is the only report.
+#
+# The last pair covers the shape this function cannot parse at all. `HUNK_HEADER` reads plain unified
+# diff headers, and a `@@` line is recognised by its prefix alone, so a combined diff's `@@@` or any
+# `@@ garbage @@` reaches the count comparison with nothing to compare. That is reported with the line
+# and the text rather than raising, for the same reason every other unreadable shape in this file is.
 CASES += (
     (
         "a patch whose hunk headers match their bodies passes",
@@ -1016,6 +1025,18 @@ CASES += (
         with_hunk_headers(BASE, delta=2),
         1,
         "a hunk header disagrees with the lines it introduces",
+    ),
+    (
+        "a hunk header the check cannot parse is reported, not raised",
+        with_hunk_headers(BASE).replace("@@ -0,", "@@ garbage @@\n@@ -0,", 1),
+        1,
+        "a hunk header is not one this check can read, at patch line",
+    ),
+    (
+        "a combined-diff header the check cannot parse is reported, not raised",
+        with_hunk_headers(BASE).replace("@@ -0,", "@@@ -1,2 -3,4 +5,6 @@@\n@@ -0,", 1),
+        1,
+        "a hunk header is not one this check can read, at patch line",
     ),
 )
 
