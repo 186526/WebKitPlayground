@@ -1277,13 +1277,27 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 # two counts as unsigned counters and decrements them line by line, so a wrong count is never
 # reported as a wrong count.
 #
-# The variable that decides the outcome is not the hunk's kind, and not which side runs long. It is
-# whether a counter is decremented after it has already reached zero, or is still positive when the
-# body ends. Either one stops the parse with `corrupt patch at <patch>:<line>` and rc 128. When
-# neither happens the read stops at the body line that takes the second counter to zero, and every
-# line after it is never parsed — not read and rejected, never looked at. Two counters reaching zero
-# on the same line is not required for that: `@@ -1,1 +1,2 @@` over `-a` / `+A` / `+B` parses because
-# the old counter reaches zero on the first of those lines and no later line decrements it again.
+# The outcome is not decided by the hunk's kind, and not by which side runs long. What the counts
+# themselves do was measured in two shapes: a counter decremented after it reached zero wraps, and a
+# counter still positive when the body ends stays positive. Both stop the parse with
+# `corrupt patch at <patch>:<line>` and rc 128. A third shape leaves the parse cleanly: the read
+# stops at the body line that takes the second counter to zero, and every line after it is never
+# parsed — not read and rejected, never looked at. Two counters reaching zero on the same line is not
+# required for that: `@@ -1,1 +1,2 @@` over `-a` / `+A` / `+B` parses because the old counter
+# reaches zero on the first of those lines and no later line decrements it again.
+#
+# Those three are what the rows below measure. They are not the whole of `parse_fragment`, and this
+# comment does not claim to be: besides the two counter failures it returns from an unparsable `@@`
+# header, from a last body line with no newline, from a line that begins with neither a space nor `+`
+# nor `-`, and from `if (!patch->recount && !deleted && !added) return -1;` — a hunk whose counts the
+# read satisfied but whose parsed region held no `+` or `-` line at all. Measured, on a file of
+# `a` / `b` / `c`: `@@ -1,2 +1,2 @@` over ` a` / ` b` / `-c` / `+C` exits 128, because the first
+# two lines take both counters to zero, the loop exits, `-c` and `+C` are never parsed, and `deleted`
+# and `added` never leave 0. The same body under `@@ -1,3 +1,3 @@` exits 0, and so does the first
+# header under `--recount`; that failure never consults a counter. One more lives a stage up, in
+# `parse_single_patch`: `new file %s depends on old contents` fires when a new-file hunk carries any
+# old-side line, so the `@@ -1,1 +1,2 @@` shape above is fatal as a new file even though it parses
+# as a modification.
 #
 # Everything below was measured on a scratch repo with git 2.55.0. Each row names the file it was
 # applied to, the header and the body, so it can be re-run. The body lines are written in backticks,
@@ -1305,10 +1319,11 @@ def check_no_stale_table_basis(patch: str) -> list[Violation]:
 # then exits 0 against `a b c d e` but 1 against `z z z`, so rc 128 tracks the counts and rc 1 tracks
 # the tree.
 #
-# So an undercount has four outcomes rather than one: it applies correctly, applies with a later edit
-# silently dropped, reports `patch does not apply`, or stops with `corrupt patch`. Which one it is
-# follows from the two rules above and from the three lines the file it meets happens to have, not
-# from the hunk's kind.
+# So a wrong count does not have one outcome, and the rows above are the ones measured: it applies
+# correctly, applies with a later edit never parsed, reports `patch does not apply`, or stops with
+# `corrupt patch`. Which of them the counts reach follows from the counters where the body's lines
+# allow it, and from the lines the target file happens to have where they do not. Hunk kind does not
+# enter any of the four.
 #
 # Both hunks that prompted this check had a header their body outgrew, and the two did not share an
 # outcome. The new-file hunk at b70ce36 declared `@@ -0,0 +1,184 @@` over a 194-line body: its old
@@ -1347,9 +1362,10 @@ def check_hunk_counts(patch: str) -> list[Violation]:
     is counted on neither side.
 
     Both directions are violations, and the check reports the numbers rather than predicting what
-    `git apply` will do with them. What it does follows from whether a counter is decremented past
-    zero or is still positive at the end of the body, as the comment above records; the diagnosis a
-    reader needs is which header is wrong and by how much, and that is the same either way.
+    `git apply` will do with them. What it does is not settled by the counts alone — a hunk can also
+    fail for carrying no `+` or `-` line at all, or for a new-file hunk that carries an old-side line
+    — so the diagnosis a reader needs is which header is wrong and by how much, and that is the same
+    whatever the apply then does.
 
     A header this function cannot parse is a violation, not an exception. `git apply` accepts combined
     diffs and a `@@` line is only recognised as a header by its prefix, so a header the regex does not
