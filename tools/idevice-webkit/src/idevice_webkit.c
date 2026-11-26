@@ -6,6 +6,7 @@
 #include "dyld_lookup.h"
 #include "file_writer.h"
 #include "filter_match.h"
+#include "load_chain.h"
 #include "macho_image.h"
 #include "stage_clock.h"
 #include "textkit.h"
@@ -296,23 +297,48 @@ static bool host_is_target(host_images *images) {
   return true;
 }
 
-/* The framework is loaded before its image is read: RTLD_NOLOAD answers only
-   for an image already in the process, and a host reaches this point with the
-   framework not loaded yet, so a lookup before the load would find nothing and
-   the version would never be reported. The handle the load returns is the one
-   its class is asked for, and dladdr turns that class into the base and the
-   path the version text is read from, which is the path dyld resolved, not the
-   literal one this code loaded. */
+/* The seven are loaded in the measured order, each by its rewritten /var/jb
+   path, each with RTLD_NOW|RTLD_GLOBAL. The chain stops at its first failure and
+   the report names the step: a run whose JavaScriptCore did not load has no 18.3
+   exports for the other six to bind, so continuing would reproduce the recorded
+   symbol error under a step number that points at the wrong image.
+
+   The single framework load that used to be here is gone on purpose. It loaded
+   WebKit alone, which is the shape the device recorded failing: the entry image
+   was the 18.3 one and the dependency it bound was the 16.1 JavaScriptCore. */
 
 static void attempt_load(host_images *images) {
-  void *handle = library_load(framework_path);
-  dylib_report_set_dlopen(framework_path, handle, handle == NULL ? library_last_error() : NULL);
+  load_result chain;
+  load_chain_run(&chain);
+  dylib_report_set_chain(&chain);
+
+  /* What the application's own request resolved to, read after the chain so the
+     18.3 images are already in the process and a dedupe would show here as the
+     18.3 uuid rather than as absent. */
+  system_images resident;
+  load_chain_read_system(&resident);
+  dylib_report_set_system_images(&resident);
+
+  /* The version text describes the WebKit this tweak put in the process, so the
+     first choice is the chain's last step, which is the rewritten image. When the
+     chain did not get that far the package's own path is asked instead, and
+     RTLD_NOLOAD answers only for an image already resident: the report then says
+     what the process actually holds rather than what was intended. */
+  const char *held_path = load_chain_paths[load_chain_count - 1];
+  void *handle = library_find(held_path);
+  if (handle == NULL) {
+    held_path = framework_path;
+    handle = library_find(framework_path);
+  }
+  text_copy(images->web_kit_path, framework_path, sizeof(images->web_kit_path));
   if (web_kit_image(handle, images)) {
     char version[version_capacity];
     version[0] = 0;
     macho_version_text(images->web_kit_header, version, sizeof(version));
     dylib_report_set_image(images->web_kit_path, version);
   }
+  dylib_report_set_dlopen(held_path, handle,
+                          handle == NULL ? library_last_error() : NULL);
 }
 
 /* The path is a directory when its last component is the whole of it:
