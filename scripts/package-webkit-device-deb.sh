@@ -1448,7 +1448,7 @@ owner_key() {
 }
 owner_record() {
     owner_key
-    stat -c '%d:%i' -- "$override"
+    stat -c '%d:%i' -- "${1:-$override}"
 }
 owned() {
     [ ! -L "$override" ] && [ -d "$override" ] &&
@@ -1499,15 +1499,20 @@ if [ "$ROOTLESS" = 1 ]; then
             printf 'Conflicting WebKit override ownership record: %s\n' "$marker" >&2
             exit 1
         fi
-        if ! mkdir -m 0755 "$override"; then
+        if [ -e "$override" ] || [ -L "$override" ]; then
             printf 'WebKit override path is unmanaged: %s\nAfter reviewing its contents, move it aside and retry: mv "%s" "%s.manual-backup.$(date +%%s)"\n' \
                 "$override" "$override" "$override" >&2
             exit 1
         fi
-        if ! (set -C; umask 077; owner_record > "$marker"); then
-            rmdir "$override"
-            exit 1
-        fi
+        (
+            transaction=$(mktemp -d -- "$override.deb-stage.XXXXXXXX")
+            trap 'rm -rf -- "$transaction"' EXIT
+            mkdir -m 0755 "$transaction/override"
+            (umask 077; owner_record "$transaction/override" > "$transaction/owner")
+            ln -T -- "$transaction/owner" "$marker"
+            mv -nT -- "$transaction/override" "$override"
+            owned || { printf 'Could not publish WebKit override: %s\n' "$override" >&2; exit 1; }
+        )
     fi
     for name in "$override/usr" "$override/usr/lib"; do
         [ ! -L "$name" ] || { printf 'Unexpected symlink: %s\n' "$name" >&2; exit 1; }

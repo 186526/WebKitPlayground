@@ -2050,7 +2050,28 @@ def case_override_lifecycle() -> None:
 
         def hook(control: Path, name: str, *args: str, check: bool = True):
             return subprocess.run(["sh", str(control / name), *args], env=env,
-                                  check=check, capture_output=True, text=True, timeout=10)
+                                  check=check, capture_output=True, text=True, timeout=10,
+                                  start_new_session=True)
+
+        def interrupt_configure(control: Path, commands: tuple[str, ...]) -> None:
+            for command in commands:
+                shim = bin_dir / command
+                shim.write_text(f"#!{sys.executable}\n"
+                                "import os, signal, subprocess, sys\n"
+                                f"subprocess.run([{shutil.which(command)!r}, *sys.argv[1:]], check=True)\n"
+                                "os.killpg(os.getpgrp(), signal.SIGKILL)\n")
+                shim.chmod(0o755)
+            try:
+                result = hook(control, "postinst", "configure", check=False)
+                assert result.returncode == -9, result.stderr
+                assert not override.exists()
+            finally:
+                for command in commands:
+                    (bin_dir / command).unlink()
+            hook(control, "postinst", "configure")
+            assert (override / "WebKit.framework/WebKit").is_file()
+            hook(control, "prerm", "remove")
+            assert not override.exists()
 
         for version in (1, 2):
             contents = f"WebKit version {version}".encode()
@@ -2080,6 +2101,8 @@ def case_override_lifecycle() -> None:
                 assert all(str(path) in result.stderr for path in missing)
                 for path in missing:
                     path.with_suffix(".saved").rename(path)
+                interrupt_configure(control, ("mkdir", "mktemp"))
+                interrupt_configure(control, ("stat",))
             else:
                 stale = override / "WebKit.framework"
                 stale.unlink()
