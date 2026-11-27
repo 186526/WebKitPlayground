@@ -1436,13 +1436,31 @@ write_hook_header() {
     printf 'USRLIB_DIR="${DPKG_ROOT:-}%s"\n' "${INSTALL_USRLIB_DIR}"
     printf 'override="${DPKG_ROOT:-}%s"\n' "${INSTALL_OVERRIDE_DIR}"
     cat <<'HOOK'
-marker="$override/.webkit-deb-owner"
 frameworks='WebKit WebCore JavaScriptCore WebKitLegacy WebGPU'
 libraries='libwebrtc.dylib libANGLE-shared.dylib'
+init_owner() {
+    canonical_parent=$(realpath -m -- "${override%/*}")
+    override="$canonical_parent/${override##*/}"
+    marker="$override.deb-owner"
+}
+owner_key() {
+    printf '%s\n%s\n' "${DPKG_MAINTSCRIPT_PACKAGE:-com.82flex.custom-webkit}" "$override"
+}
+owner_record() {
+    owner_key
+    stat -c '%d:%i' -- "$override"
+}
 owned() {
     [ ! -L "$override" ] && [ -d "$override" ] &&
         [ ! -L "$marker" ] && [ -f "$marker" ] &&
-        [ "$(cat "$marker")" = "${DPKG_MAINTSCRIPT_PACKAGE:-com.82flex.custom-webkit}" ]
+        [ "$(cat "$marker")" = "$(owner_record)" ]
+}
+clear_owner_remnant() {
+    if [ ! -e "$override" ] && [ ! -L "$override" ] &&
+        [ ! -L "$marker" ] && [ -f "$marker" ] &&
+        [ "$(head -n 2 "$marker")" = "$(owner_key)" ]; then
+        rm "$marker"
+    fi
 }
 HOOK
 }
@@ -1454,19 +1472,8 @@ cat >> "${DEBIAN_DIR}/postinst" <<'POSTINST'
 ensure_link() {
     target=$1 path=$2
     if [ -L "$path" ]; then
-        existing=$(readlink "$path")
-        [ "$existing" != "$target" ] || return 0
-        case "$existing" in
-            /*) existing="${DPKG_ROOT:-}$existing" ;;
-            *) existing="${path%/*}/$existing" ;;
-        esac
-        if owned && resolved=$(realpath -m -- "$existing"); then
-            case "$resolved" in
-                "$frameworks_root"/*|"$usrlib_root"/*)
-                    rm "$path"
-                    ;;
-            esac
-        fi
+        [ "$(readlink "$path")" != "$target" ] || return 0
+        rm "$path"
     fi
     if [ -e "$path" ] || [ -L "$path" ]; then
         printf 'Leaving unmanaged WebKit override entry untouched: %s\n' "$path" >&2
@@ -1485,15 +1492,22 @@ if [ "$ROOTLESS" = 1 ]; then
         fi
     done
     [ "$missing" = 0 ] || exit 1
-    frameworks_root=$(realpath -m -- "$FRAMEWORKS_DIR")
-    usrlib_root=$(realpath -m -- "$USRLIB_DIR")
+    init_owner
+    clear_owner_remnant
     if ! owned; then
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+            printf 'Conflicting WebKit override ownership record: %s\n' "$marker" >&2
+            exit 1
+        fi
         if ! mkdir -m 0755 "$override"; then
             printf 'WebKit override path is unmanaged: %s\nAfter reviewing its contents, move it aside and retry: mv "%s" "%s.manual-backup.$(date +%%s)"\n' \
                 "$override" "$override" "$override" >&2
             exit 1
         fi
-        printf '%s\n' "${DPKG_MAINTSCRIPT_PACKAGE:-com.82flex.custom-webkit}" > "$marker"
+        if ! (set -C; umask 077; owner_record > "$marker"); then
+            rmdir "$override"
+            exit 1
+        fi
     fi
     for name in "$override/usr" "$override/usr/lib"; do
         [ ! -L "$name" ] || { printf 'Unexpected symlink: %s\n' "$name" >&2; exit 1; }
@@ -1527,6 +1541,8 @@ chmod 0755 "${DEBIAN_DIR}/postinst"
 write_hook_header > "${DEBIAN_DIR}/prerm"
 cat >> "${DEBIAN_DIR}/prerm" <<'PRERM'
 [ "$ROOTLESS" = 1 ] && [ "${1:-}" = remove ] || exit 0
+init_owner
+clear_owner_remnant
 if ! owned; then
     if [ -e "$override" ] || [ -L "$override" ]; then
         printf 'Leaving unmanaged WebKit override untouched: %s\n' "$override" >&2
@@ -1535,21 +1551,24 @@ if ! owned; then
 fi
 
 remove_link() {
-    if [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; then
-        rm "$2"
+    if [ -L "$1" ]; then
+        rm "$1"
     fi
 }
 for name in $frameworks; do
-    remove_link "../Frameworks/$name.framework" "$override/$name.framework"
+    remove_link "$override/$name.framework"
 done
 if [ ! -L "$override/usr" ] && [ ! -L "$override/usr/lib" ]; then
     for name in $libraries; do
-        remove_link "../../../../usr/lib/$name" "$override/usr/lib/$name"
+        remove_link "$override/usr/lib/$name"
     done
     rmdir "$override/usr/lib" "$override/usr" 2>/dev/null || true
 fi
-rm "$marker"
-rmdir "$override" 2>/dev/null || printf 'Leaving remaining contents in %s\n' "$override" >&2
+if rmdir "$override" 2>/dev/null; then
+    rm "$marker"
+else
+    printf 'Leaving remaining contents in %s; ownership record retained for retry\n' "$override" >&2
+fi
 exit 0
 PRERM
 chmod 0755 "${DEBIAN_DIR}/prerm"

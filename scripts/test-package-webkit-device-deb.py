@@ -2083,7 +2083,7 @@ def case_override_lifecycle() -> None:
             else:
                 stale = override / "WebKit.framework"
                 stale.unlink()
-                stale.symlink_to("../Frameworks/old/WebKit.framework")
+                stale.symlink_to("../old/WebKit.framework")
             hook(control, "postinst", "configure", *(["1"] if version == 2 else []))
             hook(control, "postinst", "configure")
             assert (override / "WebKit.framework/version-test.txt").read_bytes() == contents
@@ -2092,26 +2092,31 @@ def case_override_lifecycle() -> None:
                 assert (override / rel).read_bytes() == (library / "Frameworks" / rel).read_bytes()
             for name in ("libwebrtc.dylib", "libANGLE-shared.dylib"):
                 assert (override / "usr/lib" / name).read_bytes() == (installed / "var/jb/usr/lib" / name).read_bytes()
-        link = override / "WebKit.framework"
-        managed_target = link.readlink()
-        link.unlink()
-        foreign_target = library / "user-framework"
-        foreign_target.mkdir()
-        link.symlink_to("../user-framework")
-        result = hook(control, "postinst", "configure", check=False)
-        assert result.returncode != 0 and str(link) in result.stderr
-        assert link.readlink() == Path("../user-framework") and foreign_target.is_dir()
-        link.unlink()
-        link.symlink_to(managed_target)
+        marker = library / "WebKitOverride.deb-owner"
+        owner_record = marker.read_bytes()
+        unrelated = override / "user-link"
+        unrelated.symlink_to("../user-framework")
+        hook(control, "postinst", "configure")
         hook(control, "prerm", "remove")
-        assert not override.exists()
+        assert unrelated.readlink() == Path("../user-framework")
+        assert marker.read_bytes() == owner_record
+        unrelated.unlink()
+        hook(control, "prerm", "remove")
+        assert not override.exists() and not marker.exists()
+        marker.write_bytes(owner_record)
+        hook(control, "prerm", "remove")
+        assert not marker.exists()
         override.mkdir()
+        (override / ".webkit-deb-owner").write_text("com.82flex.custom-webkit\n")
+        foreign_link = override / "WebKit.framework"
+        foreign_link.symlink_to("../old/WebKit.framework")
         foreign = override / "keep-me"
         foreign.write_bytes(b"user data")
         result = hook(control, "postinst", "configure", check=False)
         assert result.returncode != 0 and str(override) in result.stderr
         hook(control, "prerm", "remove")
         assert foreign.read_bytes() == b"user data"
+        assert foreign_link.readlink() == Path("../old/WebKit.framework")
     print("PASS rootless override lifecycle")
 
 
