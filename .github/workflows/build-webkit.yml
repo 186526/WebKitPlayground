@@ -1143,21 +1143,23 @@ jobs:
             COMPRESS_PNG_FILES=NO \
             DEBUG_INFORMATION_FORMAT=dwarf \
             WK_ROOTLESS_FRAMEWORKS=YES > "$GITHUB_WORKSPACE/diagnostics/build.log" 2>&1 || status=$?
+          # The runner uses bash -e; cleanup and diagnostics must not replace the build status.
+          set +e
           echo "build-webkit exited with status ${status}"
-          kill "$sampler_pid" 2>/dev/null || true
+          kill "$sampler_pid" 2>/dev/null
           echo "ccache statistics after build:"
-          ccache -s || true
+          ccache -s
           if [ "$status" -ne 0 ]; then
             echo "=== last 60 lines of build output"
-            tail -60 "$GITHUB_WORKSPACE/diagnostics/build.log" || true
+            tail -60 "$GITHUB_WORKSPACE/diagnostics/build.log"
             echo "=== memory"
-            sysctl -n hw.memsize vm.swapusage 2>/dev/null || true
-            vm_stat 2>/dev/null | head -12 || true
-            ps -Ao rss,comm -r 2>/dev/null | head -15 || true
+            sysctl -n hw.memsize vm.swapusage 2>/dev/null
+            vm_stat 2>/dev/null | head -12
+            ps -Ao rss,comm -r 2>/dev/null | head -15
             echo "=== sampler tail"
-            tail -20 "$sampler" || true
+            tail -20 "$sampler"
             echo "=== actool probe"
-            /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1 || true
+            /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1
           fi
           exit "$status"
 
