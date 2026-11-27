@@ -1597,6 +1597,24 @@ chmod 0755 "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/prerm"
 # Shared by both pipelines, so payload mode runs it as its 6th step and prints
 # [6/7]. The heading keeps product mode's number; see the step-label note above.
 log_step "Building .deb package..."
+# com.82flex.custom-webkit 620.2.4-20261126231806 shipped with none of these
+# markers. Scan the staged binary in both build modes so an old product or
+# repackaged payload cannot silently ship without the helper-spawn code again.
+WEBKIT_BINARY="${PAYLOAD_DIR}/WebKit.framework/WebKit"
+HELPER_SPAWN_MARKERS=(
+    WK_HELPER_SPAWN
+    posix_spawnattr_set_registered_ports
+    launchWithRegisteredPort
+    WK_HELPER_LAUNCH_MODE
+)
+HELPER_SPAWN_PATTERNS=()
+for marker in "${HELPER_SPAWN_MARKERS[@]}"; do
+    HELPER_SPAWN_PATTERNS+=(-e "${marker}")
+done
+if ! LC_ALL=C grep -aFq "${HELPER_SPAWN_PATTERNS[@]}" -- "${WEBKIT_BINARY}"; then
+    log_error "Could not confirm helper-spawn code in ${WEBKIT_BINARY}. Searched for: ${(j:, :)HELPER_SPAWN_MARKERS}"
+    exit 1
+fi
 mkdir -p "$(dirname "${OUTPUT_DEB}")"
 ARCHIVE_WORK_DIR="$(mktemp -d "$(dirname "${OUTPUT_DEB}")/.webkit-deb-output.XXXXXX")"
 STAGED_DEB="${ARCHIVE_WORK_DIR}/$(basename "${OUTPUT_DEB}")"

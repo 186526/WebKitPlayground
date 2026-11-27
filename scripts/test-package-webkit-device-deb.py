@@ -194,7 +194,8 @@ def build_product(root: Path, with_top_level_overlay: bool = True, with_dependen
                     ((LC_LOAD_DYLIB, JSC), (LC_LOAD_DYLIB, WEBCORE),
                      (LC_LOAD_WEAK_DYLIB, WEBRTC), (LC_REEXPORT_DYLIB, WEBKITLEGACY_PRIVATE))
                     if deps else (),
-                    filetype=MH_EXECUTE))
+                    filetype=MH_EXECUTE)[:TEXT_OFFSET] + b"WK_HELPER_SPAWN" +
+                b"\0" * (IMAGE_SIZE - TEXT_OFFSET - len(b"WK_HELPER_SPAWN")))
     (product / "WebKit.framework" / "Info.plist").write_text("<plist/>", encoding="utf-8")
     write_macho(product / "WebCore.framework" / "WebCore",
                 build_macho(
@@ -1528,6 +1529,9 @@ def build_signed_macho(identity: str, dependencies: tuple[tuple[int, str], ...])
     header = struct.pack("<IiiIIIII", MH_MAGIC_64, CPU_TYPE_ARM64, 0, MH_DYLIB,
                          len(commands), len(body), 0x00200085, 0)
     image = bytearray(header + body + b"\0" * (IMAGE_SIZE - 32 - len(body)))
+    if identity == WEBKIT:
+        marker = b"WK_HELPER_SPAWN"
+        image[TEXT_OFFSET:TEXT_OFFSET + len(marker)] = marker
     blob = build_code_directory(bytes(image), signature_offset)
     image[signature_offset:signature_offset + len(blob)] = blob
     return bytes(image)
