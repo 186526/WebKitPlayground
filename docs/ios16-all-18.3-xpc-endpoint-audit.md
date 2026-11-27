@@ -67,7 +67,7 @@
 
 ### 已知的解析规则
 
-M47 的直接证据：Music.app（pid 42029）加载自己 app 包内的 `MusicApplication.framework`，其 `MusicScriptUpdateService` 被解析到 `/private/var/containers/Bundle/Application/<UUID>/Music.app/Frameworks/.../MusicScriptUpdateService.xpc/...`。这个路径不在任何系统索引里，直接否证「固定按系统路径解析」。同一份记录还给出对应的性能优化结构：`/System/Library/xpc/launchd.plist` 的 `SystemLibraryTreeState` 有 1902 条，键全部落在 `/System/Library/{,Private}Frameworks`（1692 + 209）加 1 条 `MTLReplayer`，`/var/jb`、`preboot`、`dopamine` 命中 0。launchd 内有 `_imagePathToInfo`、`_serviceBundles`、`_infoPlist`、`_executablePath` 与 `"Found XPCService bundle by executable: %s"` 等字符串。
+M47 的直接证据：Music.app（pid 42029）加载自己 app 包内的 `MusicApplication.framework`，其 `MusicScriptUpdateService` 被解析到 `/private/var/containers/Bundle/Application/<UUID>/Music.app/Frameworks/.../MusicScriptUpdateService.xpc/...`。这个路径不在任何系统索引里，直接否证「固定按系统路径解析」。同一份记录还给出对应的性能优化结构：`/System/Library/xpc/launchd.plist` 的 `SystemLibraryTreeState` 有 1902 条，键全部落在 `/System/Library/{,Private}Frameworks`（1692 + 209）加 1 条 `MTLReplayer`，`/var/jb`、`preboot`、`dopamine` 命中 0。这些字符串（`_imagePathToInfo`、`_serviceBundles`、`_infoPlist`、`_executablePath` 与 `"Found XPCService bundle by executable: %s"`）不属于 launchd：M174 在 `launchd-842.1.4`（`d448a1c`）的 `src/`、`liblaunch/`、`support/` 与 `launchd-842.92.1`（`49a9c79`）的 `src/core.c` 上全文检索均 0 命中，最可能属于 libxpc（推断，libxpc 无公开源码，`src/core.c` 唯一读 `CFBundleIdentifier` 处只用于 systemstats 进程名）。
 
 那个索引是缓存，不是查找的唯一途径——Music.app 的命中证明索引外路径可以被解析。**仍未测过的末环是：一个位于索引外、且被进程 `dlopen` 进来的 framework，其 `XPCServices` 目录是否被现扫。**
 
