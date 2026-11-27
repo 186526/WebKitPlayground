@@ -1408,13 +1408,17 @@ mkdir -p "${DEBIAN_DIR}"
 # Calculate installed size (in KiB).
 INSTALLED_SIZE="$(du -sk "${DEB_ROOT}" | awk '{print $1}')"
 
+ROOTLESS_DEPENDS=""
+if [[ "${ROOTLESS}" == 1 ]]; then
+    ROOTLESS_DEPENDS=", coreutils"
+fi
 cat > "${DEBIAN_DIR}/control" <<CTRL
 Package: ${PACKAGE_ID}
 Name: ${PACKAGE_NAME}
 Version: ${PACKAGE_VERSION}
 Architecture: ${PACKAGE_ARCH}
 Maintainer: ${PACKAGE_AUTHOR}
-Depends: firmware (>= 14.0)
+Depends: firmware (>= 14.0)${ROOTLESS_DEPENDS:-}
 Section: System
 Priority: optional
 Installed-Size: ${INSTALLED_SIZE}
@@ -1449,13 +1453,40 @@ cat >> "${DEBIAN_DIR}/postinst" <<'POSTINST'
 
 ensure_link() {
     target=$1 path=$2
-    if [ -L "$path" ] && [ "$(readlink "$path")" = "$target" ]; then
-        return
+    if [ -L "$path" ]; then
+        existing=$(readlink "$path")
+        [ "$existing" != "$target" ] || return 0
+        case "$existing" in
+            /*) existing="${DPKG_ROOT:-}$existing" ;;
+            *) existing="${path%/*}/$existing" ;;
+        esac
+        if owned && resolved=$(realpath -m -- "$existing"); then
+            case "$resolved" in
+                "$frameworks_root"/*|"$usrlib_root"/*)
+                    rm "$path"
+                    ;;
+            esac
+        fi
     fi
-    ln -s "$target" "${path%/*}/" # The target leaf is the link leaf.
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        printf 'Leaving unmanaged WebKit override entry untouched: %s\n' "$path" >&2
+        return 1
+    fi
+    ln -s "$target" "$path"
 }
 
 if [ "$ROOTLESS" = 1 ]; then
+    missing=0
+    for name in $frameworks; do
+        binary="$FRAMEWORKS_DIR/$name.framework/$name"
+        if [ ! -f "$binary" ]; then
+            printf 'Missing required WebKit framework binary: %s\n' "$binary" >&2
+            missing=1
+        fi
+    done
+    [ "$missing" = 0 ] || exit 1
+    frameworks_root=$(realpath -m -- "$FRAMEWORKS_DIR")
+    usrlib_root=$(realpath -m -- "$USRLIB_DIR")
     if ! owned; then
         if ! mkdir -m 0755 "$override"; then
             printf 'WebKit override path is unmanaged: %s\nAfter reviewing its contents, move it aside and retry: mv "%s" "%s.manual-backup.$(date +%%s)"\n' \

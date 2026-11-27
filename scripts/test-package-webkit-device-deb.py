@@ -2063,8 +2063,28 @@ def case_override_lifecycle() -> None:
             if version == 2:
                 hook(root / "control-1", "prerm", "upgrade", "2")
                 assert override.is_dir()
+            required = [f"{name}.framework/{name}" for name in
+                        ("WebKit", "WebCore", "JavaScriptCore", "WebKitLegacy", "WebGPU")]
+            if version == 1:
+                library.mkdir(parents=True)
+                result = hook(control, "postinst", "configure", check=False)
+                assert result.returncode != 0 and not override.exists()
+                assert all(str(library / "Frameworks" / rel) in result.stderr for rel in required)
             unpack(deb, installed)
-            hook(control, "postinst", "configure", *( ["1"] if version == 2 else []))
+            if version == 1:
+                missing = [library / "Frameworks" / rel for rel in required[:2]]
+                for path in missing:
+                    path.rename(path.with_suffix(".saved"))
+                result = hook(control, "postinst", "configure", check=False)
+                assert result.returncode != 0 and not override.exists()
+                assert all(str(path) in result.stderr for path in missing)
+                for path in missing:
+                    path.with_suffix(".saved").rename(path)
+            else:
+                stale = override / "WebKit.framework"
+                stale.unlink()
+                stale.symlink_to("../Frameworks/old/WebKit.framework")
+            hook(control, "postinst", "configure", *(["1"] if version == 2 else []))
             hook(control, "postinst", "configure")
             assert (override / "WebKit.framework/version-test.txt").read_bytes() == contents
             for name in ("WebKit", "WebCore", "JavaScriptCore", "WebKitLegacy", "WebGPU"):
@@ -2072,6 +2092,17 @@ def case_override_lifecycle() -> None:
                 assert (override / rel).read_bytes() == (library / "Frameworks" / rel).read_bytes()
             for name in ("libwebrtc.dylib", "libANGLE-shared.dylib"):
                 assert (override / "usr/lib" / name).read_bytes() == (installed / "var/jb/usr/lib" / name).read_bytes()
+        link = override / "WebKit.framework"
+        managed_target = link.readlink()
+        link.unlink()
+        foreign_target = library / "user-framework"
+        foreign_target.mkdir()
+        link.symlink_to("../user-framework")
+        result = hook(control, "postinst", "configure", check=False)
+        assert result.returncode != 0 and str(link) in result.stderr
+        assert link.readlink() == Path("../user-framework") and foreign_target.is_dir()
+        link.unlink()
+        link.symlink_to(managed_target)
         hook(control, "prerm", "remove")
         assert not override.exists()
         override.mkdir()
