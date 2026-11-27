@@ -89,6 +89,7 @@ MH_MAGIC_64, CPU_TYPE_ARM64 = 0xFEEDFACF, 0x0100000C
 LC_SEGMENT_64, LC_LOAD_DYLIB = 0x19, 0xC
 LC_ID_DYLIB = 0xD
 LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB = 0x80000018, 0x8000001F
+LC_LOAD_UPWARD_DYLIB = 0x80000023
 LC_CODE_SIGNATURE = 0x1D
 
 TEXT_OFFSET = 0x1000
@@ -813,15 +814,17 @@ def case_corrupted_name_is_rejected() -> None:
     print(f"PASS {label}")
 
 
-def case_rewrite_already_rpath_linked() -> None:
+def case_rewrite_already_rpath_linked(kind: int = LC_LOAD_DYLIB) -> None:
     label = "rewrite repairs missing LC_RPATH and is byte-identical on repeat"
+    if kind == LC_LOAD_UPWARD_DYLIB:
+        label += " for an upward dependency"
     with tempfile.TemporaryDirectory() as work:
         root = Path(work)
         tool = extract_tool(root / "macho-load-paths.py")
         helper = "Library/Frameworks/WebKit.framework/XPCServices/helper"
         dependency = "@rpath/WebKit.framework/WebKit"
         payload = write_destination_tree(root, {
-            helper: build_macho(((LC_LOAD_DYLIB, dependency),), filetype=MH_EXECUTE),
+            helper: build_macho(((kind, dependency), (LC_LOAD_DYLIB, LIBSYSTEM)), filetype=MH_EXECUTE),
         })
         result = run_tool(tool, "verify", root)
         if result.returncode != 1 or "resolves to no file inside the payload" not in result.stderr:
@@ -847,8 +850,10 @@ def case_rewrite_already_rpath_linked() -> None:
     print(f"PASS {label}")
 
 
-def case_rewrite_rejects_malformed_name() -> None:
+def case_rewrite_rejects_malformed_name(kind: int = LC_LOAD_DYLIB) -> None:
     label = "rewrite rejects a malformed load name without writing any image"
+    if kind == LC_LOAD_UPWARD_DYLIB:
+        label += " for an upward dependency"
     with tempfile.TemporaryDirectory() as work:
         root = Path(work)
         tool = extract_tool(root / "macho-load-paths.py")
@@ -856,7 +861,7 @@ def case_rewrite_rejects_malformed_name() -> None:
         payload = write_destination_tree(root, {
             "Library/Frameworks/adattributiond": build_macho(((LC_LOAD_DYLIB, WEBKIT),)),
             "Library/Frameworks/webpushd": build_macho(
-                ((LC_LOAD_DYLIB, dependency), (LC_LOAD_DYLIB, "bad-tail"))),
+                ((LC_LOAD_DYLIB, dependency), (kind, "bad-tail"))),
         })
         before = {path: path.read_bytes() for path in payload.rglob("*") if path.is_file()}
         result = run_tool(tool, "rewrite", root)
@@ -867,6 +872,36 @@ def case_rewrite_rejects_malformed_name() -> None:
         if after != before:
             failures.append(f"{label}: rewrite changed the payload")
             return
+    print(f"PASS {label}")
+
+
+def case_rpath_symlink_containment() -> None:
+    label = "rewrite and verify reject an @rpath symlink outside the payload"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        helper = "Library/Frameworks/webpushd"
+        payload = write_destination_tree(root / "payload", {
+            helper: build_macho(((LC_LOAD_DYLIB, "@rpath/external.dylib"),)),
+        })
+        dependency = payload / "Library/Frameworks/external.dylib"
+        dependency.write_bytes(b"fixture")
+        result = run_tool(tool, "rewrite", root / "payload")
+        if result.returncode != 0:
+            failures.append(f"{label}: regular-file control failed: {result}")
+            return
+        external = root / "external.dylib"
+        dependency.rename(external)
+        dependency.symlink_to(external)
+        before = (payload / helper).read_bytes()
+        for mode in ("rewrite", "verify"):
+            result = run_tool(tool, mode, root / "payload")
+            if result.returncode != 1 or "@rpath/external.dylib resolves to no file inside the payload" not in result.stderr:
+                failures.append(f"{label}: unexpected {mode} result: {result}")
+                return
+            if (payload / helper).read_bytes() != before:
+                failures.append(f"{label}: {mode} changed the helper")
+                return
     print(f"PASS {label}")
 
 
@@ -2010,6 +2045,9 @@ exec {CP} "$@"''',
     case_corrupted_name_is_rejected()
     case_rewrite_already_rpath_linked()
     case_rewrite_rejects_malformed_name()
+    case_rewrite_already_rpath_linked(LC_LOAD_UPWARD_DYLIB)
+    case_rewrite_rejects_malformed_name(LC_LOAD_UPWARD_DYLIB)
+    case_rpath_symlink_containment()
     case_header_pad_atomicity()
     case_truncated_image()
     case_payload_mode()

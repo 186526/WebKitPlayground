@@ -381,14 +381,16 @@ LC_LAZY_LOAD_DYLIB = 0x20
 LC_REEXPORT_DYLIB = 0x8000001F
 LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_RPATH = 0x8000001C
-DYLIB_COMMAND_KINDS = (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB)
+LC_LOAD_UPWARD_DYLIB = 0x80000023
+DYLIB_COMMAND_KINDS = (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB,
+                       LC_LAZY_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB)
 
 # Where each command kind keeps its string offset, and the smallest offset the
 # string can have.  LC_RPATH's fixed part is 12 bytes, a dylib command's is 24.
 # These are floors for validation only; the actual offset is always read from
 # the command's own lc_str field.
-NAME_OFFSETS = {LC_RPATH: 12, LC_LOAD_DYLIB: 24, LC_LOAD_WEAK_DYLIB: 24,
-                LC_REEXPORT_DYLIB: 24, LC_LAZY_LOAD_DYLIB: 24}
+NAME_OFFSETS = {kind: 24 for kind in DYLIB_COMMAND_KINDS}
+NAME_OFFSETS[LC_RPATH] = 12
 
 # Every install name a linked image can carry.  The check in verify_image uses
 # it as a format test, not a whitelist: a name outside these forms is the tail
@@ -653,8 +655,14 @@ def install_mapping(system_path):
 
 def resolves_rpath(root, dependency, rpaths):
     tail = dependency[len("@rpath/"):]
-    return any(os.path.isfile(os.path.join(root, value.lstrip("/"), tail))
-               for value in rpaths if value.startswith("/"))
+    canonical_root = os.path.realpath(root)
+    for value in rpaths:
+        if not value.startswith("/"):
+            continue
+        candidate = os.path.realpath(os.path.join(canonical_root, value.lstrip("/"), tail))
+        if os.path.commonpath((canonical_root, candidate)) == canonical_root and os.path.isfile(candidate):
+            return True
+    return False
 
 
 def rewrite(root, prefix):
@@ -713,7 +721,8 @@ def verify_image(image, root, relative, prefix):
     entries = image.install_name_commands()
     problems.extend(install_name_problems(entries, relative))
     dependencies = [name for _, name in entries if name.startswith("@rpath/")]
-    reexports = {name for command, name in entries if command.kind == LC_REEXPORT_DYLIB}
+    reexports = {name for command, name in entries
+                 if command.kind in (LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB)}
     if not dependencies:
         return problems, dependencies, reexports
     rpaths = image.rpaths()
@@ -749,8 +758,8 @@ def verify_with_rabin2(tool, path, relative, dependencies, reexports):
     # rabin2 -l writes "ERROR: Missing bin header libs" to stderr and still
     # exits 0 on a file it cannot read, so neither empty output nor the exit
     # status is a pass signal; both are checked here.  It also never lists an
-    # LC_REEXPORT_DYLIB, so those names are compared against the image's own
-    # parse only: requiring them from rabin2 would fail every real WebKit.
+    # LC_REEXPORT_DYLIB or LC_LOAD_UPWARD_DYLIB, so those names are checked
+    # by the built-in parser only.
     result = subprocess.run([tool, "-l", path], capture_output=True, text=True)
     reported = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if result.returncode != 0 or "ERROR" in result.stderr:
