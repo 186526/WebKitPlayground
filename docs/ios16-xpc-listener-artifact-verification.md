@@ -219,7 +219,7 @@ $ grep -a -o -- '<串>' WebKit.framework/WebKit | wc -l
 
 ### 4.1 通用读数
 
-`LC_BUILD_VERSION` 在 16 个映像上完全一致：`platform = 2`（iOS），`minos = 16.1.0`，`sdk = 18.5.0`。文件类型：`6`（`MH_DYLIB`）8 个，是五个 framework 与三个 dylib（`libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`）；`2`（`MH_EXECUTE`）8 个，是五个 `.xpc` helper、`jsc`、`adattributiond`、`webpushd`。8 + 8 = 16，与扫描的映像总数相等。`cputype` 全部 `16777228`（`0x0100000c`，`CPU_TYPE_ARM64`）配 `cpusubtype 2`（`CPU_SUBTYPE_ARM64E`），即 16 个都是 thin arm64e，没有 universal 头。
+`LC_BUILD_VERSION` 在 16 个映像上完全一致：`platform = 2`（iOS），`minos = 16.1.0`，`sdk = 18.5.0`。文件类型：`6`（`MH_DYLIB`）8 个，是五个 framework 与三个 dylib（`libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`）；`2`（`MH_EXECUTE`）8 个，是五个 `.xpc` helper、`jsc`、`adattributiond`、`webpushd`。8 + 8 = 16，与扫描的映像总数相等。`cputype` 全部 `16777228`（`0x0100000c`，`CPU_TYPE_ARM64`）配 `cpusubtype 2`（`CPU_SUBTYPE_ARM64E`），即 16 个都是 thin arm64e，没有 universal 头。直接读原始头时这个字段是 `2147483650`（`0x80000002`），比 `2` 多出的是 `0x80000000`——`CPU_SUBTYPE_PTRAUTH_ABI` 能力位（`CPU_SUBTYPE_LIB64` 在 arm64 上被复用为该位）；`llvm-otool -hv` 把它打印成 `cpusubtype E`、`caps PAC00`，基类型仍是 2。
 
 ### 4.2 `LC_RPATH`
 
@@ -285,7 +285,7 @@ _WKXPCServiceMain
 
 两个包的签名都是嵌入的 superblob，`magic = 0xfade0cc0`。`WebKit` 的 superblob 长度 637298，`count = 3`，三个槽位是 `0x00000`（CodeDirectory，SHA-1）、`0x00002`（Requirements）、`0x01000`（CodeDirectory Alternate #0，SHA-256）。`LC_CODE_SIGNATURE` 是 `dataoff = 50160320`、`datasize = 637312`；`dataoff + 637298 = 50797618`，与文件大小 50797632 差 14 字节，`datasize` 比 superblob 的 `length` 多出的 14 字节正是这段对齐填充。
 
-五个 `.xpc` helper 与 `JavaScriptCore.framework/Helpers/jsc` 的 superblob 都是 `count = 5`，比 framework 多出两个槽：`0x00005`（Entitlements，magic `0xfade7171`，GPU 那份 2681 字节，XML plist）与 `0x00007`（DER entitlements，magic `0xfade7172`，GPU 那份 1809 字节，正文以 `0x30` SEQUENCE 开头）。其余十个映像（五个 framework、`libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`、`adattributiond`、`webpushd`）都是 `count = 3`，没有这两个槽。全 payload 扫描的读数因此是「五个 `.xpc` helper 加 `jsc` 共六个 `count = 5`，十个 `count = 3`」。`jsc` 是 `JavaScriptCore.framework` 里的命令行宿主，和 helper 一样是独立可执行文件，所以同样携带权限声明：它的 `slot 0x00005` 是 508 字节的 XML，内容为 `com.apple.developer.kernel.extended-virtual-addressing`、`com.apple.private.pac.exception`、`com.apple.private.verified-jit`、`com.apple.security.fatal-exceptions = [jit]`、`dynamic-codesigning` 五项，都是 JIT 与指针认证相关。三个 dylib 与五个 framework 都不是可执行入口，不带。
+五个 `.xpc` helper 与 `JavaScriptCore.framework/Helpers/jsc` 的 superblob 都是 `count = 5`，比 framework 多出两个槽：`0x00005`（Entitlements，magic `0xfade7171`，GPU 那份 2681 字节，XML plist）与 `0x00007`（DER entitlements，magic `0xfade7172`，GPU 那份槽全长 1809 字节，正文以 `0x31`（SET）开头，其下逐个套 `0x30` SEQUENCE，实测起始 24 字节是 `31 82 07 05 30 1a 0c 16 application-identifier`；`jsc` 那份是 `31 81 d0 30 18 0c 13 dynamic-codesigning`）。其余十个映像（五个 framework、`libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`、`adattributiond`、`webpushd`）都是 `count = 3`，没有这两个槽。全 payload 扫描的读数因此是「五个 `.xpc` helper 加 `jsc` 共六个 `count = 5`，十个 `count = 3`」。`jsc` 是 `JavaScriptCore.framework` 里的命令行宿主，和 helper 一样是独立可执行文件，所以同样携带权限声明：它的 `slot 0x00005` 是 508 字节的 XML，内容为 `com.apple.developer.kernel.extended-virtual-addressing`、`com.apple.private.pac.exception`、`com.apple.private.verified-jit`、`com.apple.security.fatal-exceptions = [jit]`、`dynamic-codesigning` 五项，都是 JIT 与指针认证相关。三个 dylib 与五个 framework 都不是可执行入口，不带。
 
 GPU 那份的 superblob 长度 5936（`LC_CODE_SIGNATURE.datasize` 5952，差 16 字节填充）；五个 helper 的 superblob 长度并不相同，另外四个分别是 `Networking` 4319、`WebContent.CaptivePortal` 5774、`WebContent.Development` 1703、`WebContent` 5473，差异来自各自权限块的字节长度。所以「5936」只能用于 GPU，不能当成五个 helper 的统称。
 
@@ -308,7 +308,7 @@ $ rcodesign print-signature-info WebKit.framework/WebKit
           signed_entity_size: 50160320
 ```
 
-`rcodesign` 是 `artifacts/tools/apple-codesign-0.29.0-x86_64-unknown-linux-musl/rcodesign`（0.29.0），与本文自己的 superblob 走查是两套实现，得到同一组数字（长度 637298、3 个槽、`codeLimit` 50160320）。它对 `WebKit` 与另外四个 framework 都正常输出（退出码 0）；对五个带 Entitlements 槽的 helper 会报 `error with plist DER encoding: Wrapped codec-specific decode error / Codec: BER`，并**以退出码 1 结束** —— 这是 `rcodesign` 0.29.0 读 DER 权限块时的缺陷，不是签名损坏：那些块的 tag 与长度字段本身是合法的（`0x30` 82 05 30 1a …），而且 `rcodesign compute-code-hashes` 对同一份文件仍能算出完整页哈希（`WebKit` 12247 行）。
+`rcodesign` 是 `artifacts/tools/apple-codesign-0.29.0-x86_64-unknown-linux-musl/rcodesign`（0.29.0），与本文自己的 superblob 走查是两套实现，得到同一组数字（长度 637298、3 个槽、`codeLimit` 50160320）。它对 `WebKit` 与另外四个 framework 都正常输出（退出码 0）；对五个带 Entitlements 槽的 helper 会报 `error with plist DER encoding: Wrapped codec-specific decode error / Codec: BER`，并**以退出码 1 结束** —— 这是 `rcodesign` 0.29.0 读 DER 权限块时的缺陷，不是签名损坏：那些块的 tag 与长度字段本身是合法的（真实起始是 `31` 82 07 05 `30` 1a，外层 `0x31` SET 套 `0x30` SEQUENCE；`0x82` 表示长度用两字节，`0x0705` 即 1797，加上 4 字节头正好是槽内正文的 1801 字节，合 DER 规则），而且 `rcodesign compute-code-hashes` 对同一份文件仍能算出完整页哈希（`WebKit` 12247 行）。
 
 ```
 $ rcodesign print-signature-info .../com.apple.WebKit.GPU; echo $?
@@ -345,9 +345,9 @@ designated(3): 0: (identifier "WebKit") and ((anchor apple generic) and
 
 ### 5.2 CodeDirectory 参数
 
-`WebKit` 的 SHA-1 槽：`version = 132096`（`0x20400`，与 `rcodesign` 读到的 `0x20400` 一致）、`nSpecial = 2`、`nCode = 12247`、`codeLimit = 50160320`、`hashSize = 20`、`hashType = 1`（SHA-1）、`pageLog2 = 12`（页大小 4096）。`nCode × 20 × 2 + 95 字节头 = 245075`，正是 `slot 0x00000` 的 `len`。
+`WebKit` 的 SHA-1 槽：`version = 132096`（`0x20400`，与 `rcodesign` 读到的 `0x20400` 一致）、`nSpecial = 2`、`nCode = 12247`、`codeLimit = 50160320`、`hashSize = 20`、`hashType = 1`（SHA-1）、`pageLog2 = 12`（页大小 4096）。CodeDirectory 的总长是 `95 + (nCode + nSpecial) × hashSize`，代入得 `95 + (12247 + 2) × 20 = 245075`，正是 `slot 0x00000` 的 `len`。
 
-Alternate #0 槽的四个性质与主槽相同：identifier 同为 `WebKit`、`nCode` 同为 12247、`codeLimit` 同为 50160320，只有摘要类型不同（`hashType = 2`，SHA-256）。两个目录覆盖同一段字节，所以任一时刻两者都必须同时重算。这一点对重签的人有用：只更新一个槽会让另一个槽的页哈希全部失配。
+Alternate #0 槽的四个性质与主槽相同：identifier 同为 `WebKit`、`nCode` 同为 12247、`codeLimit` 同为 50160320，只有摘要类型不同（`hashType = 2`，SHA-256）。SHA-1 与 SHA-256 的差别只落在 `hashSize` 上（20 与 32），公式的其余部分不变：`95 + (12247 + 2) × 32 = 392063`，正是 `slot 0x01000` 的 `len`。两个目录覆盖同一段字节，所以任一时刻两者都必须同时重算。这一点对重签的人有用：只更新一个槽会让另一个槽的页哈希全部失配。
 
 ### 5.3 逐页校验
 
@@ -403,7 +403,7 @@ Entitlements 槽是完整的 16.1 时代 WebKit GPU 权限集，逐条读出如�
 | `com.apple.private.network.socket-delegate` | true |
 | `com.apple.runningboard.assertions.webkit` | true |
 | `com.apple.tcc.delegated-services` | `[kTCCServiceCamera, kTCCServiceMicrophone]` |
-| `com.apple.mediaremote.*`（四条）、`com.apple.private.mediaexperience.*`（三条）、`com.apple.private.coremedia.*`（四条）、`com.apple.coreaudio.allow-vorbis-decode` | true |
+| `com.apple.mediaremote.*`（三条：`external-artwork-validation`、`set-playback-state`、`ui-control`）、`com.apple.private.mediaexperience.*`（三条）、`com.apple.private.coremedia.*`（三条：`allow-fps-attachment`、`extensions.audiorecording.allow`、`pidinheritance.allow`）、`com.apple.developer.coremedia.allow-alternate-video-decoder-selection`（一条，前缀是 `com.apple.developer.coremedia`，与上面三条不同）、`com.apple.coreaudio.allow-vorbis-decode` | true |
 | `com.apple.springboard.statusbarstyleoverrides` / `.coordinator` | true / `[UIStatusBarStyleOverrideWebRTCAudioCapture, UIStatusBarStyleOverrideWebRTCCapture]` |
 | `com.apple.systemstatus.activityattribution` / `com.apple.security.exception.mach-lookup.global-name` | true / `[com.apple.systemstatus.activityattribution]` |
 | `com.apple.private.attribution.explicitly-assumed-identities` | `[{type: wildcard}]` |
@@ -449,19 +449,22 @@ $ llvm-nm -arch arm64e -m WebKit.framework/WebKit | grep WTFSignpost...
 
 反过来说，`_xpc_connection_create` 在两边都还在未定义表里（各 1 条），因为 WebKit 别的代码路径仍然用它。不能用「未定义表里有 `_xpc_connection_create`」推断入口还是客户端连接，判据只能是第 3 节的反汇编。新包里 `_xpc_connection_create` 的调用点有 2 处（`0x4d9334`、`0xb25634`），都不在 `XPCServiceMain` 里。
 
-### 6.3 全部符号的差异只有三项
+### 6.3 全部符号的差异是一个改名加三个新增
 
-把两个 `WebKit` 的符号名去重排序后比较，新 131109 条、旧 131107 条，差异恰好三行：
+把两个 `WebKit` 的符号名去重排序后比较，新 131109 条、旧 131107 条，交集 131106 条。差异是四行：一个改名（`___block_literal_global.127` → `.129`）与三个新增名字。
 
 ```
-< ___block_literal_global.127
----
+$ llvm-nm -arch arm64e <新 WebKit> | awk '{print $NF}' | sort -u > n.txt
+$ llvm-nm -arch arm64e <旧 WebKit> | awk '{print $NF}' | sort -u > o.txt
+$ comm -23 n.txt o.txt        # 只在新包里，3 行
 > ___block_literal_global.129
 > __ZGVZN6WebKit14XPCServiceMainEiPPKcE17createMachService
 > __ZZN6WebKit14XPCServiceMainEiPPKcE17createMachService
+$ comm -13 n.txt o.txt        # 只在旧包里，1 行
+< ___block_literal_global.127
 ```
 
-前两条是补丁新增的静态变量（`createMachService` 本体与它的 guard），第三条是一个匿名 block literal 的编号从 `.127` 变成 `.129`，属于编译器内部计数，不是新接口。其余 131105 条符号名两边一致。
+两个 `__ZGV` / `__ZZ` 名字是补丁新增的静态变量（`createMachService` 本体与它的 guard）；`___block_literal_global` 的名字变了但两侧各只有一条，属于编译器内部编号的变化，不是新接口。其余 131106 条符号名两边一致。
 
 `__text` 里的符号按名字去重后新旧两边都是 97286 个，且两个集合完全相同：
 
@@ -563,8 +566,12 @@ plist 的 `RunLoopType = NSRunLoop` 描述的是系统 16.1 那套 stub 被构�
 第 4、5 节里「16 个映像」那几组读数来自两个自己写的一次性 Python 脚本，**它们没有入库**，所以本节把完整内容贴在下面，任何人都能另存为文件复跑。本节给出的每条命令与读数都在写这一版文档时实跑过一次。
 
 ```sh
-# 解包
+# 取新包（run id 与 sha256 见第 1.1 节）。--dir 必须给，gh 2.46 用 -D . 会报
+# "would result in path traversal"
 D=/home/real186/project/ipad-pro-m2/.tmp/deb-45874174324
+mkdir -p $D && gh run download 45874174324 --repo 186526/WebKitPlayground \
+  -n webkit-rootless-deb --dir $D
+sha256sum $D/webkit-rootless.deb   # d080748438e4d6e0…，与新包一致
 dpkg-deb -x $D/webkit-rootless.deb $D/x
 dpkg-deb -f $D/webkit-rootless.deb Package Version
 
