@@ -676,8 +676,13 @@ def rewrite(root, prefix):
                 raise PayloadError("%s names %s, and its install row points at %s, which is not in the payload"
                                    % (path, name, destination))
             replacements.append((command, rpath_name))
-        dependencies = [name for _, name in entries if name.startswith("@rpath/")]
-        dependencies.extend(name for _, name in replacements)
+        replacement_names = {command.offset: name for command, name in replacements}
+        planned_entries = [(command, replacement_names.get(command.offset, name))
+                           for command, name in entries]
+        problems = install_name_problems(planned_entries, os.path.relpath(path, root))
+        if problems:
+            raise PayloadError(problems[0])
+        dependencies = [name for _, name in planned_entries if name.startswith("@rpath/")]
         if not dependencies:
             continue
         has_rpath_dependencies = True
@@ -706,19 +711,7 @@ def rewrite(root, prefix):
 def verify_image(image, root, relative, prefix):
     problems = []
     entries = image.install_name_commands()
-    for command, name in entries:
-        if name.startswith(FORBIDDEN_PREFIXES):
-            problems.append("%s still names the system path %s" % (relative, name))
-            continue
-        # An install name is an absolute path or an @-prefixed one.  Anything
-        # else is the tail of a name some step overwrote from the wrong offset
-        # (writing "@rpath/..." at 24 into a command whose lc_str is 28 yields
-        # "th/WebKit.framework/WebKit"), and the prefix and resolution checks
-        # below would all wave it through.
-        if not name.startswith(INSTALL_NAME_PREFIXES):
-            problems.append("%s: load command 0x%08x at %d resolves a name that is neither an "
-                            "absolute path nor @-prefixed: %r"
-                            % (relative, command.kind, command.offset, name))
+    problems.extend(install_name_problems(entries, relative))
     dependencies = [name for _, name in entries if name.startswith("@rpath/")]
     reexports = {name for command, name in entries if command.kind == LC_REEXPORT_DYLIB}
     if not dependencies:
@@ -732,6 +725,24 @@ def verify_image(image, root, relative, prefix):
         if not resolves_rpath(root, dependency, rpaths):
             problems.append("%s: %s resolves to no file inside the payload" % (relative, dependency))
     return problems, dependencies, reexports
+
+
+def install_name_problems(entries, relative):
+    problems = []
+    for command, name in entries:
+        if name.startswith(FORBIDDEN_PREFIXES):
+            problems.append("%s still names the system path %s" % (relative, name))
+            continue
+        # An install name is an absolute path or an @-prefixed one.  Anything
+        # else is the tail of a name some step overwrote from the wrong offset
+        # (writing "@rpath/..." at 24 into a command whose lc_str is 28 yields
+        # "th/WebKit.framework/WebKit"), and the prefix and resolution checks
+        # below would all wave it through.
+        if not name.startswith(INSTALL_NAME_PREFIXES):
+            problems.append("%s: load command 0x%08x at %d resolves a name that is neither an "
+                            "absolute path nor @-prefixed: %r"
+                            % (relative, command.kind, command.offset, name))
+    return problems
 
 
 def verify_with_rabin2(tool, path, relative, dependencies, reexports):

@@ -847,6 +847,29 @@ def case_rewrite_already_rpath_linked() -> None:
     print(f"PASS {label}")
 
 
+def case_rewrite_rejects_malformed_name() -> None:
+    label = "rewrite rejects a malformed load name without writing any image"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        dependency = "@rpath/WebKit.framework/WebKit"
+        payload = write_destination_tree(root, {
+            "Library/Frameworks/adattributiond": build_macho(((LC_LOAD_DYLIB, WEBKIT),)),
+            "Library/Frameworks/webpushd": build_macho(
+                ((LC_LOAD_DYLIB, dependency), (LC_LOAD_DYLIB, "bad-tail"))),
+        })
+        before = {path: path.read_bytes() for path in payload.rglob("*") if path.is_file()}
+        result = run_tool(tool, "rewrite", root)
+        after = {path: path.read_bytes() for path in payload.rglob("*") if path.is_file()}
+        if result.returncode != 1 or "absolute path nor @-prefixed: 'bad-tail'" not in result.stderr:
+            failures.append(f"{label}: unexpected rewrite result: {result}")
+            return
+        if after != before:
+            failures.append(f"{label}: rewrite changed the payload")
+            return
+    print(f"PASS {label}")
+
+
 def case_header_pad_atomicity() -> None:
     """A payload rejected for header-pad exhaustion must be left byte-identical.
 
@@ -1986,6 +2009,7 @@ exec {CP} "$@"''',
     case_nonstandard_lc_str()
     case_corrupted_name_is_rejected()
     case_rewrite_already_rpath_linked()
+    case_rewrite_rejects_malformed_name()
     case_header_pad_atomicity()
     case_truncated_image()
     case_payload_mode()
