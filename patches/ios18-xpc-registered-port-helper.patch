@@ -1,0 +1,142 @@
+diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+--- a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
++++ b/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServiceMain.mm
+@@ -30,6 +30,8 @@
+ #import "XPCEndpointMessages.h"
+ #import "XPCServiceEntryPoint.h"
+ #import "XPCUtilities.h"
++#import <atomic>
++#import <cerrno>
+ #import <CoreFoundation/CoreFoundation.h>
+ #import <dlfcn.h>
+ #import <mach/mach.h>
+@@ -123,6 +125,11 @@
+     }
+ }
+ #endif // PLATFORM(MAC)
++
++#if !PLATFORM(MAC) && !PLATFORM(MACCATALYST)
++enum class RegisteredPortBootstrapState { Inactive, Pending, Replying, Replied, TimedOut };
++static std::atomic<RegisteredPortBootstrapState> registeredPortBootstrapState { RegisteredPortBootstrapState::Inactive };
++#endif
+
+ void XPCServiceEventHandler(xpc_connection_t peer)
+ {
+@@ -257,7 +264,18 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+             auto reply = adoptOSObject(xpc_dictionary_create_reply(event));
+             xpc_dictionary_set_string(reply.get(), "message-name", "process-finished-launching");
+             xpc_dictionary_set_int64(reply.get(), "pid", getpid());
++#if !PLATFORM(MAC) && !PLATFORM(MACCATALYST)
++            auto bootstrapState = RegisteredPortBootstrapState::Pending;
++            bool claimedReply = registeredPortBootstrapState.compare_exchange_strong(bootstrapState, RegisteredPortBootstrapState::Replying);
++            if (!claimedReply && bootstrapState != RegisteredPortBootstrapState::Inactive)
++                return;
++#endif
+             xpc_connection_send_message(xpc_dictionary_get_remote_connection(event), reply.get());
++#if !PLATFORM(MAC) && !PLATFORM(MACCATALYST)
++            // The reply is committed locally; remote receipt is not observable here.
++            if (claimedReply)
++                registeredPortBootstrapState.store(RegisteredPortBootstrapState::Replied);
++#endif
+
+             int fd = xpc_dictionary_dup_fd(event, "stdout");
+             if (fd != -1)
+@@ -290,6 +308,64 @@ void XPCServiceEventHandler(xpc_connection_t peer)
+     xpc_connection_resume(peer);
+ }
+
++#if !PLATFORM(MAC) && !PLATFORM(MACCATALYST)
++static OSObjectPtr<xpc_connection_t> createRegisteredPortConnection()
++{
++    const char* slotValue = getenv("WK_HELPER_REGISTERED_SLOT");
++    if (!slotValue || !*slotValue || strspn(slotValue, "0123456789") != strlen(slotValue)) {
++        RELEASE_LOG_FAULT(IPC, "Exiting: WK_HELPER_REGISTERED_SLOT must be a decimal index");
++        return { };
++    }
++    errno = 0;
++    auto slot = strtoul(slotValue, nullptr, 10);
++    if (errno == ERANGE) {
++        RELEASE_LOG_FAULT(IPC, "Exiting: WK_HELPER_REGISTERED_SLOT is out of range");
++        return { };
++    }
++
++    mach_port_array_t registeredPorts = nullptr;
++    mach_msg_type_number_t registeredPortCount = 0;
++    auto task = mach_task_self();
++    auto lookupResult = mach_ports_lookup(task, &registeredPorts, &registeredPortCount);
++    if (lookupResult != KERN_SUCCESS) {
++        RELEASE_LOG_FAULT(IPC, "Exiting: mach_ports_lookup failed (%d)", lookupResult);
++        return { };
++    }
++
++    OSObjectPtr<xpc_connection_t> connection;
++    auto port = slot < registeredPortCount ? registeredPorts[slot] : MACH_PORT_NULL;
++    mach_port_type_t portType = 0;
++    if (slot >= registeredPortCount)
++        RELEASE_LOG_FAULT(IPC, "Exiting: registered slot %lu is beyond the port array", slot);
++    else if (!MACH_PORT_VALID(port) || mach_port_type(task, port, &portType) != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND))
++        RELEASE_LOG_FAULT(IPC, "Exiting: registered slot %lu does not contain a send right", slot);
++    else {
++        auto placeholder = adoptOSObject(xpc_connection_create(nullptr, nullptr));
++        auto endpoint = adoptOSObject(xpc_endpoint_create(placeholder.get()));
++        // The device's iOS 16.1 libxpc stores the endpoint's send right at this offset.
++        constexpr size_t endpointPortOffset = 0x18;
++        auto* endpointPort = reinterpret_cast<mach_port_t*>(static_cast<char*>((__bridge void*)endpoint.get()) + endpointPortOffset);
++        auto placeholderPort = *endpointPort;
++        *endpointPort = port;
++        connection = adoptOSObject(xpc_connection_create_from_endpoint(endpoint.get()));
++        // Restore the owned right so endpoint destruction releases it; the lookup owns port.
++        *endpointPort = placeholderPort;
++        endpoint = nullptr;
++        // The placeholder is never activated. Cancel it before releasing its last reference.
++        xpc_connection_cancel(placeholder.get());
++    }
++
++    // Release every right returned by lookup; only the designated slot is used to connect.
++    for (mach_msg_type_number_t index = 0; index < registeredPortCount; ++index) {
++        if (MACH_PORT_VALID(registeredPorts[index]))
++            mach_port_deallocate(task, registeredPorts[index]);
++    }
++    if (registeredPortCount)
++        vm_deallocate(task, reinterpret_cast<vm_address_t>(registeredPorts), registeredPortCount * sizeof(mach_port_t));
++    return connection;
++}
++#endif
++
+ int XPCServiceMain(int, const char**)
+ {
+     auto bootstrap = adoptOSObject(xpc_copy_bootstrap());
+@@ -321,6 +397,33 @@ int XPCServiceMain(int, const char**)
+     xpc_main(XPCServiceEventHandler);
+     return 0;
+ #else
++    // The deb defaults to the launchd listener, which waits for a peer. The UI-spawned
++    // client instead establishes its own peer through the designated registered slot.
++    const char* launchMode = getenv("WK_HELPER_LAUNCH_MODE");
++    if (launchMode && !strcmp(launchMode, "registered-port")) {
++        RELEASE_LOG(IPC, "XPCServiceMain: registered-port client (WK_HELPER_LAUNCH_MODE=registered-port)");
++        auto connection = createRegisteredPortConnection();
++        if (!connection) {
++            RELEASE_LOG_FAULT(IPC, "Exiting: no XPC client connection from registered ports");
++            exitProcess(EXIT_FAILURE);
++        }
++        // An endpoint made from an unrelated send right produced a connection that
++        // neither errored nor replied. Wait asynchronously on the peer's target queue.
++        constexpr int64_t bootstrapTimeoutSeconds = 30;
++        auto queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
++        registeredPortBootstrapState.store(RegisteredPortBootstrapState::Pending);
++        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, bootstrapTimeoutSeconds * NSEC_PER_SEC), queue, ^{
++            auto bootstrapState = RegisteredPortBootstrapState::Pending;
++            if (!registeredPortBootstrapState.compare_exchange_strong(bootstrapState, RegisteredPortBootstrapState::TimedOut))
++                return;
++            RELEASE_LOG_FAULT(IPC, "Exiting: registered-port client timed out waiting for bootstrap");
++            exitProcess(EXIT_FAILURE);
++        });
++        XPCServiceEventHandler(connection.get());
++        dispatch_main();
++    }
++
++    RELEASE_LOG(IPC, "XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)");
+     // xpc_main is marked API_UNAVAILABLE(ios), so reproduce what it does.
+     // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
+     // xpc_connection_create_listener, and the handler it wraps receives each connection launchd

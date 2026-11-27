@@ -1,0 +1,305 @@
+diff --git a/Source/WebKit/UIProcess/Launcher/ProcessLauncher.h b/Source/WebKit/UIProcess/Launcher/ProcessLauncher.h
+--- a/Source/WebKit/UIProcess/Launcher/ProcessLauncher.h
++++ b/Source/WebKit/UIProcess/Launcher/ProcessLauncher.h
+@@ -159,6 +159,13 @@
+     void terminateXPCConnection();
+ #endif
+
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++    void launchWithRegisteredPort(ASCIILiteral);
++    void cancelRegisteredPortListener();
++    OSObjectPtr<xpc_connection_t> m_registeredPortListener;
++    pid_t m_spawnedHelperPID { 0 };
++#endif
++
+     Client* m_client;
+
+ #if PLATFORM(COCOA)
+diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
+--- a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
++++ b/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
+@@ -53,6 +53,18 @@
+ #import <wtf/text/CString.h>
+ #import <wtf/text/WTFString.h>
+
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++#import <cerrno>
++#import <dlfcn.h>
++#import <mach/mach.h>
++#import <signal.h>
++#import <sys/wait.h>
++#import <unistd.h>
++#import <wtf/Scope.h>
++#import <wtf/Vector.h>
++#import <wtf/text/MakeString.h>
++#endif
++
+ #if PLATFORM(MAC)
+ #import "CodeSigning.h"
+ #endif
+@@ -235,8 +247,160 @@
+ }
+ #endif
+
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++static constexpr Seconds registeredPortLaunchTimeout = 10_s;
++
++static const char* missingHelperDyldVariable()
++{
++    for (auto key : { "DYLD_FRAMEWORK_PATH", "__XPC_DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH" }) {
++        if (auto value = getenv(key); !value || !*value)
++            return key;
++    }
++    return nullptr;
++}
++
++using SetRegisteredPorts = int (*)(posix_spawnattr_t*, mach_port_t*, uint32_t);
++static SetRegisteredPorts registeredPortsFunction()
++{
++    static const auto function = reinterpret_cast<SetRegisteredPorts>(dlsym(RTLD_DEFAULT, "posix_spawnattr_set_registered_ports_np"));
++    return function;
++}
++
++static int spawnHelperWithRegisteredPort(pid_t& helperPID, ASCIILiteral name, mach_port_t listenerPort)
++{
++    posix_spawnattr_t attributes;
++    if (auto error = posix_spawnattr_init(&attributes))
++        return error;
++    auto destroyAttributes = makeScopeExit([&] { posix_spawnattr_destroy(&attributes); });
++    if (auto error = registeredPortsFunction()(&attributes, &listenerPort, 1))
++        return error;
++
++    char launchMode[] = "WK_HELPER_LAUNCH_MODE=registered-port";
++    char registeredSlot[] = "WK_HELPER_REGISTERED_SLOT=0";
++    Vector<char*> environment;
++    for (auto entry = *_NSGetEnviron(); *entry; ++entry) {
++        if (strncmp(*entry, "WK_HELPER_LAUNCH_MODE=", sizeof("WK_HELPER_LAUNCH_MODE=") - 1)
++            && strncmp(*entry, "WK_HELPER_REGISTERED_SLOT=", sizeof("WK_HELPER_REGISTERED_SLOT=") - 1))
++            environment.append(*entry);
++    }
++    environment.append(launchMode);
++    environment.append(registeredSlot);
++    environment.append(nullptr);
++
++    auto executable = makeString("/var/jb/Library/Frameworks/WebKit.framework/XPCServices/"_s, name, ".xpc/"_s, name).utf8();
++    char* arguments[] = { const_cast<char*>(executable.data()), nullptr };
++    return posix_spawn(&helperPID, executable.data(), nullptr, &attributes, arguments, environment.data());
++}
++
++static void reapSpawnedHelper(pid_t helperPID)
++{
++    while (waitpid(helperPID, nullptr, 0) == -1 && errno == EINTR) { }
++}
++
++void ProcessLauncher::launchWithRegisteredPort(ASCIILiteral name)
++{
++    ASSERT(RunLoop::isMain());
++    auto weakLauncher = ThreadSafeWeakPtr { *this };
++    auto failBeforeConnection = [weakLauncher] {
++        if (auto launcher = weakLauncher.get(); launcher && launcher->isLaunching() && launcher->m_client)
++            launcher->didFinishLaunchingProcess(0, { });
++    };
++
++    if (auto key = missingHelperDyldVariable()) {
++        LOG_ERROR("Cannot spawn %s with a registered port: missing or empty %s", name.characters(), key);
++        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
++        return;
++    }
++
++    auto listener = adoptOSObject(xpc_connection_create(nullptr, dispatch_get_main_queue()));
++    auto endpoint = listener ? adoptOSObject(xpc_endpoint_create(listener.get())) : OSObjectPtr<xpc_endpoint_t> { };
++    mach_port_t listenerPort = MACH_PORT_NULL;
++    if (endpoint) {
++        // iPadOS 16.1 libxpc stores the endpoint's borrowed send right at this offset.
++        constexpr size_t endpointPortOffset = 0x18;
++        auto bytes = static_cast<const uint8_t*>((__bridge const void*)endpoint.get());
++        memcpy(&listenerPort, bytes + endpointPortOffset, sizeof(listenerPort));
++    }
++
++    mach_port_type_t portType;
++    auto result = mach_port_type(mach_task_self(), listenerPort, &portType);
++    if (result != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND)) {
++        LOG_ERROR("Could not obtain a registered send right for %s", name.characters());
++        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
++        return;
++    }
++
++    pid_t helperPID = 0;
++    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {
++        LOG_ERROR("Could not spawn %s with a registered port: %s", name.characters(), strerror(error));
++        // The named path assumes xpc_connection_create succeeds; spawn can fail before
++        // a connection exists. Drop the endpoint (and its send right) on return, then notify the client.
++        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
++        return;
++    }
++
++    auto childExitSource = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, helperPID, DISPATCH_PROC_EXIT, dispatch_get_main_queue()));
++    if (!childExitSource) {
++        kill(helperPID, SIGKILL);
++        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ reapSpawnedHelper(helperPID); });
++        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
++        return;
++    }
++
++    m_spawnedHelperPID = helperPID;
++    m_registeredPortListener = WTFMove(listener);
++    dispatch_source_set_event_handler(childExitSource.get(), ^{
++        reapSpawnedHelper(helperPID);
++        dispatch_source_cancel(childExitSource.get());
++        auto launcher = weakLauncher.get();
++        if (!launcher)
++            return;
++        launcher->m_spawnedHelperPID = 0;
++        if (launcher->m_registeredPortListener) {
++            launcher->cancelRegisteredPortListener();
++            failBeforeConnection();
++        }
++    });
++    dispatch_resume(childExitSource.get());
++
++    xpc_connection_set_event_handler(m_registeredPortListener.get(), ^(xpc_object_t event) {
++        auto launcher = weakLauncher.get();
++        if (!launcher || !launcher->m_registeredPortListener)
++            return;
++        launcher->cancelRegisteredPortListener();
++        if (xpc_get_type(event) != XPC_TYPE_CONNECTION) {
++            launcher->terminateXPCConnection();
++            failBeforeConnection();
++            return;
++        }
++        launcher->m_xpcConnection = static_cast<xpc_connection_t>(event);
++        xpc_connection_set_target_queue(launcher->m_xpcConnection.get(), dispatch_get_main_queue());
++        launcher->finishLaunchingProcess(name);
++    });
++    xpc_connection_resume(m_registeredPortListener.get());
++
++    RunLoop::main().dispatchAfter(registeredPortLaunchTimeout, [weakLauncher, failBeforeConnection] {
++        auto launcher = weakLauncher.get();
++        if (!launcher || !launcher->m_registeredPortListener)
++            return;
++        launcher->terminateXPCConnection();
++        failBeforeConnection();
++    });
++}
++
++void ProcessLauncher::cancelRegisteredPortListener()
++{
++    if (auto listener = std::exchange(m_registeredPortListener, nullptr))
++        xpc_connection_cancel(listener.get());
++}
++#endif
++
+ void ProcessLauncher::platformDestroy()
+ {
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++    if (m_spawnedHelperPID)
++        terminateXPCConnection();
++#endif
+ #if USE(EXTENSIONKIT)
+     if (m_process)
+         m_process->invalidate();
+@@ -305,6 +469,15 @@
+     launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
+ #else
+     auto name = serviceName(m_launchOptions, m_client);
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR)
++    if (auto mode = getenv("WK_HELPER_SPAWN"); mode && !strcmp(mode, "registered-port")) {
++        if (registeredPortsFunction()) {
++            launchWithRegisteredPort(name);
++            return;
++        }
++        LOG_ERROR("Registered-port spawn API unavailable; using named XPC launch for %s", name.characters());
++    }
++#endif
+     m_xpcConnection = adoptOSObject(xpc_connection_create(name, nullptr));
+     finishLaunchingProcess(name);
+ #endif
+@@ -315,16 +468,30 @@
+     uuid_t uuid;
+     uuid_generate(uuid);
+
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++    const bool isRegisteredPortLaunch = m_spawnedHelperPID;
++    if (!isRegisteredPortLaunch)
++        xpc_connection_set_oneshot_instance(m_xpcConnection.get(), uuid);
++#else
+     xpc_connection_set_oneshot_instance(m_xpcConnection.get(), uuid);
++#endif
+
+     // Inherit UI process localization. It can be different from child process default localization:
+     // 1. When the application and system frameworks simply have different localized resources available, we should match the application.
+     // 1.1. An important case is WebKitTestRunner, where we should use English localizations for all system frameworks.
+     // 2. When AppleLanguages is passed as command line argument for UI process, or set in its preferences, we should respect it in child processes.
+ #if !USE(EXTENSIONKIT)
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR)
++    if (!isRegisteredPortLaunch) {
++        auto initializationMessage = adoptOSObject(xpc_dictionary_create(nullptr, nullptr, 0));
++        _CFBundleSetupXPCBootstrap(initializationMessage.get());
++        xpc_connection_set_bootstrap(m_xpcConnection.get(), initializationMessage.get());
++    }
++#else
+     auto initializationMessage = adoptOSObject(xpc_dictionary_create(nullptr, nullptr, 0));
+     _CFBundleSetupXPCBootstrap(initializationMessage.get());
+     xpc_connection_set_bootstrap(m_xpcConnection.get(), initializationMessage.get());
+ #endif
++#endif
+
+     // Create the listening port.
+@@ -460,6 +627,11 @@
+         // And the receive right.
+         mach_port_mod_refs(mach_task_self(), listeningPort, MACH_PORT_RIGHT_RECEIVE, -1);
+
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++        if (processLauncher->m_spawnedHelperPID)
++            kill(processLauncher->m_spawnedHelperPID, SIGKILL);
++#endif
++
+         if (processLauncher->m_xpcConnection)
+             xpc_connection_cancel(processLauncher->m_xpcConnection.get());
+         processLauncher->m_xpcConnection = nullptr;
+@@ -498,7 +690,29 @@
+     }
+
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++    if (isRegisteredPortLaunch) {
++        RunLoop::main().dispatchAfter(registeredPortLaunchTimeout, [weakLauncher = ThreadSafeWeakPtr { *this }, eventHandlerBlock] {
++            if (auto launcher = weakLauncher.get(); launcher && launcher->isLaunching())
++                eventHandlerBlock(nullptr);
++        });
++    }
++#endif
++
+     ref();
+     xpc_connection_send_message_with_reply(m_xpcConnection.get(), bootstrapMessage.get(), dispatch_get_main_queue(), ^(xpc_object_t reply) {
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++        if (isRegisteredPortLaunch && isLaunching() && xpc_get_type(reply) != XPC_TYPE_ERROR) {
++            // Bootstrap relies on the send right being available only to the spawned child.
++            // Its self-reported reply PID is a consistency check, not peer authentication.
++            auto peerPID = xpc_get_type(reply) == XPC_TYPE_DICTIONARY ? xpc_dictionary_get_int64(reply, "pid") : 0;
++            if (!peerPID || peerPID != m_spawnedHelperPID) {
++                LOG_ERROR("Registered-port helper returned an unexpected PID");
++                eventHandlerBlock(nullptr);
++                deref();
++                return;
++            }
++        }
++#endif
+         // Errors are handled in the event handler.
+         // It is possible for this block to be called after the error event handler, in which case we're no longer
+         // launching and we already took care of cleaning things up.
+@@ -556,9 +748,15 @@
+
+ void ProcessLauncher::terminateXPCConnection()
+ {
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
++    cancelRegisteredPortListener();
++    if (m_spawnedHelperPID)
++        kill(m_spawnedHelperPID, SIGKILL);
++#endif
++
+     if (!m_xpcConnection)
+         return;
+
+     xpc_connection_cancel(m_xpcConnection.get());
+ #if !USE(EXTENSIONKIT)
+     terminateWithReason(m_xpcConnection.get(), WebKit::ReasonCode::Invalidation, "ProcessLauncher::platformInvalidate");
