@@ -198,12 +198,13 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
  #if USE(EXTENSIONKIT)
      if (m_process)
          m_process->invalidate();
-@@ -305,6 +469,15 @@
+@@ -305,6 +469,16 @@
      launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
  #else
      auto name = serviceName(m_launchOptions, m_client);
 +#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR)
-+    if (auto mode = getenv("WK_HELPER_SPAWN"); mode && !strcmp(mode, "registered-port")) {
++    // Registered-port spawn is the default; set WK_HELPER_SPAWN=launchd to use named XPC.
++    if (auto mode = getenv("WK_HELPER_SPAWN"); !mode || strcmp(mode, "launchd")) {
 +        if (registeredPortsFunction()) {
 +            launchWithRegisteredPort(name);
 +            return;
