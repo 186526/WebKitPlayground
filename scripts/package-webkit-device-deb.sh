@@ -659,8 +659,11 @@ def resolves_rpath(root, dependency, rpaths):
     for value in rpaths:
         if not value.startswith("/"):
             continue
-        candidate = os.path.realpath(os.path.join(canonical_root, value.lstrip("/"), tail))
-        if os.path.commonpath((canonical_root, candidate)) == canonical_root and os.path.isfile(candidate):
+        candidate = os.path.join(canonical_root, value.lstrip("/"), tail)
+        if not os.path.isfile(candidate):
+            continue
+        resolved = os.path.realpath(candidate)
+        if os.path.commonpath((canonical_root, resolved)) == canonical_root:
             return True
     return False
 

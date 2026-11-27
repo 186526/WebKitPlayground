@@ -905,6 +905,39 @@ def case_rpath_symlink_containment() -> None:
     print(f"PASS {label}")
 
 
+def case_rpath_intermediate_directory(directory: str, traversable: bool) -> None:
+    label = f"rewrite and verify {'accept' if traversable else 'reject'} @rpath through {directory}/.."
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        helper = "Library/Frameworks/webpushd"
+        dependency = f"@rpath/{directory}/../WebKit.framework/WebKit"
+        payload = write_destination_tree(root, {
+            helper: build_macho(((LC_LOAD_DYLIB, dependency),)),
+        })
+        path = payload / helper
+        if not traversable:
+            # Install the normal search paths first so verify cannot fail just for missing LC_RPATH.
+            (payload / "Library/Frameworks" / directory).mkdir()
+            result = run_tool(tool, "rewrite", root)
+            if result.returncode != 0:
+                failures.append(f"{label}: setup rewrite failed: {result}")
+                return
+            (payload / "Library/Frameworks" / directory).rmdir()
+        before = path.read_bytes()
+        for mode in ("rewrite", "verify"):
+            result = run_tool(tool, mode, root)
+            if result.returncode != (0 if traversable else 1) or (
+                not traversable and f"{dependency} resolves to no file inside the payload" not in result.stderr
+            ):
+                failures.append(f"{label}: unexpected {mode} result: {result}")
+                return
+        if not traversable and path.read_bytes() != before:
+            failures.append(f"{label}: rejected rewrite modified the helper")
+            return
+    print(f"PASS {label}")
+
+
 def case_header_pad_atomicity() -> None:
     """A payload rejected for header-pad exhaustion must be left byte-identical.
 
@@ -2048,6 +2081,8 @@ exec {CP} "$@"''',
     case_rewrite_already_rpath_linked(LC_LOAD_UPWARD_DYLIB)
     case_rewrite_rejects_malformed_name(LC_LOAD_UPWARD_DYLIB)
     case_rpath_symlink_containment()
+    case_rpath_intermediate_directory("missing-dir", traversable=False)
+    case_rpath_intermediate_directory("WebKit.framework", traversable=True)
     case_header_pad_atomicity()
     case_truncated_image()
     case_payload_mode()
