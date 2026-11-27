@@ -720,4 +720,4 @@ find $D/x/var/jb -type f -size +4k | sort | xargs python3 /tmp/artifact-slots.py
 1. `LC_DYLD_ENVIRONMENT` 的 cmd 值是 `0x27`，不带 `LC_REQ_DYLD` 位；按 `0x80000027` 解析会一条都读不到。
 2. 新旧 `WebKit` 不能逐字节比较，见第 3.4 节。
 3. `llvm-objdump --disassemble-symbols=<mangled>` 在这份二进制上不生效，会从头开始打印；`--start-address/--stop-address` 也只在配合 `-d` 时才按预期工作。
-4. `rcodesign print-signature-info` 在本仓库这份 0.29.0 上读五个 helper 的 DER 权限块会报 `Wrapped codec-specific decode error / Codec: BER`；读五个 framework 正常。要读 helper 的权限，用本文脚本直接解 `slot 0x00005` 的 XML。
+4. `rcodesign print-signature-info` 在本仓库这份 0.29.0 上读五个 helper 的 DER 权限块会报 `Wrapped codec-specific decode error / Codec: BER`；读五个 framework 正常。要读 helper 或 `jsc` 的权限，按第 10.2 节的脚本定位 `slot 0x00005` 后直接解其中的 XML。
