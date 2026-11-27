@@ -16,7 +16,7 @@
 | job 起止 | `2026-11-26T18:13:30Z` 至 `2026-11-26T23:19:27Z` |
 | deb | `webkit-rootless.deb`，58939840 字节，sha256 `d080748438e4d6e0b7093f30ea6f0992c4db829b671dcca31dcece574858a1cd` |
 | 包名与版本 | `com.82flex.custom-webkit` `620.2.4-20261126231806` |
-| 解包产物 | `/home/real186/project/ipad-pro-m2/.tmp/deb-45874174324/x/` |
+| 解包产物 | `.tmp/deb-45874174324/x/`；命令见第 10 节 |
 | payload 文件数 | 88；连 `DEBIAN/` 下 3 个控制文件共 91 个普通文件（`dpkg-deb -c` 的 120 行含目录） |
 
 版本号里的时间戳不是构建时间，是打 deb 那一刻的时间。`scripts/package-webkit-device-deb.sh:277` 写的是 `PACKAGE_VERSION="${PACKAGE_VERSION}-$(date +%Y%m%d%H%M%S)"`，位于 `--payload` 之外的分支，正常打包路径必走这一行。所以 `20261126231806` 是 runner 本地时间（UTC）`23:18:06`，比 job 完成早 81 秒。这条把 deb 与 run 绑在一起，与被检查的二进制无关。
@@ -28,7 +28,7 @@
 | CI run | `45752229643`，conclusion `success`，headSha `b5fc17bd125b92a5ab1135e247efb94fbfd48f5f` |
 | 包名与版本 | `com.82flex.custom-webkit` `620.2.4-20261126093904` |
 | 存档 | `artifacts/webkit-rootless.deb`，58938996 字节，sha256 `225950f49fd5f5b24c7d27bd846404be09d3a130546af6c3a23592dcd83d81ac` |
-| 解包产物 | `.tmp/verify/old/`；该目录在本次会话中被另一进程删除，重新展开到 `.tmp/m170/old/` 后哈希相同，见第 10 节 |
+| 解包产物 | 从 `artifacts/webkit-rootless.deb` 重新展开，命令见第 10 节 |
 
 `66879e8` 的上游包含 `b5fc17b`（`git merge-base --is-ancestor b5fc17b 66879e8` 返回 0），所以旧包的 headSha 是同一个仓库历史里的祖先，两者之间只有一个 XPC 补丁的差异。
 
@@ -213,13 +213,13 @@ $ grep -a -o -- '<串>' WebKit.framework/WebKit | wc -l
 
 `__oslogstring` 净增 150 字节，而三条新日志串加 NUL 是 202 字节（66 + 72 + 61 + 3）。差额说明这个节里同时少了别的内容，本文没有逐条对齐这一节，所以**不用它的增量做证据**；第 2 节的三条日志串位置是直接读出来的，不依赖这个增量。
 
-## 4. 五个 framework 与五个 `.xpc` helper 的 load command
+## 4. 全部 16 个 Mach-O 映像的 load command
 
-全部 16 个 Mach-O 都用同一个脚本读（命令见第 10 节），下表来自一次完整扫描而非抽样。
+全部 16 个 Mach-O 都用同一段脚本扫，脚本全文在第 10.1 节，下表来自一次完整扫描而非抽样。
 
 ### 4.1 通用读数
 
-`LC_BUILD_VERSION` 在 16 个映像上完全一致：`platform = 2`（iOS），`minos = 16.1.0`，`sdk = 18.5.0`。文件类型：五个 framework 与两个 dylib 是 `6`（`MH_DYLIB`），五个 `.xpc` helper、`jsc`、`adattributiond`、`webpushd` 是 `2`（`MH_EXECUTE`）。`cputype` 全部 `16777228`（`0x0100000c`，`CPU_TYPE_ARM64`）配 `cpusubtype 2`（`CPU_SUBTYPE_ARM64E`），即 16 个都是 thin arm64e，没有 universal 头。
+`LC_BUILD_VERSION` 在 16 个映像上完全一致：`platform = 2`（iOS），`minos = 16.1.0`，`sdk = 18.5.0`。文件类型：`6`（`MH_DYLIB`）8 个，是五个 framework 与三个 dylib（`libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`）；`2`（`MH_EXECUTE`）8 个，是五个 `.xpc` helper、`jsc`、`adattributiond`、`webpushd`。8 + 8 = 16，与扫描的映像总数相等。`cputype` 全部 `16777228`（`0x0100000c`，`CPU_TYPE_ARM64`）配 `cpusubtype 2`（`CPU_SUBTYPE_ARM64E`），即 16 个都是 thin arm64e，没有 universal 头。
 
 ### 4.2 `LC_RPATH`
 
@@ -285,7 +285,7 @@ _WKXPCServiceMain
 
 两个包的签名都是嵌入的 superblob，`magic = 0xfade0cc0`。`WebKit` 的 superblob 长度 637298，`count = 3`，三个槽位是 `0x00000`（CodeDirectory，SHA-1）、`0x00002`（Requirements）、`0x01000`（CodeDirectory Alternate #0，SHA-256）。`LC_CODE_SIGNATURE` 是 `dataoff = 50160320`、`datasize = 637312`；`dataoff + 637298 = 50797618`，与文件大小 50797632 差 14 字节，`datasize` 比 superblob 的 `length` 多出的 14 字节正是这段对齐填充。
 
-五个 `.xpc` helper 的 superblob 都是 `count = 5`，比 framework 多出两个槽：`0x00005`（Entitlements，magic `0xfade7171`，GPU 那份 2681 字节，XML plist）与 `0x00007`（DER entitlements，magic `0xfade7172`，GPU 那份 1809 字节，正文以 `0x30` SEQUENCE 开头）。这两个槽只出现在 helper 上，因为只有 helper 携带权限声明。
+五个 `.xpc` helper 与 `JavaScriptCore.framework/Helpers/jsc` 的 superblob 都是 `count = 5`，比 framework 多出两个槽：`0x00005`（Entitlements，magic `0xfade7171`，GPU 那份 2681 字节，XML plist）与 `0x00007`（DER entitlements，magic `0xfade7172`，GPU 那份 1809 字节，正文以 `0x30` SEQUENCE 开头）。其余十个映像（五个 framework、`libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`、`adattributiond`、`webpushd`）都是 `count = 3`，没有这两个槽。全 payload 扫描的读数因此是「五个 `.xpc` helper 加 `jsc` 共六个 `count = 5`，十个 `count = 3`」。`jsc` 是 `JavaScriptCore.framework` 里的命令行宿主，和 helper 一样是独立可执行文件，所以同样携带权限声明：它的 `slot 0x00005` 是 508 字节的 XML，内容为 `com.apple.developer.kernel.extended-virtual-addressing`、`com.apple.private.pac.exception`、`com.apple.private.verified-jit`、`com.apple.security.fatal-exceptions = [jit]`、`dynamic-codesigning` 五项，都是 JIT 与指针认证相关。三个 dylib 与五个 framework 都不是可执行入口，不带。
 
 GPU 那份的 superblob 长度 5936（`LC_CODE_SIGNATURE.datasize` 5952，差 16 字节填充）；五个 helper 的 superblob 长度并不相同，另外四个分别是 `Networking` 4319、`WebContent.CaptivePortal` 5774、`WebContent.Development` 1703、`WebContent` 5473，差异来自各自权限块的字节长度。所以「5936」只能用于 GPU，不能当成五个 helper 的统称。
 
@@ -374,7 +374,7 @@ Alternate #0 槽的四个性质与主槽相同：identifier 同为 `WebKit`、`n
 
 「两槽合计」一列是 `slot 0x00000` 与 `slot 0x01000` 的 `nCode` 之和，与逐槽数字是同一批读数的两种记法，不是两套来源。
 
-`.xpc` helper 的 `nSpecial = 7`，比 `WebKit` 的 2 多出五个特殊槽位（`Info.plist`、`Requirements`、资源目录等），`nCode` 仍然只有 13，因为文件不到 50 KB。
+`.xpc` helper 与 `jsc` 的 `nSpecial = 7`，比 `WebKit` 的 2 多出五个特殊槽位（`Info.plist`、`Requirements`、资源目录等）。五个 helper 的 `nCode` 仍然只有 13，因为文件都不到 60 KB；`jsc` 是 109，因为它是完整的 JavaScript 命令行宿主。全 payload 扫描里 `nSpecial` 只有两种取值：五个 `.xpc` helper 与 `jsc` 这六个是 7，其余十个是 2。
 
 ### 5.4 这批读数说明了什么，以及说不了什么
 
@@ -461,9 +461,18 @@ $ llvm-nm -arch arm64e -m WebKit.framework/WebKit | grep WTFSignpost...
 > __ZZN6WebKit14XPCServiceMainEiPPKcE17createMachService
 ```
 
-前两条是补丁新增的静态变量（`createMachService` 本体与它的 guard），第三条是一个匿名 block literal 的编号从 `.127` 变成 `.129`，属于编译器内部计数，不是新接口。其余 131105 条符号名两边一致，包括全部 97286 个 `__text` 符号。
+前两条是补丁新增的静态变量（`createMachService` 本体与它的 guard），第三条是一个匿名 block literal 的编号从 `.127` 变成 `.129`，属于编译器内部计数，不是新接口。其余 131105 条符号名两边一致。
 
-`__text` 符号的地址差也逐条对齐了：97286 个共有符号全部同时存在于两边，只在第 3.4 节列出的六处发生位移。
+`__text` 里的符号按名字去重后新旧两边都是 97286 个，且两个集合完全相同：
+
+```sh
+# 对一个 WebKit，`t`/`T` 是按节归类的本地/全局代码符号
+llvm-nm --defined-only <WebKit> | awk '$2=="t"||$2=="T"{print $3}' | sort -u | wc -l   # 97286
+```
+
+这里必须带 `sort -u`：`llvm-nm` 对同一个名字有别名或本地副本时会打印多行，不去重数的是行数而不是名字数（同一份文件前者约 110525 行）。对两个包各跑一遍再 `comm`，交集 97286、两侧差集都为空。
+
+`__text` 符号的地址差也逐条对齐了：这 97286 个共有符号全部同时存在于两边，只在第 3.4 节列出的六处发生位移。
 
 ## 7. 安装行为：deb 自己不建覆盖目录
 
@@ -543,13 +552,15 @@ plist 的 `RunLoopType = NSRunLoop` 描述的是系统 16.1 那套 stub 被构�
 | 5 | 确认页面渲染 | 设备上的截图工具或 `applicationState.db` 读取 | 同 4 |
 | 6 | 反汇编整个 `WebKit` 的 `.text` 做交叉引用（本机只做了 `XPCServiceMain` 附近与调用点计数） | 本机 `llvm-objdump` 可以，但没有做完整调用图 | 不是工具缺失，是本次范围外 |
 | 7 | 确认 `libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`、`adattributiond`、`webpushd` 的符号 | 本机 `llvm-nm` 可以，本次只对五个 framework 与五个 helper 做了 A/B | 同 6 |
-| 8 | 用 `rcodesign` 读五个 helper 的权限声明 | 本机 `rcodesign` 0.29.0 读了会报 `Wrapped codec-specific decode error / Codec: BER`，并以退出码 1 结束 | 这是该版本读 DER 权限块的缺陷；本文的权限表是用自己的 plist 解析器从 `slot 0x00005` 的 XML 读出来的 |
+| 8 | 用 `rcodesign` 读五个 helper 的权限声明 | 本机 `rcodesign` 0.29.0 读了会报 `Wrapped codec-specific decode error / Codec: BER`，并以退出码 1 结束 | 这是该版本读 DER 权限块的缺陷；本文的权限表是用一次性的 plist 解析脚本从 `slot 0x00005` 的 XML 读出来的 |
 
 第 1 条的缺口有实际后果：逐页重算证明「签名与文件字节自洽」，不证明「系统会接受这份签名」。两者是不同命题，而后者在本机上没有可用的判据。
 
 ## 10. 取证环境与复现命令
 
-工具（全部在本机 `/usr/bin/`）：`llvm-otool`、`llvm-objdump`、`llvm-nm`、`dpkg-deb`、`python3`、`gh`。签名解析用 `.tmp/verify/sigparse.py` 改造后的脚本，全 16 个映像的扫描脚本在 `.tmp/m170/scan.py`。
+工具（全部在本机 `/usr/bin/`）：`llvm-otool`、`llvm-objdump`、`llvm-nm`、`dpkg-deb`、`python3`、`gh`。
+
+第 4、5 节里「16 个映像」那几组读数来自两个自己写的一次性 Python 脚本，**它们没有入库**，所以本节把完整内容贴在下面，任何人都能另存为文件复跑。本节给出的每条命令与读数都在写这一版文档时实跑过一次。
 
 ```sh
 # 解包
@@ -557,10 +568,15 @@ D=/home/real186/project/ipad-pro-m2/.tmp/deb-45874174324
 dpkg-deb -x $D/webkit-rootless.deb $D/x
 dpkg-deb -f $D/webkit-rootless.deb Package Version
 
-# 字符串常量
+# 旧包从 artifacts 重新展开（源文件 sha256 见第 1.2 节）
+TMP=/home/real186/project/ipad-pro-m2/.tmp/m170
+mkdir -p $TMP/old && dpkg-deb -x /home/real186/project/ipad-pro-m2/artifacts/webkit-rootless.deb $TMP/old
+sha256sum $TMP/old/var/jb/Library/Frameworks/WebKit.framework/WebKit   # a305c1f4d8f11f9c...
+
 NEW=$D/x/var/jb/Library/Frameworks/WebKit.framework/WebKit
-OLD=/home/real186/project/ipad-pro-m2/.tmp/verify/old/var/jb/Library/Frameworks/WebKit.framework/WebKit
-# 若该目录已不在，见本节末尾的重新展开命令
+OLD=$TMP/old/var/jb/Library/Frameworks/WebKit.framework/WebKit
+
+# 字符串常量
 grep -a -o -- 'xpc_connection_create_mach_service' $NEW | wc -l   # 2
 grep -a -o -- 'xpc_connection_create_mach_service' $OLD | wc -l   # 0
 
@@ -570,32 +586,134 @@ llvm-objdump -d --macho --arch=arm64e --no-show-raw-insn $NEW > /path/to/new.dis
 grep -n '^__ZN6WebKit14XPCServiceMainEiPPKc:' /path/to/new.dis
 grep -n '^____ZN6WebKit14XPCServiceMainEiPPKc_block_invoke:' /path/to/new.dis
 
-# load command
-llvm-otool -l $NEW | grep -A6 'LC_BUILD_VERSION\|LC_RPATH\|LC_DYLD_ENVIRONMENT'
-
 # 符号
 llvm-nm -arch arm64e -m $NEW | grep WTFSignpostIndirectLoggingEnabled
 llvm-nm -u -arch arm64e $NEW | awk '{print $NF}' | sort | sha256sum
-
-# 签名
-python3 .tmp/verify/sigparse.py $NEW
+llvm-nm --defined-only $NEW | awk '$2=="t"||$2=="T"{print $3}' | sort -u | wc -l   # 97286
 
 # 签名的第二意见（独立实现）
 R=/home/real186/project/ipad-pro-m2/artifacts/tools/apple-codesign-0.29.0-x86_64-unknown-linux-musl/rcodesign
 $R print-signature-info $NEW | head -30      # blob_count: 3，无 CMS 槽
 $R verify $NEW                              # no cryptographic signature present
 $R compute-code-hashes $NEW | wc -l         # 12247
-
-# 全 payload 扫描（16 个映像的 minos/sdk/签名/环境变量）
-python3 .tmp/m170/scan.py $D/x/var/jb
 ```
 
-旧包的解包产物 `OLD` 是 `artifacts/webkit-rootless.deb` 展开后的路径；本次会话中 `.tmp/verify/old/` 被别的进程删过一次，重新从 `artifacts/` 展开后 `WebKit` 的 sha256 仍是 `a305c1f4…`，第 1.2 节那条来源确认因此可以随时复跑：
+### 10.1 load command 全量扫描
+
+`llvm-otool -l` 只能一个文件一个文件读，而且要在一份几十万行的输出里 `grep`。下面的脚本直接读 Mach-O 头与 load command 区，一次给出 16 个映像的 `filetype`、`minos`/`sdk`、`LC_RPATH`（`0x8000001c`）与 `LC_DYLD_ENVIRONMENT`（`0x27`）的条数与内容。它只读文件头之后的 `sizeofcmds` 字节，不读整份二进制，所以对 93 MB 的 `WebCore` 也是瞬间返回。
 
 ```sh
-mkdir -p $TMPDIR/old && dpkg-deb -x /home/real186/project/ipad-pro-m2/artifacts/webkit-rootless.deb $TMPDIR/old
-sha256sum $TMPDIR/old/var/jb/Library/Frameworks/WebKit.framework/WebKit   # a305c1f4d8f11f9c...
+cat > /tmp/artifact-scan.py <<'PY'
+import struct, sys
+
+MAGICS = {0xfeedfacf, 0xcffaedfe}          # MH_MAGIC_64 的两种字节序
+
+def read(path):
+    with open(path, "rb") as f:
+        hdr = f.read(32)
+        if len(hdr) < 32 or struct.unpack_from("<I", hdr, 0)[0] not in MAGICS:
+            return None                     # 不是 Mach-O，跳过（Assets.car 等）
+        n = struct.unpack_from("<I", hdr, 16)[0]
+        sizeofcmds = struct.unpack_from("<I", hdr, 20)[0]
+        body = f.read(sizeofcmds)
+    if len(body) < sizeofcmds:
+        return None
+    filetype = struct.unpack_from("<I", hdr, 12)[0]
+    off, minos, sdk, rpaths, denyv = 0, None, None, [], []
+    for _ in range(n):
+        if off + 8 > len(body):
+            break
+        cmd, sz = struct.unpack_from("<II", body, off)
+        if sz < 8:
+            break
+        if cmd == 0x32 and off + 20 <= len(body):        # LC_BUILD_VERSION
+            a, b = struct.unpack_from("<II", body, off + 12)
+            minos = "%d.%d.%d" % (a >> 16, (a >> 8) & 0xff, a & 0xff)
+            sdk = "%d.%d.%d" % (b >> 16, (b >> 8) & 0xff, b & 0xff)
+        elif cmd in (0x8000001c, 0x27) and off + sz <= len(body):
+            no = struct.unpack_from("<I", body, off + 8)[0]   # LC_RPATH / LC_DYLD_ENVIRONMENT
+            s = body[off + no:off + sz].split(b"\0")[0].decode("utf-8", "replace")
+            (rpaths if cmd == 0x8000001c else denyv).append(s)
+        off += sz
+    return filetype, minos, sdk, rpaths, denyv
+
+for path in sys.argv[1:]:
+    try:
+        r = read(path)
+    except Exception as exc:
+        print("ERR  %s  %s" % (path, exc))
+        continue
+    if r is None or r[1] is None:
+        continue
+    filetype, minos, sdk, rpaths, denyv = r
+    print("%-56s type=%d minos=%s sdk=%s rpath=%d denyv=%d"
+          % (path.split("var/jb/")[-1], filetype, minos, sdk, len(rpaths), len(denyv)))
+    for s in rpaths:
+        print("    RPATH %s" % s)
+    for s in denyv:
+        print("    DENV  %s" % s)
+PY
+
+# 只看 Mach-O：按大小粗筛后再交给脚本，脚本自己再按魔数确认
+find $D/x/var/jb -type f -size +4k | sort | xargs python3 /tmp/artifact-scan.py | tee /tmp/new.txt
+find $TMP/old/var/jb -type f -size +4k | sort | xargs python3 /tmp/artifact-scan.py | tee /tmp/old.txt
+diff <(sed 's|^Library/||' /tmp/new.txt) <(sed 's|^Library/||' /tmp/old.txt)   # 无输出
 ```
+
+新包这一次的输出共 16 行 `type=` 记录，可按两列清点：
+
+```sh
+awk '{print $2}' /tmp/new.txt | sort | uniq -c
+#       8 type=2
+#       8 type=6
+```
+
+`type=2` 是 `MH_EXECUTE`：五个 `.xpc` helper、`jsc`、`adattributiond`、`webpushd`。`type=6` 是 `MH_DYLIB`：五个 framework 加 `libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`。全部 16 行的 `minos` 都是 `16.1.0`、`sdk` 都是 `18.5.0`。`DENV` 行一共有 21 条：五个 helper 各 4 条、`jsc` 1 条，其余十个映像没有 `LC_DYLD_ENVIRONMENT`。
+
+`Assets.car`、`corePrediction_model`、`.svg`、`.wav`、`CodeResources` 这些不是 Mach-O 的文件被脚本按魔数跳过；若不做这一步，load command 循环会拿非 Mach-O 数据的头几个字节当前导，读出天文数字的长度并卡住。
+
+### 10.2 签名槽与 CodeDirectory 参数
+
+```sh
+cat > /tmp/artifact-slots.py <<'PY'
+import struct, sys
+
+MAGICS = {0xfeedfacf, 0xcffaedfe}
+
+for path in sys.argv[1:]:
+    with open(path, "rb") as f:
+        hdr = f.read(32)
+        if len(hdr) < 32 or struct.unpack_from("<I", hdr, 0)[0] not in MAGICS:
+            continue
+        n = struct.unpack_from("<I", hdr, 16)[0]
+        body = f.read(struct.unpack_from("<I", hdr, 20)[0])
+        off, cs = 0, None
+        for _ in range(n):
+            cmd, sz = struct.unpack_from("<II", body, off)
+            if cmd == 0x1d:                              # LC_CODE_SIGNATURE
+                cs = struct.unpack_from("<II", body, off + 8)
+            off += sz
+        if cs is None:
+            continue
+        f.seek(cs[0])
+        blob = f.read(cs[1])
+    count = struct.unpack_from(">I", blob, 8)[0]
+    slots, values = [], None
+    for i in range(count):
+        slot, o = struct.unpack_from(">II", blob, 12 + i * 8)
+        slots.append("0x%x" % slot)
+        if slot == 0:                                    # CSSLOT_CODEDIRECTORY
+            values = (struct.unpack_from(">I", blob, o + 24)[0],
+                      struct.unpack_from(">I", blob, o + 28)[0])
+    print("%-56s count=%d slots=%s nSpecial=%s nCode=%s"
+          % (path.split("var/jb/")[-1], count, ",".join(slots),
+             values[0] if values else "-", values[1] if values else "-"))
+PY
+
+find $D/x/var/jb -type f -size +4k | sort | xargs python3 /tmp/artifact-slots.py
+```
+
+输出 16 行，只有两种形状：五个 `.xpc` helper 与 `jsc` 是 `count=5 slots=0x0,0x2,0x5,0x7,0x1000 nSpecial=7`（`jsc` 的 `nCode=109`，其余五个 `nCode=13`）；其余十个是 `count=3 slots=0x0,0x2,0x1000 nSpecial=2`，`nCode` 从 13 到 22498 不等。`nSpecial` 与 `nCode` 都在 CodeDirectory 头里，偏移分别是 24 与 28。
 
 四个踩过的坑，写在这里免得重复：
 
