@@ -115,8 +115,10 @@ The [WebKit workflow](.github/workflows/build-webkit.yml) defaults to the Safari
 patches enabled and builds for arm64e with an iOS 16.1 deployment target. A successful run publishes
 `webkit-rootless.deb` and `webkit-rootless.build-info` in the `webkit-rootless-deb` artifact. The
 build info records the archive SHA-256, the WebKit and workflow revisions, and the build inputs.
-The upload uses the exact archive that passed the package checks. The cache report lists which
-archive was restored separately from the hit rate measured during compilation.
+The upload uses the exact archive that passed the package checks and requires the complete build
+info to match the verified inputs. The package checks require every slice of each required
+framework and `libwebrtc.dylib` to be a Mach-O dynamic library. The cache report lists which archive
+was restored separately from the hit rate measured during compilation.
 
 ## How to use
 

@@ -89,7 +89,7 @@ check() {
     pass=$(( pass + 1 ))
 }
 
-# write_macho <path> <minos> <cputype> <cpusubtype> [<platform>]
+# write_macho <path> <minos> <cputype> <cpusubtype> [<platform> [<filetype>]]
 write_macho() {
     python3 - "$@" <<'PY'
 import struct, sys
@@ -98,13 +98,18 @@ major, minor = (int(x) for x in minos.split('.'))
 MH_MAGIC_64 = 0xfeedfacf
 LC_BUILD_VERSION = 0x32
 platform = int(sys.argv[5]) if len(sys.argv) > 5 else 2
+filetype = int(sys.argv[6]) if len(sys.argv) > 6 else 2
 TOOL_LD = 3
-header = struct.pack('<IIIIIIII', MH_MAGIC_64, int(cputype, 0) & 0xffffffff,
-                     int(cpusubtype, 0) & 0xffffffff, 2, 1, 32, 0, 0)
-command = struct.pack('<IIIIII', LC_BUILD_VERSION, 32, platform,
-                      (major << 16) | (minor << 8), 18 << 16, 1)
-command += struct.pack('<II', TOOL_LD, 0)
-open(path, 'wb').write(header + command)
+commands = [struct.pack('<8I', LC_BUILD_VERSION, 32, platform,
+                        (major << 16) | (minor << 8), 18 << 16, 1, TOOL_LD, 0)]
+if filetype == 6:  # MH_DYLIB requires LC_ID_DYLIB.
+    name = b'@rpath/test.dylib\0'
+    name += b'\0' * (-len(name) % 8)
+    commands.append(struct.pack('<6I', 0xd, 24 + len(name), 24, 0, 0, 0) + name)
+header = struct.pack('<8I', MH_MAGIC_64, int(cputype, 0) & 0xffffffff,
+                     int(cpusubtype, 0) & 0xffffffff, filetype, len(commands),
+                     sum(map(len, commands)), 0, 0)
+open(path, 'wb').write(header + b''.join(commands))
 PY
 }
 
@@ -187,6 +192,38 @@ check "a matching slice does not excuse a slice outside the declared target" 1 "
     "${CHECKER}" --deb "${WORK}/fat-good.deb" --arch arm64e
 check "an incomplete WebKit layout is rejected" 1 "missing executable Mach-O file at required package path" \
     "${CHECKER}" --deb "${WORK}/thin-good.deb" --require-webkit-layout
+
+# Match platform, architecture and deployment version in both slices, so only
+# the filetype distinguishes the good package from the broken ones.
+write_macho "${WORK}/dylib-a" 16.1 0x0100000C 0 2 6
+write_macho "${WORK}/dylib-e" 16.1 0x0100000C 0x80000002 2 6
+"${LIPO_BIN}" -create "${WORK}/dylib-a" "${WORK}/dylib-e" -output "${WORK}/fat-dylib"
+"${LIPO_BIN}" -create "${WORK}/dylib-a" "${WORK}/fat-good-e" -output "${WORK}/fat-wrong-filetype"
+
+layout="${WORK}/layout"
+mkdir -p "${layout}/DEBIAN" "${layout}/var/jb/usr/lib"
+for framework in WebKit WebCore WebKitLegacy JavaScriptCore; do
+    mkdir -p "${layout}/var/jb/Library/Frameworks/${framework}.framework"
+    cp "${WORK}/fat-dylib" "${layout}/var/jb/Library/Frameworks/${framework}.framework/${framework}"
+done
+dpkg-deb -e "${WORK}/thin-good.deb" "${layout}/DEBIAN"
+webrtc="${layout}/var/jb/usr/lib/libwebrtc.dylib"
+cp "${WORK}/fat-dylib" "${webrtc}"
+chmod +x "${webrtc}" "${layout}"/var/jb/Library/Frameworks/*.framework/*
+dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-good.deb" >/dev/null
+check "all required paths contain dylibs in every slice" 0 "Result: PASS" \
+    "${CHECKER}" --deb "${WORK}/layout-good.deb" --require-webkit-layout
+cp "${WORK}/fat-wrong-filetype" "${webrtc}"
+dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-wrong-dylib.deb" >/dev/null
+check "libwebrtc rejects an executable slice despite a matching dylib slice" 1 \
+    "var/jb/usr/lib/libwebrtc.dylib: arm64e expected MH_DYLIB (6), got filetype 2" \
+    "${CHECKER}" --deb "${WORK}/layout-wrong-dylib.deb" --require-webkit-layout
+cp "${WORK}/fat-dylib" "${webrtc}"
+cp "${WORK}/thin-16.1" "${layout}/${WEBKIT_REL}"
+dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-wrong-framework.deb" >/dev/null
+check "a framework path rejects an executable Mach-O" 1 \
+    "${WEBKIT_REL}: - expected MH_DYLIB (6), got filetype 2" \
+    "${CHECKER}" --deb "${WORK}/layout-wrong-framework.deb" --require-webkit-layout
 
 write_macho "${WORK}/fat-simulator" 16.1 0x0100000C 0x80000002 7
 "${LIPO_BIN}" -create "${WORK}/fat-a" "${WORK}/fat-simulator" -output "${WORK}/fat-wrong-platform"

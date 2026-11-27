@@ -221,7 +221,7 @@ read_slice_versions() {
         function flush_slice() {
             if (!slice_index) return
             name = (slice_name != "") ? slice_name : (fat ? "slice-" slice_index : "-")
-            print name, (platform != "" ? platform : "none"), (minos != "" ? minos : "none"), cpu, versions
+            print name, (platform != "" ? platform : "none"), (minos != "" ? minos : "none"), cpu, versions, filetype
         }
         / \(architecture / {
             banner = $0
@@ -235,10 +235,11 @@ read_slice_versions() {
             slice_name = banner
             banner = platform = minos = ""
             in_build = in_legacy = versions = 0
-            cpu = "unknown"
+            cpu = filetype = "unknown"
             next
         }
         $1 == "0xfeedfacf" {
+            if ($5 ~ /^[0-9]+$/) filetype = $5
             if ($2 != 16777228) cpu = "type-" $2
             else if ($3 == 0 || $3 == 1) cpu = "arm64"
             else if ($3 == 2) cpu = "arm64e"
@@ -314,13 +315,16 @@ print_rule() {
 }
 
 check_slices() {
-    local rel="$1" declared_slices="$2" headers="$3"
-    local rows arch platform minos cpu versions
+    local rel="$1" declared_slices="$2" headers="$3" expected_type="${4:-}"
+    local rows arch platform minos cpu versions filetype
     local expected_slices=$(( declared_slices > 0 ? declared_slices : 1 ))
     typeset -a slice_minos=()
     rows="$(read_slice_versions "${declared_slices}" <<< "${headers}")"
     if [[ -n "${rows}" ]]; then
-        while read -r arch platform minos cpu versions; do
+        while read -r arch platform minos cpu versions filetype; do
+            if [[ "${expected_type}" == dylib && "${filetype}" != 6 ]]; then
+                DEB_FAILURES+=("${rel}: ${arch} expected MH_DYLIB (6), got filetype ${filetype}")
+            fi
             if [[ "${arch}" == "-" ]]; then
                 slice_minos+=("${platform} ${minos} (${cpu})")
             else
@@ -399,12 +403,16 @@ check_deb() {
         exit 2
     fi
 
+    typeset -A expected_types=()
     if [[ "${REQUIRE_WEBKIT_LAYOUT}" == 1 ]]; then
         local required_image
         for required_image in "${CHECKED_BINARIES[@]}" "${OPTIONAL_BINARIES[@]}"; do
-            require_packaged_image "${unpack_dir}" "var/jb/Library/Frameworks/${required_image}"
+            expected_types[var/jb/Library/Frameworks/${required_image}]=dylib
         done
-        require_packaged_image "${unpack_dir}" var/jb/usr/lib/libwebrtc.dylib
+        expected_types[var/jb/usr/lib/libwebrtc.dylib]=dylib
+        for required_image in "${(@k)expected_types}"; do
+            require_packaged_image "${unpack_dir}" "${required_image}"
+        done
     fi
 
     typeset -a candidates=()
@@ -443,7 +451,7 @@ check_deb() {
             printf 'Error: llvm-objdump failed to read %s\n' "${rel}" >&2
             exit 2
         fi
-        check_slices "${rel}" "${declared_slices}" "${headers}"
+        check_slices "${rel}" "${declared_slices}" "${headers}" "${expected_types[$rel]:-}"
         if [[ "${#DEB_FAILURES}" -gt "${previous_failures}" ]]; then
             image_fatal=1
         fi

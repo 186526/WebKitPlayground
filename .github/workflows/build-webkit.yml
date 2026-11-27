@@ -95,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           command -v ccache || brew install ccache
-          ccache --version | head -1
+          ccache --version | head -1 || echo '::warning::Could not report the ccache version.'
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
           # base_dir strips the per-run checkout prefix from the hashed file paths.
@@ -137,7 +137,8 @@ jobs:
           # without spending build time on maximum compression.
           ccache --set-config=compression=true
           ccache --set-config=compression_level=6
-          ccache -p | grep -E 'cache_dir|base_dir|hash_dir|compiler_check|sloppiness|max_size|compression'
+          ccache -p | grep -E 'cache_dir|base_dir|hash_dir|compiler_check|sloppiness|max_size|compression' \
+            || echo '::warning::Could not report the ccache configuration.'
 
       - name: Restore ccache
         id: ccache
@@ -1312,11 +1313,7 @@ jobs:
           checksum=$(shasum -a 256 "$deb")
           digest=${checksum%% *}
           IFS=' ' read -r source_digest _ < "$RUNNER_TEMP/webkit-proxy-source.sha256"
-          printf '%s\n' \
-            "archive=webkit-rootless.deb" "sha256=$digest" "proxy_source_sha256=$source_digest" \
-            "webkit_ref=$WEBKIT_REF" "webkit_commit=$WEBKIT_COMMIT" "workflow_commit=$GITHUB_SHA" \
-            "apply_patch=$APPLY_PATCH" "xcode=$XCODE" "arch=$WK_BUILD_ARCH" "max_minos=$WK_BUILD_DEPLOYMENT_TARGET" \
-            "run_id=$GITHUB_RUN_ID" "run_attempt=$GITHUB_RUN_ATTEMPT" > "$provenance"
+          python3 scripts/write-webkit-build-info.py "$deb" "$digest" "$source_digest" > "$provenance"
           printf 'deb=%s\nprovenance=%s\nsha256=%s\nproduct=%s\n' \
             "$deb" "$provenance" "$digest" "$product" >> "$GITHUB_OUTPUT"
 
@@ -1328,19 +1325,26 @@ jobs:
           EXPECTED_SHA: ${{ steps.package.outputs.sha256 }}
           PRODUCT: ${{ steps.package.outputs.product }}
           WEBKIT_COMMIT: ${{ steps.webkit-source.outputs.commit }}
+          WEBKIT_REF: ${{ inputs.webkit_ref }}
+          APPLY_PATCH: ${{ inputs.apply_patch }}
+          XCODE: ${{ inputs.xcode }}
         run: |
           set -euo pipefail
           checksum=$(shasum -a 256 "$DEB")
           test "${checksum%% *}" = "$EXPECTED_SHA"
           test "$(git -C WebKit rev-parse HEAD)" = "$WEBKIT_COMMIT"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           zsh scripts/package-webkit-device-deb.sh --verify-deb "$DEB" --rootless
           zsh scripts/check-ios-deployment-gates.sh --deb "$DEB" --require-webkit-layout \
             --arch "$WK_BUILD_ARCH" --max-minos "$WK_BUILD_DEPLOYMENT_TARGET"
           python3 scripts/check-xpc-service-bundle-identifiers.py --deb "$DEB" --rootless
           python3 scripts/check-corecrypto-curve25519-imports.py --deb "$DEB"
-          shasum -a 256 -c "$RUNNER_TEMP/webkit-proxy-source.sha256"
           IFS=' ' read -r source_digest _ < "$RUNNER_TEMP/webkit-proxy-source.sha256"
-          grep -qxF "proxy_source_sha256=$source_digest" "$PROVENANCE"
+          source_checksum=$(shasum -a 256 "$WK_PROXY_SOURCE")
+          if [ "${source_checksum%% *}" != "$source_digest" ]; then
+            echo '::error::The verified source differs from the pre-build checksum.'
+            exit 1
+          fi
           python3 scripts/check-network-session-proxy-configurations.py --source "$WK_PROXY_SOURCE"
           python3 scripts/test-check-xpc-service-bundle-identifiers.py
           python3 scripts/test-check-network-session-proxy-configurations.py
@@ -1368,9 +1372,12 @@ jobs:
 
           checksum=$(shasum -a 256 "$DEB")
           test "${checksum%% *}" = "$EXPECTED_SHA"
-          grep -qxF "sha256=$EXPECTED_SHA" "$PROVENANCE"
-          grep -qxF "webkit_commit=$WEBKIT_COMMIT" "$PROVENANCE"
-          grep -qxF "workflow_commit=$GITHUB_SHA" "$PROVENANCE"
+          python3 scripts/write-webkit-build-info.py "$DEB" "${checksum%% *}" "$source_digest" \
+            > "$control/expected.build-info"
+          if ! cmp -s "$control/expected.build-info" "$PROVENANCE"; then
+            echo '::error::Build info does not match the verified archive and build inputs.'
+            exit 1
+          fi
           printf 'deb=%s\nprovenance=%s\n' "$DEB" "$PROVENANCE" >> "$GITHUB_OUTPUT"
 
       - name: Upload deb
