@@ -308,7 +308,14 @@ $ rcodesign print-signature-info WebKit.framework/WebKit
           signed_entity_size: 50160320
 ```
 
-`rcodesign` 是 `artifacts/tools/apple-codesign-0.29.0-x86_64-unknown-linux-musl/rcodesign`（0.29.0），与本文自己的 superblob 走查是两套实现，得到同一组数字（长度 637298、3 个槽、`codeLimit` 50160320）。它对 `WebKit` 与另外四个 framework 都正常输出；对五个带 Entitlements 槽的 helper 会报 `error with plist DER encoding: Wrapped codec-specific decode error / Codec: BER` —— 这是 `rcodesign` 0.29.0 读 DER 权限块时的缺陷，不是签名损坏：那些块的 tag 与长度字段本身是合法的（`0x30` 82 05 30 1a …），而且 `rcodesign compute-code-hashes` 对同一份文件仍能算出完整页哈希（`WebKit` 12247 行）。
+`rcodesign` 是 `artifacts/tools/apple-codesign-0.29.0-x86_64-unknown-linux-musl/rcodesign`（0.29.0），与本文自己的 superblob 走查是两套实现，得到同一组数字（长度 637298、3 个槽、`codeLimit` 50160320）。它对 `WebKit` 与另外四个 framework 都正常输出（退出码 0）；对五个带 Entitlements 槽的 helper 会报 `error with plist DER encoding: Wrapped codec-specific decode error / Codec: BER`，并**以退出码 1 结束** —— 这是 `rcodesign` 0.29.0 读 DER 权限块时的缺陷，不是签名损坏：那些块的 tag 与长度字段本身是合法的（`0x30` 82 05 30 1a …），而且 `rcodesign compute-code-hashes` 对同一份文件仍能算出完整页哈希（`WebKit` 12247 行）。
+
+```
+$ rcodesign print-signature-info .../com.apple.WebKit.GPU; echo $?
+Error: error with plist DER encoding: Error Kind: Wrapped codec-specific decode error
+Codec: BER
+1
+```
 
 `rcodesign verify` 另一个独立结论：
 
@@ -325,7 +332,16 @@ no cryptographic signature present
         cms: null
 ```
 
-`cms: null` 与「`0x10000` 槽缺席」是同一事实的两种表述。同处的 `code_requirements` 是 `designated(3): 0: (identifier "WebKit") and ((anchor apple generic) and ((certificate leaf[subject.CN] = "") ...))`——这是一条写在 Requirements 里的**规则**，引用的是一个并不存在的空 CN 证书，不是一份实际的签名。读这段字符串时不要把它当成「有证书链」的证据。
+`cms: null` 与「`0x10000` 槽缺席」是同一事实的两种表述。它比 `verify` 子命令那句更干净，因为工具自己已经声明 `verify` 会给出误导结果。
+
+同处的 `code_requirements` 是：
+
+```
+designated(3): 0: (identifier "WebKit") and ((anchor apple generic) and
+  ((certificate leaf[subject.CN] = "") and (certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */)));
+```
+
+这是一条写在 Requirements 里的**规则**，不是一份实际签名。它的锚是 `anchor apple generic`，即「证书链要能被 Apple 的锚验过」；而 `cms: null` 说明根本没有证书链。**嵌入的 requirement 与缺席的 CMS 互相矛盾**：任何按这条 requirement 校验的一方都会判定不通过。设备上这些二进制能跑，靠的是越狱绕过这条检查，而不是满足它。读这段字符串时不要把它当成「有证书链」的证据。
 
 ### 5.2 CodeDirectory 参数
 
@@ -527,7 +543,7 @@ plist 的 `RunLoopType = NSRunLoop` 描述的是系统 16.1 那套 stub 被构�
 | 5 | 确认页面渲染 | 设备上的截图工具或 `applicationState.db` 读取 | 同 4 |
 | 6 | 反汇编整个 `WebKit` 的 `.text` 做交叉引用（本机只做了 `XPCServiceMain` 附近与调用点计数） | 本机 `llvm-objdump` 可以，但没有做完整调用图 | 不是工具缺失，是本次范围外 |
 | 7 | 确认 `libWebKitSwift.dylib`、`libANGLE-shared.dylib`、`libwebrtc.dylib`、`adattributiond`、`webpushd` 的符号 | 本机 `llvm-nm` 可以，本次只对五个 framework 与五个 helper 做了 A/B | 同 6 |
-| 8 | 用 `rcodesign` 读五个 helper 的权限声明 | 本机 `rcodesign` 0.29.0 读了会报 `Wrapped codec-specific decode error / Codec: BER` | 这是该版本读 DER 权限块的缺陷；本文的权限表是用自己的 plist 解析器从 `slot 0x00005` 的 XML 读出来的 |
+| 8 | 用 `rcodesign` 读五个 helper 的权限声明 | 本机 `rcodesign` 0.29.0 读了会报 `Wrapped codec-specific decode error / Codec: BER`，并以退出码 1 结束 | 这是该版本读 DER 权限块的缺陷；本文的权限表是用自己的 plist 解析器从 `slot 0x00005` 的 XML 读出来的 |
 
 第 1 条的缺口有实际后果：逐页重算证明「签名与文件字节自洽」，不证明「系统会接受这份签名」。两者是不同命题，而后者在本机上没有可用的判据。
 
