@@ -787,6 +787,10 @@ jobs:
           }
           python3 scripts/test-check-translation-switch.py
 
+      - name: Check registered-port helper spawn default
+        if: inputs.apply_patch
+        run: python3 scripts/check-registered-port-spawn.py
+
       - name: Refuse a build that ships a WebCore which cannot dlopen
         env:
           APPLY_PATCH: ${{ inputs.apply_patch }}
