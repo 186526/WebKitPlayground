@@ -109,6 +109,15 @@ other pair.
 The message numbering difference and the translation layer that closes it are designed in
 `docs/ios16-ipc-message-number-translation.md`.
 
+## CI device build artifacts
+
+The [WebKit workflow](.github/workflows/build-webkit.yml) defaults to the Safari 18.3.1 tag with
+patches enabled and builds for arm64e with an iOS 16.1 deployment target. A successful run publishes
+`webkit-rootless.deb` and `webkit-rootless.build-info` in the `webkit-rootless-deb` artifact. The
+build info records the archive SHA-256, the WebKit and workflow revisions, and the build inputs.
+The upload uses the exact archive that passed the package checks. The cache report lists which
+archive was restored separately from the hit rate measured during compilation.
+
 ## How to use
 
 1. We need to [patch dyld](https://github.com/Lessica/Dopamine/blob/rh2.x_modify_white/BaseBin/dyldhook/src/roothider.c) to allow `DYLD_FRAMEWORK_PATH` to work on top of DSC

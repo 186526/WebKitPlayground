@@ -7,6 +7,7 @@ SCRIPT_NAME="$(basename "$0")"
 SOURCE_DIR="${ROOT_DIR}/WebKit"
 PRODUCT_DIR="${SOURCE_DIR}/WebKitBuild/Debug-iphoneos"
 OUTPUT_TAR=""
+ARCHIVE_WORK_DIR=""
 PUSH_TO_DEVICE=0
 SSH_TARGET="iproxy"
 SSH_HOST=""
@@ -160,6 +161,9 @@ PAYLOAD_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1
 
 cleanup() {
     rm -rf "${WORK_DIR}"
+    if [[ -n "${ARCHIVE_WORK_DIR:-}" ]]; then
+        rm -rf "${ARCHIVE_WORK_DIR}"
+    fi
 }
 trap cleanup EXIT
 
@@ -190,15 +194,12 @@ typeset -a ondemand_items=(
     "com.apple.WebKit.WebAuthn.xpc"
 )
 
-copy_item_if_exists() {
+copy_item() {
     local item="$1"
-    local src="${PRODUCT_DIR}/${item}"
-    local dst="${PAYLOAD_DIR}/${item}"
-    if [[ -e "${src}" ]]; then
-        ditto "${src}" "${dst}"
-        return 0
-    fi
-    return 1
+    ditto "${PRODUCT_DIR}/${item}" "${PAYLOAD_DIR}/${item}" || {
+        log_error "Failed to copy build artifact: ${item}"
+        exit 1
+    }
 }
 
 item_is_already_covered_in_framework() {
@@ -213,28 +214,29 @@ item_is_already_covered_in_framework() {
 }
 
 for item in "${required_items[@]}"; do
-    if ! copy_item_if_exists "${item}"; then
+    if [[ ! -e "${PRODUCT_DIR}/${item}" ]]; then
         log_error "Missing required artifact: ${item}"
         exit 1
     fi
+    copy_item "${item}"
 done
 
 for item in "${recommended_items[@]}"; do
-    if ! copy_item_if_exists "${item}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
+    if [[ -e "${PRODUCT_DIR}/${item}" ]]; then
+        copy_item "${item}"
+    elif item_is_already_covered_in_framework "${item}"; then
+        log_info "${item} already covered via WebKit.framework subdirectory."
+    else
         log_warn "recommended artifact not found: ${item}"
     fi
 done
 
 for item in "${ondemand_items[@]}"; do
-    if ! copy_item_if_exists "${item}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
+    if [[ -e "${PRODUCT_DIR}/${item}" ]]; then
+        copy_item "${item}"
+    elif item_is_already_covered_in_framework "${item}"; then
+        log_info "${item} already covered via WebKit.framework subdirectory."
+    else
         log_note "on-demand artifact not found: ${item}"
     fi
 done
@@ -367,9 +369,16 @@ done < <(find "${PAYLOAD_DIR}" -type f -print0)
 
 log_step "Creating tarball..."
 mkdir -p "$(dirname "${OUTPUT_TAR}")"
-COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 "${TAR_BIN}" -czf "${OUTPUT_TAR}" \
+ARCHIVE_WORK_DIR="$(mktemp -d "$(dirname "${OUTPUT_TAR}")/.webkit-tar-output.XXXXXX")"
+STAGED_TAR="${ARCHIVE_WORK_DIR}/$(basename "${OUTPUT_TAR}")"
+COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 "${TAR_BIN}" -czf "${STAGED_TAR}" \
     --exclude='._*' \
     -C "${PACKAGE_STAGE_DIR}" payload
+if [[ ! -f "${STAGED_TAR}" || ! -s "${STAGED_TAR}" ]]; then
+    log_error "${TAR_BIN} did not produce an archive for: ${OUTPUT_TAR}"
+    exit 1
+fi
+python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "${STAGED_TAR}" "${OUTPUT_TAR}"
 
 if [[ "${PUSH_TO_DEVICE}" == "1" ]]; then
     PUSH_SCRIPT="${SCRIPT_DIR}/push-webkit-device-artifacts.sh"

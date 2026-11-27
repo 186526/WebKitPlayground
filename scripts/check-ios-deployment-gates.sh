@@ -12,8 +12,8 @@
 #                       webpushd, adattributiond, jsc and the dylibs under
 #                       usr/lib — then print one table row per image.
 #
-# Both modes fail when an image requests a minos above --max-minos (default
-# 16.1), and when a load command makes BrowserEngineKit a load-time
+# Both modes check the iOS device platform, CPU and minos in every slice, and
+# fail when a load command makes BrowserEngineKit a load-time
 # requirement (LC_LOAD_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB). A weak
 # BrowserEngineKit load (LC_LOAD_WEAK_DYLIB) is reported without failing in
 # --deb mode; --build-dir mode keeps its original behaviour and counts every
@@ -41,6 +41,8 @@ if [[ ! -d "${DEFAULT_BUILD_DIR}" ]]; then
 fi
 
 MAX_MINOS="16.1"
+EXPECTED_ARCH=""
+REQUIRE_WEBKIT_LAYOUT=0
 FORBIDDEN_FRAMEWORK="BrowserEngineKit"
 
 MODE="build-dir"
@@ -80,17 +82,17 @@ fi
 
 usage() {
     cat <<EOF
-Usage: ${SCRIPT_NAME} [--build-dir <dir>] [--max-minos <version>]
-       ${SCRIPT_NAME} --deb <path> [--max-minos <version>]
+Usage: ${SCRIPT_NAME} [--build-dir <dir>] [--max-minos <version>] [--arch arm64|arm64e]
+       ${SCRIPT_NAME} --deb <path> [--max-minos <version>] [--arch arm64|arm64e] [--require-webkit-layout]
 
 Default build dir:
   ${DEFAULT_BUILD_DIR}
 
---deb unpacks the package with dpkg-deb -x and checks every Mach-O image in
-it; the default mode checks the four shipped binaries of a build directory.
-Both modes fail when an image requests a minos above --max-minos (default
-16.1), or when a load command makes ${FORBIDDEN_FRAMEWORK} a load-time
-requirement. --deb reports a weak ${FORBIDDEN_FRAMEWORK} load without failing.
+Both modes require iOS device arm64 or arm64e slices with minos at most
+--max-minos (default 16.1). With --arch, every slice must match the requested
+architecture. --deb checks every Mach-O and reports
+weak ${FORBIDDEN_FRAMEWORK} links without failing. --require-webkit-layout
+also requires the four rootless WebKit framework binaries and libwebrtc.
 
 Example:
   scripts/${SCRIPT_NAME} --deb /tmp/artdl/webkit-rootless.deb
@@ -113,6 +115,14 @@ while [[ $# -gt 0 ]]; do
             MAX_MINOS="${2:?missing value for --max-minos}"
             shift 2
             ;;
+        --arch)
+            EXPECTED_ARCH="${2:?missing value for --arch}"
+            shift 2
+            ;;
+        --require-webkit-layout)
+            REQUIRE_WEBKIT_LAYOUT=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -124,6 +134,19 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "${EXPECTED_ARCH}" && "${EXPECTED_ARCH}" != arm64 && "${EXPECTED_ARCH}" != arm64e ]]; then
+    printf 'Error: --arch must be arm64 or arm64e\n' >&2
+    exit 64
+fi
+if [[ "${MAX_MINOS}" != <->.<-> && "${MAX_MINOS}" != <->.<->.<-> ]]; then
+    printf 'Error: --max-minos must be a numeric version\n' >&2
+    exit 64
+fi
+if [[ "${REQUIRE_WEBKIT_LAYOUT}" == 1 && "${MODE}" != deb ]]; then
+    printf 'Error: --require-webkit-layout requires --deb\n' >&2
+    exit 64
+fi
 
 if [[ "${MODE}" == "deb" && "${BUILD_DIR_GIVEN}" == "1" ]]; then
     printf "%sError: --build-dir and --deb select different modes; pass only one%s\n" "${C_RED}" "${C_RESET}" >&2
@@ -162,28 +185,13 @@ if [[ -z "${OBJDUMP}" ]]; then
     exit 2
 fi
 
-# Prints "<platform> <minos>" for the first LC_BUILD_VERSION, or
-# "iphoneos <version>" for a legacy LC_VERSION_MIN_IPHONEOS, or "" when absent.
-read_platform_and_minos() {
-    local binary="$1"
-    "${OBJDUMP}" --macho --private-headers "${binary}" 2>/dev/null | awk '
-        /^[[:space:]]*cmd LC_BUILD_VERSION[[:space:]]*$/ { in_build = 1; next }
-        /^[[:space:]]*cmd LC_VERSION_MIN_IPHONEOS[[:space:]]*$/ { in_legacy = 1; next }
-        /^[[:space:]]*cmd / { in_build = 0; in_legacy = 0; next }
-        in_build && /^[[:space:]]*platform[[:space:]]/ { platform = $2 }
-        in_build && /^[[:space:]]*minos[[:space:]]/ { if (platform != "") print platform, $2; exit }
-        in_legacy && /^[[:space:]]*version[[:space:]]/ { print "ios", $2; exit }
-    '
-}
-
-is_fat_image() {
-    local binary="$1"
-    local magic
-    magic="$(od -An -tx1 -N4 "${binary}" 2>/dev/null | tr -d ' \n')"
-    case "${magic}" in
-        cafebabe|cafebabf|bebafeca|bfbafeca) return 0 ;;
-    esac
-    return 1
+read_headers() {
+    local binary="$1" declared_slices="$2"
+    if [[ "${declared_slices}" -gt 0 ]]; then
+        "${OBJDUMP}" --macho --non-verbose --arch all --private-headers "${binary}"
+    else
+        "${OBJDUMP}" --macho --non-verbose --private-headers "${binary}"
+    fi
 }
 
 # Prints the number of architecture slices in the fat header of $1, or 0 when
@@ -206,47 +214,14 @@ read_fat_slice_count() {
     fi
 }
 
-# Prints "<slice> <platform> <minos>" once per architecture slice, where
-# <slice> is the llvm-objdump architecture name when it prints one, "slice-N"
-# for an unnamed slice of a universal image, and "-" for a thin one. Prints
-# "<slice> none none" when a slice carries no LC_BUILD_VERSION and no
-# LC_VERSION_MIN_IPHONEOS, so an unreadable slice fails closed instead of
-# inheriting the previous slice's minos.
-#
-# The slice boundary is the "Mach header" line, not the "(architecture ...)"
-# banner: llvm-objdump omits that banner for cputypes it cannot name, and a
-# parser keyed on the banner would silently drop those slices. Everything is
-# reset at each boundary, so no slice can leak state into the next.
+# Bind metadata to Mach headers, because llvm-objdump omits the architecture
+# banner for CPU types it cannot name. Numeric fields also cover unknown CPUs.
 read_slice_versions() {
-    local binary="$1"
-    local fat=0
-    if is_fat_image "${binary}"; then
-        fat=1
-    fi
-    # Only a universal image needs --arch all; a thin image reads the same
-    # either way, so its check does not depend on that flag being supported.
-    typeset -a objdump_args=(--macho --private-headers)
-    if [[ "${fat}" == "1" ]]; then
-        objdump_args=(--macho --arch all --private-headers)
-    fi
-    { "${OBJDUMP}" "${objdump_args[@]}" "${binary}" 2>/dev/null || true; } | awk -v fat="${fat}" '
-        function reset_slice() {
-            platform = ""; minos = ""; in_build = 0; in_legacy = 0
-        }
+    awk -v fat="$1" '
         function flush_slice() {
-            if (!in_slice) return
-            name = (slice_name != "") ? slice_name : ((fat == 1) ? "slice-" slice_index : "-")
-            if (minos != "") print name, platform, minos
-            else print name, "none", "none"
-            in_slice = 0
-            reset_slice()
-        }
-        BEGIN {
-            in_slice = 0
-            slice_index = 0
-            slice_name = ""
-            banner = ""
-            reset_slice()
+            if (!slice_index) return
+            name = (slice_name != "") ? slice_name : (fat ? "slice-" slice_index : "-")
+            print name, (platform != "" ? platform : "none"), (minos != "" ? minos : "none"), cpu, versions
         }
         / \(architecture / {
             banner = $0
@@ -256,18 +231,29 @@ read_slice_versions() {
         }
         /^Mach header[[:space:]]*$/ {
             flush_slice()
-            in_slice = 1
             slice_index++
             slice_name = banner
-            banner = ""
+            banner = platform = minos = ""
+            in_build = in_legacy = versions = 0
+            cpu = "unknown"
             next
         }
-        /^[[:space:]]*cmd LC_BUILD_VERSION[[:space:]]*$/ { in_build = 1; in_legacy = 0; next }
-        /^[[:space:]]*cmd LC_VERSION_MIN_IPHONEOS[[:space:]]*$/ { in_legacy = 1; in_build = 0; next }
-        /^[[:space:]]*cmd / { in_build = 0; in_legacy = 0; next }
-        in_build && /^[[:space:]]*platform[[:space:]]/ { platform = $2; next }
-        in_build && /^[[:space:]]*minos[[:space:]]/ { minos = $2; in_build = 0; next }
-        in_legacy && /^[[:space:]]*version[[:space:]]/ { platform = "ios"; minos = $2; in_legacy = 0; next }
+        $1 == "0xfeedfacf" {
+            if ($2 != 16777228) cpu = "type-" $2
+            else if ($3 == 0 || $3 == 1) cpu = "arm64"
+            else if ($3 == 2) cpu = "arm64e"
+            else cpu = "arm64-subtype-" $3
+            next
+        }
+        $1 == "cmd" {
+            in_build = ($2 == "LC_BUILD_VERSION")
+            in_legacy = ($2 == "LC_VERSION_MIN_IPHONEOS")
+            if (in_build || $2 ~ /^LC_VERSION_MIN_/) versions++
+            next
+        }
+        in_build && $1 == "platform" { platform = ($2 == 2) ? "ios" : $2 }
+        in_build && $1 == "minos" { minos = $2; in_build = 0 }
+        in_legacy && $1 == "version" { platform = "ios"; minos = $2; in_legacy = 0 }
         END { flush_slice() }
     '
 }
@@ -290,19 +276,8 @@ version_gt() {
     }'
 }
 
-# Prints "<kind> <path>" for every dylib load command naming the framework.
-# A malformed image makes llvm-objdump exit non-zero; under `set -o pipefail`
-# that would abort the whole run before the table is printed, so the exit
-# status is swallowed here and the caller's slice check reports the image.
-#
-# --arch all is passed for the same reason read_slice_versions passes it: a
-# strong link in a later slice of a universal image must fail the gate, and
-# relying on llvm-objdump printing every slice without the flag is undocumented
-# behaviour. For thin and universal images alike the flag does not change the
-# load-command text on LLVM 21.
 list_framework_links() {
-    local binary="$1"
-    { "${OBJDUMP}" --macho --arch all --private-headers "${binary}" 2>/dev/null || true; } | awk -v needle="${FORBIDDEN_FRAMEWORK}" '
+    awk -v needle="${FORBIDDEN_FRAMEWORK}" '
         /^[[:space:]]*cmd LC_LOAD_DYLIB[[:space:]]*$/ { kind = "strong"; next }
         /^[[:space:]]*cmd LC_LOAD_WEAK_DYLIB[[:space:]]*$/ { kind = "weak"; next }
         /^[[:space:]]*cmd LC_REEXPORT_DYLIB[[:space:]]*$/ { kind = "re-export"; next }
@@ -338,58 +313,75 @@ print_rule() {
     printf '\n'
 }
 
-failures=0
-check_binary() {
-    local relative="$1"
-    local required="$2"
-    local binary="${BUILD_DIR}/${relative}"
-
-    if [[ ! -f "${binary}" ]]; then
-        if [[ "${required}" == "1" ]]; then
-            printf "%sMISSING: %s%s\n" "${C_RED}" "${relative}" "${C_RESET}"
-            failures=$(( failures + 1 ))
-        else
-            printf "%sSkip: %s not present%s\n" "${C_YELLOW}" "${relative}" "${C_RESET}"
-        fi
-        return 0
-    fi
-
-    local read_back
-    read_back="$(read_platform_and_minos "${binary}")"
-    if [[ -z "${read_back}" ]]; then
-        printf "%sNO LC_BUILD_VERSION / LC_VERSION_MIN_IPHONEOS: %s%s\n" "${C_RED}" "${relative}" "${C_RESET}"
-        failures=$(( failures + 1 ))
-        return 0
-    fi
-
-    local platform="${read_back%% *}"
-    local minos="${read_back##* }"
-    if version_gt "${minos}" "${MAX_MINOS}"; then
-        printf "%sMINOS TOO NEW: %s reports %s %s, allowed at most %s%s\n" \
-            "${C_RED}" "${relative}" "${platform}" "${minos}" "${MAX_MINOS}" "${C_RESET}"
-        failures=$(( failures + 1 ))
-    else
-        printf "%sminos ok: %s %s %s%s\n" "${C_GREEN}" "${relative}" "${platform}" "${minos}" "${C_RESET}"
-    fi
-
-    local links
-    links="$(list_framework_links "${binary}")"
-    if [[ -n "${links}" ]]; then
-        while IFS= read -r line; do
-            local kind="${line%% *}"
-            # Not named `path`: zsh ties that name to PATH, so assigning it
-            # would hide awk and dpkg-deb from the rest of the run.
-            local link_path="${line##* }"
-            local consequence="dyld refuses to load the binary on this OS"
-            if [[ "${kind}" != "strong" ]]; then
-                consequence="weak link, so the BrowserEngineKit gate did not close"
+check_slices() {
+    local rel="$1" declared_slices="$2" headers="$3"
+    local rows arch platform minos cpu versions
+    local expected_slices=$(( declared_slices > 0 ? declared_slices : 1 ))
+    typeset -a slice_minos=()
+    rows="$(read_slice_versions "${declared_slices}" <<< "${headers}")"
+    if [[ -n "${rows}" ]]; then
+        while read -r arch platform minos cpu versions; do
+            if [[ "${arch}" == "-" ]]; then
+                slice_minos+=("${platform} ${minos} (${cpu})")
+            else
+                slice_minos+=("${arch}: ${platform} ${minos} (${cpu})")
             fi
-            printf "%sFORBIDDEN FRAMEWORK (%s): %s links %s -- %s%s\n" \
-                "${C_RED}" "${kind}" "${relative}" "${link_path}" "${consequence}" "${C_RESET}"
-            failures=$(( failures + 1 ))
-        done <<< "${links}"
-    else
-        printf "%sno %s link: %s%s\n" "${C_GREEN}" "${FORBIDDEN_FRAMEWORK}" "${relative}" "${C_RESET}"
+            if [[ "${cpu}" != arm64 && "${cpu}" != arm64e ]]; then
+                DEB_FAILURES+=("${rel}: ${arch} has unsupported CPU ${cpu}")
+            elif [[ -n "${EXPECTED_ARCH}" && "${cpu}" != "${EXPECTED_ARCH}" ]]; then
+                DEB_FAILURES+=("${rel}: ${arch} expected ${EXPECTED_ARCH} CPU, got ${cpu}")
+            fi
+            if [[ "${versions}" != 1 || "${minos}" != <->.<-> && "${minos}" != <->.<->.<-> ]]; then
+                DEB_FAILURES+=("${rel}: ${arch} requires one readable iOS deployment command, found ${versions} and minos ${minos}")
+                continue
+            fi
+            if [[ "${platform}" != ios ]]; then
+                DEB_FAILURES+=("${rel}: ${arch} expected iOS device platform (2), got ${platform}")
+            fi
+            if version_gt "${minos}" "${MAX_MINOS}"; then
+                if [[ "${arch}" == "-" ]]; then
+                    DEB_FAILURES+=("${rel}: minos ${platform} ${minos} is newer than ${MAX_MINOS}")
+                else
+                    DEB_FAILURES+=("${rel}: minos ${platform} ${minos} is newer than ${MAX_MINOS} in the ${arch} slice")
+                fi
+            fi
+        done <<< "${rows}"
+    fi
+    if [[ "${#slice_minos}" -ne "${expected_slices}" ]]; then
+        DEB_FAILURES+=("${rel}: expected ${expected_slices} slice(s) but only ${#slice_minos} could be read")
+    fi
+    row_minos+=("${(j:, :)slice_minos}")
+}
+
+check_build() {
+    local relative binary declared_slices headers links
+    typeset -a row_minos=()
+    for relative in "${CHECKED_BINARIES[@]}" "${OPTIONAL_BINARIES[@]}"; do
+        binary="${BUILD_DIR}/${relative}"
+        if [[ ! -f "${binary}" ]]; then
+            if [[ "${relative}" != "${OPTIONAL_BINARIES[1]}" ]]; then
+                DEB_FAILURES+=("MISSING: ${relative}")
+            fi
+            continue
+        fi
+        declared_slices="$(read_fat_slice_count "${binary}")"
+        if ! headers="$(read_headers "${binary}" "${declared_slices}")"; then
+            printf 'Error: llvm-objdump failed to read %s\n' "${relative}" >&2
+            exit 2
+        fi
+        check_slices "${relative}" "${declared_slices}" "${headers}"
+        printf '%s: %s\n' "${relative}" "${row_minos[-1]}"
+        links="$(list_framework_links <<< "${headers}")"
+        if [[ -n "${links}" ]]; then
+            DEB_FAILURES+=("${relative}: FORBIDDEN FRAMEWORK ${FORBIDDEN_FRAMEWORK}: ${links}")
+        fi
+    done
+}
+
+require_packaged_image() {
+    local relative="$2" binary="$1/$2"
+    if [[ ! -f "${binary}" || -L "${binary}" || ! -x "${binary}" ]] || ! is_macho_image "${binary}"; then
+        DEB_FAILURES+=("${relative}: missing executable Mach-O file at required package path")
     fi
 }
 
@@ -397,9 +389,9 @@ check_binary() {
 # image and exits 1 when any image fails a gate.
 check_deb() {
     local deb="$1"
-    local unpack_dir
-    unpack_dir="$(mktemp -d "${TMPDIR:-/tmp}/webkit-deployment-gates.XXXXXX")"
-    DEB_UNPACK_DIR="${unpack_dir}"
+    DEB_UNPACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/webkit-deployment-gates.XXXXXX")"
+    local unpack_dir="${DEB_UNPACK_DIR}/root"
+    mkdir "${unpack_dir}"
 
     printf "%sUnpacking %s with dpkg-deb -x%s\n" "${C_BOLD}${C_CYAN}" "${deb}" "${C_RESET}"
     if ! dpkg-deb -x "${deb}" "${unpack_dir}"; then
@@ -407,11 +399,22 @@ check_deb() {
         exit 2
     fi
 
+    if [[ "${REQUIRE_WEBKIT_LAYOUT}" == 1 ]]; then
+        local required_image
+        for required_image in "${CHECKED_BINARIES[@]}" "${OPTIONAL_BINARIES[@]}"; do
+            require_packaged_image "${unpack_dir}" "var/jb/Library/Frameworks/${required_image}"
+        done
+        require_packaged_image "${unpack_dir}" var/jb/usr/lib/libwebrtc.dylib
+    fi
+
     typeset -a candidates=()
     local file
+    local inventory="${DEB_UNPACK_DIR}/files"
+    find "${unpack_dir}" -type f -print0 > "${inventory}"
     while IFS= read -r -d '' file; do
         candidates+=("${file}")
-    done < <(find "${unpack_dir}" -type f -print0)
+    done < "${inventory}"
+    rm -f "${inventory}"
     candidates=("${(@o)candidates}")
 
     typeset -a images=()
@@ -423,9 +426,9 @@ check_deb() {
 
     local prefix_len=$(( ${#unpack_dir} + 1 ))
     typeset -a row_path=() row_minos=() row_bek=() row_result=() row_level=()
-    local image rel slice_rows platform minos links line kind link_path
+    local image rel headers links line kind link_path
     local weak_linked_images=0
-    local level result image_weak image_fatal bek_cell link_kinds arch declared_slices
+    local level result image_weak image_fatal bek_cell link_kinds declared_slices previous_failures
 
     for image in "${images[@]}"; do
         rel="${image:${prefix_len}}"
@@ -434,59 +437,18 @@ check_deb() {
         image_weak=0
         image_fatal=0
         bek_cell="-"
-
-        typeset -a slice_lines=()
-        while IFS= read -r line; do
-            [[ -n "${line}" ]] && slice_lines+=("${line}")
-        done < <(read_slice_versions "${image}")
-        if [[ "${#slice_lines}" -eq 0 ]]; then
-            slice_lines=("- none none")
-        fi
-        # llvm-objdump can skip a slice it cannot parse. When the fat header
-        # declares more slices than were read, fail closed instead of gating
-        # only the slices that came back.
+        previous_failures="${#DEB_FAILURES}"
         declared_slices="$(read_fat_slice_count "${image}")"
-        if [[ "${declared_slices}" -gt 0 && "${#slice_lines}" -ne "${declared_slices}" ]]; then
-            level="fail"
-            result="FAIL"
-            DEB_FAILURES+=("${rel}: the fat header declares ${declared_slices} slice(s) but only ${#slice_lines} could be read, so the rest are ungated")
+        if ! headers="$(read_headers "${image}" "${declared_slices}")"; then
+            printf 'Error: llvm-objdump failed to read %s\n' "${rel}" >&2
+            exit 2
+        fi
+        check_slices "${rel}" "${declared_slices}" "${headers}"
+        if [[ "${#DEB_FAILURES}" -gt "${previous_failures}" ]]; then
+            image_fatal=1
         fi
 
-        typeset -a slice_minos=()
-        for line in "${slice_lines[@]}"; do
-            arch="${line%% *}"
-            platform="${line#* }"
-            minos="${platform#* }"
-            platform="${platform%% *}"
-            if [[ "${arch}" == "-" ]]; then
-                slice_minos+=("${platform} ${minos}")
-            else
-                slice_minos+=("${arch}: ${platform} ${minos}")
-            fi
-            if [[ "${minos}" == "none" ]]; then
-                level="fail"
-                result="FAIL"
-                if [[ "${arch}" == "-" ]]; then
-                    DEB_FAILURES+=("${rel}: no LC_BUILD_VERSION or LC_VERSION_MIN_IPHONEOS, so the minos is unknown")
-                else
-                    DEB_FAILURES+=("${rel}: ${arch} has no LC_BUILD_VERSION or LC_VERSION_MIN_IPHONEOS, so its minos is unknown")
-                fi
-            elif version_gt "${minos}" "${MAX_MINOS}"; then
-                level="fail"
-                result="FAIL"
-                if [[ "${arch}" == "-" ]]; then
-                    DEB_FAILURES+=("${rel}: minos ${platform} ${minos} is newer than ${MAX_MINOS}")
-                elif [[ "${arch}" == slice-* ]]; then
-                    DEB_FAILURES+=("${rel}: ${arch} reports minos ${platform} ${minos}, newer than ${MAX_MINOS}")
-                else
-                    DEB_FAILURES+=("${rel}: minos ${platform} ${minos} is newer than ${MAX_MINOS} in the ${arch} slice")
-                fi
-            fi
-        done
-        slice_rows="${(j:, :)slice_minos}"
-        row_minos+=("${slice_rows}")
-
-        links="$(list_framework_links "${image}")"
+        links="$(list_framework_links <<< "${headers}")"
         if [[ -n "${links}" ]]; then
             link_kinds=""
             while IFS= read -r line; do
@@ -595,15 +557,10 @@ if [[ "${MODE}" == "deb" ]]; then
     check_deb "${DEB_PATH}"
 fi
 
-for relative in "${CHECKED_BINARIES[@]}"; do
-    check_binary "${relative}" 1
-done
-for relative in "${OPTIONAL_BINARIES[@]}"; do
-    check_binary "${relative}" 0
-done
-
-if [[ "${failures}" -ne 0 ]]; then
-    printf "%sResult: FAILED (%s failed check(s))%s\n" "${C_BOLD}${C_RED}" "${failures}" "${C_RESET}"
+check_build
+if [[ "${#DEB_FAILURES}" -ne 0 ]]; then
+    printf '%s\n' "${DEB_FAILURES[@]}" >&2
+    printf "%sResult: FAILED (%s failed check(s))%s\n" "${C_BOLD}${C_RED}" "${#DEB_FAILURES}" "${C_RESET}"
     exit 1
 fi
 

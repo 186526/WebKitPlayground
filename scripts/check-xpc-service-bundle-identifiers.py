@@ -22,9 +22,9 @@ main process asks for com.apple.WebKit.WebContent, so our WebContent is never se
 fix underneath it stays invisible.
 
 patches/ios16-xpc-service-bundle-identifier.patch drops the suffix from that one line in
-each of the three files. This script reads the CFBundleIdentifier of every .xpc the package
-ships, fails when a bundle is absent, carries the suffix, or disagrees with its own directory
-name, and requires all four names the device's XPCServices directory has. It reads a .deb
+each of the three files. This script checks identifiers and the CFBundleExecutable of each
+packaged .xpc bundle. It requires the four service names and rejects a suffix, directory/identifier
+mismatch or missing executable Mach-O file. It reads a .deb
 directly (ar + data.tar, without dpkg-deb) so CI can check the artifact it just built, and an
 already-unpacked payload tree for local work; both modes apply the same rules.
 
@@ -40,15 +40,56 @@ from __future__ import annotations
 import argparse
 import io
 import plistlib
+import struct
 import sys
 import tarfile
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
-# The four XPC services /System/Library/Frameworks/WebKit.framework/XPCServices holds on
-# iOS 16.1, listed from the device over ssh. All four are required: ProcessLauncherCocoa.mm:190-212
-# asks for each by name, so a package missing one ships nothing those callers can launch. A
-# package may also carry bundles outside this list, such as .Development, and those are checked
-# for the suffix only.
+THIN_MACHO = {bytes.fromhex(magic): (endian, size) for magic, endian, size in (
+    ("feedface", ">", 28), ("cefaedfe", "<", 28), ("feedfacf", ">", 32), ("cffaedfe", "<", 32),
+)}
+FAT_MACHO = {bytes.fromhex(magic): (endian, entry) for magic, endian, entry in (
+    ("cafebabe", ">", "5I"), ("bebafeca", "<", "5I"),
+    ("cafebabf", ">", "2I2Q2I"), ("bfbafeca", "<", "2I2Q2I"),
+)}
+MH_EXECUTE = 2
+
+
+def executable_header(header: bytes) -> bool:
+    format_info = THIN_MACHO.get(header[:4])
+    if format_info is None:
+        return False
+    endian, size = format_info
+    return len(header) >= size and struct.unpack_from(endian + "I", header, 12)[0] == MH_EXECUTE
+
+
+def executable_image(reader: BinaryIO) -> bool:
+    magic = reader.read(4)
+    if magic not in FAT_MACHO:
+        return executable_header(magic + reader.read(28))
+    endian, layout = FAT_MACHO[magic]
+    count_bytes = reader.read(4)
+    if len(count_bytes) != 4:
+        return False
+    count, = struct.unpack(endian + "I", count_bytes)
+    entry = struct.Struct(endian + layout)
+    image_size = reader.seek(0, io.SEEK_END)
+    table_end = 8 + count * entry.size
+    if count == 0 or table_end > image_size:
+        return False
+    for index in range(count):
+        reader.seek(8 + index * entry.size)
+        _, _, offset, size, *_ = entry.unpack(reader.read(entry.size))
+        if offset < table_end or size < 28 or offset + size > image_size:
+            return False
+        reader.seek(offset)
+        if not executable_header(reader.read(min(size, 32))):
+            return False
+    return True
+
+# These are the four names ProcessLauncherCocoa.mm:190-212 asks for on iOS 16.1.
 REQUIRED_IDENTIFIERS = (
     "com.apple.WebKit.GPU",
     "com.apple.WebKit.Networking",
@@ -120,39 +161,66 @@ def bundle_parts(path: str) -> str | None:
     return bundle[:-len(XPC_SUFFIX)] if bundle.endswith(XPC_SUFFIX) else None
 
 
-def bundles_from_tar(tar: tarfile.TarFile) -> dict[str, bytes]:
-    """Map each XPC bundle's directory stem to its Info.plist bytes."""
-    bundles: dict[str, bytes] = {}
-    for member in tar.getmembers():
-        if not member.isfile():
+@dataclass(frozen=True)
+class Bundle:
+    plist: bytes
+    members: dict[str, bool]
+
+
+def bundles_from_tar(tar: tarfile.TarFile, rootless: bool) -> dict[str, Bundle]:
+    framework = PurePosixPath("var/jb/Library/Frameworks") / FRAMEWORK / CONTAINER
+    groups: dict[PurePosixPath, dict[str, tarfile.TarInfo]] = {}
+    for member in tar:
+        path = PurePosixPath(member.name)
+        if not path.name or bundle_parts((path.parent / PLIST_NAME).as_posix()) is None:
             continue
-        stem = bundle_parts(member.name)
-        if stem is None:
-            continue
+        if rootless and path.parent.parent != framework:
+            raise ValueError(f"unexpected XPC bundle path: {path.parent} (expected under {framework})")
+        group = groups.setdefault(path.parent, {})
+        if path.name in group:
+            raise ValueError(f"duplicate archive member: {path}")
+        group[path.name] = member
+
+    bundles: dict[str, Bundle] = {}
+    for directory, group in groups.items():
+        stem = directory.stem
         if stem in bundles:
-            raise ValueError(f"two {stem}{XPC_SUFFIX} bundles in the package; one identifier "
-                             f"cannot describe both")
-        extracted = tar.extractfile(member)
-        if extracted is not None:
-            bundles[stem] = extracted.read()
+            raise ValueError(f"two {stem}{XPC_SUFFIX} bundles in the package")
+        plist = group.get(PLIST_NAME)
+        if plist is None or not plist.isfile():
+            raise ValueError(f"{directory}: missing regular {PLIST_NAME}")
+        with tar.extractfile(plist) as reader:
+            contents = reader.read()
+        members = {}
+        for name, member in group.items():
+            if member.isfile() and member.mode & 0o111:
+                with tar.extractfile(member) as reader:
+                    members[name] = executable_image(reader)
+        bundles[stem] = Bundle(contents, members)
     return bundles
 
 
-def bundles_from_directory(root: Path) -> dict[str, bytes]:
-    """Read the same bundle layout from an unpacked payload tree."""
-    bundles: dict[str, bytes] = {}
-    for plist in sorted(root.rglob(PLIST_NAME)):
-        stem = bundle_parts(plist.as_posix())
+def bundles_from_directory(root: Path) -> dict[str, Bundle]:
+    bundles: dict[str, Bundle] = {}
+    for directory in sorted(root.rglob(f"*{XPC_SUFFIX}")):
+        stem = bundle_parts((directory / PLIST_NAME).as_posix())
         if stem is None:
             continue
         if stem in bundles:
             raise ValueError(f"two {stem}{XPC_SUFFIX} bundles under {root}")
-        bundles[stem] = plist.read_bytes()
+        plist = directory / PLIST_NAME
+        if directory.is_symlink() or not plist.is_file() or plist.is_symlink():
+            raise ValueError(f"{directory}: missing regular {PLIST_NAME}")
+        members = {}
+        for candidate in directory.iterdir():
+            if not candidate.is_symlink() and candidate.is_file() and candidate.stat().st_mode & 0o111:
+                with candidate.open("rb") as reader:
+                    members[candidate.name] = executable_image(reader)
+        bundles[stem] = Bundle(plist.read_bytes(), members)
     return bundles
 
 
-def identifier(bundle: str, plist: bytes) -> str:
-    """Return the CFBundleIdentifier a bundle claims, or raise ValueError explaining why not."""
+def bundle_metadata(bundle: str, plist: bytes) -> tuple[str, str]:
     try:
         parsed = plistlib.loads(plist)
     except Exception as error:  # plistlib raises several unrelated parser errors
@@ -160,10 +228,14 @@ def identifier(bundle: str, plist: bytes) -> str:
     value = parsed.get("CFBundleIdentifier") if isinstance(parsed, dict) else None
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{bundle}{XPC_SUFFIX}: {PLIST_NAME} has no CFBundleIdentifier")
-    return value.strip()
+    executable = parsed.get("CFBundleExecutable")
+    if (not isinstance(executable, str) or not executable.strip()
+            or executable in {".", ".."} or "/" in executable or "\0" in executable):
+        raise ValueError(f"{bundle}{XPC_SUFFIX}: {PLIST_NAME} has no valid CFBundleExecutable basename")
+    return value.strip(), executable
 
 
-def check(bundles: dict[str, bytes]) -> tuple[list[str], list[str], list[str]]:
+def check(bundles: dict[str, Bundle]) -> tuple[list[str], list[str], list[str]]:
     """Return the per-bundle table rows, the failures and the notes, in that order.
 
     Three things make a package unusable on the device. The .Service suffix is what the 18.5 SDK
@@ -173,14 +245,15 @@ def check(bundles: dict[str, bytes]) -> tuple[list[str], list[str], list[str]]:
     fatal: ProcessLauncherCocoa.mm:190-212 asks for each of the four by name, so a package that
     dropped one ships nothing the corresponding call can launch.
 
-    A bundle outside REQUIRED_IDENTIFIERS is checked for the suffix and reported, not failed.
+    An optional bundle may be absent, but a shipped bundle must also carry its executable.
     """
     rows: list[str] = []
     failures: list[str] = []
     notes: list[str] = []
     for bundle in sorted(bundles):
+        contents = bundles[bundle]
         try:
-            value = identifier(bundle, bundles[bundle])
+            value, executable = bundle_metadata(bundle, contents.plist)
         except ValueError as error:
             failures.append(str(error))
             continue
@@ -195,13 +268,14 @@ def check(bundles: dict[str, bytes]) -> tuple[list[str], list[str], list[str]]:
             failures.append(
                 f"{bundle}{XPC_SUFFIX}: directory says {bundle} but CFBundleIdentifier says {value}")
             verdict = "mismatch"
+        if executable not in contents.members:
+            failures.append(f"{bundle}{XPC_SUFFIX}: missing executable {executable} (expected an executable regular file)")
+            verdict = "missing executable"
+        elif not contents.members[executable]:
+            failures.append(f"{bundle}{XPC_SUFFIX}: {executable} is not a Mach-O executable")
+            verdict = "not Mach-O"
         if bundle not in REQUIRED_IDENTIFIERS and verdict == "ok":
-            # Only reached by a bundle that is correctly named for a bundle the device does not
-            # have. .Development is the case: iOS asks for it only when the UI process sets
-            # nonValidInjectedCodeAllowed, which a shipped Safari does not, so it is reported
-            # rather than failed. A wrongly named bundle is already in `failures`.
-            notes.append(f"{bundle}{XPC_SUFFIX}: not one of the four required names; only the "
-                         f"suffix and the directory/identifier agreement were checked")
+            notes.append(f"{bundle}{XPC_SUFFIX}: not one of the four required names")
         rows.append(f"  {bundle}{XPC_SUFFIX}: {value}  [{verdict}]")
 
     for name in REQUIRED_IDENTIFIERS:
@@ -223,7 +297,11 @@ def parse_args() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--deb", type=Path, help="packaged .deb to read")
     source.add_argument("--root", type=Path, help="already-unpacked payload tree to read")
-    return parser.parse_args()
+    parser.add_argument("--rootless", action="store_true", help="require the rootless archive layout with --deb")
+    args = parser.parse_args()
+    if args.rootless and args.deb is None:
+        parser.error("--rootless requires --deb")
+    return args
 
 
 def main() -> int:
@@ -235,8 +313,8 @@ def main() -> int:
             return 1
         try:
             with open_data_tar(args.deb.read_bytes()) as tar:
-                bundles = bundles_from_tar(tar)
-        except (ValueError, tarfile.TarError) as error:
+                bundles = bundles_from_tar(tar, args.rootless)
+        except (ValueError, OSError, EOFError, tarfile.TarError) as error:
             print(f"FAIL: cannot read {described}: {error}", file=sys.stderr)
             return 1
     else:

@@ -89,7 +89,7 @@ check() {
     pass=$(( pass + 1 ))
 }
 
-# write_macho <path> <minos> <cputype> <cpusubtype>
+# write_macho <path> <minos> <cputype> <cpusubtype> [<platform>]
 write_macho() {
     python3 - "$@" <<'PY'
 import struct, sys
@@ -97,11 +97,11 @@ path, minos, cputype, cpusubtype = sys.argv[1:5]
 major, minor = (int(x) for x in minos.split('.'))
 MH_MAGIC_64 = 0xfeedfacf
 LC_BUILD_VERSION = 0x32
-PLATFORM_IOS = 2
+platform = int(sys.argv[5]) if len(sys.argv) > 5 else 2
 TOOL_LD = 3
 header = struct.pack('<IIIIIIII', MH_MAGIC_64, int(cputype, 0) & 0xffffffff,
                      int(cpusubtype, 0) & 0xffffffff, 2, 1, 32, 0, 0)
-command = struct.pack('<IIIIII', LC_BUILD_VERSION, 32, PLATFORM_IOS,
+command = struct.pack('<IIIIII', LC_BUILD_VERSION, 32, platform,
                       (major << 16) | (minor << 8), 18 << 16, 1)
 command += struct.pack('<II', TOOL_LD, 0)
 open(path, 'wb').write(header + command)
@@ -165,6 +165,45 @@ check "unlabelled first slice does not leak its minos into the next" 1 \
 check "unlabelled first slice is still reported" 1 \
     "slice-1: ios 16.1" \
     "${CHECKER}" --deb "${WORK}/fat-unlabelled.deb"
+
+write_macho "${WORK}/simulator" 16.1 0x0100000C 0 7
+make_deb "${WORK}/simulator.deb" "${WEBKIT_REL}" "${WORK}/simulator"
+check "an arm64 simulator image fails despite matching minos" 1 "expected iOS device platform" \
+    "${CHECKER}" --deb "${WORK}/simulator.deb"
+
+write_macho "${WORK}/x86-ios" 16.1 0x01000007 3
+make_deb "${WORK}/x86-ios.deb" "${WEBKIT_REL}" "${WORK}/x86-ios"
+check "an x86_64 iOS image fails despite matching platform and minos" 1 "unsupported CPU" \
+    "${CHECKER}" --deb "${WORK}/x86-ios.deb"
+
+check "the declared target architecture must match" 1 "expected arm64e CPU, got arm64" \
+    "${CHECKER}" --deb "${WORK}/thin-good.deb" --arch arm64e
+write_macho "${WORK}/fat-good-e" 16.1 0x0100000C 0x80000002
+"${LIPO_BIN}" -create "${WORK}/fat-a" "${WORK}/fat-good-e" -output "${WORK}/fat-good"
+make_deb "${WORK}/fat-good.deb" "${WEBKIT_REL}" "${WORK}/fat-good"
+check "both supported architectures pass without an explicit target" 0 "Result: PASS" \
+    "${CHECKER}" --deb "${WORK}/fat-good.deb"
+check "a matching slice does not excuse a slice outside the declared target" 1 "expected arm64e CPU, got arm64" \
+    "${CHECKER}" --deb "${WORK}/fat-good.deb" --arch arm64e
+check "an incomplete WebKit layout is rejected" 1 "missing executable Mach-O file at required package path" \
+    "${CHECKER}" --deb "${WORK}/thin-good.deb" --require-webkit-layout
+
+write_macho "${WORK}/fat-simulator" 16.1 0x0100000C 0x80000002 7
+"${LIPO_BIN}" -create "${WORK}/fat-a" "${WORK}/fat-simulator" -output "${WORK}/fat-wrong-platform"
+make_deb "${WORK}/fat-wrong-platform.deb" "${WEBKIT_REL}" "${WORK}/fat-wrong-platform"
+check "a later simulator slice still fails the iOS device gate" 1 "arm64e expected iOS device platform" \
+    "${CHECKER}" --deb "${WORK}/fat-wrong-platform.deb"
+
+mkdir -p "${WORK}/stub"
+cat > "${WORK}/stub/llvm-objdump" <<'STUB'
+#!/bin/sh
+printf 'Mach header\n 0xfeedfacf 16777228 0 0x00 2 1 32 0x00000000\n cmd LC_BUILD_VERSION\n platform 2\n minos 16.1\n'
+exit 19
+STUB
+printf '#!/bin/sh\nexit 1\n' > "${WORK}/stub/xcrun"
+chmod +x "${WORK}/stub/llvm-objdump" "${WORK}/stub/xcrun"
+check "nonzero inspection tool status fails despite valid-looking output" 2 "llvm-objdump failed to read" \
+    env PATH="${WORK}/stub:${PATH}" "${CHECKER}" --deb "${WORK}/thin-good.deb"
 
 printf '\n%d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

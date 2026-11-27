@@ -34,6 +34,7 @@ PRODUCT_DIR="${SOURCE_DIR}/WebKitBuild/Debug-iphoneos"
 PAYLOAD_SOURCE=""
 EXPECT_MANIFEST=""
 OUTPUT_DEB=""
+ARCHIVE_WORK_DIR=""
 ROOTLESS=0
 ROOTHIDE=0
 PACKAGE_ID="com.82flex.custom-webkit"
@@ -325,7 +326,12 @@ PAYLOAD_DIR="${DEB_ROOT}${INSTALL_FRAMEWORKS_DIR}"
 USRLIB_DIR="${DEB_ROOT}${INSTALL_USRLIB_DIR}"
 PAYLOAD_REALPATH="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${PAYLOAD_DIR}" 2>/dev/null || echo "${PAYLOAD_DIR}")"
 
-cleanup() { rm -rf "${WORK_DIR}"; }
+cleanup() {
+    rm -rf "${WORK_DIR}"
+    if [[ -n "${ARCHIVE_WORK_DIR:-}" ]]; then
+        rm -rf "${ARCHIVE_WORK_DIR}"
+    fi
+}
 trap cleanup EXIT
 
 MACHO_LOAD_PATHS_TOOL="${WORK_DIR}/macho-load-paths.py"
@@ -953,7 +959,7 @@ if [[ -n "${VERIFY_DEB}" ]]; then
     write_macho_load_path_tool
     log_info "Verifying the load paths inside $(basename "${VERIFY_DEB}") (prefix '${PREFIX:-/}')..."
     if ! python3 "${MACHO_LOAD_PATHS_TOOL}" verify "${VERIFY_ROOT}" "${PREFIX}"; then
-        log_error "The packaged payload still names a system framework path; this .deb cannot load its own copies."
+        log_error "The packaged load-path check failed for ${VERIFY_DEB}."
         exit 1
     fi
     log_success "Verified ${VERIFY_DEB}: every shipped image resolves inside the package."
@@ -991,15 +997,12 @@ typeset -a ondemand_items=(
     "com.apple.WebKit.WebAuthn.xpc"
 )
 
-copy_item_if_exists() {
-    local item="$1" dst_dir="$2"
-    local src="${PRODUCT_DIR}/${item}"
-    local dst="${dst_dir}/${item}"
-    if [[ -e "${src}" ]]; then
-        ditto "${src}" "${dst}"
-        return 0
-    fi
-    return 1
+copy_item() {
+    local item="$1"
+    ditto "${PRODUCT_DIR}/${item}" "${PAYLOAD_DIR}/${item}" || {
+        log_error "Failed to copy build artifact: ${item}"
+        exit 1
+    }
 }
 
 item_is_already_covered_in_framework() {
@@ -1010,10 +1013,11 @@ item_is_already_covered_in_framework() {
 }
 
 for item in "${required_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
+    if [[ ! -e "${PRODUCT_DIR}/${item}" ]]; then
         log_error "Missing required artifact: ${item}"
         exit 1
     fi
+    copy_item "${item}"
 done
 
 # The build product keeps the real overlay at top level and puts a symlink to it
@@ -1023,14 +1027,20 @@ done
 install_swift_overlay() {
     local source="${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}"
     local destination="${PAYLOAD_DIR}/${SWIFT_OVERLAY_REL}"
-    [[ -e "${source}" ]] || return 1
     mkdir -p "$(dirname "${destination}")"
     rm -f "${destination}"
-    cp -fL "${source}" "${destination}"
+    cp -fL "${source}" "${destination}" || {
+        log_error "Failed to copy build artifact: ${SWIFT_OVERLAY_NAME}"
+        exit 1
+    }
     log_info "Placed Swift overlay at ${SWIFT_OVERLAY_REL}"
 }
 
-install_swift_overlay || log_note "Swift overlay not in the product: ${SWIFT_OVERLAY_NAME}"
+if [[ -e "${PRODUCT_DIR}/${SWIFT_OVERLAY_NAME}" ]]; then
+    install_swift_overlay
+else
+    log_note "Swift overlay not in the product: ${SWIFT_OVERLAY_NAME}"
+fi
 
 # A symlink satisfies -e but not the check below: dyld opens the path at runtime and a relative
 # link in the payload has no sibling file to reach.  This runs before STEP 2 so the build stops
@@ -1052,21 +1062,21 @@ verify_swift_overlay() {
 verify_swift_overlay || exit 1
 
 for item in "${recommended_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
+    if [[ -e "${PRODUCT_DIR}/${item}" ]]; then
+        copy_item "${item}"
+    elif item_is_already_covered_in_framework "${item}"; then
+        log_info "${item} already covered via WebKit.framework subdirectory."
+    else
         log_warn "recommended artifact not found: ${item}"
     fi
 done
 
 for item in "${ondemand_items[@]}"; do
-    if ! copy_item_if_exists "${item}" "${PAYLOAD_DIR}"; then
-        if item_is_already_covered_in_framework "${item}"; then
-            log_info "${item} already covered via WebKit.framework subdirectory."
-            continue
-        fi
+    if [[ -e "${PRODUCT_DIR}/${item}" ]]; then
+        copy_item "${item}"
+    elif item_is_already_covered_in_framework "${item}"; then
+        log_info "${item} already covered via WebKit.framework subdirectory."
+    else
         log_note "on-demand artifact not found: ${item}"
     fi
 done
@@ -1400,17 +1410,16 @@ chmod 0755 "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/prerm"
 # [6/7]. The heading keeps product mode's number; see the step-label note above.
 log_step "Building .deb package..."
 mkdir -p "$(dirname "${OUTPUT_DEB}")"
+ARCHIVE_WORK_DIR="$(mktemp -d "$(dirname "${OUTPUT_DEB}")/.webkit-deb-output.XXXXXX")"
+STAGED_DEB="${ARCHIVE_WORK_DIR}/$(basename "${OUTPUT_DEB}")"
+COPYFILE_DISABLE=1 dpkg-deb --build --root-owner-group -Zgzip "${DEB_ROOT}" "${STAGED_DEB}"
 
-# Use DEBIAN_BINARY env to silence dpkg-deb warnings on macOS.
-COPYFILE_DISABLE=1 dpkg-deb --build --root-owner-group -Zgzip "${DEB_ROOT}" "${OUTPUT_DEB}" 2>&1 \
-    | grep -v 'root-owner-group' || true
-
-if [[ ! -f "${OUTPUT_DEB}" ]]; then
-    log_error "dpkg-deb failed to produce: ${OUTPUT_DEB}"
+if [[ ! -f "${STAGED_DEB}" || ! -s "${STAGED_DEB}" ]]; then
+    log_error "dpkg-deb did not produce an archive for: ${OUTPUT_DEB}"
     exit 1
 fi
 
-DEB_SIZE="$(du -sh "${OUTPUT_DEB}" | awk '{print $1}')"
+DEB_SIZE="$(du -sh "${STAGED_DEB}" | awk '{print $1}')"
 
 if [[ "${MODE}" == "payload" ]]; then
     # ── PAYLOAD STEP 7 — Read the package back and check the shipped bytes ──
@@ -1421,7 +1430,7 @@ if [[ "${MODE}" == "payload" ]]; then
     log_step "Unpacking the package and checking the rewritten bytes..."
     VERIFY_DIR="${WORK_DIR}/verify"
     mkdir -p "${VERIFY_DIR}"
-    dpkg-deb -x "${OUTPUT_DEB}" "${VERIFY_DIR}"
+    dpkg-deb -x "${STAGED_DEB}" "${VERIFY_DIR}"
     python3 "${REWRITER}" verify "${VERIFY_DIR}" --prefix "${PREFIX-/var/jb}"
     # The images in the package must be byte-identical to the ones that were
     # rewritten. A digest per image is the reading that says so.
@@ -1460,6 +1469,7 @@ print("  all seven images in the .deb are the bytes the rewrite produced")
 SELFCHECK
 fi
 
+python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "${STAGED_DEB}" "${OUTPUT_DEB}"
 log_success "Done.  Package created (${DEB_SIZE}): ${OUTPUT_DEB}"
 log_info "Install on device:  dpkg -i $(basename "${OUTPUT_DEB}")"
 log_info "Remove from device: dpkg -r ${PACKAGE_ID}"

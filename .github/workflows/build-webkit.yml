@@ -10,7 +10,7 @@ on:
       apply_patch:
         description: 'Apply the worktree patches (required for the 18.3 ref; 16.x tags need their own worktree dumps)'
         required: true
-        default: 'false'
+        default: 'true'
       xcode:
         description: 'Xcode app bundle name'
         required: true
@@ -42,6 +42,8 @@ jobs:
       # WebKitProjectPaths.xcconfig:98 builds from it. Two literals would let a future target
       # change leave the pre-build assertion checking a path the build no longer reads.
       WK_BUILD_DEPLOYMENT_TARGET: '16.1'
+      WK_BUILD_ARCH: arm64e
+      WK_CCACHE_KEY: ccache-${{ inputs.webkit_ref }}-${{ inputs.xcode }}-${{ github.run_id }}-${{ github.run_attempt }}
       # patches/ios18-public-sdk-extensionkit-extension-exclusion.patch makes BaseExtension.xcconfig
       # read this switch and, when it is YES, exclude every source and blank the bridging header of
       # the four ExtensionKit targets (WebContentExtension, WebContentCaptivePortalExtension,
@@ -70,6 +72,7 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
 
       - name: Measure disk before clone
+        continue-on-error: true
         run: df -h /
 
       - name: Free runner disk
@@ -86,7 +89,7 @@ jobs:
           sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/XROS.platform || true
           sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/XRSimulator.platform || true
           sudo rm -rf ~/Library/Developer/CoreSimulator || true
-          df -h /
+          df -h / || true
 
       - name: Install ccache
         run: |
@@ -138,27 +141,32 @@ jobs:
 
       - name: Restore ccache
         id: ccache
+        continue-on-error: true
         uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
-          # Exact per-run key so every run saves its own cache; restores from the newest prefix match.
-          key: ccache-${{ inputs.webkit_ref }}-${{ inputs.xcode }}-${{ github.run_id }}
+          key: ${{ env.WK_CCACHE_KEY }}
           restore-keys: |
             ccache-${{ inputs.webkit_ref }}-${{ inputs.xcode }}-
             ccache-${{ inputs.webkit_ref }}-
 
       - name: Fetch WebKit source
+        id: webkit-source
+        env:
+          WEBKIT_REF: ${{ inputs.webkit_ref }}
         run: |
           set -euo pipefail
           time git clone --depth 1 --single-branch \
-            --branch '${{ inputs.webkit_ref }}' \
+            --branch "$WEBKIT_REF" \
             https://github.com/WebKit/WebKit.git WebKit
           cd WebKit
+          commit=$(git rev-parse HEAD)
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
           git log -1 --format='%H %ad %s'
           grep -E '^(MAJOR|MINOR|TINY)_VERSION' Configurations/Version.xcconfig || \
             grep -E '^(MAJOR|MINOR|TINY)_VERSION' Source/WebKit/Configurations/Version.xcconfig || true
-          du -sh .git
-          df -h /
+          du -sh .git || true
+          df -h / || true
 
       - name: Refuse a build that would ship XPC services iOS never selects
         env:
@@ -1001,7 +1009,7 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
-          actool=/Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool
+          actool=$(xcrun --find actool)
           src="$PWD/WebKit/Source/WebKit"
           out="$RUNNER_TEMP/actool-real"
           rm -rf "$out"
@@ -1025,8 +1033,12 @@ jobs:
           ls "$out" | head
 
       - name: Build
+        id: build
         run: |
           set -uo pipefail
+          proxy_source="$GITHUB_WORKSPACE/WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm"
+          shasum -a 256 "$proxy_source" > "$RUNNER_TEMP/webkit-proxy-source.sha256"
+          printf 'WK_PROXY_SOURCE=%s\n' "$proxy_source" >> "$GITHUB_ENV"
           cd WebKit
           # build-webkit drives xcodebuild directly, so IDE defaults do not reach it; Xcode's own
           # scheduling already spreads work across ~3 cores natively.
@@ -1037,7 +1049,8 @@ jobs:
           # The capacity report before Save subtracts this snapshot's Cleanups from the
           # post-build one, because that counter accumulates for the life of the cache
           # directory and only the difference describes this build.
-          ccache --show-stats --verbose > "$GITHUB_WORKSPACE/diagnostics/ccache-before.txt" || true
+          baseline="$GITHUB_WORKSPACE/diagnostics/ccache-before.txt"
+          ccache --show-stats --verbose > "$baseline" || rm -f "$baseline"
           sampler="$GITHUB_WORKSPACE/diagnostics/samples.log"
           ( while true; do
               printf '%s ' "$(date -u +%FT%TZ)"
@@ -1129,7 +1142,7 @@ jobs:
           # WebKit.xcconfig:284 and the -Xparser flags from :286.
           Tools/Scripts/build-webkit --ios-device --release --use-ccache \
             WK_USE_CCACHE=YES \
-            ARCHS='arm64e' \
+            ARCHS="$WK_BUILD_ARCH" \
             IPHONEOS_DEPLOYMENT_TARGET="$WK_BUILD_DEPLOYMENT_TARGET" \
             WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED="$WK_EXTENSIONKIT_EXTENSIONS_EXCLUDED" \
             WK_VERSIONED_SDK_ADDITIONS_PATH="$WK_ADDITIONS_SDK_PATH" \
@@ -1159,7 +1172,7 @@ jobs:
             echo "=== sampler tail"
             tail -20 "$sampler"
             echo "=== actool probe"
-            /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1
+            xcrun actool --version --output-format xml1
           fi
           exit "$status"
 
@@ -1171,42 +1184,46 @@ jobs:
           # carries a BrowserEngineKit load command, so a gate regression cannot turn into
           # another deb that dyld refuses to load on the device.
           zsh scripts/check-ios-deployment-gates.sh \
-            --build-dir "$PWD/WebKit/WebKitBuild/Release-iphoneos" \
-            --max-minos 16.1
+            --build-dir "$GITHUB_WORKSPACE/WebKit/WebKitBuild/Release-iphoneos" \
+            --arch "$WK_BUILD_ARCH" --max-minos "$WK_BUILD_DEPLOYMENT_TARGET"
 
       - name: Report ccache compression
+        id: ccache-compression
         if: always()
+        continue-on-error: true
         run: |
-          # --show-compression walks every file in the cache, so it runs once here and the
-          # capacity step below reads this transcript instead of asking for it again.
+          set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/diagnostics"
-          ccache --show-compression 2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/ccache-compression.txt" || true
+          ccache --show-compression 2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/ccache-compression.txt"
 
       - name: Report ccache capacity
         if: always()
+        continue-on-error: true
+        env:
+          RESTORED_CACHE_KEY: ${{ steps.ccache.outputs.cache-matched-key }}
+          CACHE_EXACT_MATCH: ${{ steps.ccache.outputs.cache-hit }}
+          COMPRESSION_OUTCOME: ${{ steps.ccache-compression.outcome }}
         run: |
-          set -uo pipefail
-          # One line, read-only, and the number to compare across builds. RESIDENT means this
-          # build trimmed nothing and ended below 98% of max_size; anything else means the
-          # working set still does not fit. in-run-hit is the share of this build's cacheable
-          # calls that the restored cache answered, which is the number that should rise once
-          # max_size stops forcing trims.
+          set -euo pipefail
+          printf 'ccache archive: restored-key=%s exact-key-match=%s\n' \
+            "${RESTORED_CACHE_KEY:-none}" "${CACHE_EXACT_MATCH:-false}"
+          # in-run-hit counts compiler calls answered by ccache during this build.
+          # The count includes entries created earlier in the same build.
           compression_report="$GITHUB_WORKSPACE/diagnostics/ccache-compression.txt"
           baseline="$GITHUB_WORKSPACE/diagnostics/ccache-before.txt"
-          # Either file is missing only when an earlier step failed before writing it;
-          # without --baseline the script judges saturation alone, and without the
-          # transcript it runs ccache itself.
-          args=()
-          [ -f "$baseline" ] && args+=(--baseline "$baseline")
-          [ -f "$compression_report" ] && args+=(--compression "$compression_report")
-          # macOS /bin/bash is 3.2, where "${args[@]}" on an empty array under `set -u` aborts
-          # the step during word expansion, so `|| true` cannot catch it. The +"..." form
-          # expands to nothing when the array is unset or empty and to the quoted elements
-          # otherwise, which is safe on both 3.2 and 5.x.
-          python3 scripts/report-ccache-capacity.py ${args[@]+"${args[@]}"} || true
+          if [ "$COMPRESSION_OUTCOME" != success ]; then
+            echo "::warning::ccache compression unavailable; see Report ccache compression."
+            exit 0
+          fi
+          args=(--compression "$compression_report")
+          if [ -s "$baseline" ]; then
+            args+=(--baseline "$baseline")
+          fi
+          python3 scripts/report-ccache-capacity.py "${args[@]}"
 
       - name: Inspect build output
         if: always()
+        continue-on-error: true
         run: |
           set -uo pipefail
           df -h /
@@ -1235,6 +1252,7 @@ jobs:
 
       - name: Prune build intermediates
         if: always()
+        continue-on-error: true
         run: |
           set -euo pipefail
           # Crash reports explain a silent kill; upload them out of the VM before it goes away.
@@ -1260,126 +1278,109 @@ jobs:
           df -h /
 
       - name: Save ccache
-        if: always()
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' && steps.ccache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ~/.ccache
-          key: ${{ steps.ccache.outputs.cache-primary-key }}
+          key: ${{ env.WK_CCACHE_KEY }}
 
       - name: Install packaging tools
-        if: success()
         run: |
           set -euo pipefail
           brew install ldid dpkg || true
-          command -v ldid && command -v dpkg-deb
+          command -v ldid
+          command -v dpkg-deb
 
       - name: Package rootless deb
-        if: success()
+        id: package
+        env:
+          WEBKIT_COMMIT: ${{ steps.webkit-source.outputs.commit }}
+          WEBKIT_REF: ${{ inputs.webkit_ref }}
+          APPLY_PATCH: ${{ inputs.apply_patch }}
+          XCODE: ${{ inputs.xcode }}
         run: |
           set -euo pipefail
-          zsh scripts/package-webkit-device-deb.sh \
-            --product "$PWD/WebKit/WebKitBuild/Release-iphoneos" \
-            --rootless \
-            --output "$PWD/packages/webkit-rootless.deb"
-          ls -lh packages/
+          test "$(git -C WebKit rev-parse HEAD)" = "$WEBKIT_COMMIT"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          product="$GITHUB_WORKSPACE/WebKit/WebKitBuild/Release-iphoneos"
+          directory=$(mktemp -d "$RUNNER_TEMP/webkit-package.XXXXXX")
+          deb="$directory/webkit-rootless.deb"
+          provenance="$directory/webkit-rootless.build-info"
+          zsh scripts/package-webkit-device-deb.sh --product "$product" --rootless --output "$deb"
+          test -s "$deb"
+          checksum=$(shasum -a 256 "$deb")
+          digest=${checksum%% *}
+          IFS=' ' read -r source_digest _ < "$RUNNER_TEMP/webkit-proxy-source.sha256"
+          printf '%s\n' \
+            "archive=webkit-rootless.deb" "sha256=$digest" "proxy_source_sha256=$source_digest" \
+            "webkit_ref=$WEBKIT_REF" "webkit_commit=$WEBKIT_COMMIT" "workflow_commit=$GITHUB_SHA" \
+            "apply_patch=$APPLY_PATCH" "xcode=$XCODE" "arch=$WK_BUILD_ARCH" "max_minos=$WK_BUILD_DEPLOYMENT_TARGET" \
+            "run_id=$GITHUB_RUN_ID" "run_attempt=$GITHUB_RUN_ATTEMPT" > "$provenance"
+          printf 'deb=%s\nprovenance=%s\nsha256=%s\nproduct=%s\n' \
+            "$deb" "$provenance" "$digest" "$product" >> "$GITHUB_OUTPUT"
 
-      - name: Assert the packaged images carry the @rpath load chain
-        if: success()
+      - name: Verify the packaged deb and its source
+        id: verify-package
+        env:
+          DEB: ${{ steps.package.outputs.deb }}
+          PROVENANCE: ${{ steps.package.outputs.provenance }}
+          EXPECTED_SHA: ${{ steps.package.outputs.sha256 }}
+          PRODUCT: ${{ steps.package.outputs.product }}
+          WEBKIT_COMMIT: ${{ steps.webkit-source.outputs.commit }}
         run: |
           set -euo pipefail
-          # STEP 7 of the packaging script reads its staging tree, before dpkg-deb
-          # writes the archive, so nothing in that run inspects the bytes inside the
-          # finished .deb. This step unpacks the package and runs that same reader
-          # over it, so a payload still naming /System/Library/Frameworks/WebKit
-          # fails this run instead of being uploaded.
-          DEB="$PWD/packages/webkit-rootless.deb"
+          checksum=$(shasum -a 256 "$DEB")
+          test "${checksum%% *}" = "$EXPECTED_SHA"
+          test "$(git -C WebKit rev-parse HEAD)" = "$WEBKIT_COMMIT"
           zsh scripts/package-webkit-device-deb.sh --verify-deb "$DEB" --rootless
-
-          # The check is also held to its negative result, because a verifier that
-          # cannot reject an unrewritten payload is what let an all-system-path deb
-          # reach a device once already. The control is the build product's own
-          # binary, which is the file STEP 5 rewrites: putting it back into the
-          # unpacked tree reproduces exactly the payload a skipped STEP 5 leaves,
-          # with no hand-written Mach-O bytes.
-          #
-          # Everything the control needs lives outside packages/, because Upload deb
-          # globs packages/*.deb and would otherwise publish this deliberately broken
-          # package under the same artifact name as the real one.
-          CONTROL="$RUNNER_TEMP/load-path-control"
-          rm -rf "$CONTROL" && mkdir -p "$CONTROL"
-          NEG="$CONTROL/root"
-          mkdir -p "$NEG"
-          dpkg-deb -x "$DEB" "$NEG"
-          PRODUCT="$PWD/WebKit/WebKitBuild/Release-iphoneos"
-          cp -f "$PRODUCT/WebKit.framework/WebKit" \
-                "$NEG/var/jb/Library/Frameworks/WebKit.framework/WebKit"
-          mkdir -p "$NEG/DEBIAN"
-          dpkg-deb -e "$DEB" "$NEG/DEBIAN"
-          NEG_DEB="$CONTROL/negative.deb"
-          dpkg-deb --build --root-owner-group "$NEG" "$NEG_DEB" >/dev/null
-          if zsh scripts/package-webkit-device-deb.sh \
-               --verify-deb "$NEG_DEB" --rootless >/dev/null 2>&1; then
-            echo "The load-path check accepted a payload whose WebKit names the system framework."
-            echo "Such a check cannot gate this build: it would pass an unrewritten package."
-            exit 1
-          fi
-          echo "Load-path check rejected the unrewritten control package, as it must."
-          # The artifact that gets uploaded must be exactly the one this step checked.
-          ls -l packages/*.deb
-
-      - name: Assert the packaged XPC services carry the identifiers iOS asks for
-        if: success()
-        run: |
-          set -euo pipefail
-          # A package whose bundles are still named com.apple.WebKit.WebContent.Service is
-          # unusable on the device: Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm
-          # asks for com.apple.WebKit.WebContent with no suffix, so our service is never selected
-          # and every fix underneath it stays invisible. Checking here fails the run instead of
-          # shipping a deb that only reveals the problem after it is installed.
-          python3 scripts/check-xpc-service-bundle-identifiers.py --deb "$PWD/packages/webkit-rootless.deb" || {
-            echo "This deb ships XPC services iOS never selects, so installing it replaces nothing."
-            echo "Either a bundle is missing (see the FAIL lines above) or one still carries the"
-            echo ".Service suffix. On a Safari-18.x ref the suffix means"
-            echo "patches/ios16-xpc-service-bundle-identifier.patch did not reach the build;"
-            echo "this run had apply_patch=${{ inputs.apply_patch }}."
-            exit 1
-          }
-          # The checker reads plists out of ar and tar, so the cases that pin both directions need
-          # no build artifact and no dpkg-deb; running them here keeps the checker itself honest.
+          zsh scripts/check-ios-deployment-gates.sh --deb "$DEB" --require-webkit-layout \
+            --arch "$WK_BUILD_ARCH" --max-minos "$WK_BUILD_DEPLOYMENT_TARGET"
+          python3 scripts/check-xpc-service-bundle-identifiers.py --deb "$DEB" --rootless
+          python3 scripts/check-corecrypto-curve25519-imports.py --deb "$DEB"
+          shasum -a 256 -c "$RUNNER_TEMP/webkit-proxy-source.sha256"
+          IFS=' ' read -r source_digest _ < "$RUNNER_TEMP/webkit-proxy-source.sha256"
+          grep -qxF "proxy_source_sha256=$source_digest" "$PROVENANCE"
+          python3 scripts/check-network-session-proxy-configurations.py --source "$WK_PROXY_SOURCE"
           python3 scripts/test-check-xpc-service-bundle-identifiers.py
-
-      - name: Assert no iOS 17 corecrypto import in the packaged deb
-        if: success()
-        run: |
-          set -euo pipefail
-          # The check that matches the device failure: whatever the compiler and linker did, the
-          # payload must not import cccurve25519_make_priv, cccurve25519_make_pub,
-          # cccurve25519_make_key_pair or ccrng_generate, because iOS 16.1 exports none of them.
-          # Run against the deb rather than the build tree, because the deb is what reaches the
-          # device and its payload is what dyld reads.
-          python3 scripts/check-corecrypto-curve25519-imports.py --deb packages/webkit-rootless.deb
-
-      - name: Assert the iOS 17 proxy configuration guard reached the build tree
-        if: success()
-        run: |
-          set -euo pipefail
-          # The real criterion is the source-level guard, not anything in the binary: the packaged
-          # WebKit.framework/WebKit keeps the _objc_msgSend$setProxyConfigurations: stub because the
-          # iOS 17 arm still needs it, so its presence proves nothing either way, and no
-          # disassembly can show whether a caller is reachable on iOS 16. Re-run the checker against
-          # the same build tree the deb was packaged from, so a run whose source was reverted after
-          # the earlier check cannot ship. The checker's own cases run here too, without artifacts.
-          python3 scripts/check-network-session-proxy-configurations.py \
-            --source WebKit/Source/WebKit/NetworkProcess/cocoa/NetworkSessionCocoa.mm
           python3 scripts/test-check-network-session-proxy-configurations.py
 
+          # The unrewritten WebKit from this build must trigger the load-path check itself.
+          control=$(mktemp -d "$RUNNER_TEMP/load-path-control.XXXXXX")
+          trap 'rm -rf "$control"' EXIT
+          negative="$control/root"
+          mkdir -p "$negative"
+          dpkg-deb -x "$DEB" "$negative"
+          image=var/jb/Library/Frameworks/WebKit.framework/WebKit
+          cp -f "$PRODUCT/WebKit.framework/WebKit" "$negative/$image"
+          mkdir -p "$negative/DEBIAN"
+          dpkg-deb -e "$DEB" "$negative/DEBIAN"
+          negative_deb="$control/negative.deb"
+          dpkg-deb --build --root-owner-group "$negative" "$negative_deb" >/dev/null
+          status=0
+          zsh scripts/package-webkit-device-deb.sh --verify-deb "$negative_deb" --rootless \
+            > "$control/verify.log" 2>&1 || status=$?
+          if [ "$status" -ne 1 ] || ! grep -F "Error: $image still names the system path /System/Library/" "$control/verify.log"; then
+            cat "$control/verify.log"
+            echo "::error::The verifier did not reject the unrewritten WebKit for its system load path (exit $status)."
+            exit 1
+          fi
+
+          checksum=$(shasum -a 256 "$DEB")
+          test "${checksum%% *}" = "$EXPECTED_SHA"
+          grep -qxF "sha256=$EXPECTED_SHA" "$PROVENANCE"
+          grep -qxF "webkit_commit=$WEBKIT_COMMIT" "$PROVENANCE"
+          grep -qxF "workflow_commit=$GITHUB_SHA" "$PROVENANCE"
+          printf 'deb=%s\nprovenance=%s\n' "$DEB" "$PROVENANCE" >> "$GITHUB_OUTPUT"
+
       - name: Upload deb
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: webkit-rootless-deb
-          path: packages/*.deb
-          if-no-files-found: warn
+          path: |
+            ${{ steps.verify-package.outputs.deb }}
+            ${{ steps.verify-package.outputs.provenance }}
+          if-no-files-found: error
           retention-days: 7
 
       - name: Upload diagnostics

@@ -21,6 +21,7 @@ import lzma
 import bz2
 import plistlib
 import re
+import struct
 import subprocess
 import sys
 import tarfile
@@ -89,7 +90,7 @@ def write_deb(path: Path, files: dict[str, bytes], compression: str = "gz") -> N
         for name, body in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(body)
-            info.mode = 0o644
+            info.mode = 0o644 if name.endswith(".plist") else 0o755
             tar.addfile(info, io.BytesIO(body))
     control = b"Package: com.example.stub\nVersion: 1.0\nArchitecture: iphoneos-arm64\n"
     path.write_bytes(
@@ -111,9 +112,10 @@ def bundle_files(names: tuple[str, ...],
     files: dict[str, bytes] = {}
     for name in names:
         directory = (renamed or {}).get(name, name)
-        files[f"{XPCSERVICES}/{directory}.xpc/{directory}"] = b"\xcf\xfa\xed\xfe"  # a Mach-O magic
-        files[f"{XPCSERVICES}/{directory}.xpc/Info.plist"] = plist_bytes(
-            (identifiers or {}).get(name, name))
+        identifier = (identifiers or {}).get(name, name)
+        files[f"{XPCSERVICES}/{directory}.xpc/{identifier}"] = struct.pack(
+            "<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
+        files[f"{XPCSERVICES}/{directory}.xpc/Info.plist"] = plist_bytes(identifier)
     return files
 
 
@@ -170,6 +172,8 @@ def case_root_directory() -> None:
             destination = root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(body)
+            if not name.endswith(".plist"):
+                destination.chmod(0o755)
         case_result("the unpacked device layout passes via --root",
                     run([sys.executable, str(SCRIPT), "--root", str(root)]), 0,
                     ("4 XPC bundle(s)", "OK: all 4 required bundle(s) are present"))
@@ -183,6 +187,8 @@ def case_root_partial(present: tuple[str, ...], missing: str) -> None:
             destination = root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(body)
+            if not name.endswith(".plist"):
+                destination.chmod(0o755)
         case_result(f"--root with only {len(present)} bundle(s) fails and names {missing}",
                     run([sys.executable, str(SCRIPT), "--root", str(root)]), 1,
                     (f"FAIL: {missing}.xpc is missing from this package", "asks for"))
@@ -249,6 +255,34 @@ def main() -> int:
              bundle_files(DEVICE_NAMES), 0,
              ("4 XPC bundle(s)", "com.apple.WebKit.WebContent.xpc: com.apple.WebKit.WebContent  [ok]",
               "OK: all 4 required bundle(s) are present"))
+
+    case_deb("a package containing only plists fails",
+             {name: body for name, body in bundle_files(DEVICE_NAMES).items() if name.endswith(".plist")},
+             1, "missing executable")
+
+    files = bundle_files(DEVICE_NAMES)
+    executable = f"{XPCSERVICES}/{DEVICE_NAMES[0]}.xpc/{DEVICE_NAMES[0]}"
+    files[executable] = b"not a Mach-O image"
+    case_deb("a regular text file cannot stand in for a service executable", files, 1, "is not a Mach-O executable")
+    thin = bundle_files(DEVICE_NAMES)[executable]
+    files[executable] = thin[:16]
+    case_deb("a truncated Mach-O header is not an XPC executable", files, 1, "is not a Mach-O executable")
+    dylib = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 6, 0, 0, 0, 0)
+    files[executable] = dylib
+    case_deb("an executable-mode dylib is not an XPC executable", files, 1, "is not a Mach-O executable")
+    fat_header = struct.pack(">12I", 0xCAFEBABE, 2, 0x0100000C, 0, 48, 32, 0, 0x0100000C, 2, 80, 32, 0)
+    arm64e = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 2, 2, 0, 0, 0, 0)
+    files[executable] = fat_header + thin + arm64e
+    case_deb("a universal image with two executable slices passes", files, 0, "4 required bundle(s)")
+    files[executable] = fat_header + thin + dylib
+    case_deb("a universal image with a dylib slice is not an XPC executable", files, 1, "is not a Mach-O executable")
+    with tempfile.TemporaryDirectory() as work:
+        deb = Path(work) / "webkit.deb"
+        misplaced = {f"extra/{name}": body for name, body in bundle_files(DEVICE_NAMES).items()}
+        write_deb(deb, misplaced)
+        case_result("the rootless gate rejects XPC bundles in the wrong directory",
+                    run([sys.executable, str(SCRIPT), "--deb", str(deb), "--rootless"]),
+                    1, "unexpected XPC bundle path")
 
     # A package that also ships the Development bundle. iOS 16.1 has no such bundle and asks
     # for it only when nonValidInjectedCodeAllowed is set, so it is reported, not failed.

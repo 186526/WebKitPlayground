@@ -43,6 +43,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -273,6 +274,80 @@ def run_script(product: Path, output: Path, mode: str, bin_dir: Path,
     return subprocess.run(
         command, capture_output=True, text=True, env=environment,
     )
+
+
+def case_archive_failure(package_type: str, failure: str, stale: bool = True) -> None:
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        product = build_product(root)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        if package_type == "tar":
+            write_stand_in(bin_dir, "ldid", "exit 0")
+        if failure == "copy":
+            write_stand_in(bin_dir, "ditto", f'''case "$1" in
+  */libANGLE-shared.dylib) echo 'stub copy failed' >&2; exit 42;;
+esac
+exec {CP} -R "$@"''')
+        elif package_type == "deb":
+            write_stand_in(bin_dir, "dpkg-deb", '''for last; do :; done
+printf partial > "$last"
+echo 'stub archive failed root-owner-group' >&2
+exit 43''')
+        else:
+            write_stand_in(bin_dir, "gtar", '''printf partial > "$2"
+echo 'stub archive failed' >&2
+exit 43''')
+        output = root / f"output.{package_type}"
+        if stale:
+            output.write_bytes(b"old archive")
+        if package_type == "deb":
+            result = run_script(product, output, "--rootless", bin_dir)
+        else:
+            result = subprocess.run(
+                ["zsh", str(SCRIPT.with_name("package-webkit-device-artifacts.sh")),
+                 "--product", str(product), "--output", str(output)],
+                capture_output=True, text=True,
+                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}, timeout=30,
+            )
+        combined = result.stdout + result.stderr
+        label = f"{package_type}: {failure} failure with {'existing' if stale else 'absent'} output"
+        expected = "stub copy failed" if failure == "copy" else "stub archive failed"
+        preserved = output.read_bytes() == b"old archive" if stale and output.is_file() else not stale and not output.exists()
+        if result.returncode == 0 or expected not in combined or "Package created" in combined or not preserved:
+            failures.append(f"{label}: exit {result.returncode}, previous state preserved={preserved}\n{combined}")
+            return
+        print(f"PASS {label}")
+
+
+def case_tar_replaces_old_output() -> None:
+    label = "TAR succeeds and replaces an old output with the new payload"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        product = build_product(root)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        write_stand_in(bin_dir, "ldid", "exit 0")
+        output = root / "webkit.tar.gz"
+        output.write_bytes(b"old archive")
+        result = subprocess.run(
+            ["zsh", str(SCRIPT.with_name("package-webkit-device-artifacts.sh")),
+             "--product", str(product), "--output", str(output)],
+            capture_output=True, text=True,
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}, timeout=30,
+        )
+        if result.returncode != 0:
+            failures.append(f"{label}: exit {result.returncode}\n{result.stdout}{result.stderr}")
+            return
+        with tarfile.open(output, "r:gz") as archive:
+            relative = "WebKit.framework/WebKit"
+            with archive.extractfile(f"payload/{relative}") as image:
+                if image.read() != (product / relative).read_bytes():
+                    failures.append(f"{label}: archive does not carry the prepared fixture image")
+                    return
+        print(f"PASS {label}")
 
 
 def unpack(deb: Path, destination: Path) -> None:
@@ -1898,6 +1973,11 @@ exec {CP} "$@"''',
     case_verify_deb_rejects_unrewritten()
     case_verify_deb_accepts_rewritten()
     case_verify_deb_prefix_guard()
+    case_tar_replaces_old_output()
+    for package_type in ("deb", "tar"):
+        case_archive_failure(package_type, "copy")
+        case_archive_failure(package_type, "archive")
+        case_archive_failure(package_type, "archive", stale=False)
 
     if failures:
         print(f"\n{len(failures)} failure(s):", file=sys.stderr)

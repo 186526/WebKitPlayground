@@ -142,9 +142,13 @@ def read_input(path: Path | None, command: list[str]) -> tuple[str, str]:
         return path.read_text(encoding="utf-8", errors="replace"), str(path)
     source = " ".join(command)
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        completed = subprocess.run(command, capture_output=True, text=True, check=True, timeout=120)
     except FileNotFoundError:
         raise SystemExit(f"{command[0]}: not found; pass the matching file argument instead")
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"{source}: exited {error.returncode}: {error.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"{source}: timed out after 120 seconds")
     return completed.stdout, source
 
 
