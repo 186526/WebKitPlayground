@@ -1043,15 +1043,15 @@ jobs:
           cd WebKit
           # build-webkit drives xcodebuild directly, so IDE defaults do not reach it; Xcode's own
           # scheduling already spreads work across ~3 cores natively.
-          echo "ccache statistics before build:"
-          ccache -s || true
+          echo "ccache statistics before build:" || :
+          ccache -s || :
           # Independent sampler: survives whatever kills the build shell.
           mkdir -p "$GITHUB_WORKSPACE/diagnostics"
           # The capacity report before Save subtracts this snapshot's Cleanups from the
           # post-build one, because that counter accumulates for the life of the cache
           # directory and only the difference describes this build.
           baseline="$GITHUB_WORKSPACE/diagnostics/ccache-before.txt"
-          ccache --show-stats --verbose > "$baseline" || rm -f "$baseline"
+          ccache --show-stats --verbose > "$baseline" || rm -f "$baseline" || :
           sampler="$GITHUB_WORKSPACE/diagnostics/samples.log"
           ( while true; do
               printf '%s ' "$(date -u +%FT%TZ)"
@@ -1061,7 +1061,7 @@ jobs:
               sleep 15
             done ) > "$sampler" 2>&1 &
           sampler_pid=$!
-          echo "sampler pid ${sampler_pid}"
+          echo "sampler pid ${sampler_pid}" || :
           status=0
           # The device deb must load on iOS 16.1, so every shipped binary has to be built
           # for 16.1 against the 18.5 SDK. Without IPHONEOS_DEPLOYMENT_TARGET the SDK's own
@@ -1157,24 +1157,25 @@ jobs:
             COMPRESS_PNG_FILES=NO \
             DEBUG_INFORMATION_FORMAT=dwarf \
             WK_ROOTLESS_FRAMEWORKS=YES > "$GITHUB_WORKSPACE/diagnostics/build.log" 2>&1 || status=$?
-          # The runner uses bash -e; cleanup and diagnostics must not replace the build status.
-          set +e
-          echo "build-webkit exited with status ${status}"
-          kill "$sampler_pid" 2>/dev/null
-          echo "ccache statistics after build:"
-          ccache -s
-          if [ "$status" -ne 0 ]; then
-            echo "=== last 60 lines of build output"
-            tail -60 "$GITHUB_WORKSPACE/diagnostics/build.log"
-            echo "=== memory"
-            sysctl -n hw.memsize vm.swapusage 2>/dev/null
-            vm_stat 2>/dev/null | head -12
-            ps -Ao rss,comm -r 2>/dev/null | head -15
-            echo "=== sampler tail"
-            tail -20 "$sampler"
-            echo "=== actool probe"
-            xcrun actool --version --output-format xml1
-          fi
+          # Even a diagnostic write failure must leave the saved build status intact.
+          (
+            echo "build-webkit exited with status ${status}"
+            kill "$sampler_pid" 2>/dev/null
+            echo "ccache statistics after build:"
+            ccache -s
+            if [ "$status" -ne 0 ]; then
+              echo "=== last 60 lines of build output"
+              tail -60 "$GITHUB_WORKSPACE/diagnostics/build.log"
+              echo "=== memory"
+              sysctl -n hw.memsize vm.swapusage 2>/dev/null
+              vm_stat 2>/dev/null | head -12
+              ps -Ao rss,comm -r 2>/dev/null | head -15
+              echo "=== sampler tail"
+              tail -20 "$sampler"
+              echo "=== actool probe"
+              xcrun actool --version --output-format xml1
+            fi
+          ) || :
           exit "$status"
 
       - name: Assert iOS 16.1 deployment gates
