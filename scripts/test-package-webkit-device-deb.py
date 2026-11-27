@@ -130,6 +130,12 @@ def _dylib_command(kind: int, name: str, lc_str: int = 24) -> bytes:
     return body[:4] + struct.pack("<I", size) + body[8:]
 
 
+WEBKIT_SPAWN_MARKERS = (
+    b"posix_spawnattr_set_registered_ports_np\0"
+    b"Exiting: no XPC client connection from registered ports\0"
+)
+
+
 def build_macho(
     dependencies: tuple[tuple[int, str], ...] = (),
     *,
@@ -194,8 +200,8 @@ def build_product(root: Path, with_top_level_overlay: bool = True, with_dependen
                     ((LC_LOAD_DYLIB, JSC), (LC_LOAD_DYLIB, WEBCORE),
                      (LC_LOAD_WEAK_DYLIB, WEBRTC), (LC_REEXPORT_DYLIB, WEBKITLEGACY_PRIVATE))
                     if deps else (),
-                    filetype=MH_EXECUTE)[:TEXT_OFFSET] + b"WK_HELPER_SPAWN" +
-                b"\0" * (IMAGE_SIZE - TEXT_OFFSET - len(b"WK_HELPER_SPAWN")))
+                    filetype=MH_EXECUTE)[:TEXT_OFFSET] + WEBKIT_SPAWN_MARKERS +
+                b"\0" * (IMAGE_SIZE - TEXT_OFFSET - len(WEBKIT_SPAWN_MARKERS)))
     (product / "WebKit.framework" / "Info.plist").write_text("<plist/>", encoding="utf-8")
     write_macho(product / "WebCore.framework" / "WebCore",
                 build_macho(
@@ -1530,8 +1536,7 @@ def build_signed_macho(identity: str, dependencies: tuple[tuple[int, str], ...])
                          len(commands), len(body), 0x00200085, 0)
     image = bytearray(header + body + b"\0" * (IMAGE_SIZE - 32 - len(body)))
     if identity == WEBKIT:
-        marker = b"WK_HELPER_SPAWN"
-        image[TEXT_OFFSET:TEXT_OFFSET + len(marker)] = marker
+        image[TEXT_OFFSET:TEXT_OFFSET + len(WEBKIT_SPAWN_MARKERS)] = WEBKIT_SPAWN_MARKERS
     blob = build_code_directory(bytes(image), signature_offset)
     image[signature_offset:signature_offset + len(blob)] = blob
     return bytes(image)

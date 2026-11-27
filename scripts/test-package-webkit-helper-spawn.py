@@ -6,12 +6,9 @@ import tempfile
 from pathlib import Path
 
 
-MARKERS = (
-    "WK_HELPER_SPAWN",
-    "posix_spawnattr_set_registered_ports",
-    "launchWithRegisteredPort",
-    "WK_HELPER_LAUNCH_MODE",
-)
+UI_MARKER = "posix_spawnattr_set_registered_ports_np"
+HELPER_MARKER = "Exiting: no XPC client connection from registered ports"
+MARKERS = (UI_MARKER, HELPER_MARKER)
 
 
 def main() -> None:
@@ -25,13 +22,17 @@ def main() -> None:
         binary = product / "WebKit.framework" / "WebKit"
         original = binary.read_bytes()
         offset = fixtures["TEXT_OFFSET"]
-        for index, markers in enumerate(((), MARKERS, *((marker,) for marker in MARKERS))):
-            content = b"\0".join(text.encode("ascii") for text in (*markers, "WKWebsiteDataTypeCookies"))
-            binary.write_bytes(original[:offset] + content + original[offset + len(content):])
-            output = root / f"helper-spawn-{index}.deb"
-            result = fixtures["run_script"](product, output, "--rootless", bin_dir)
-            diagnostics = result.stdout + result.stderr
+        cases = {"neither": (), "ui-only": (UI_MARKER,), "helper-only": (HELPER_MARKER,), "both": MARKERS}
+        for label, markers in cases.items():
+            strings = (*markers, "WKWebsiteDataTypeCookies")
             if markers:
+                strings += ("WK_HELPER_LAUNCH_MODE",)
+            content = b"\0".join(text.encode("ascii") for text in strings)
+            binary.write_bytes(original[:offset] + content + original[offset + len(content):])
+            output = root / f"helper-spawn-{label}.deb"
+            result = fixtures["run_script"](product, output, "--rootless", bin_dir)
+            diagnostics = f"{label}:\n{result.stdout}{result.stderr}"
+            if label == "both":
                 assert result.returncode == 0 and output.is_file(), diagnostics
             else:
                 assert result.returncode != 0 and not output.exists(), diagnostics

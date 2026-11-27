@@ -1601,18 +1601,18 @@ log_step "Building .deb package..."
 # markers. Scan the staged binary in both build modes so an old product or
 # repackaged payload cannot silently ship without the helper-spawn code again.
 WEBKIT_BINARY="${PAYLOAD_DIR}/WebKit.framework/WebKit"
-HELPER_SPAWN_MARKERS=(
-    WK_HELPER_SPAWN
-    posix_spawnattr_set_registered_ports
-    launchWithRegisteredPort
-    WK_HELPER_LAUNCH_MODE
-)
-HELPER_SPAWN_PATTERNS=()
-for marker in "${HELPER_SPAWN_MARKERS[@]}"; do
-    HELPER_SPAWN_PATTERNS+=(-e "${marker}")
-done
-if ! LC_ALL=C grep -aFq "${HELPER_SPAWN_PATTERNS[@]}" -- "${WEBKIT_BINARY}"; then
-    log_error "Could not confirm helper-spawn code in ${WEBKIT_BINARY}. Searched for: ${(j:, :)HELPER_SPAWN_MARKERS}"
+# WK_HELPER_LAUNCH_MODE is shared by both patches and cannot prove either side.
+UI_SPAWN_MARKER='posix_spawnattr_set_registered_ports_np'
+HELPER_CLIENT_MARKER='Exiting: no XPC client connection from registered ports'
+MISSING_SPAWN_MARKERS=()
+if ! LC_ALL=C grep -aFq -- "${UI_SPAWN_MARKER}" "${WEBKIT_BINARY}"; then
+    MISSING_SPAWN_MARKERS+=("UI: ${UI_SPAWN_MARKER}")
+fi
+if ! LC_ALL=C grep -aFq -- "${HELPER_CLIENT_MARKER}" "${WEBKIT_BINARY}"; then
+    MISSING_SPAWN_MARKERS+=("helper: ${HELPER_CLIENT_MARKER}")
+fi
+if (( ${#MISSING_SPAWN_MARKERS[@]} )); then
+    log_error "Could not confirm both sides of helper-spawn code in ${WEBKIT_BINARY}. Missing: ${(j:; :)MISSING_SPAWN_MARKERS}. Searched for: ${UI_SPAWN_MARKER}; ${HELPER_CLIENT_MARKER}"
     exit 1
 fi
 mkdir -p "$(dirname "${OUTPUT_DEB}")"
