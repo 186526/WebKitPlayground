@@ -2032,6 +2032,58 @@ def load_commands_bytes(data: bytes) -> list[tuple[int, str | None]]:
     return commands
 
 
+def case_override_lifecycle() -> None:
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_shims(bin_dir)
+        for command in ("chown", "uicache"):
+            shim = bin_dir / command
+            shim.write_text("#!/bin/sh\nexit 0\n")
+            shim.chmod(0o755)
+        product = build_product(root)
+        installed = root / "installed"
+        library = installed / "var/jb/Library"
+        override = library / "WebKitOverride"
+        env = dict(os.environ, DPKG_ROOT=str(installed), PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+        def hook(control: Path, name: str, *args: str, check: bool = True):
+            return subprocess.run(["sh", str(control / name), *args], env=env,
+                                  check=check, capture_output=True, text=True, timeout=10)
+
+        for version in (1, 2):
+            contents = f"WebKit version {version}".encode()
+            (product / "WebKit.framework" / "version-test.txt").write_bytes(contents)
+            deb = root / f"webkit-{version}.deb"
+            result = run_script(product, deb, "--rootless", bin_dir, root / "ldid.log")
+            assert result.returncode == 0, result.stdout + result.stderr
+            control = root / f"control-{version}"
+            subprocess.run(["dpkg-deb", "-e", deb, control], check=True, timeout=10)
+            if version == 2:
+                hook(root / "control-1", "prerm", "upgrade", "2")
+                assert override.is_dir()
+            unpack(deb, installed)
+            hook(control, "postinst", "configure", *( ["1"] if version == 2 else []))
+            hook(control, "postinst", "configure")
+            assert (override / "WebKit.framework/version-test.txt").read_bytes() == contents
+            for name in ("WebKit", "WebCore", "JavaScriptCore", "WebKitLegacy", "WebGPU"):
+                rel = Path(f"{name}.framework/{name}")
+                assert (override / rel).read_bytes() == (library / "Frameworks" / rel).read_bytes()
+            for name in ("libwebrtc.dylib", "libANGLE-shared.dylib"):
+                assert (override / "usr/lib" / name).read_bytes() == (installed / "var/jb/usr/lib" / name).read_bytes()
+        hook(control, "prerm", "remove")
+        assert not override.exists()
+        override.mkdir()
+        foreign = override / "keep-me"
+        foreign.write_bytes(b"user data")
+        result = hook(control, "postinst", "configure", check=False)
+        assert result.returncode != 0 and str(override) in result.stderr
+        hook(control, "prerm", "remove")
+        assert foreign.read_bytes() == b"user data"
+    print("PASS rootless override lifecycle")
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--sign":
         # The signer stand-ins call back into this module so the fixtures carry seals the packaging
@@ -2049,6 +2101,7 @@ def main() -> int:
         print(f"missing required tool(s): {', '.join(missing)}", file=sys.stderr)
         return 1
 
+    case_override_lifecycle()
     case_shipped_layout("a rootless package ships the overlay inside WebKit.framework",
                         "--rootless", "var/jb")
     case_shipped_layout("a rootful package ships the overlay inside WebKit.framework",

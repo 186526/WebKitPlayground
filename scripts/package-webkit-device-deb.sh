@@ -300,6 +300,34 @@ fi
 
 INSTALL_FRAMEWORKS_DIR="${PREFIX}/Library/Frameworks"
 INSTALL_USRLIB_DIR="${PREFIX}/usr/lib"
+INSTALL_OVERRIDE_DIR="${PREFIX}/Library/WebKitOverride"
+
+if [[ "${ROOTLESS}" == 1 ]]; then
+    python3 - "${ROOT_DIR}" "${PREFIX}" "${INSTALL_OVERRIDE_DIR}" "${INSTALL_FRAMEWORKS_DIR}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root, prefix, override, frameworks = sys.argv[1:]
+root = Path(root)
+
+
+def literal(file, pattern):
+    matches = re.findall(pattern, (root / file).read_text(), re.MULTILINE)
+    return matches[0] if len(matches) == 1 else "<missing or ambiguous>"
+
+
+installer = literal("scripts/install-webkit-override.sh", r"^OVERRIDE_ROOT=([^\s]+)$")
+basebin = literal("dopamine-basebin/0001-systemhook-set-search-paths.patch",
+                  r'^\+\s*const char \*jbFrameworkPath = JBROOT_PATH\("([^"]+)"\);$')
+xpc = literal("patches/ios18-public-sdk-xpc-main.patch", r"^\+WK_ROOTLESS_FRAMEWORKS_ROOT\s*=\s*([^\s;]+);$")
+if not (override == installer == prefix + basebin == xpc
+        and frameworks == prefix + "/Library/Frameworks" and override != frameworks):
+    sys.exit(f"Error: WebKit override path mismatch: installer {installer!r}, "
+             f"basebin {basebin!r} (resolved {prefix + basebin!r}), XPC {xpc!r}, "
+             f"deb override {override!r}, deb frameworks {frameworks!r}.")
+PY
+fi
 
 # ── output path ──────────────────────────────────────────────
 timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -1393,16 +1421,61 @@ Installed-Size: ${INSTALLED_SIZE}
 Description: ${PACKAGE_DESCRIPTION}
 CTRL
 
-# ── postinst: ensure proper permissions & refresh caches ─────
-cat > "${DEBIAN_DIR}/postinst" <<'POSTINST'
-#!/bin/sh
-set -e
+write_hook_header() {
+    if [[ "${ROOTLESS}" == 1 ]]; then
+        printf '#!%s/usr/bin/sh\n' "${PREFIX}"
+    else
+        printf '#!/bin/sh\n'
+    fi
+    printf 'set -e\nROOTLESS=%s\n' "${ROOTLESS}"
+    printf 'FRAMEWORKS_DIR="${DPKG_ROOT:-}%s"\n' "${INSTALL_FRAMEWORKS_DIR}"
+    printf 'USRLIB_DIR="${DPKG_ROOT:-}%s"\n' "${INSTALL_USRLIB_DIR}"
+    printf 'override="${DPKG_ROOT:-}%s"\n' "${INSTALL_OVERRIDE_DIR}"
+    cat <<'HOOK'
+marker="$override/.webkit-deb-owner"
+frameworks='WebKit WebCore JavaScriptCore WebKitLegacy WebGPU'
+libraries='libwebrtc.dylib libANGLE-shared.dylib'
+owned() {
+    [ ! -L "$override" ] && [ -d "$override" ] &&
+        [ ! -L "$marker" ] && [ -f "$marker" ] &&
+        [ "$(cat "$marker")" = "${DPKG_MAINTSCRIPT_PACKAGE:-com.82flex.custom-webkit}" ]
+}
+HOOK
+}
 
-FRAMEWORKS_DIR="/Library/Frameworks"
-USRLIB_DIR="/usr/lib"
-if [ -d "/var/jb/Library/Frameworks" ]; then
-    FRAMEWORKS_DIR="/var/jb/Library/Frameworks"
-    USRLIB_DIR="/var/jb/usr/lib"
+write_hook_header > "${DEBIAN_DIR}/postinst"
+cat >> "${DEBIAN_DIR}/postinst" <<'POSTINST'
+[ "${1:-}" = configure ] || exit 0
+
+ensure_link() {
+    target=$1 path=$2
+    if [ -L "$path" ] && [ "$(readlink "$path")" = "$target" ]; then
+        return
+    fi
+    ln -s "$target" "${path%/*}/" # The target leaf is the link leaf.
+}
+
+if [ "$ROOTLESS" = 1 ]; then
+    if ! owned; then
+        if ! mkdir -m 0755 "$override"; then
+            printf 'WebKit override path is unmanaged: %s\nAfter reviewing its contents, move it aside and retry: mv "%s" "%s.manual-backup.$(date +%%s)"\n' \
+                "$override" "$override" "$override" >&2
+            exit 1
+        fi
+        printf '%s\n' "${DPKG_MAINTSCRIPT_PACKAGE:-com.82flex.custom-webkit}" > "$marker"
+    fi
+    for name in "$override/usr" "$override/usr/lib"; do
+        [ ! -L "$name" ] || { printf 'Unexpected symlink: %s\n' "$name" >&2; exit 1; }
+        [ -d "$name" ] || mkdir -m 0755 "$name"
+    done
+    for name in $frameworks; do
+        [ -d "$FRAMEWORKS_DIR/$name.framework" ] || continue
+        ensure_link "../Frameworks/$name.framework" "$override/$name.framework"
+    done
+    for name in $libraries; do
+        [ -f "$USRLIB_DIR/$name" ] || continue
+        ensure_link "../../../../usr/lib/$name" "$override/usr/lib/$name"
+    done
 fi
 
 # Fix ownership (root:wheel).
@@ -1420,11 +1493,32 @@ exit 0
 POSTINST
 chmod 0755 "${DEBIAN_DIR}/postinst"
 
-# ── prerm: inform user; no automatic rollback ────────────────
-cat > "${DEBIAN_DIR}/prerm" <<'PRERM'
-#!/bin/sh
-# Uninstalling custom WebKit.  The stock system dyld shared cache
-# will resume providing the original frameworks automatically.
+write_hook_header > "${DEBIAN_DIR}/prerm"
+cat >> "${DEBIAN_DIR}/prerm" <<'PRERM'
+[ "$ROOTLESS" = 1 ] && [ "${1:-}" = remove ] || exit 0
+if ! owned; then
+    if [ -e "$override" ] || [ -L "$override" ]; then
+        printf 'Leaving unmanaged WebKit override untouched: %s\n' "$override" >&2
+    fi
+    exit 0
+fi
+
+remove_link() {
+    if [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; then
+        rm "$2"
+    fi
+}
+for name in $frameworks; do
+    remove_link "../Frameworks/$name.framework" "$override/$name.framework"
+done
+if [ ! -L "$override/usr" ] && [ ! -L "$override/usr/lib" ]; then
+    for name in $libraries; do
+        remove_link "../../../../usr/lib/$name" "$override/usr/lib/$name"
+    done
+    rmdir "$override/usr/lib" "$override/usr" 2>/dev/null || true
+fi
+rm "$marker"
+rmdir "$override" 2>/dev/null || printf 'Leaving remaining contents in %s\n' "$override" >&2
 exit 0
 PRERM
 chmod 0755 "${DEBIAN_DIR}/prerm"
