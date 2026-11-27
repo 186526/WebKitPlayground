@@ -89,27 +89,33 @@ check() {
     pass=$(( pass + 1 ))
 }
 
-# write_macho <path> <minos> <cputype> <cpusubtype> [<platform> [<filetype>]]
 write_macho() {
     python3 - "$@" <<'PY'
-import struct, sys
-path, minos, cputype, cpusubtype = sys.argv[1:5]
-major, minor = (int(x) for x in minos.split('.'))
+import argparse
+import struct
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument('path', type=Path)
+parser.add_argument('minos')
+parser.add_argument('cpu_type', type=lambda value: int(value, 0))
+parser.add_argument('cpu_subtype', type=lambda value: int(value, 0))
+parser.add_argument('--platform', type=int, default=2)
+parser.add_argument('--dylib', action='store_true')
+image = parser.parse_args()
+major, minor = map(int, image.minos.split('.'))
 MH_MAGIC_64 = 0xfeedfacf
 LC_BUILD_VERSION = 0x32
-platform = int(sys.argv[5]) if len(sys.argv) > 5 else 2
-filetype = int(sys.argv[6]) if len(sys.argv) > 6 else 2
 TOOL_LD = 3
-commands = [struct.pack('<8I', LC_BUILD_VERSION, 32, platform,
+commands = [struct.pack('<8I', LC_BUILD_VERSION, 32, image.platform,
                         (major << 16) | (minor << 8), 18 << 16, 1, TOOL_LD, 0)]
-if filetype == 6:  # MH_DYLIB requires LC_ID_DYLIB.
+if image.dylib:
     name = b'@rpath/test.dylib\0'
     name += b'\0' * (-len(name) % 8)
     commands.append(struct.pack('<6I', 0xd, 24 + len(name), 24, 0, 0, 0) + name)
-header = struct.pack('<8I', MH_MAGIC_64, int(cputype, 0) & 0xffffffff,
-                     int(cpusubtype, 0) & 0xffffffff, filetype, len(commands),
-                     sum(map(len, commands)), 0, 0)
-open(path, 'wb').write(header + b''.join(commands))
+header = struct.pack('<8I', MH_MAGIC_64, image.cpu_type, image.cpu_subtype,
+                     6 if image.dylib else 2, len(commands), sum(map(len, commands)), 0, 0)
+image.path.write_bytes(header + b''.join(commands))
 PY
 }
 
@@ -171,7 +177,7 @@ check "unlabelled first slice is still reported" 1 \
     "slice-1: ios 16.1" \
     "${CHECKER}" --deb "${WORK}/fat-unlabelled.deb"
 
-write_macho "${WORK}/simulator" 16.1 0x0100000C 0 7
+write_macho "${WORK}/simulator" 16.1 0x0100000C 0 --platform 7
 make_deb "${WORK}/simulator.deb" "${WEBKIT_REL}" "${WORK}/simulator"
 check "an arm64 simulator image fails despite matching minos" 1 "expected iOS device platform" \
     "${CHECKER}" --deb "${WORK}/simulator.deb"
@@ -195,8 +201,8 @@ check "an incomplete WebKit layout is rejected" 1 "missing executable Mach-O fil
 
 # Match platform, architecture and deployment version in both slices, so only
 # the filetype distinguishes the good package from the broken ones.
-write_macho "${WORK}/dylib-a" 16.1 0x0100000C 0 2 6
-write_macho "${WORK}/dylib-e" 16.1 0x0100000C 0x80000002 2 6
+write_macho "${WORK}/dylib-a" 16.1 0x0100000C 0 --dylib
+write_macho "${WORK}/dylib-e" 16.1 0x0100000C 0x80000002 --dylib
 "${LIPO_BIN}" -create "${WORK}/dylib-a" "${WORK}/dylib-e" -output "${WORK}/fat-dylib"
 "${LIPO_BIN}" -create "${WORK}/dylib-a" "${WORK}/fat-good-e" -output "${WORK}/fat-wrong-filetype"
 
@@ -224,8 +230,44 @@ dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-wrong-fra
 check "a framework path rejects an executable Mach-O" 1 \
     "${WEBKIT_REL}: - expected MH_DYLIB (6), got filetype 2" \
     "${CHECKER}" --deb "${WORK}/layout-wrong-framework.deb" --require-webkit-layout
+cp "${WORK}/fat-dylib" "${layout}/${WEBKIT_REL}"
 
-write_macho "${WORK}/fat-simulator" 16.1 0x0100000C 0x80000002 7
+frameworks="${layout}/var/jb/Library/Frameworks"
+ln -s WebKit.framework "${frameworks}/Optional.framework"
+dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-optional-link.deb" >/dev/null
+check "strict layout allows an optional framework symlink" 0 "Result: PASS" \
+    "${CHECKER}" --deb "${WORK}/layout-optional-link.deb" --require-webkit-layout
+
+mv "${frameworks}/WebCore.framework" "${frameworks}/WebCore-data"
+ln -s WebCore-data "${frameworks}/WebCore.framework"
+cp "${WORK}/fat-wrong-filetype" "${frameworks}/WebCore-data/WebCore"
+dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-aliased-framework.deb" >/dev/null
+check "strict layout rejects a required framework directory symlink" 1 \
+    "var/jb/Library/Frameworks/WebCore.framework is a symlink" \
+    "${CHECKER}" --deb "${WORK}/layout-aliased-framework.deb" --require-webkit-layout
+check "non-strict inspection still checks the alias target by its own path" 0 "WebCore-data/WebCore" \
+    "${CHECKER}" --deb "${WORK}/layout-aliased-framework.deb"
+
+rm "${frameworks}/WebCore.framework"
+mv "${frameworks}/WebCore-data" "${frameworks}/WebCore.framework"
+cp "${WORK}/fat-dylib" "${frameworks}/WebCore.framework/WebCore"
+mv "${frameworks}" "${frameworks}-data"
+ln -s Frameworks-data "${frameworks}"
+dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-aliased-parent.deb" >/dev/null
+check "strict layout rejects a shared parent directory symlink" 1 \
+    "required directory var/jb/Library/Frameworks is a symlink" \
+    "${CHECKER}" --deb "${WORK}/layout-aliased-parent.deb" --require-webkit-layout
+
+rm "${frameworks}"
+mv "${frameworks}-data" "${frameworks}"
+mv "${webrtc}" "${webrtc}.real"
+ln -s libwebrtc.dylib.real "${webrtc}"
+dpkg-deb --build --root-owner-group -Zgzip "${layout}" "${WORK}/layout-aliased-library.deb" >/dev/null
+check "strict layout rejects a symlink at a required library path" 1 \
+    "var/jb/usr/lib/libwebrtc.dylib: required file is a symlink" \
+    "${CHECKER}" --deb "${WORK}/layout-aliased-library.deb" --require-webkit-layout
+
+write_macho "${WORK}/fat-simulator" 16.1 0x0100000C 0x80000002 --platform 7
 "${LIPO_BIN}" -create "${WORK}/fat-a" "${WORK}/fat-simulator" -output "${WORK}/fat-wrong-platform"
 make_deb "${WORK}/fat-wrong-platform.deb" "${WEBKIT_REL}" "${WORK}/fat-wrong-platform"
 check "a later simulator slice still fails the iOS device gate" 1 "arm64e expected iOS device platform" \

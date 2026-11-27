@@ -120,7 +120,7 @@ def bundle_files(names: tuple[str, ...],
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True)
+    return subprocess.run(command, capture_output=True, text=True, timeout=30)
 
 
 def case_result(label: str, result: subprocess.CompletedProcess[str], expected_status: int,

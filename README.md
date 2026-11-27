@@ -117,8 +117,9 @@ patches enabled and builds for arm64e with an iOS 16.1 deployment target. A succ
 build info records the archive SHA-256, the WebKit and workflow revisions, and the build inputs.
 The upload uses the exact archive that passed the package checks and requires the complete build
 info to match the verified inputs. The package checks require every slice of each required
-framework and `libwebrtc.dylib` to be a Mach-O dynamic library. The cache report lists which archive
-was restored separately from the hit rate measured during compilation.
+framework and `libwebrtc.dylib` to be a Mach-O dynamic library. The required files and their parent
+directories within the archive cannot be symlinks. The cache report lists which archive was restored
+separately from the hit rate measured during compilation.
 
 ## How to use
 

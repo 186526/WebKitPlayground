@@ -92,7 +92,8 @@ Both modes require iOS device arm64 or arm64e slices with minos at most
 --max-minos (default 16.1). With --arch, every slice must match the requested
 architecture. --deb checks every Mach-O and reports
 weak ${FORBIDDEN_FRAMEWORK} links without failing. --require-webkit-layout
-also requires the four rootless WebKit framework binaries and libwebrtc.
+also requires the four rootless WebKit framework binaries and libwebrtc at
+paths without symlinks, with every slice of each required image an MH_DYLIB.
 
 Example:
   scripts/${SCRIPT_NAME} --deb /tmp/artdl/webkit-rootless.deb
@@ -383,10 +384,44 @@ check_build() {
 }
 
 require_packaged_image() {
-    local relative="$2" binary="$1/$2"
-    if [[ ! -f "${binary}" || -L "${binary}" || ! -x "${binary}" ]] || ! is_macho_image "${binary}"; then
-        DEB_FAILURES+=("${relative}: missing executable Mach-O file at required package path")
+    local root="$1" relative="$2" component directory="" binary="$1/$2"
+    for component in "${(@s:/:)${relative:h}}"; do
+        directory="${directory:+${directory}/}${component}"
+        if [[ -L "${root}/${directory}" ]]; then
+            printf 'Error: %s: required directory %s is a symlink\n' "${relative}" "${directory}" >&2
+            return 1
+        fi
+        if [[ ! -d "${root}/${directory}" ]]; then
+            printf 'Error: %s: missing executable Mach-O file at required package path (not a directory: %s)\n' \
+                "${relative}" "${directory}" >&2
+            return 1
+        fi
+    done
+    if [[ -L "${binary}" ]]; then
+        printf 'Error: %s: required file is a symlink\n' "${relative}" >&2
+        return 1
     fi
+    if [[ ! -f "${binary}" || ! -x "${binary}" ]] || ! is_macho_image "${binary}"; then
+        printf 'Error: %s: missing executable Mach-O file at required package path\n' "${relative}" >&2
+        return 1
+    fi
+}
+
+validated_layout_paths() {
+    local root="$1" framework relative
+    local -a required_paths=()
+    if [[ -L "${root}" || ! -d "${root}" ]]; then
+        printf 'Error: the extraction root is not a real directory\n' >&2
+        return 1
+    fi
+    for framework in "${CHECKED_BINARIES[@]}" "${OPTIONAL_BINARIES[@]}"; do
+        required_paths+=("var/jb/Library/Frameworks/${framework}")
+    done
+    required_paths+=(var/jb/usr/lib/libwebrtc.dylib)
+    for relative in "${required_paths[@]}"; do
+        require_packaged_image "${root}" "${relative}" || return 1
+    done
+    printf '%s\n' "${required_paths[@]}"
 }
 
 # Unpacks ${deb}, walks every Mach-O image inside it, prints one table row per
@@ -404,15 +439,12 @@ check_deb() {
     fi
 
     typeset -A expected_types=()
+    local required_image layout_paths
     if [[ "${REQUIRE_WEBKIT_LAYOUT}" == 1 ]]; then
-        local required_image
-        for required_image in "${CHECKED_BINARIES[@]}" "${OPTIONAL_BINARIES[@]}"; do
-            expected_types[var/jb/Library/Frameworks/${required_image}]=dylib
-        done
-        expected_types[var/jb/usr/lib/libwebrtc.dylib]=dylib
-        for required_image in "${(@k)expected_types}"; do
-            require_packaged_image "${unpack_dir}" "${required_image}"
-        done
+        layout_paths="$(validated_layout_paths "${unpack_dir}")" || exit 1
+        while IFS= read -r required_image; do
+            expected_types[$required_image]=dylib
+        done <<< "${layout_paths}"
     fi
 
     typeset -a candidates=()
@@ -434,9 +466,10 @@ check_deb() {
 
     local prefix_len=$(( ${#unpack_dir} + 1 ))
     typeset -a row_path=() row_minos=() row_bek=() row_result=() row_level=()
-    local image rel headers links line kind link_path
+    local image rel headers links line kind link_path expected_type
     local weak_linked_images=0
     local level result image_weak image_fatal bek_cell link_kinds declared_slices previous_failures
+    typeset -A checked_required=()
 
     for image in "${images[@]}"; do
         rel="${image:${prefix_len}}"
@@ -451,7 +484,11 @@ check_deb() {
             printf 'Error: llvm-objdump failed to read %s\n' "${rel}" >&2
             exit 2
         fi
-        check_slices "${rel}" "${declared_slices}" "${headers}" "${expected_types[$rel]:-}"
+        expected_type="${expected_types[$rel]:-}"
+        check_slices "${rel}" "${declared_slices}" "${headers}" "${expected_type}"
+        if [[ -n "${expected_type}" ]]; then
+            checked_required[$rel]=1
+        fi
         if [[ "${#DEB_FAILURES}" -gt "${previous_failures}" ]]; then
             image_fatal=1
         fi
@@ -493,6 +530,12 @@ check_deb() {
         row_bek+=("${bek_cell}")
         row_result+=("${result}")
         row_level+=("${level}")
+    done
+
+    for required_image in "${(@ok)expected_types}"; do
+        if [[ -z "${checked_required[$required_image]:-}" ]]; then
+            DEB_FAILURES+=("${required_image}: required image was not inspected")
+        fi
     done
 
     if [[ "${#images}" -eq 0 ]]; then
