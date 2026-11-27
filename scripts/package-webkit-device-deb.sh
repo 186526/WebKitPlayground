@@ -343,8 +343,9 @@ write_macho_load_path_tool() {
 Modes:
   rewrite <root> <prefix>   Replace every load command that names one of the
                             system frameworks this package ships with its
-                            @rpath form, then give the image the LC_RPATH
-                            entries that resolve it.
+                            @rpath form. Add missing LC_RPATH entries to images
+                            with @rpath dependencies, including preexisting ones.
+                            A fully rewritten payload is left unchanged.
   verify  <root> <prefix>   Fail unless every Mach-O under <root> is free of
                             the system framework prefixes, and unless every
                             @rpath dependency resolves to a file inside <root>.
@@ -650,15 +651,23 @@ def install_mapping(system_path):
                        % system_path)
 
 
+def resolves_rpath(root, dependency, rpaths):
+    tail = dependency[len("@rpath/"):]
+    return any(os.path.isfile(os.path.join(root, value.lstrip("/"), tail))
+               for value in rpaths if value.startswith("/"))
+
+
 def rewrite(root, prefix):
     # Planning parses every image, resolves every destination, and checks the
     # header pad of every image that needs new LC_RPATH bytes, before the first
     # write.  A payload this program rejects therefore stays byte-identical.
     plan = []
+    has_rpath_dependencies = False
     for path in payload_images(root):
         image = Image(path)
+        entries = image.install_name_commands()
         replacements = []
-        for command, name in image.install_name_commands():
+        for command, name in entries:
             if not name.startswith(FORBIDDEN_PREFIXES):
                 continue
             rpath_name, relative = install_mapping(name)
@@ -667,11 +676,20 @@ def rewrite(root, prefix):
                 raise PayloadError("%s names %s, and its install row points at %s, which is not in the payload"
                                    % (path, name, destination))
             replacements.append((command, rpath_name))
-        if replacements:
-            blobs = image.missing_rpath_blobs([prefix + "/" + directory for directory in RPATH_DIRECTORIES])
-            image.check_rpath_capacity(blobs)
+        dependencies = [name for _, name in entries if name.startswith("@rpath/")]
+        dependencies.extend(name for _, name in replacements)
+        if not dependencies:
+            continue
+        has_rpath_dependencies = True
+        wanted_rpaths = [prefix + "/" + directory for directory in RPATH_DIRECTORIES]
+        for dependency in dependencies:
+            if not resolves_rpath(root, dependency, image.rpaths() + wanted_rpaths):
+                raise PayloadError("%s: %s resolves to no file inside the payload" % (path, dependency))
+        blobs = image.missing_rpath_blobs(wanted_rpaths)
+        image.check_rpath_capacity(blobs)
+        if replacements or blobs:
             plan.append((path, image, replacements, blobs))
-    if not plan:
+    if not has_rpath_dependencies:
         raise PayloadError("no Mach-O under %s names a system framework path; the install table matched nothing"
                            % root)
     total = 0
@@ -711,9 +729,7 @@ def verify_image(image, root, relative, prefix):
         if wanted not in rpaths:
             problems.append("%s loads @rpath dependencies but has no LC_RPATH %s" % (relative, wanted))
     for dependency in dependencies:
-        tail = dependency[len("@rpath/"):]
-        if not any(os.path.exists(os.path.join(root, value.lstrip("/"), tail))
-                   for value in rpaths if value.startswith("/")):
+        if not resolves_rpath(root, dependency, rpaths):
             problems.append("%s: %s resolves to no file inside the payload" % (relative, dependency))
     return problems, dependencies, reexports
 

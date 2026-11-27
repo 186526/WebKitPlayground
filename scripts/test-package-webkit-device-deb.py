@@ -813,6 +813,40 @@ def case_corrupted_name_is_rejected() -> None:
     print(f"PASS {label}")
 
 
+def case_rewrite_already_rpath_linked() -> None:
+    label = "rewrite repairs missing LC_RPATH and is byte-identical on repeat"
+    with tempfile.TemporaryDirectory() as work:
+        root = Path(work)
+        tool = extract_tool(root / "macho-load-paths.py")
+        helper = "Library/Frameworks/WebKit.framework/XPCServices/helper"
+        dependency = "@rpath/WebKit.framework/WebKit"
+        payload = write_destination_tree(root, {
+            helper: build_macho(((LC_LOAD_DYLIB, dependency),), filetype=MH_EXECUTE),
+        })
+        result = run_tool(tool, "verify", root)
+        if result.returncode != 1 or "resolves to no file inside the payload" not in result.stderr:
+            failures.append(f"{label}: verify accepted absent LC_RPATH or failed unexpectedly: {result}")
+            return
+        result = run_tool(tool, "rewrite", root)
+        if result.returncode != 0:
+            failures.append(f"{label}: initial rewrite failed: {result}")
+            return
+        if rpaths(payload / helper) != ["/var/jb/Library/Frameworks", "/var/jb/usr/lib"]:
+            failures.append(f"{label}: rewrite did not add both LC_RPATH entries")
+            return
+        before = {path: path.read_bytes() for path in payload.rglob("*") if path.is_file()}
+        for mode in ("verify", "rewrite"):
+            result = run_tool(tool, mode, root)
+            if result.returncode != 0:
+                failures.append(f"{label}: {mode} failed on the repaired payload: {result}")
+                return
+            after = {path: path.read_bytes() for path in payload.rglob("*") if path.is_file()}
+            if after != before:
+                failures.append(f"{label}: {mode} modified the repaired payload")
+                return
+    print(f"PASS {label}")
+
+
 def case_header_pad_atomicity() -> None:
     """A payload rejected for header-pad exhaustion must be left byte-identical.
 
@@ -829,7 +863,8 @@ def case_header_pad_atomicity() -> None:
         tight = "Library/Frameworks/webpushd"
         write_destination_tree(root, {
             roomy: build_macho(((LC_LOAD_DYLIB, WEBKIT),), filetype=MH_EXECUTE),
-            tight: build_macho(((LC_LOAD_DYLIB, WEBKIT),), filetype=MH_EXECUTE, header_pad=False),
+            tight: build_macho(((LC_LOAD_DYLIB, "@rpath/WebKit.framework/WebKit"),),
+                               filetype=MH_EXECUTE, header_pad=False),
         })
         before = {relative: (root / "var/jb" / relative).read_bytes() for relative in (roomy, tight)}
 
@@ -1950,6 +1985,7 @@ exec {CP} "$@"''',
     case_missing_table_destination()
     case_nonstandard_lc_str()
     case_corrupted_name_is_rejected()
+    case_rewrite_already_rpath_linked()
     case_header_pad_atomicity()
     case_truncated_image()
     case_payload_mode()
