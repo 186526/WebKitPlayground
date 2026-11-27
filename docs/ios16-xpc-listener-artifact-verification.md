@@ -17,7 +17,7 @@
 | deb | `webkit-rootless.deb`，58939840 字节，sha256 `d080748438e4d6e0b7093f30ea6f0992c4db829b671dcca31dcece574858a1cd` |
 | 包名与版本 | `com.82flex.custom-webkit` `620.2.4-20261126231806` |
 | 解包产物 | `/home/real186/project/ipad-pro-m2/.tmp/deb-45874174324/x/` |
-| payload 文件数 | 91 |
+| payload 文件数 | 88；连 `DEBIAN/` 下 3 个控制文件共 91 个普通文件（`dpkg-deb -c` 的 120 行含目录） |
 
 版本号里的时间戳不是构建时间，是打 deb 那一刻的时间。`scripts/package-webkit-device-deb.sh:277` 写的是 `PACKAGE_VERSION="${PACKAGE_VERSION}-$(date +%Y%m%d%H%M%S)"`，位于 `--payload` 之外的分支，正常打包路径必走这一行。所以 `20261126231806` 是 runner 本地时间（UTC）`23:18:06`，比 job 完成早 81 秒。这条把 deb 与 run 绑在一起，与被检查的二进制无关。
 
@@ -28,11 +28,11 @@
 | CI run | `45752229643`，conclusion `success`，headSha `b5fc17bd125b92a5ab1135e247efb94fbfd48f5f` |
 | 包名与版本 | `com.82flex.custom-webkit` `620.2.4-20261126093904` |
 | 存档 | `artifacts/webkit-rootless.deb`，58938996 字节，sha256 `225950f49fd5f5b24c7d27bd846404be09d3a130546af6c3a23592dcd83d81ac` |
-| 解包产物 | `/home/real186/project/ipad-pro-m2/.tmp/verify/old/` |
+| 解包产物 | `.tmp/verify/old/`；该目录在本次会话中被另一进程删除，重新展开到 `.tmp/m170/old/` 后哈希相同，见第 10 节 |
 
 `66879e8` 的上游包含 `b5fc17b`（`git merge-base --is-ancestor b5fc17b 66879e8` 返回 0），所以旧包的 headSha 是同一个仓库历史里的祖先，两者之间只有一个 XPC 补丁的差异。
 
-旧侧的来源用二进制自身的哈希确认，不靠版本号：从 `artifacts/webkit-rootless.deb` 解出的 `var/jb/Library/Frameworks/WebKit.framework/WebKit`，sha256 是 `a305c1f4d8f11f9c5f350dd421595f0c97d900673b8a0c1227996a0713b6d28d`，与 `.tmp/verify/old/` 里那一份逐位相同。下文所有「旧」读数都来自这一份。
+旧侧的来源用二进制自身的哈希确认，不靠版本号：从 `artifacts/webkit-rootless.deb` 解出的 `var/jb/Library/Frameworks/WebKit.framework/WebKit`，sha256 是 `a305c1f4d8f11f9c5f350dd421595f0c97d900673b8a0c1227996a0713b6d28d`。下文所有「旧」读数都来自这一份。
 
 ## 2. 补丁新增的四条字符串常量
 
@@ -542,6 +542,7 @@ dpkg-deb -f $D/webkit-rootless.deb Package Version
 # 字符串常量
 NEW=$D/x/var/jb/Library/Frameworks/WebKit.framework/WebKit
 OLD=/home/real186/project/ipad-pro-m2/.tmp/verify/old/var/jb/Library/Frameworks/WebKit.framework/WebKit
+# 若该目录已不在，见本节末尾的重新展开命令
 grep -a -o -- 'xpc_connection_create_mach_service' $NEW | wc -l   # 2
 grep -a -o -- 'xpc_connection_create_mach_service' $OLD | wc -l   # 0
 
