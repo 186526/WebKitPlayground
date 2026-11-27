@@ -1,6 +1,6 @@
 # M166 的 XPC listener 补丁是否编进了发货产物：产物级验证
 
-本文回答一个问题：`patches/ios18-public-sdk-xpc-main.patch` 在提交 `66879e8` 上被合并之后，CI run `45874174324` 打出的 deb 里，那个 listener 实现是不是真的存在于二进制中。答案分三层，每层各自有独立读数：字符串常量在 `.cstring` 与 `.oslogstring` 里的位置、`XPCServiceMain` 与它的事件 handler block 的反汇编、以及五个 framework 与五个 `.xpc` helper 的 load command 与代码签名。
+本文回答一个问题：`patches/ios18-public-sdk-xpc-main.patch` 在提交 `66879e8` 上被合并之后，CI run `45874174324` 打出的 deb 里，那个 listener 实现是不是真的存在于二进制中。答案分三层，每层各自有独立读数：字符串常量在 `.cstring` 与 `.oslogstring` 里的位置、`XPCServiceMain` 与它的事件 handler block 的反汇编、以及全部 16 个 Mach-O 映像（五个 framework、三个 dylib、五个 `.xpc` helper、`jsc`、`adattributiond`、`webpushd`）的 load command 与代码签名。
 
 本文不含任何设备读数。第 8 节说明为什么这些读数推不出「白屏已修」，第 9 节列出本地跑不了、需要哪一件工具才能补上的验证。
 
