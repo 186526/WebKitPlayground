@@ -75,16 +75,18 @@ def check_ui(source):
     if body.count("return false;") != len(failure_conditions) or body.count(cancel) != len(failure_conditions):
         raise ValueError("expected one listener cancel per synchronous fallback")
     branches_by_condition = dict(branches)
-    for condition in failure_conditions:
+    expected_prefixes = (
+        ['        RELEASE_LOG_ERROR(IPC, "WK_HELPER_SPAWN_FALLBACK: no registered send right for %s; using named XPC", name.characters());',
+         "        if (listener)"],
+        ['        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));'],
+        ["        kill(helperPID, SIGKILL);",
+         "        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ reapSpawnedHelper(helperPID); });"],
+    )
+    for condition, prefix in zip(failure_conditions, expected_prefixes):
         branch = branches_by_condition.get(condition, "")
-        cleanup = f"        {cancel}\n        return false;"
-        if condition == failure_conditions[0]:
-            cleanup = f"        if (listener)\n    {cleanup}"
-            if 'RELEASE_LOG_ERROR(IPC, "WK_HELPER_SPAWN_FALLBACK:' not in branch:
-                raise ValueError("expected the send-right failure to log WK_HELPER_SPAWN_FALLBACK")
-        if not branch.rstrip().endswith(cleanup) or "failBeforeConnection" in branch:
+        cancel_indent = "            " if condition == failure_conditions[0] else "        "
+        if branch.splitlines() != [*prefix, f"{cancel_indent}{cancel}", "        return false;"]:
             raise ValueError(f"expected cancel before named-XPC fallback in branch: {condition}")
-        check_no_early_return(branch.split(cancel, 1)[0], "listener")
         held = held.replace(branch, "", 1)
     check_no_early_return(held, "listener")
     if re.search(r"\bxpc_connection_cancel\s*\(", after_transfer):
@@ -94,15 +96,21 @@ def check_ui(source):
 
 
 def check_helper(source):
-    cleanup = re.search(r"auto placeholder = adoptOSObject\(xpc_connection_create\(nullptr, nullptr\)\);"
-                        r"(.*?)\*endpointPort = placeholderPort;\s+endpoint = nullptr;\s+"
-                        r"xpc_connection_cancel\(placeholder.get\(\)\);\s+\}", source, re.DOTALL)
-    if not cleanup:
+    cleanup = re.search(r"^        auto placeholder = adoptOSObject\(xpc_connection_create\(nullptr, nullptr\)\);\n"
+                        r"(.*?)^    \}$", source, re.MULTILINE | re.DOTALL)
+    expected_tail = [
+        "        connection = adoptOSObject(xpc_connection_create_from_endpoint(endpoint.get()));",
+        "        *endpointPort = placeholderPort;",
+        "        endpoint = nullptr;",
+        "        xpc_connection_cancel(placeholder.get());",
+    ]
+    if not cleanup or cleanup[1].splitlines()[-len(expected_tail):] != expected_tail:
         raise ValueError("expected restoration of the endpoint right and cancel before placeholder scope exit")
-    check_connection_uses(cleanup[1], "placeholder", {
+    before_cleanup = "\n".join(cleanup[1].splitlines()[:-len(expected_tail)])
+    check_connection_uses(before_cleanup, "placeholder", {
         "auto endpoint = adoptOSObject(xpc_endpoint_create(placeholder.get()));",
     })
-    check_no_early_return(cleanup[1], "placeholder")
+    check_no_early_return(before_cleanup, "placeholder")
     if 'XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)' not in source:
         raise ValueError("expected the helper's existing launchd listener marker")
 
@@ -120,7 +128,14 @@ def check_regressions(ui_source, helper_source):
         "placeholder = nullptr;",
         "auto escaped = WTFMove(placeholder);",
     )
+    spawn_log = '        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));\n'
+    cancel_line = "        xpc_connection_cancel(listener.get());\n"
+    spawn_cancel = spawn_failure + spawn_log + cancel_line
     cases = (
+        (check_ui, ui_source, spawn_cancel, spawn_failure + spawn_log + "        if (false)\n" + cancel_line,
+         "if (false) before spawn failure cancel"),
+        (check_ui, ui_source, spawn_cancel, spawn_failure + spawn_log + cancel_line[1:],
+         "seven-space indentation on spawn failure cancel"),
         *((check_ui, ui_source, spawn_failure, f"{spawn_failure}        {statement}\n", statement)
           for statement in listener_mutations),
         *((check_helper, helper_source, restore_port, f"        {statement}\n{restore_port}", statement)
