@@ -16,7 +16,7 @@ import sys
 PATCHES = Path(__file__).resolve().parents[1] / "patches"
 UI_PATCH = PATCHES / "ios18-xpc-registered-port-ui.patch"
 HELPER_PATCH = PATCHES / "ios18-xpc-registered-port-helper.patch"
-UI_PATCH_SHA256 = "12eeebd3d6dbd6e90b27b3190ff2bad9bc12b40fdd79403e13d925094df99302"
+UI_PATCH_SHA256 = "f4d95148afbc7b527caaff8dec4573224e131287e51ff66f3c2ba25a1ad6cb3c"
 HELPER_PATCH_SHA256 = "0e154f2ff56447b9c1520493c4bac5a8fe2641132ac6706fd3749f34ea92da53"
 LAUNCH_BLOCK = '''     launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
  #else
@@ -47,55 +47,9 @@ LAUNCH_FUNCTION = '''bool ProcessLauncher::launchWithRegisteredPort(ASCIILiteral
         return true;
     }
 
-    auto listener = adoptOSObject(xpc_connection_create(nullptr, dispatch_get_main_queue()));
-    auto endpoint = listener ? adoptOSObject(xpc_endpoint_create(listener.get())) : OSObjectPtr<xpc_endpoint_t> { };
-    mach_port_t listenerPort = MACH_PORT_NULL;
-    if (endpoint) {
-        // iPadOS 16.1 libxpc stores the endpoint's borrowed send right at this offset.
-        constexpr size_t endpointPortOffset = 0x18;
-        auto bytes = static_cast<const uint8_t*>((__bridge const void*)endpoint.get());
-        memcpy(&listenerPort, bytes + endpointPortOffset, sizeof(listenerPort));
-    }
-
-    mach_port_type_t portType;
-    auto result = mach_port_type(mach_task_self(), listenerPort, &portType);
-    if (result != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND)) {
-        RELEASE_LOG_ERROR(IPC, "WK_HELPER_SPAWN_FALLBACK: no registered send right for %s; using named XPC", name.characters());
-        if (listener)
-            xpc_connection_cancel(listener.get());
+    m_registeredPortListener = adoptOSObject(xpc_connection_create(nullptr, dispatch_get_main_queue()));
+    if (!m_registeredPortListener)
         return false;
-    }
-
-    pid_t helperPID = 0;
-    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {
-        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));
-        xpc_connection_cancel(listener.get());
-        return false;
-    }
-
-    auto childExitSource = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, helperPID, DISPATCH_PROC_EXIT, dispatch_get_main_queue()));
-    if (!childExitSource) {
-        kill(helperPID, SIGKILL);
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ reapSpawnedHelper(helperPID); });
-        xpc_connection_cancel(listener.get());
-        return false;
-    }
-
-    m_spawnedHelperPID = helperPID;
-    m_registeredPortListener = WTFMove(listener);
-    dispatch_source_set_event_handler(childExitSource.get(), ^{
-        reapSpawnedHelper(helperPID);
-        dispatch_source_cancel(childExitSource.get());
-        auto launcher = weakLauncher.get();
-        if (!launcher)
-            return;
-        launcher->m_spawnedHelperPID = 0;
-        if (launcher->m_registeredPortListener) {
-            launcher->cancelRegisteredPortListener();
-            failBeforeConnection();
-        }
-    });
-    dispatch_resume(childExitSource.get());
 
     xpc_connection_set_event_handler(m_registeredPortListener.get(), ^(xpc_object_t event) {
         auto launcher = weakLauncher.get();
@@ -111,7 +65,58 @@ LAUNCH_FUNCTION = '''bool ProcessLauncher::launchWithRegisteredPort(ASCIILiteral
         xpc_connection_set_target_queue(launcher->m_xpcConnection.get(), dispatch_get_main_queue());
         launcher->finishLaunchingProcess(name);
     });
-    xpc_connection_resume(m_registeredPortListener.get());
+    bool listenerResumed = false;
+    if (!listenerResumed) {
+        xpc_connection_resume(m_registeredPortListener.get());
+        listenerResumed = true;
+    }
+
+    auto endpoint = adoptOSObject(xpc_endpoint_create(m_registeredPortListener.get()));
+    mach_port_t listenerPort = MACH_PORT_NULL;
+    if (endpoint) {
+        // iPadOS 16.1 libxpc stores the endpoint's borrowed send right at this offset.
+        constexpr size_t endpointPortOffset = 0x18;
+        auto bytes = static_cast<const uint8_t*>((__bridge const void*)endpoint.get());
+        memcpy(&listenerPort, bytes + endpointPortOffset, sizeof(listenerPort));
+    }
+
+    mach_port_type_t portType;
+    auto result = mach_port_type(mach_task_self(), listenerPort, &portType);
+    if (result != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND)) {
+        RELEASE_LOG_ERROR(IPC, "WK_HELPER_SPAWN_FALLBACK: no registered send right for %s; using named XPC", name.characters());
+        cancelRegisteredPortListener();
+        return false;
+    }
+
+    pid_t helperPID = 0;
+    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {
+        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));
+        cancelRegisteredPortListener();
+        return false;
+    }
+
+    auto childExitSource = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, helperPID, DISPATCH_PROC_EXIT, dispatch_get_main_queue()));
+    if (!childExitSource) {
+        kill(helperPID, SIGKILL);
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ reapSpawnedHelper(helperPID); });
+        cancelRegisteredPortListener();
+        return false;
+    }
+
+    m_spawnedHelperPID = helperPID;
+    dispatch_source_set_event_handler(childExitSource.get(), ^{
+        reapSpawnedHelper(helperPID);
+        dispatch_source_cancel(childExitSource.get());
+        auto launcher = weakLauncher.get();
+        if (!launcher)
+            return;
+        launcher->m_spawnedHelperPID = 0;
+        if (launcher->m_registeredPortListener) {
+            launcher->cancelRegisteredPortListener();
+            failBeforeConnection();
+        }
+    });
+    dispatch_resume(childExitSource.get());
 
     RunLoop::main().dispatchAfter(registeredPortLaunchTimeout, [weakLauncher, failBeforeConnection] {
         auto launcher = weakLauncher.get();
@@ -322,7 +327,21 @@ def check_regressions(ui_patch, helper_patch):
     cleanup_opening = "+void ProcessLauncher::cancelRegisteredPortListener()\n+{\n"
     spawn_cancel = (spawn_failure
                     + '+        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));\n')
-    cancel_line = "+        xpc_connection_cancel(listener.get());\n"
+    cancel_line = "+        cancelRegisteredPortListener();\n"
+    resume = "+        xpc_connection_resume(m_registeredPortListener.get());\n"
+    child_exit_resume = "+    dispatch_resume(childExitSource.get());\n"
+    check_regression(check_ui, ui_patch, "cancel and release on failure before resume", [
+        (resume, ""),
+        (child_exit_resume, child_exit_resume + resume.replace("+        ", "+    ")),
+    ])
+    check_regression(check_ui, ui_patch, "resume again on success", [
+        (child_exit_resume, child_exit_resume + resume.replace("+        ", "+    ")),
+    ])
+    handler = "+    xpc_connection_set_event_handler(m_registeredPortListener.get(), ^(xpc_object_t event) {\n"
+    check_regression(check_ui, ui_patch, "resume before setting the event handler", [
+        (resume, ""),
+        (handler, resume.replace("+        ", "+    ") + handler),
+    ])
     for description, anchor, replacement in (
         ("if (false) at start of cancelRegisteredPortListener", cleanup_opening, cleanup_opening + "+    if (false)\n"),
         ("if (false) before spawn failure cancel", spawn_cancel, spawn_cancel + "+        if (false)\n"),

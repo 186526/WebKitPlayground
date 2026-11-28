@@ -37,7 +37,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
  #if PLATFORM(MAC)
  #import "CodeSigning.h"
  #endif
-@@ -235,8 +247,160 @@
+@@ -235,8 +247,165 @@
  }
  #endif
 
@@ -106,55 +106,9 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +        return true;
 +    }
 +
-+    auto listener = adoptOSObject(xpc_connection_create(nullptr, dispatch_get_main_queue()));
-+    auto endpoint = listener ? adoptOSObject(xpc_endpoint_create(listener.get())) : OSObjectPtr<xpc_endpoint_t> { };
-+    mach_port_t listenerPort = MACH_PORT_NULL;
-+    if (endpoint) {
-+        // iPadOS 16.1 libxpc stores the endpoint's borrowed send right at this offset.
-+        constexpr size_t endpointPortOffset = 0x18;
-+        auto bytes = static_cast<const uint8_t*>((__bridge const void*)endpoint.get());
-+        memcpy(&listenerPort, bytes + endpointPortOffset, sizeof(listenerPort));
-+    }
-+
-+    mach_port_type_t portType;
-+    auto result = mach_port_type(mach_task_self(), listenerPort, &portType);
-+    if (result != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND)) {
-+        RELEASE_LOG_ERROR(IPC, "WK_HELPER_SPAWN_FALLBACK: no registered send right for %s; using named XPC", name.characters());
-+        if (listener)
-+            xpc_connection_cancel(listener.get());
++    m_registeredPortListener = adoptOSObject(xpc_connection_create(nullptr, dispatch_get_main_queue()));
++    if (!m_registeredPortListener)
 +        return false;
-+    }
-+
-+    pid_t helperPID = 0;
-+    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {
-+        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));
-+        xpc_connection_cancel(listener.get());
-+        return false;
-+    }
-+
-+    auto childExitSource = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, helperPID, DISPATCH_PROC_EXIT, dispatch_get_main_queue()));
-+    if (!childExitSource) {
-+        kill(helperPID, SIGKILL);
-+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ reapSpawnedHelper(helperPID); });
-+        xpc_connection_cancel(listener.get());
-+        return false;
-+    }
-+
-+    m_spawnedHelperPID = helperPID;
-+    m_registeredPortListener = WTFMove(listener);
-+    dispatch_source_set_event_handler(childExitSource.get(), ^{
-+        reapSpawnedHelper(helperPID);
-+        dispatch_source_cancel(childExitSource.get());
-+        auto launcher = weakLauncher.get();
-+        if (!launcher)
-+            return;
-+        launcher->m_spawnedHelperPID = 0;
-+        if (launcher->m_registeredPortListener) {
-+            launcher->cancelRegisteredPortListener();
-+            failBeforeConnection();
-+        }
-+    });
-+    dispatch_resume(childExitSource.get());
 +
 +    xpc_connection_set_event_handler(m_registeredPortListener.get(), ^(xpc_object_t event) {
 +        auto launcher = weakLauncher.get();
@@ -170,7 +124,58 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +        xpc_connection_set_target_queue(launcher->m_xpcConnection.get(), dispatch_get_main_queue());
 +        launcher->finishLaunchingProcess(name);
 +    });
-+    xpc_connection_resume(m_registeredPortListener.get());
++    bool listenerResumed = false;
++    if (!listenerResumed) {
++        xpc_connection_resume(m_registeredPortListener.get());
++        listenerResumed = true;
++    }
++
++    auto endpoint = adoptOSObject(xpc_endpoint_create(m_registeredPortListener.get()));
++    mach_port_t listenerPort = MACH_PORT_NULL;
++    if (endpoint) {
++        // iPadOS 16.1 libxpc stores the endpoint's borrowed send right at this offset.
++        constexpr size_t endpointPortOffset = 0x18;
++        auto bytes = static_cast<const uint8_t*>((__bridge const void*)endpoint.get());
++        memcpy(&listenerPort, bytes + endpointPortOffset, sizeof(listenerPort));
++    }
++
++    mach_port_type_t portType;
++    auto result = mach_port_type(mach_task_self(), listenerPort, &portType);
++    if (result != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND)) {
++        RELEASE_LOG_ERROR(IPC, "WK_HELPER_SPAWN_FALLBACK: no registered send right for %s; using named XPC", name.characters());
++        cancelRegisteredPortListener();
++        return false;
++    }
++
++    pid_t helperPID = 0;
++    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {
++        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));
++        cancelRegisteredPortListener();
++        return false;
++    }
++
++    auto childExitSource = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, helperPID, DISPATCH_PROC_EXIT, dispatch_get_main_queue()));
++    if (!childExitSource) {
++        kill(helperPID, SIGKILL);
++        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ reapSpawnedHelper(helperPID); });
++        cancelRegisteredPortListener();
++        return false;
++    }
++
++    m_spawnedHelperPID = helperPID;
++    dispatch_source_set_event_handler(childExitSource.get(), ^{
++        reapSpawnedHelper(helperPID);
++        dispatch_source_cancel(childExitSource.get());
++        auto launcher = weakLauncher.get();
++        if (!launcher)
++            return;
++        launcher->m_spawnedHelperPID = 0;
++        if (launcher->m_registeredPortListener) {
++            launcher->cancelRegisteredPortListener();
++            failBeforeConnection();
++        }
++    });
++    dispatch_resume(childExitSource.get());
 +
 +    RunLoop::main().dispatchAfter(registeredPortLaunchTimeout, [weakLauncher, failBeforeConnection] {
 +        auto launcher = weakLauncher.get();
