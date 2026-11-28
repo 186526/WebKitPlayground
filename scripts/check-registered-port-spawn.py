@@ -27,10 +27,11 @@ finishLaunchingProcess(name);
 """
 
 
-def patched_source(path):
+def patched_source(path, *, keep_comments=False):
     lines = path.read_text(encoding="utf-8").splitlines()
     return "\n".join(line[1:] for line in lines if line.startswith(("+", " "))
-                     and not line.startswith("+++") and not line[1:].lstrip().startswith("//"))
+                     and not line.startswith("+++")
+                     and (keep_comments or not line[1:].lstrip().startswith("//")))
 
 
 def check_connection_uses(source, connection, allowed_lines):
@@ -106,21 +107,26 @@ def check_ui(source):
 
 
 def check_helper(source):
-    cleanup = re.search(r"^        auto placeholder = adoptOSObject\(xpc_connection_create\(nullptr, nullptr\)\);\n"
-                        r"(.*?)^    \}$", source, re.MULTILINE | re.DOTALL)
-    expected_tail = [
+    expected_cleanup = [
+        "        auto placeholder = adoptOSObject(xpc_connection_create(nullptr, nullptr));",
+        "        auto endpoint = adoptOSObject(xpc_endpoint_create(placeholder.get()));",
+        "        // The device's iOS 16.1 libxpc stores the endpoint's send right at this offset.",
+        "        constexpr size_t endpointPortOffset = 0x18;",
+        "        auto* endpointPort = reinterpret_cast<mach_port_t*>(static_cast<char*>((__bridge void*)endpoint.get()) + endpointPortOffset);",
+        "        auto placeholderPort = *endpointPort;",
+        "        *endpointPort = port;",
         "        connection = adoptOSObject(xpc_connection_create_from_endpoint(endpoint.get()));",
+        "        // Restore the owned right so endpoint destruction releases it; the lookup owns port.",
         "        *endpointPort = placeholderPort;",
         "        endpoint = nullptr;",
+        "        // The placeholder is never activated. Cancel it before releasing its last reference.",
         "        xpc_connection_cancel(placeholder.get());",
+        "    }",
     ]
-    if not cleanup or cleanup[1].splitlines()[-len(expected_tail):] != expected_tail:
+    cleanup = re.search(r"^" + re.escape(expected_cleanup[0]) + r"\n.*?^    \}$",
+                        source, re.MULTILINE | re.DOTALL)
+    if not cleanup or cleanup[0].splitlines() != expected_cleanup:
         raise ValueError("expected restoration of the endpoint right and cancel before placeholder scope exit")
-    before_cleanup = "\n".join(cleanup[1].splitlines()[:-len(expected_tail)])
-    check_connection_uses(before_cleanup, "placeholder", {
-        "auto endpoint = adoptOSObject(xpc_endpoint_create(placeholder.get()));",
-    })
-    check_no_early_return(before_cleanup, "placeholder")
     if 'XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)' not in source:
         raise ValueError("expected the helper's existing launchd listener marker")
 
@@ -153,8 +159,19 @@ def check_regressions(ui_source, helper_source):
         *((check_helper, helper_source, restore_port, f"        {statement}\n{restore_port}", statement)
           for statement in placeholder_mutations),
     )
-    for check, source, anchor, replacement, statement in cases:
-        mutated = source.replace(anchor, replacement, 1)
+    goto_anchors = (
+        ("        connection = adoptOSObject(xpc_connection_create_from_endpoint(endpoint.get()));", "        goto releaseRegisteredPorts;\n"),
+        ("    for (mach_msg_type_number_t index = 0;", "    releaseRegisteredPorts:\n"),
+    )
+    goto_source = helper_source
+    for anchor, insertion in goto_anchors:
+        if anchor not in goto_source:
+            raise ValueError(f"could not insert goto regression before: {anchor}")
+        goto_source = goto_source.replace(anchor, insertion + anchor, 1)
+    mutated_cases = [(check, source, source.replace(anchor, replacement, 1), statement)
+                     for check, source, anchor, replacement, statement in cases]
+    mutated_cases.append((check_helper, helper_source, goto_source, "goto releaseRegisteredPorts; with target label"))
+    for check, source, mutated, statement in mutated_cases:
         if mutated == source:
             raise ValueError(f"could not insert regression case: {statement}")
         try:
@@ -172,7 +189,7 @@ def main():
     args = parser.parse_args()
     try:
         ui_source = patched_source(args.patch)
-        helper_source = patched_source(args.helper_patch)
+        helper_source = patched_source(args.helper_patch, keep_comments=True)
         check_ui(ui_source)
         check_helper(helper_source)
         check_regressions(ui_source, helper_source)
