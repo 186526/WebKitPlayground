@@ -6,7 +6,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/ProcessLauncher.h b/Source/WebKit/
  #endif
 
 +#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR) && !USE(EXTENSIONKIT)
-+    void launchWithRegisteredPort(ASCIILiteral);
++    bool launchWithRegisteredPort(ASCIILiteral);
 +    void cancelRegisteredPortListener();
 +    OSObjectPtr<xpc_connection_t> m_registeredPortListener;
 +    pid_t m_spawnedHelperPID { 0 };
@@ -91,7 +91,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +    while (waitpid(helperPID, nullptr, 0) == -1 && errno == EINTR) { }
 +}
 +
-+void ProcessLauncher::launchWithRegisteredPort(ASCIILiteral name)
++bool ProcessLauncher::launchWithRegisteredPort(ASCIILiteral name)
 +{
 +    ASSERT(RunLoop::isMain());
 +    auto weakLauncher = ThreadSafeWeakPtr { *this };
@@ -101,9 +101,9 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +    };
 +
 +    if (auto key = missingHelperDyldVariable()) {
-+        LOG_ERROR("Cannot spawn %s with a registered port: missing or empty %s", name.characters(), key);
++        RELEASE_LOG_ERROR(IPC, "Cannot spawn %s with a registered port: missing or empty %s", name.characters(), key);
 +        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
-+        return;
++        return true;
 +    }
 +
 +    auto listener = adoptOSObject(xpc_connection_create(nullptr, dispatch_get_main_queue()));
@@ -119,26 +119,25 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +    mach_port_type_t portType;
 +    auto result = mach_port_type(mach_task_self(), listenerPort, &portType);
 +    if (result != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND)) {
-+        LOG_ERROR("Could not obtain a registered send right for %s", name.characters());
-+        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
-+        return;
++        RELEASE_LOG_ERROR(IPC, "WK_HELPER_SPAWN_FALLBACK: no registered send right for %s; using named XPC", name.characters());
++        if (listener)
++            xpc_connection_cancel(listener.get());
++        return false;
 +    }
 +
 +    pid_t helperPID = 0;
 +    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {
-+        LOG_ERROR("Could not spawn %s with a registered port: %s", name.characters(), strerror(error));
-+        // The named path assumes xpc_connection_create succeeds; spawn can fail before
-+        // a connection exists. Drop the endpoint (and its send right) on return, then notify the client.
-+        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
-+        return;
++        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));
++        xpc_connection_cancel(listener.get());
++        return false;
 +    }
 +
 +    auto childExitSource = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, helperPID, DISPATCH_PROC_EXIT, dispatch_get_main_queue()));
 +    if (!childExitSource) {
 +        kill(helperPID, SIGKILL);
 +        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ reapSpawnedHelper(helperPID); });
-+        RunLoop::main().dispatch(WTFMove(failBeforeConnection));
-+        return;
++        xpc_connection_cancel(listener.get());
++        return false;
 +    }
 +
 +    m_spawnedHelperPID = helperPID;
@@ -180,6 +179,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +        launcher->terminateXPCConnection();
 +        failBeforeConnection();
 +    });
++    return true;
 +}
 +
 +void ProcessLauncher::cancelRegisteredPortListener()
@@ -198,18 +198,16 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
  #if USE(EXTENSIONKIT)
      if (m_process)
          m_process->invalidate();
-@@ -305,6 +469,16 @@
+@@ -305,6 +469,14 @@
      launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
  #else
      auto name = serviceName(m_launchOptions, m_client);
 +#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR)
 +    // Registered-port spawn is the default; set WK_HELPER_SPAWN=launchd to use named XPC.
 +    if (auto mode = getenv("WK_HELPER_SPAWN"); !mode || strcmp(mode, "launchd")) {
-+        if (registeredPortsFunction()) {
-+            launchWithRegisteredPort(name);
++        if (registeredPortsFunction() && launchWithRegisteredPort(name))
 +            return;
-+        }
-+        LOG_ERROR("Registered-port spawn API unavailable; using named XPC launch for %s", name.characters());
++        RELEASE_LOG_ERROR(IPC, "Registered-port spawn unavailable or failed; falling back to named XPC launch for %s", name.characters());
 +    }
 +#endif
      m_xpcConnection = adoptOSObject(xpc_connection_create(name, nullptr));
@@ -278,7 +276,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +            // Its self-reported reply PID is a consistency check, not peer authentication.
 +            auto peerPID = xpc_get_type(reply) == XPC_TYPE_DICTIONARY ? xpc_dictionary_get_int64(reply, "pid") : 0;
 +            if (!peerPID || peerPID != m_spawnedHelperPID) {
-+                LOG_ERROR("Registered-port helper returned an unexpected PID");
++                RELEASE_LOG_ERROR(IPC, "Registered-port helper returned an unexpected PID");
 +                eventHandlerBlock(nullptr);
 +                deref();
 +                return;
