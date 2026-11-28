@@ -192,6 +192,19 @@ TERMINATE_BLOCK = ''' void ProcessLauncher::terminateXPCConnection()
 +#endif
 +
      if (!m_xpcConnection)'''
+HELPER_LISTENER_BLOCK = '''+            if (!registeredPortBootstrapState.compare_exchange_strong(bootstrapState, RegisteredPortBootstrapState::TimedOut))
++                return;
++            RELEASE_LOG_FAULT(IPC, "Exiting: registered-port client timed out waiting for bootstrap");
++            exitProcess(EXIT_FAILURE);
++        });
++        XPCServiceEventHandler(connection.get());
++        dispatch_main();
++    }
++
++    RELEASE_LOG(IPC, "XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)");
+     // xpc_main is marked API_UNAVAILABLE(ios), so reproduce what it does.
+     // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
+     // xpc_connection_create_listener, and the handler it wraps receives each connection launchd'''
 CANCEL_REFERENCES_OUTSIDE_LAUNCH = 3  # Declaration, definition, and terminateXPCConnection call.
 CPP_TOKENS = re.compile(r'''//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}]''', re.DOTALL)
 
@@ -261,8 +274,8 @@ def check_ui(patch):
     hunks = patched_hunks(patch)
     source = "\n".join(hunks)
     check_launch_block(patch, source)
-    if "bool launchWithRegisteredPort(ASCIILiteral);" not in source:
-        raise ValueError("expected a boolean launchWithRegisteredPort declaration")
+    if patch.splitlines().count("+    bool launchWithRegisteredPort(ASCIILiteral);") != 1:
+        raise ValueError("expected exactly one added boolean launchWithRegisteredPort declaration")
     check_function(hunks, LAUNCH_FUNCTION)
     check_function(hunks, CANCEL_FUNCTION)
     check_anchored_block(patch, DESTROY_BLOCK)
@@ -275,15 +288,13 @@ def check_ui(patch):
 def check_helper(patch):
     hunks = patched_hunks(patch)
     check_function(hunks, HELPER_FUNCTION)
-    if not any('XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)' in hunk
-               for hunk in hunks):
-        raise ValueError("expected the helper's existing launchd listener marker")
+    check_anchored_block(patch, HELPER_LISTENER_BLOCK)
 
 
 def check_regression(check, patch, description, replacements):
     for anchor, replacement in replacements:
-        if anchor not in patch:
-            raise ValueError(f"could not insert regression case: {description}")
+        if patch.count(anchor) != 1:
+            raise ValueError(f"expected one insertion anchor for regression case: {description}")
         patch = patch.replace(anchor, replacement, 1)
     try:
         check(patch)
@@ -317,6 +328,10 @@ def check_regressions(ui_patch, helper_patch):
             "auto escaped = std::exchange(listener, nullptr);")),
     ):
         check_regression(check_ui, ui_patch, description, [(anchor, replacement)])
+    listener_log = HELPER_LISTENER_BLOCK.splitlines()[9] + "\n"
+    check_regression(check_helper, helper_patch, "return 0 before the helper's named listener log", [
+        (listener_log, "+    return 0;\n" + listener_log),
+    ])
     for statement in ("placeholder = nullptr;", "auto escaped = WTFMove(placeholder);"):
         check_regression(check_helper, helper_patch, statement,
                          [(restore_port, f"+        {statement}\n{restore_port}")])
