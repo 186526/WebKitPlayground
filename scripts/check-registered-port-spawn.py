@@ -12,18 +12,20 @@ import sys
 PATCHES = Path(__file__).resolve().parents[1] / "patches"
 UI_PATCH = PATCHES / "ios18-xpc-registered-port-ui.patch"
 HELPER_PATCH = PATCHES / "ios18-xpc-registered-port-helper.patch"
-LAUNCH_BLOCK = """
-#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR)
-// Registered-port spawn is the default; set WK_HELPER_SPAWN=launchd to use named XPC.
-if (auto mode = getenv("WK_HELPER_SPAWN"); !mode || strcmp(mode, "launchd")) {
-    if (registeredPortsFunction() && launchWithRegisteredPort(name))
-        return;
-    RELEASE_LOG_ERROR(IPC, "Registered-port spawn unavailable or failed; falling back to named XPC launch for %s", name.characters());
-}
-#endif
-m_xpcConnection = adoptOSObject(xpc_connection_create(name, nullptr));
-finishLaunchingProcess(name);
-"""
+LAUNCH_BLOCK = '''     launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
+ #else
+     auto name = serviceName(m_launchOptions, m_client);
++#if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR)
++    // Registered-port spawn is the default; set WK_HELPER_SPAWN=launchd to use named XPC.
++    if (auto mode = getenv("WK_HELPER_SPAWN"); !mode || strcmp(mode, "launchd")) {
++        if (registeredPortsFunction() && launchWithRegisteredPort(name))
++            return;
++        RELEASE_LOG_ERROR(IPC, "Registered-port spawn unavailable or failed; falling back to named XPC launch for %s", name.characters());
++    }
++#endif
+     m_xpcConnection = adoptOSObject(xpc_connection_create(name, nullptr));
+     finishLaunchingProcess(name);
+ #endif'''
 LAUNCH_FUNCTION = '''bool ProcessLauncher::launchWithRegisteredPort(ASCIILiteral name)
 {
     ASSERT(RunLoop::isMain());
@@ -236,19 +238,29 @@ def check_function(hunks, expected):
     raise ValueError(f"unbalanced braces in {signature}")
 
 
-def check_anchored_block(patch, expected):
+def check_anchored_block(patch, expected, *, whole_hunk=False):
     signature = expected.split("\n", 1)[0]
-    raw_patch, start = find_unique([patch], signature)
-    actual = "\n".join(raw_patch[start:].split("\n")[:len(expected.splitlines())])
+    if whole_hunk:
+        hunks = re.split(r"^@@ .*\n", patch, flags=re.MULTILINE)[1:]
+        hunk, _ = find_unique(hunks, signature)
+        actual = hunk.removesuffix("\n")
+    else:
+        raw_patch, start = find_unique([patch], signature)
+        actual = "\n".join(raw_patch[start:].split("\n")[:len(expected.splitlines())])
     compare_text(expected, actual)
+
+
+def check_launch_block(patch, source):
+    find_unique([patch], LAUNCH_BLOCK.split("\n", 1)[0])
+    check_anchored_block(patch, LAUNCH_BLOCK, whole_hunk=True)
+    if source.count('getenv("WK_HELPER_SPAWN")') != 1:
+        raise ValueError("expected one registered-port launch mode selector")
 
 
 def check_ui(patch):
     hunks = patched_hunks(patch)
     source = "\n".join(hunks)
-    normalized = " ".join(source.split())
-    if normalized.count('getenv("WK_HELPER_SPAWN")') != 1 or " ".join(LAUNCH_BLOCK.split()) not in normalized:
-        raise ValueError("expected registered-port selection with launchd opt-out and named-XPC fallback")
+    check_launch_block(patch, source)
     if "bool launchWithRegisteredPort(ASCIILiteral);" not in source:
         raise ValueError("expected a boolean launchWithRegisteredPort declaration")
     check_function(hunks, LAUNCH_FUNCTION)
@@ -282,6 +294,12 @@ def check_regression(check, patch, description, replacements):
 
 
 def check_regressions(ui_patch, helper_patch):
+    service_name = "     auto name = serviceName(m_launchOptions, m_client);\n"
+    finish_launch = "     finishLaunchingProcess(name);\n #endif"
+    check_regression(check_ui, ui_patch, "if (false) wrapping registered-port selection and named-XPC fallback", [
+        (service_name, service_name + "+    if (false) {\n"),
+        (finish_launch, "     finishLaunchingProcess(name);\n+    }\n #endif"),
+    ])
     spawn_failure = "+    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {\n"
     restore_port = "+        *endpointPort = placeholderPort;"
     cleanup_opening = "+void ProcessLauncher::cancelRegisteredPortListener()\n+{\n"
