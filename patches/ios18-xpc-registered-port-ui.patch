@@ -37,7 +37,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
  #if PLATFORM(MAC)
  #import "CodeSigning.h"
  #endif
-@@ -235,8 +247,165 @@
+@@ -235,8 +247,161 @@
  }
  #endif
 
@@ -124,11 +124,7 @@ diff --git a/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm b/So
 +        xpc_connection_set_target_queue(launcher->m_xpcConnection.get(), dispatch_get_main_queue());
 +        launcher->finishLaunchingProcess(name);
 +    });
-+    bool listenerResumed = false;
-+    if (!listenerResumed) {
-+        xpc_connection_resume(m_registeredPortListener.get());
-+        listenerResumed = true;
-+    }
++    xpc_connection_resume(m_registeredPortListener.get());
 +
 +    auto endpoint = adoptOSObject(xpc_endpoint_create(m_registeredPortListener.get()));
 +    mach_port_t listenerPort = MACH_PORT_NULL;

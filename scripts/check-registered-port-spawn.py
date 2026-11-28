@@ -16,7 +16,7 @@ import sys
 PATCHES = Path(__file__).resolve().parents[1] / "patches"
 UI_PATCH = PATCHES / "ios18-xpc-registered-port-ui.patch"
 HELPER_PATCH = PATCHES / "ios18-xpc-registered-port-helper.patch"
-UI_PATCH_SHA256 = "f4d95148afbc7b527caaff8dec4573224e131287e51ff66f3c2ba25a1ad6cb3c"
+UI_PATCH_SHA256 = "6b96b89f6dbae024f0722e0bab3d2d49c354072a6cbfb83050589873819a8639"
 HELPER_PATCH_SHA256 = "0e154f2ff56447b9c1520493c4bac5a8fe2641132ac6706fd3749f34ea92da53"
 LAUNCH_BLOCK = '''     launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
  #else
@@ -65,11 +65,7 @@ LAUNCH_FUNCTION = '''bool ProcessLauncher::launchWithRegisteredPort(ASCIILiteral
         xpc_connection_set_target_queue(launcher->m_xpcConnection.get(), dispatch_get_main_queue());
         launcher->finishLaunchingProcess(name);
     });
-    bool listenerResumed = false;
-    if (!listenerResumed) {
-        xpc_connection_resume(m_registeredPortListener.get());
-        listenerResumed = true;
-    }
+    xpc_connection_resume(m_registeredPortListener.get());
 
     auto endpoint = adoptOSObject(xpc_endpoint_create(m_registeredPortListener.get()));
     mach_port_t listenerPort = MACH_PORT_NULL;
@@ -328,19 +324,19 @@ def check_regressions(ui_patch, helper_patch):
     spawn_cancel = (spawn_failure
                     + '+        RELEASE_LOG_ERROR(IPC, "Could not spawn %s with a registered port: %s", name.characters(), strerror(error));\n')
     cancel_line = "+        cancelRegisteredPortListener();\n"
-    resume = "+        xpc_connection_resume(m_registeredPortListener.get());\n"
+    resume = "+    xpc_connection_resume(m_registeredPortListener.get());\n"
     child_exit_resume = "+    dispatch_resume(childExitSource.get());\n"
     check_regression(check_ui, ui_patch, "cancel and release on failure before resume", [
         (resume, ""),
-        (child_exit_resume, child_exit_resume + resume.replace("+        ", "+    ")),
+        (child_exit_resume, child_exit_resume + resume),
     ])
     check_regression(check_ui, ui_patch, "resume again on success", [
-        (child_exit_resume, child_exit_resume + resume.replace("+        ", "+    ")),
+        (child_exit_resume, child_exit_resume + resume),
     ])
     handler = "+    xpc_connection_set_event_handler(m_registeredPortListener.get(), ^(xpc_object_t event) {\n"
     check_regression(check_ui, ui_patch, "resume before setting the event handler", [
         (resume, ""),
-        (handler, resume.replace("+        ", "+    ") + handler),
+        (handler, resume + handler),
     ])
     for description, anchor, replacement in (
         ("if (false) at start of cancelRegisteredPortListener", cleanup_opening, cleanup_opening + "+    if (false)\n"),
