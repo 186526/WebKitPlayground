@@ -728,3 +728,38 @@ find $D/x/var/jb -type f -size +4k | sort | xargs python3 /tmp/artifact-slots.py
 2. 新旧 `WebKit` 不能逐字节比较，见第 3.4 节。
 3. `llvm-objdump --disassemble-symbols=<mangled>` 在这份二进制上不生效，会从头开始打印；`--start-address/--stop-address` 也只在配合 `-d` 时才按预期工作。
 4. `rcodesign print-signature-info` 在本仓库这份 0.29.0 上读五个 helper 的 DER 权限块会报 `Wrapped codec-specific decode error / Codec: BER`；读五个 framework 正常。要读 helper 或 `jsc` 的权限，按第 10.2 节的脚本定位 `slot 0x00005` 后直接解其中的 XML。
+
+## 11. Registered-port endpoint 的偏移与设备已装 WebKit 的版本
+
+本节读数均由 M216 于 2026-11-28 在 iPadOS 16.1 设备上测得。调用点见 `patches/ios16-ui-side-helper-spawn.patch:109-124`。M216 通过 `ssh mobile@192.168.2.136` 在设备上用 `/var/jb/usr/bin/python3` 从标准输入执行 ctypes 探针；探针脚本未保留，以下记录测量步骤和原始读数。
+
+### 11.1 新建 endpoint 的端口字段位于 `+0x18`
+
+每轮对 `xpc_connection_create` 前后的 `mach_port_names` 结果作差。五轮分别新增 `0xd03`、`0x1d03`、`0x1c03`、`0xe03`、`0xf03`，`mach_port_type` 均返回类型 `0x30000`（`RECEIVE|SEND`）。调用 `xpc_endpoint_create` 后，端口表没有新增条目。用 `malloc_size` 测得五个 endpoint 对象均为 32 字节（`0x20`）；逐个读取对象内的 32 位值，五轮均得到 `00=1c916a30`、`04=00000002`、`08=0`、`0c=0`、`10=2`、`14=0`、`18=该轮独立确认的新增端口`、`1c=0`。从 `0x20` 起已超出对象。**独立确认的端口与字段读数逐轮一致，`endpointPortOffset = 0x18` 对新建对象正确。**
+
+旧记录里的 `0x1d03` 来自已经删除的临时探针，不能作为偏移正确的证据。本节以 `mach_port_names` 的前后差分独立识别新增端口，再与对象字段比较；五轮中出现的 `0x1d03` 来自这次独立测量。
+
+### 11.2 错误偏移与空对象均未在新进程中复现
+
+M216 在同一进程内通过 `xpc_connection_create(NULL, dispatch_get_main_queue())` 建立 connection，再用 `xpc_endpoint_create` 建立 endpoint，两次返回均非空。探针用 `ctypes` 按 `(uint32_t, uint32_t, uint32_t*)` 声明 `mach_port_type` 的参数，并分别传入人工字面量 `0` 和通过 `c.memmove(c.byref(port), endpoint+0x18, 4)` 读取的端口值。前者返回 `15`（`KERN_INVALID_NAME`），输出哨兵 `0xf00d` 未变；后者读到 `0xb03`，返回 `0`，类型为 `0x30000`。按同样方式追加 128 轮，计数为 `null_listener=0 null_endpoint=0 kr_failure=0 missing_send=0`。**在新进程中，错误偏移和对象返回空值这两个候选原因均未复现。**
+
+### 11.3 设备已装的二进制早于 M213 修复
+
+M216 读取设备上 `/var/jb/Library/Frameworks/WebKit.framework/WebKit` 的 Mach-O `LC_UUID`，得到 `c70240e5-740a-3b57-8d37-1d0919782a1e`。反汇编与导入表查询使用以下原命令：
+
+```sh
+r2 -q -e scr.color=0 -c "pD 2140 @ 0x4d97d8; ii~xpc_connection_cancel" /var/jb/Library/Frameworks/WebKit.framework/WebKit
+```
+
+`xpc_connection_cancel` 的导入跳板位于 `0xddd89c`，但主函数体 `0x4d97d8–0x4da030` 没有调用它，三条失败路径释放对象前也没有取消调用。M216 用 Python 读取整个二进制，再以 `d.count(b"...")` 分别统计字面量：`WK_HELPER_SPAWN_FALLBACK` 和 `Registered-port spawn unavailable` 均出现 0 次；`WK_HELPER_SPAWN` 出现 1 次，文件偏移为 `0xe86859`。**主函数体没有取消调用，且 `WK_HELPER_SPAWN_FALLBACK` 出现 0 次，说明设备已装的是 M213 修复前的构建。崩溃报告只能证明修复前的代码发生过崩溃。**
+
+### 11.4 崩溃栈不能确定 Safari 进入了哪条失败路径
+
+同一条 `r2` 命令显示，`0x4d9984` 的直接前驱是 `0x4d9980` 的 `cbz x23,0x4d9988` 未跳转的分支；`0x4d9978` 根据 endpoint 是否为空决定是否先执行 `0x4d997c` 的释放。三条失败路径均汇入 `0x4d9974`；成功路径从 `0x4d9f34/38` 也能到达 `0x4d997c/80`，但 `0x4d9f30` 已将 `x23` 清零，因此成功路径不会执行 `0x4d9984`。
+
+崩溃报告不能确定 Safari 当时进入了哪条失败路径，也不能确认当时的触发条件。后续若在 Safari 侧采集同一次调用的数据，需要记录四组值：
+
+1. `xpc_connection_create` 与 `xpc_endpoint_create` 的两个返回值。
+2. 传给 `mach_port_type` 的端口值。
+3. `mach_port_type` 的返回码。
+4. 后续启动子进程与注册子进程退出监听的结果。
