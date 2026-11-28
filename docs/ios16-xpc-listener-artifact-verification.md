@@ -731,7 +731,7 @@ find $D/x/var/jb -type f -size +4k | sort | xargs python3 /tmp/artifact-slots.py
 
 ## 11. Registered-port endpoint 的偏移与设备已装 WebKit 的版本
 
-本节读数均由 M216 于 2026-11-28 在 iPadOS 16.1 设备上测得。调用点见 `patches/ios16-ui-side-helper-spawn.patch:109-124`。M216 通过 `ssh mobile@192.168.2.136` 在设备上用 `/var/jb/usr/bin/python3` 从标准输入执行 ctypes 探针；探针脚本未保留，以下记录测量步骤和原始读数。
+本节读数均由 M216 于 2026-11-28 在 iPadOS 16.1 设备上测得。调用点见 `patches/ios18-xpc-registered-port-ui.patch:109-120`。M216 通过 `ssh mobile@192.168.2.136` 在设备上用 `/var/jb/usr/bin/python3` 从标准输入执行 ctypes 探针；探针脚本未保留，以下记录测量步骤和原始读数。
 
 ### 11.1 新建 endpoint 的端口字段位于 `+0x18`
 
