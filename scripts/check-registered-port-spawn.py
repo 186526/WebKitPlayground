@@ -29,6 +29,13 @@ def patched_source(path):
                      and not line.startswith("+++") and not line[1:].lstrip().startswith("//"))
 
 
+def check_connection_held(source, connection):
+    if re.search(rf"\b{connection}\s*(?:=(?!=)|\.\s*(?:reset|leakRef|swap)\s*\()", source):
+        raise ValueError(f"expected {connection} to retain its connection until cancel or transfer")
+    if re.search(r"\breturn\b", source):
+        raise ValueError(f"unexpected return before {connection} cancel or transfer")
+
+
 def check_ui(source):
     normalized = " ".join(source.split())
     if normalized.count('getenv("WK_HELPER_SPAWN")') != 1 or " ".join(LAUNCH_BLOCK.split()) not in normalized:
@@ -40,7 +47,15 @@ def check_ui(source):
     if not launch:
         raise ValueError("expected a boolean launchWithRegisteredPort implementation")
     body = launch[1]
-    branches = re.findall(r"^    if \(([^\n]*)\) \{\n(.*?)^    \}", body, re.MULTILINE | re.DOTALL)
+    acquisition = "auto listener = adoptOSObject(xpc_connection_create(nullptr, dispatch_get_main_queue()));"
+    transfer = "m_registeredPortListener = WTFMove(listener);"
+    before_acquisition, acquired, after_acquisition = body.partition(acquisition)
+    held, transferred, after_transfer = after_acquisition.partition(transfer)
+    if not acquired or not transferred or body.count("WTFMove(listener)") != 1:
+        raise ValueError("expected listener creation followed by a single ownership transfer")
+    if re.search(r"\blistener\s*=(?!=)", before_acquisition + after_transfer):
+        raise ValueError("unexpected listener assignment outside its ownership interval")
+    branches = re.findall(r"^    if \(([^\n]*)\) \{\n(.*?)^    \}", held, re.MULTILINE | re.DOTALL)
     failure_conditions = (
         "result != KERN_SUCCESS || !(portType & MACH_PORT_TYPE_SEND)",
         "auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)",
@@ -59,16 +74,45 @@ def check_ui(source):
                 raise ValueError("expected the send-right failure to log WK_HELPER_SPAWN_FALLBACK")
         if not branch.rstrip().endswith(cleanup) or "failBeforeConnection" in branch:
             raise ValueError(f"expected cancel before named-XPC fallback in branch: {condition}")
+        check_connection_held(branch.split(cancel, 1)[0], "listener")
+        held = held.replace(branch, "", 1)
+    check_connection_held(held, "listener")
+    if re.search(r"\bxpc_connection_cancel\s*\(", after_transfer):
+        raise ValueError("unexpected connection cancel after listener transfer")
     if not re.search(r"std::exchange\(m_registeredPortListener, nullptr\)\)\s+" + re.escape(cancel), source):
         raise ValueError("expected the transferred listener to be cleared and cancelled once")
 
 
 def check_helper(source):
-    if not re.search(r"\*endpointPort = placeholderPort;\s+endpoint = nullptr;\s+"
-                     r"xpc_connection_cancel\(placeholder.get\(\)\);\s+\}", source):
+    cleanup = re.search(r"auto placeholder = adoptOSObject\(xpc_connection_create\(nullptr, nullptr\)\);"
+                        r"(.*?)\*endpointPort = placeholderPort;\s+endpoint = nullptr;\s+"
+                        r"xpc_connection_cancel\(placeholder.get\(\)\);\s+\}", source, re.DOTALL)
+    if not cleanup:
         raise ValueError("expected restoration of the endpoint right and cancel before placeholder scope exit")
+    check_connection_held(cleanup[1], "placeholder")
     if 'XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)' not in source:
         raise ValueError("expected the helper's existing launchd listener marker")
+
+
+def check_regressions(ui_source, helper_source):
+    spawn_failure = "    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {\n"
+    restore_port = "        *endpointPort = placeholderPort;"
+    cases = (
+        (check_ui, ui_source, spawn_failure, spawn_failure + "        listener = nullptr;\n", "listener = nullptr;"),
+        (check_ui, ui_source, spawn_failure, spawn_failure + "        return true;\n", "return true;"),
+        (check_helper, helper_source, restore_port, "        placeholder = nullptr;\n" + restore_port,
+         "placeholder = nullptr;"),
+    )
+    for check, source, anchor, replacement, statement in cases:
+        mutated = source.replace(anchor, replacement, 1)
+        if mutated == source:
+            raise ValueError(f"could not insert regression case: {statement}")
+        try:
+            check(mutated)
+        except ValueError as error:
+            print(f"OK: regression rejected {statement} ({error})")
+            continue
+        raise ValueError(f"regression accepted: {statement}")
 
 
 def main():
@@ -76,12 +120,15 @@ def main():
     parser.add_argument("patch", nargs="?", type=Path, default=UI_PATCH)
     parser.add_argument("--helper-patch", type=Path, default=HELPER_PATCH)
     args = parser.parse_args()
-    for path, check in ((args.patch, check_ui), (args.helper_patch, check_helper)):
-        try:
-            check(patched_source(path))
-        except (OSError, ValueError) as error:
-            print(f"FAIL: {path}: {error}\n\nResult: FAIL", file=sys.stderr)
-            return 1
+    try:
+        ui_source = patched_source(args.patch)
+        helper_source = patched_source(args.helper_patch)
+        check_ui(ui_source)
+        check_helper(helper_source)
+        check_regressions(ui_source, helper_source)
+    except (OSError, ValueError) as error:
+        print(f"FAIL: {args.patch}, {args.helper_patch}: {error}\n\nResult: FAIL", file=sys.stderr)
+        return 1
     print("OK: registered-port spawn is the default, with named XPC on opt-out or synchronous fallback")
     print("OK: UI and helper temporary XPC connections are cancelled before release")
     print("\nResult: PASS")
