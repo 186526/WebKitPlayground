@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # 黄金文本检查比较补丁原文，不能证明运行时控制流。
+# 两个补丁文件另以 SHA-256 整体校验。区间检查负责定位差异，哈希负责证明没有
+# 未被区间覆盖的改动。改补丁必须同时更新脚本里的哈希与对应区间常量，这是刻意的：
+# 这两个补丁是不应被随意改动的安全关键代码。
 """Check named-XPC fallback and XPC connection cleanup in the registered-port patches."""
 
 import argparse
+from hashlib import sha256
 from itertools import zip_longest
 from pathlib import Path
 import re
@@ -12,6 +16,8 @@ import sys
 PATCHES = Path(__file__).resolve().parents[1] / "patches"
 UI_PATCH = PATCHES / "ios18-xpc-registered-port-ui.patch"
 HELPER_PATCH = PATCHES / "ios18-xpc-registered-port-helper.patch"
+UI_PATCH_SHA256 = "12eeebd3d6dbd6e90b27b3190ff2bad9bc12b40fdd79403e13d925094df99302"
+HELPER_PATCH_SHA256 = "0e154f2ff56447b9c1520493c4bac5a8fe2641132ac6706fd3749f34ea92da53"
 LAUNCH_BLOCK = '''     launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
  #else
      auto name = serviceName(m_launchOptions, m_client);
@@ -343,17 +349,41 @@ def check_regressions(ui_patch, helper_patch):
     ])
 
 
+def check_patch_sha256(content, expected, path):
+    actual = sha256(content).hexdigest()
+    if actual != expected:
+        raise ValueError(f"{path}: SHA-256 mismatch: expected {expected}, got {actual}")
+
+
+def check_hash_regression(helper_bytes):
+    anchor = b" #else\n+    // The deb defaults"
+    if helper_bytes.count(anchor) != 1:
+        raise ValueError("expected one helper #else insertion anchor")
+    mutated = helper_bytes.replace(anchor, b" #else\n+    return 0;\n+    // The deb defaults", 1)
+    try:
+        check_patch_sha256(mutated, HELPER_PATCH_SHA256, HELPER_PATCH.name)
+    except ValueError as error:
+        print(f"OK: regression rejected return 0 after helper #else ({error})")
+        return
+    raise ValueError("regression accepted: return 0 after helper #else")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("patch", nargs="?", type=Path, default=UI_PATCH)
     parser.add_argument("--helper-patch", type=Path, default=HELPER_PATCH)
     args = parser.parse_args()
     try:
-        ui_patch = args.patch.read_text(encoding="utf-8")
-        helper_patch = args.helper_patch.read_text(encoding="utf-8")
+        ui_bytes = args.patch.read_bytes()
+        helper_bytes = args.helper_patch.read_bytes()
+        check_patch_sha256(ui_bytes, UI_PATCH_SHA256, args.patch)
+        check_patch_sha256(helper_bytes, HELPER_PATCH_SHA256, args.helper_patch)
+        ui_patch = ui_bytes.decode("utf-8")
+        helper_patch = helper_bytes.decode("utf-8")
         check_ui(ui_patch)
         check_helper(helper_patch)
         check_regressions(ui_patch, helper_patch)
+        check_hash_regression(helper_bytes)
     except (OSError, ValueError) as error:
         print(f"FAIL: {args.patch}, {args.helper_patch}: {error}\n\nResult: FAIL", file=sys.stderr)
         return 1
