@@ -29,9 +29,14 @@ def patched_source(path):
                      and not line.startswith("+++") and not line[1:].lstrip().startswith("//"))
 
 
-def check_connection_held(source, connection):
-    if re.search(rf"\b{connection}\s*(?:=(?!=)|\.\s*(?:reset|leakRef|swap)\s*\()", source):
-        raise ValueError(f"expected {connection} to retain its connection until cancel or transfer")
+def check_connection_uses(source, connection, allowed_lines):
+    name = re.compile(rf"\b{connection}\b")
+    for line in source.splitlines():
+        if name.search(line) and line.strip() not in allowed_lines:
+            raise ValueError(f"unexpected {connection} use before cancel or transfer: {line}")
+
+
+def check_no_early_return(source, connection):
     if re.search(r"\breturn\b", source):
         raise ValueError(f"unexpected return before {connection} cancel or transfer")
 
@@ -62,6 +67,11 @@ def check_ui(source):
         "!childExitSource",
     )
     cancel = "xpc_connection_cancel(listener.get());"
+    check_connection_uses(held, "listener", {
+        cancel,
+        "if (listener)",
+        "auto endpoint = listener ? adoptOSObject(xpc_endpoint_create(listener.get())) : OSObjectPtr<xpc_endpoint_t> { };",
+    })
     if body.count("return false;") != len(failure_conditions) or body.count(cancel) != len(failure_conditions):
         raise ValueError("expected one listener cancel per synchronous fallback")
     branches_by_condition = dict(branches)
@@ -74,9 +84,9 @@ def check_ui(source):
                 raise ValueError("expected the send-right failure to log WK_HELPER_SPAWN_FALLBACK")
         if not branch.rstrip().endswith(cleanup) or "failBeforeConnection" in branch:
             raise ValueError(f"expected cancel before named-XPC fallback in branch: {condition}")
-        check_connection_held(branch.split(cancel, 1)[0], "listener")
+        check_no_early_return(branch.split(cancel, 1)[0], "listener")
         held = held.replace(branch, "", 1)
-    check_connection_held(held, "listener")
+    check_no_early_return(held, "listener")
     if re.search(r"\bxpc_connection_cancel\s*\(", after_transfer):
         raise ValueError("unexpected connection cancel after listener transfer")
     if not re.search(r"std::exchange\(m_registeredPortListener, nullptr\)\)\s+" + re.escape(cancel), source):
@@ -89,7 +99,10 @@ def check_helper(source):
                         r"xpc_connection_cancel\(placeholder.get\(\)\);\s+\}", source, re.DOTALL)
     if not cleanup:
         raise ValueError("expected restoration of the endpoint right and cancel before placeholder scope exit")
-    check_connection_held(cleanup[1], "placeholder")
+    check_connection_uses(cleanup[1], "placeholder", {
+        "auto endpoint = adoptOSObject(xpc_endpoint_create(placeholder.get()));",
+    })
+    check_no_early_return(cleanup[1], "placeholder")
     if 'XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)' not in source:
         raise ValueError("expected the helper's existing launchd listener marker")
 
@@ -97,11 +110,21 @@ def check_helper(source):
 def check_regressions(ui_source, helper_source):
     spawn_failure = "    if (auto error = spawnHelperWithRegisteredPort(helperPID, name, listenerPort)) {\n"
     restore_port = "        *endpointPort = placeholderPort;"
+    listener_mutations = (
+        "listener = nullptr;",
+        "return true;",
+        "auto escaped = WTFMove (listener);",
+        "auto escaped = std::exchange(listener, nullptr);",
+    )
+    placeholder_mutations = (
+        "placeholder = nullptr;",
+        "auto escaped = WTFMove(placeholder);",
+    )
     cases = (
-        (check_ui, ui_source, spawn_failure, spawn_failure + "        listener = nullptr;\n", "listener = nullptr;"),
-        (check_ui, ui_source, spawn_failure, spawn_failure + "        return true;\n", "return true;"),
-        (check_helper, helper_source, restore_port, "        placeholder = nullptr;\n" + restore_port,
-         "placeholder = nullptr;"),
+        *((check_ui, ui_source, spawn_failure, f"{spawn_failure}        {statement}\n", statement)
+          for statement in listener_mutations),
+        *((check_helper, helper_source, restore_port, f"        {statement}\n{restore_port}", statement)
+          for statement in placeholder_mutations),
     )
     for check, source, anchor, replacement, statement in cases:
         mutated = source.replace(anchor, replacement, 1)
