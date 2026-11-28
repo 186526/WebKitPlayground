@@ -10,7 +10,7 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
  #import <CoreFoundation/CoreFoundation.h>
  #import <dlfcn.h>
  #import <mach/mach.h>
-@@ -123,6 +125,11 @@
+@@ -137,6 +139,11 @@
      }
  }
  #endif // PLATFORM(MAC)
@@ -106,7 +106,7 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
  int XPCServiceMain(int, const char**)
  {
      auto bootstrap = adoptOSObject(xpc_copy_bootstrap());
-@@ -321,6 +397,33 @@ int XPCServiceMain(int, const char**)
+@@ -337,6 +413,34 @@ int XPCServiceMain(int, const char**)
      xpc_main(XPCServiceEventHandler);
      return 0;
  #else
@@ -133,7 +133,8 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
 +            exitProcess(EXIT_FAILURE);
 +        });
 +        XPCServiceEventHandler(connection.get());
-+        dispatch_main();
++        // Keep main-queue work on the main thread; dispatch_main unbinds it (probe19).
++        runXPCServiceMainRunLoop();
 +    }
 +
 +    RELEASE_LOG(IPC, "XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)");

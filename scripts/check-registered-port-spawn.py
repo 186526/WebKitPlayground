@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # 黄金文本检查比较补丁原文，不能证明运行时控制流。
-# 两个补丁文件另以 SHA-256 整体校验。区间检查负责定位差异，哈希负责证明没有
-# 未被区间覆盖的改动。改补丁必须同时更新脚本里的哈希与对应区间常量，这是刻意的：
-# 这两个补丁是不应被随意改动的安全关键代码。
+# 补丁文件另以 SHA-256 整体校验。区间检查负责定位差异，哈希负责证明没有
+# 未被区间覆盖的改动。改补丁必须同时更新脚本里的哈希与对应区间常量。
 """Check named-XPC fallback and XPC connection cleanup in the registered-port patches."""
 
 import argparse
@@ -16,8 +15,10 @@ import sys
 PATCHES = Path(__file__).resolve().parents[1] / "patches"
 UI_PATCH = PATCHES / "ios18-xpc-registered-port-ui.patch"
 HELPER_PATCH = PATCHES / "ios18-xpc-registered-port-helper.patch"
+XPC_MAIN_PATCH = PATCHES / "ios18-public-sdk-xpc-main.patch"
 UI_PATCH_SHA256 = "6b96b89f6dbae024f0722e0bab3d2d49c354072a6cbfb83050589873819a8639"
-HELPER_PATCH_SHA256 = "0e154f2ff56447b9c1520493c4bac5a8fe2641132ac6706fd3749f34ea92da53"
+HELPER_PATCH_SHA256 = "fc8c07cad82e9b0a90e6d2680e3098f1a7496362615c7207020ee185ce0e7907"
+XPC_MAIN_PATCH_SHA256 = "3558e61c0e1bf5f81d82bb8c15424ce98d3f11eddd5e9fb8f71d0a95537f0946"
 LAUNCH_BLOCK = '''     launchWithExtensionKit(*this, m_launchOptions.processType, m_client, WTFMove(handler));
  #else
      auto name = serviceName(m_launchOptions, m_client);
@@ -205,13 +206,28 @@ HELPER_LISTENER_BLOCK = '''+            if (!registeredPortBootstrapState.compar
 +            exitProcess(EXIT_FAILURE);
 +        });
 +        XPCServiceEventHandler(connection.get());
-+        dispatch_main();
++        // Keep main-queue work on the main thread; dispatch_main unbinds it (probe19).
++        runXPCServiceMainRunLoop();
 +    }
 +
 +    RELEASE_LOG(IPC, "XPCServiceMain: launchd listener (WK_HELPER_LAUNCH_MODE did not select registered-port)");
      // xpc_main is marked API_UNAVAILABLE(ios), so reproduce what it does.
      // What it does is listen, not dial: on this device it reads XPC_SERVICE_NAME and calls
      // xpc_connection_create_listener, and the handler it wraps receives each connection launchd'''
+NAMED_LISTENER_RUN_LOOP = '''+    xpc_connection_resume(listener);
++    runXPCServiceMainRunLoop();
++#endif'''
+XPC_MAIN_RUN_LOOP = '''[[noreturn]] static void runXPCServiceMainRunLoop()
+{
+    // On iPadOS 16.1, dispatch_main calls pthread_exit and libdispatch unbinds
+    // the main queue from the main thread (probe19: main_np=0). CFRunLoopRun
+    // keeps WorkQueue::main().dispatchSync on the main thread (probe20: main_np=1).
+    // This satisfies InitializeWebKit2's main-thread assertion when the
+    // InitializeWebKit2MainThreadAssertion SDK-aligned behavior is disabled.
+    CFRunLoopRun();
+    RELEASE_LOG_FAULT(IPC, "Exiting: XPC service main run loop returned");
+    exitProcess(EXIT_FAILURE);
+}'''
 CANCEL_REFERENCES_OUTSIDE_LAUNCH = 3  # Declaration, definition, and terminateXPCConnection call.
 CPP_TOKENS = re.compile(r'''//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}]''', re.DOTALL)
 
@@ -298,6 +314,11 @@ def check_helper(patch):
     check_anchored_block(patch, HELPER_LISTENER_BLOCK)
 
 
+def check_xpc_main(patch):
+    check_function(patched_hunks(patch), XPC_MAIN_RUN_LOOP)
+    check_anchored_block(patch, NAMED_LISTENER_RUN_LOOP)
+
+
 def check_regression(check, patch, description, replacements):
     for anchor, replacement in replacements:
         if patch.count(anchor) != 1:
@@ -349,7 +370,10 @@ def check_regressions(ui_patch, helper_patch):
             "auto escaped = std::exchange(listener, nullptr);")),
     ):
         check_regression(check_ui, ui_patch, description, [(anchor, replacement)])
-    listener_log = HELPER_LISTENER_BLOCK.splitlines()[9] + "\n"
+    listener_log = next(line for line in HELPER_LISTENER_BLOCK.splitlines() if "launchd listener" in line) + "\n"
+    check_regression(check_helper, helper_patch, "dispatch_main in registered-port entry", [
+        ("+        runXPCServiceMainRunLoop();", "+        dispatch_main();"),
+    ])
     check_regression(check_helper, helper_patch, "return 0 before the helper's named listener log", [
         (listener_log, "+    return 0;\n" + listener_log),
     ])
@@ -387,20 +411,31 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("patch", nargs="?", type=Path, default=UI_PATCH)
     parser.add_argument("--helper-patch", type=Path, default=HELPER_PATCH)
+    parser.add_argument("--xpc-main-patch", type=Path, default=XPC_MAIN_PATCH)
     args = parser.parse_args()
     try:
         ui_bytes = args.patch.read_bytes()
         helper_bytes = args.helper_patch.read_bytes()
+        xpc_main_bytes = args.xpc_main_patch.read_bytes()
         check_patch_sha256(ui_bytes, UI_PATCH_SHA256, args.patch)
         check_patch_sha256(helper_bytes, HELPER_PATCH_SHA256, args.helper_patch)
+        check_patch_sha256(xpc_main_bytes, XPC_MAIN_PATCH_SHA256, args.xpc_main_patch)
         ui_patch = ui_bytes.decode("utf-8")
         helper_patch = helper_bytes.decode("utf-8")
+        xpc_main_patch = xpc_main_bytes.decode("utf-8")
         check_ui(ui_patch)
         check_helper(helper_patch)
+        check_xpc_main(xpc_main_patch)
         check_regressions(ui_patch, helper_patch)
+        check_regression(check_xpc_main, xpc_main_patch, "dispatch_main in named listener entry", [
+            ("+    runXPCServiceMainRunLoop();", "+    dispatch_main();"),
+        ])
+        check_regression(check_xpc_main, xpc_main_patch, "dispatch_main in shared main-loop driver", [
+            ("+    CFRunLoopRun();", "+    dispatch_main();"),
+        ])
         check_hash_regression(helper_bytes)
     except (OSError, ValueError) as error:
-        print(f"FAIL: {args.patch}, {args.helper_patch}: {error}\n\nResult: FAIL", file=sys.stderr)
+        print(f"FAIL: {args.patch}, {args.helper_patch}, {args.xpc_main_patch}: {error}\n\nResult: FAIL", file=sys.stderr)
         return 1
     print("OK: registered-port spawn is the default, with named XPC on opt-out or synchronous fallback")
     print("OK: UI and helper temporary XPC connections are cancelled before release")

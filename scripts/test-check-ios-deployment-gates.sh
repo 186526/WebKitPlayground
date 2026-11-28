@@ -102,6 +102,7 @@ parser.add_argument('cpu_type', type=lambda value: int(value, 0))
 parser.add_argument('cpu_subtype', type=lambda value: int(value, 0))
 parser.add_argument('--platform', type=int, default=2)
 parser.add_argument('--dylib', action='store_true')
+parser.add_argument('--import-symbol', action='append', default=[])
 image = parser.parse_args()
 major, minor = map(int, image.minos.split('.'))
 MH_MAGIC_64 = 0xfeedfacf
@@ -113,9 +114,20 @@ if image.dylib:
     name = b'@rpath/test.dylib\0'
     name += b'\0' * (-len(name) % 8)
     commands.append(struct.pack('<6I', 0xd, 24 + len(name), 24, 0, 0, 0) + name)
+symbol_table = b''
+string_table = b'\0'
+if image.import_symbol:
+    for symbol in image.import_symbol:
+        # nlist_64: N_UNDF | N_EXT, no section, and zero value.
+        symbol_table += struct.pack('<IBBHQ', len(string_table), 1, 0, 0, 0)
+        string_table += symbol.encode('ascii') + b'\0'
+    symbol_offset = 32 + sum(map(len, commands)) + 24
+    string_offset = symbol_offset + len(symbol_table)
+    commands.append(struct.pack('<6I', 0x2, 24, symbol_offset, len(image.import_symbol),
+                                string_offset, len(string_table)))
 header = struct.pack('<8I', MH_MAGIC_64, image.cpu_type, image.cpu_subtype,
                      6 if image.dylib else 2, len(commands), sum(map(len, commands)), 0, 0)
-image.path.write_bytes(header + b''.join(commands))
+image.path.write_bytes(header + b''.join(commands) + symbol_table + (string_table if symbol_table else b''))
 PY
 }
 
@@ -142,6 +154,24 @@ CONTROL
 }
 
 WEBKIT_REL="var/jb/Library/Frameworks/WebKit.framework/WebKit"
+
+write_macho "${WORK}/runloop-a" 16.1 0x0100000C 0 --dylib --import-symbol _CFRunLoopRun
+write_macho "${WORK}/runloop-e" 16.1 0x0100000C 0x80000002 --dylib --import-symbol _CFRunLoopRun
+write_macho "${WORK}/dispatch-only" 16.1 0x0100000C 0 --dylib --import-symbol _dispatch_main
+write_macho "${WORK}/runloop-and-dispatch" 16.1 0x0100000C 0x80000002 --dylib \
+    --import-symbol _CFRunLoopRun --import-symbol _dispatch_main
+"${LIPO_BIN}" -create "${WORK}/runloop-a" "${WORK}/runloop-e" -output "${WORK}/runloop-fat"
+"${LIPO_BIN}" -create "${WORK}/runloop-a" "${WORK}/runloop-and-dispatch" -output "${WORK}/dispatch-fat"
+chmod +x "${WORK}/runloop-fat" "${WORK}/dispatch-fat" "${WORK}/dispatch-only"
+make_deb "${WORK}/runloop.deb" "${WEBKIT_REL}" "${WORK}/runloop-fat"
+make_deb "${WORK}/dispatch-only.deb" "${WEBKIT_REL}" "${WORK}/dispatch-only"
+make_deb "${WORK}/dispatch-fat.deb" "${WEBKIT_REL}" "${WORK}/dispatch-fat"
+check "every WebKit slice imports the main run loop" 0 "Result: PASS" \
+    "${CHECKER}" --deb "${WORK}/runloop.deb" --require-xpc-main-run-loop
+check "dispatch_main-only WebKit lacks the main run loop import" 1 "does not import _CFRunLoopRun" \
+    "${CHECKER}" --deb "${WORK}/dispatch-only.deb" --require-xpc-main-run-loop
+check "dispatch_main is rejected even when both slices import the main run loop" 1 "imports _dispatch_main" \
+    "${CHECKER}" --deb "${WORK}/dispatch-fat.deb" --require-xpc-main-run-loop
 
 write_macho "${WORK}/thin-16.1" 16.1 0x0100000C 0
 make_deb "${WORK}/thin-good.deb" "${WEBKIT_REL}" "${WORK}/thin-16.1"

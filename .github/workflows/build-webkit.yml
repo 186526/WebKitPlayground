@@ -1336,7 +1336,7 @@ jobs:
           test "$(git -C WebKit rev-parse HEAD)" = "$WEBKIT_COMMIT"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           zsh scripts/package-webkit-device-deb.sh --verify-deb "$DEB" --rootless
-          zsh scripts/check-ios-deployment-gates.sh --deb "$DEB" --require-webkit-layout \
+          zsh scripts/check-ios-deployment-gates.sh --deb "$DEB" --require-webkit-layout --require-xpc-main-run-loop \
             --arch "$WK_BUILD_ARCH" --max-minos "$WK_BUILD_DEPLOYMENT_TARGET"
           python3 scripts/check-xpc-service-bundle-identifiers.py --deb "$DEB" --rootless
           python3 scripts/check-corecrypto-curve25519-imports.py --deb "$DEB"

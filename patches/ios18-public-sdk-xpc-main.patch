@@ -35,32 +35,26 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
  #import <mach/mach.h>
  #import <pal/spi/cf/CFUtilitiesSPI.h>
  #import <pal/spi/cocoa/LaunchServicesSPI.h>
-@@ -135,9 +136,9 @@ void XPCServiceEventHandler(xpc_connection_t peer)
-                 if (event == XPC_ERROR_CONNECTION_INVALID || event == XPC_ERROR_TERMINATION_IMMINENT) {
-                     RELEASE_LOG_FAULT(IPC, "Exiting: Received XPC event type: %{public}s", event == XPC_ERROR_CONNECTION_INVALID ? "XPC_ERROR_CONNECTION_INVALID" : "XPC_ERROR_TERMINATION_IMMINENT");
-                     // FIXME: Handle this case more gracefully.
--                    [[NSRunLoop mainRunLoop] performBlock:^{
--                        exitProcess(EXIT_FAILURE);
--                    }];
-+                    // Exit directly: performBlock: needs the main run loop, which the non-macOS
-+                    // entry point below does not run.
-+                    exitProcess(EXIT_FAILURE);
-                 }
-             }
-             return;
-@@ -205,10 +206,7 @@ void XPCServiceEventHandler(xpc_connection_t peer)
-             InitializerFunction initializerFunctionPtr = reinterpret_cast<InitializerFunction>(CFBundleGetFunctionPointerForName(webKitBundle, entryPointFunctionName));
-             if (!initializerFunctionPtr) {
-                 RELEASE_LOG_FAULT(IPC, "Exiting: Unable to find entry point in WebKit.framework with name: %s", [(__bridge NSString *)entryPointFunctionName UTF8String]);
--                [[NSRunLoop mainRunLoop] performBlock:^{
--                    exitProcess(EXIT_FAILURE);
--                }];
--                return;
-+                exitProcess(EXIT_FAILURE);
-             }
+@@ -52,4 +53,18 @@
+ namespace WebKit {
++
++#if !PLATFORM(MAC) && !PLATFORM(MACCATALYST)
++[[noreturn]] static void runXPCServiceMainRunLoop()
++{
++    // On iPadOS 16.1, dispatch_main calls pthread_exit and libdispatch unbinds
++    // the main queue from the main thread (probe19: main_np=0). CFRunLoopRun
++    // keeps WorkQueue::main().dispatchSync on the main thread (probe20: main_np=1).
++    // This satisfies InitializeWebKit2's main-thread assertion when the
++    // InitializeWebKit2MainThreadAssertion SDK-aligned behavior is disabled.
++    CFRunLoopRun();
++    RELEASE_LOG_FAULT(IPC, "Exiting: XPC service main run loop returned");
++    exitProcess(EXIT_FAILURE);
++}
++#endif
  
-             auto reply = adoptOSObject(xpc_dictionary_create_reply(event));
-@@ -271,8 +269,54 @@ int XPCServiceMain(int, const char**)
+ static Vector<String>& overrideLanguagesFromBootstrap()
+ {
+@@ -271,8 +286,52 @@ int XPCServiceMain(int, const char**)
      setenv("__APPLEEVENTSSERVICENAME", "", 1);
  #endif
  
@@ -103,14 +97,12 @@ diff --git a/Source/WebKit/Shared/EntryPointUtilities/Cocoa/XPCService/XPCServic
 +            return;
 +        }
 +        // A listener yields connections and errors, nothing else, and an error means no connection
-+        // will ever arrive. Report it and end instead of idling in dispatch_main.
++        // will ever arrive. Report it and end instead of idling in the main run loop.
 +        RELEASE_LOG_FAULT(IPC, "Exiting: listener received %{public}s instead of a connection", xpc_type_get_name(xpc_get_type(event)));
 +        exitProcess(EXIT_FAILURE);
 +    });
 +    xpc_connection_resume(listener);
-+    // The bootstrap message initialises through WorkQueue::main().dispatchSync, which needs the
-+    // main queue to be driven, so drain it instead of running the main run loop.
-+    dispatch_main();
++    runXPCServiceMainRunLoop();
 +#endif
  }
  

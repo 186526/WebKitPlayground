@@ -43,6 +43,8 @@ fi
 MAX_MINOS="16.1"
 EXPECTED_ARCH=""
 REQUIRE_WEBKIT_LAYOUT=0
+REQUIRE_XPC_MAIN_RUN_LOOP=0
+WEBKIT_IMAGE="var/jb/Library/Frameworks/WebKit.framework/WebKit"
 FORBIDDEN_FRAMEWORK="BrowserEngineKit"
 
 MODE="build-dir"
@@ -83,7 +85,7 @@ fi
 usage() {
     cat <<EOF
 Usage: ${SCRIPT_NAME} [--build-dir <dir>] [--max-minos <version>] [--arch arm64|arm64e]
-       ${SCRIPT_NAME} --deb <path> [--max-minos <version>] [--arch arm64|arm64e] [--require-webkit-layout]
+       ${SCRIPT_NAME} --deb <path> [--max-minos <version>] [--arch arm64|arm64e] [--require-webkit-layout] [--require-xpc-main-run-loop]
 
 Default build dir:
   ${DEFAULT_BUILD_DIR}
@@ -94,6 +96,8 @@ architecture. --deb checks every Mach-O and reports
 weak ${FORBIDDEN_FRAMEWORK} links without failing. --require-webkit-layout
 also requires the four rootless WebKit framework binaries and libwebrtc at
 paths without symlinks, with every slice of each required image an MH_DYLIB.
+--require-xpc-main-run-loop requires the rootless WebKit dylib to import
+_CFRunLoopRun and not _dispatch_main in every architecture slice.
 
 Example:
   scripts/${SCRIPT_NAME} --deb /tmp/artdl/webkit-rootless.deb
@@ -124,6 +128,10 @@ while [[ $# -gt 0 ]]; do
             REQUIRE_WEBKIT_LAYOUT=1
             shift
             ;;
+        --require-xpc-main-run-loop)
+            REQUIRE_XPC_MAIN_RUN_LOOP=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -146,6 +154,11 @@ if [[ "${MAX_MINOS}" != <->.<-> && "${MAX_MINOS}" != <->.<->.<-> ]]; then
 fi
 if [[ "${REQUIRE_WEBKIT_LAYOUT}" == 1 && "${MODE}" != deb ]]; then
     printf 'Error: --require-webkit-layout requires --deb\n' >&2
+    exit 64
+fi
+
+if [[ "${REQUIRE_XPC_MAIN_RUN_LOOP}" == 1 && "${MODE}" != deb ]]; then
+    printf 'Error: --require-xpc-main-run-loop requires --deb\n' >&2
     exit 64
 fi
 
@@ -258,6 +271,38 @@ read_slice_versions() {
         in_legacy && $1 == "version" { platform = "ios"; minos = $2; in_legacy = 0 }
         END { flush_slice() }
     '
+}
+
+check_xpc_main_run_loop_imports() {
+    local image="$1" expected_slices="$2" symbols failures
+    if ! symbols="$("${OBJDUMP}" --macho --syms --arch all "${image}")"; then
+        DEB_FAILURES+=("${WEBKIT_IMAGE}: llvm-objdump could not read the imports")
+        return
+    fi
+    failures="$(awk -v expected="${expected_slices}" '
+        function check_slice() {
+            if (!slices) return
+            if (!runloop) print "slice " slices " does not import _CFRunLoopRun"
+            if (dispatch) print "slice " slices " imports _dispatch_main"
+        }
+        /^SYMBOL TABLE:[[:space:]]*$/ {
+            check_slice()
+            slices++
+            runloop = dispatch = 0
+        }
+        NF >= 2 && $(NF - 1) == "*UND*" && $NF == "_CFRunLoopRun" { runloop = 1 }
+        NF >= 2 && $(NF - 1) == "*UND*" && $NF == "_dispatch_main" { dispatch = 1 }
+        END {
+            check_slice()
+            if (slices != expected) print "expected " expected " import table(s), read " slices + 0
+        }
+    ' <<< "${symbols}")"
+    if [[ -n "${failures}" ]]; then
+        local failure
+        while IFS= read -r failure; do
+            DEB_FAILURES+=("${WEBKIT_IMAGE}: ${failure}")
+        done <<< "${failures}"
+    fi
 }
 
 # Fails when $1 is greater than $2, comparing dot-separated numeric components.
@@ -446,6 +491,10 @@ check_deb() {
             expected_types[$required_image]=dylib
         done <<< "${layout_paths}"
     fi
+    if [[ "${REQUIRE_XPC_MAIN_RUN_LOOP}" == 1 ]]; then
+        require_packaged_image "${unpack_dir}" "${WEBKIT_IMAGE}" || exit 1
+        expected_types[$WEBKIT_IMAGE]=dylib
+    fi
 
     typeset -a candidates=()
     local file
@@ -486,6 +535,9 @@ check_deb() {
         fi
         expected_type="${expected_types[$rel]:-}"
         check_slices "${rel}" "${declared_slices}" "${headers}" "${expected_type}"
+        if [[ "${REQUIRE_XPC_MAIN_RUN_LOOP}" == 1 && "${rel}" == "${WEBKIT_IMAGE}" ]]; then
+            check_xpc_main_run_loop_imports "${image}" "$(( declared_slices > 0 ? declared_slices : 1 ))"
+        fi
         if [[ -n "${expected_type}" ]]; then
             checked_required[$rel]=1
         fi
