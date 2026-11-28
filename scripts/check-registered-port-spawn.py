@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# 这些检查比对的是补丁的精确文本，不是控制流。它们能拦住「插入控制语句」「改变缩进」
+# 「改写成等价的其它写法」这类改动，但无法证明被检查的语句真的会执行。任何绕过都已
+# 通过精确匹配整个语句块来堵住；新增检查时保持同样的粒度，不要退回 endswith 或正则相邻。
 """Check named-XPC fallback and XPC connection cleanup in the registered-port patches."""
 
 import argparse
@@ -10,6 +13,7 @@ import sys
 PATCHES = Path(__file__).resolve().parents[1] / "patches"
 UI_PATCH = PATCHES / "ios18-xpc-registered-port-ui.patch"
 HELPER_PATCH = PATCHES / "ios18-xpc-registered-port-helper.patch"
+LISTENER_CLEANUP_OPENING = "void ProcessLauncher::cancelRegisteredPortListener()\n{\n"
 LAUNCH_BLOCK = """
 #if PLATFORM(IOS) && !PLATFORM(IOS_SIMULATOR)
 if (auto mode = getenv("WK_HELPER_SPAWN"); !mode || strcmp(mode, "launchd")) {
@@ -91,7 +95,13 @@ def check_ui(source):
     check_no_early_return(held, "listener")
     if re.search(r"\bxpc_connection_cancel\s*\(", after_transfer):
         raise ValueError("unexpected connection cancel after listener transfer")
-    if not re.search(r"std::exchange\(m_registeredPortListener, nullptr\)\)\s+" + re.escape(cancel), source):
+    listener_cleanup = re.search(r"^" + re.escape(LISTENER_CLEANUP_OPENING) + r"(.*?)^\}$",
+                                 source, re.MULTILINE | re.DOTALL)
+    expected_cleanup = [
+        "    if (auto listener = std::exchange(m_registeredPortListener, nullptr))",
+        f"        {cancel}",
+    ]
+    if not listener_cleanup or listener_cleanup[1].splitlines() != expected_cleanup:
         raise ValueError("expected the transferred listener to be cleared and cancelled once")
 
 
@@ -132,6 +142,8 @@ def check_regressions(ui_source, helper_source):
     cancel_line = "        xpc_connection_cancel(listener.get());\n"
     spawn_cancel = spawn_failure + spawn_log + cancel_line
     cases = (
+        (check_ui, ui_source, LISTENER_CLEANUP_OPENING, LISTENER_CLEANUP_OPENING + "    if (false)\n",
+         "if (false) at start of cancelRegisteredPortListener"),
         (check_ui, ui_source, spawn_cancel, spawn_failure + spawn_log + "        if (false)\n" + cancel_line,
          "if (false) before spawn failure cancel"),
         (check_ui, ui_source, spawn_cancel, spawn_failure + spawn_log + cancel_line[1:],
